@@ -16,7 +16,7 @@ class SubmenuViewHolder(val binding: ListItemSettingBinding, adapter: SettingsAd
     override fun bind(item: SettingsItem) {
         this.item = item as SubmenuSetting
         binding.textSettingName.setText(item.nameId)
-        if (item.descriptionId!! > 0) {
+        if (item.descriptionId != 0) {
             binding.textSettingDescription.setText(item.descriptionId)
             binding.textSettingDescription.visibility = View.VISIBLE
         } else {
