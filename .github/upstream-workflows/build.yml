@@ -5,7 +5,6 @@ name: eden-build
 on:
   push:
     branches: [ "master" ]
-    tags: [ "*" ]
   pull_request:
     branches: [ master ]
 
@@ -58,14 +57,6 @@ jobs:
       - name: Set up MSVC
         uses: https://github.com/ilammy/msvc-dev-cmd@v1
         if: ${{ matrix.target == 'msvc' }}
-
-#      - name: Install extra tools
-#        run: choco install ccache ninja wget cygwin
-#        if: ${{ matrix.target == 'msvc' }}
-
-#      - name: Install vulkan-SDK
-#        run: ./.ci/install-vulkan-sdk.ps1
-#        shell: powershell
 
       - name: Cygwin with autoconf # NEEDED FOR LIBUSB
         shell: cmd

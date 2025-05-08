@@ -1,0 +1,259 @@
+name: Build Application and Make Release
+
+on:
+  push:
+    tags: [ "*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  source:
+    runs-on: linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Pack
+        run: ./.ci/source.sh
+      - name: Upload
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: source.zip
+          path: artifacts/
+
+  windows:
+    runs-on: windows
+    strategy:
+      matrix:
+        target: ["msvc"] # TODO: Add msys2
+    defaults:
+      run:
+        shell: ${{ (matrix.target == 'msys2' && 'msys2') || 'bash' }} {0}
+    env:
+      CCACHE_DIR: ${{ runner.workspace }}/.cache/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros
+      OS: windows
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/vcpkg_installed
+            ${{ github.workspace }}/build/externals
+            ${{ github.workspace }}/.vcpkg
+          key: ${{ runner.os }}-${{ matrix.target }}-vcpkg-${{ hashFiles('**/CMakeLists.txt', '**/vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-vcpkg-
+
+      - name: Set up MSVC
+        uses: https://github.com/ilammy/msvc-dev-cmd@v1
+        if: ${{ matrix.target == 'msvc' }}
+
+      - name: Cygwin with autoconf # NEEDED FOR LIBUSB
+        shell: cmd
+        run: |
+          C:\tools\cygwin\cygwinsetup.exe -q -P autoconf,automake,libtool,make,pkg-config
+
+          REM Create wrapper batch files for Cygwin tools in a directory that will be in PATH
+          REM mkdir C:\cygwin-wrappers
+
+          REM Create autoconf.bat wrapper
+          echo @echo off > C:\cygwin-wrappers\autoconf.bat
+          echo C:\tools\cygwin\bin\bash.exe -l -c "autoconf %%*" >> C:\cygwin-wrappers\autoconf.bat
+
+          REM Add other wrappers if needed for other Cygwin tools
+          echo @echo off > C:\cygwin-wrappers\automake.bat
+          echo C:\tools\cygwin\bin\bash.exe -l -c "automake %%*" >> C:\cygwin-wrappers\automake.bat
+
+          REM Add the wrappers directory to PATH
+          echo C:\cygwin-wrappers>>"%GITHUB_PATH%"
+          echo C:\tools\cygwin\bin>>"%GITHUB_PATH%"
+
+      - name: CMake Configure
+        id: cmake
+        shell: cmd
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE="%CD%\..\CMakeModules\MSVCCache.cmake" -DYUZU_USE_BUNDLED_QT=ON -DENABLE_QT_TRANSLATION=ON -DUSE_DISCORD_PRESENCE=ON -DYUZU_USE_BUNDLED_VCPKG=ON -DYUZU_USE_BUNDLED_SDL2=ON -DUSE_CCACHE=ON
+
+      - name: Build
+        id: build
+        shell: cmd
+        run: |
+          cd build
+          ninja yuzu yuzu-cmd yuzu-room tests
+          ccache -s -v
+
+      - name: Package artifacts
+        if: steps.build.outcome == 'success'
+        shell: powershell
+        run: |
+          $GITDATE = $(git show -s --date=short --format='%ad') -replace "-", ""
+          $GITREV = $(git show -s --format='%h')
+          $RELEASE_DIST = "eden-windows-msvc"
+          $ARTIFACTS_DIR = "${{ github.workspace }}/artifacts"
+
+          mkdir -p $ARTIFACTS_DIR
+          mkdir -p $RELEASE_DIST
+
+          Copy-Item "build/bin/Release/*" -Destination "$RELEASE_DIST" -Recurse -ErrorAction SilentlyContinue
+          if (-not $?) {
+            # Try without Release subfolder if that doesn't exist
+            Copy-Item "build/bin/*" -Destination "$RELEASE_DIST" -Recurse -ErrorAction SilentlyContinue
+          }
+
+          $BUILD_ZIP = "eden-windows-msvc-$GITDATE-$GITREV.zip"
+          7z a -tzip $BUILD_ZIP $RELEASE_DIST\*
+          
+          Move-Item $BUILD_ZIP $ARTIFACTS_DIR/ -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE*" -Destination "$RELEASE_DIST" -ErrorAction SilentlyContinue
+          Copy-Item "README*" -Destination "$RELEASE_DIST" -ErrorAction SilentlyContinue
+
+      - name: Upload Windows artifacts
+        if: steps.build.outcome == 'success'
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}.zip
+          path: artifacts/*
+
+  linux:
+    runs-on: linux
+    env:
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros
+      OS: linux
+      TARGET: fresh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          fetch-tags: true
+
+      - name: Build
+        run: |
+          ./.ci/linux.sh v3 8
+
+      - name: Package AppImage
+        run: |
+          ./.ci/package-appimage.sh v3 &> /dev/null
+
+      - name: Upload Linux artifacts
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: linux.zip
+          path: ./*.AppImage
+
+  android:
+    runs-on: android
+
+    env:
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros
+      OS: android
+      TARGET: universal
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set tag name
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              echo "GIT_TAG_NAME=$GITHUB_REF_NAME" >> $GITHUB_ENV
+          fi
+          echo $GIT_TAG_NAME
+
+      - name: Build
+        run: JAVA_HOME=$JAVA_HOME_21_X64 ./.ci/android.sh
+
+      - name: Package Android artifacts
+        run: |
+          GITDATE="$(git show -s --date=short --format='%ad' | sed 's/-//g')"
+          GITREV="$(git show -s --format='%h')"
+          ARTIFACTS_DIR="$PWD/artifacts"
+          mkdir -p "${ARTIFACTS_DIR}/"
+
+          REV_NAME="eden-android-${GITDATE}-${GITREV}"
+          BUILD_FLAVOR="mainline"
+          BUILD_TYPE_LOWER="release"
+          BUILD_TYPE_UPPER="Release"
+
+          cp src/android/app/build/outputs/apk/"${BUILD_FLAVOR}/${BUILD_TYPE_LOWER}/app-${BUILD_FLAVOR}-${BUILD_TYPE_LOWER}.apk" \
+             "${ARTIFACTS_DIR}/${REV_NAME}.apk" || echo "APK not found"
+
+          cp src/android/app/build/outputs/bundle/"${BUILD_FLAVOR}${BUILD_TYPE_UPPER}"/"app-${BUILD_FLAVOR}-${BUILD_TYPE_LOWER}.aab" \
+             "${ARTIFACTS_DIR}/${REV_NAME}.aab" || echo "AAB not found"
+
+          ls -la "${ARTIFACTS_DIR}/"
+
+      - name: Upload Android artifacts
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: android.zip
+          path: artifacts/*
+
+  create_release:
+    needs: [linux, windows, android]
+    runs-on: linux
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+          path: 'eden-source'
+
+      - name: Download artifacts
+        uses: forgejo/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Grab and store version
+        run: |
+          cd eden-source
+          tag_name=$(git describe --tags --abbrev=0)
+          echo "VERSION=$tag_name" >> $GITHUB_ENV
+          echo $tag_name
+
+      - name: Package artifacts properly
+        shell: bash
+        run: |
+          set -ex
+          mv ${{ github.workspace }}/eden-source eden-${{ env.VERSION }}
+          cd artifacts
+          ls *.zip
+
+          mkdir -p dist
+
+          cp linux.zip/Eden-*.AppImage dist/Eden-Linux-${{ env.VERSION }}-amd64.AppImage
+          cp msvc.zip/eden-windows-msvc*.zip dist/Eden-Windows-MSVC-${{ env.VERSION }}-amd64.zip
+          cp android.zip/eden-android*.apk dist/Eden-Android-${{ env.VERSION }}.apk
+          cp android.zip/eden-android*.aab dist/Eden-Android-${{ env.VERSION }}.aab
+          cp source.zip/eden-unified-source*.tar.xz dist/Eden-Source-${{ env.VERSION }}.tar.xz
+          cp source.zip/eden-unified-source*.tar.xz.sha256sum dist/Eden-Source-${{ env.VERSION }}.tar.xz.sha256sum
+
+      - name: Create release
+        id: create_release
+        uses: actions/forgejo-release@v2.6.0
+        with:
+          direction: upload
+          tag: ${{ env.VERSION }}
+          title: Eden ${{ env.VERSION }}
+          release-dir: artifacts/dist/
