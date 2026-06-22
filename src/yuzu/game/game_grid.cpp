@@ -25,8 +25,6 @@ GameGrid::GameGrid(QWidget* parent) : QListView{parent} {
 
     setEditTriggers(QAbstractItemView::NoEditTriggers);
     setContextMenuPolicy(Qt::CustomContextMenu);
-    setGridSize(QSize(140, 160));
-    m_gameCard->setSize(gridSize(), 0, 4);
 
     setSpacing(10);
     setWordWrap(true);
@@ -97,8 +95,17 @@ void GameGrid::UpdateIconSize() {
         setUpdatesEnabled(false);
 
         setGridSize(grid_size);
-        m_gameCard->setSize(grid_size, stretched_width - min_item_width, columns);
+        m_gameCard->setSize(grid_size, grid_size, stretched_width - min_item_width, columns);
 
         setUpdatesEnabled(true);
     }
+}
+
+QModelIndex GameGrid::indexAt(const QPoint& point) const {
+    QModelIndex index = QListView::indexAt(point);
+    if (!index.isValid())
+        return {};
+    if (m_gameCard && !m_gameCard->hitTest(point, index, this, visualRect(index)))
+        return {};
+    return index;
 }
