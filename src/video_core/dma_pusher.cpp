@@ -38,6 +38,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nvn_header_count.h"
 #include "video_core/nx2_list_grid.h"
 #include "video_core/nx2_list_macro_trace.h"
 #include "video_core/rasterizer_interface.h"
@@ -772,6 +773,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
         } else {
             auto const command_header = commands[index]; //can copy
             // No command active - this is the first word of a new one
+            VideoCommon::NvnHeaderCount::Count(command_header.subchannel, command_header.method);
             switch (command_header.mode) {
             case SubmissionMode::Increasing:
                 SetState(command_header);

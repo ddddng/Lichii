@@ -24,6 +24,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/nvn_hook.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
@@ -528,6 +529,7 @@ struct System::Impl {
 
         // Make the process created be the application
         kernel.SetApplicationProcess(process->GetHandle());
+        Core::NvnHook::Install(*process->GetHandle());
 
         // Set up the rest of the system.
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};

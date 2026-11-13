@@ -37,6 +37,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "core/nvn_hook.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/device_memory.h"
 #include "video_core/rasterizer_interface.h"
@@ -2082,6 +2083,7 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
         const auto paced = std::chrono::steady_clock::now();
+        Core::NvnHook::OnPresent(present);
         if (const u32 recorder = w[18] & 0xf; recorder != 0) {
             m_recorded_ticks[recorder - 1] = system.CoreTiming().GetClockTicks();
         }
