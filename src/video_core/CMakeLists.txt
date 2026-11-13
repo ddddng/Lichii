@@ -131,6 +131,7 @@ add_library(video_core STATIC
     nx2_fast_draw.h
     nx2_profile.h
     nvn_header_count.h
+    nvn_hle_marker.h
     nx2_stutter_trace.cpp
     nx2_stutter_trace.h
     nx2_perf.h

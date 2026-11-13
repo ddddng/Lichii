@@ -26,6 +26,7 @@
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
 #include "video_core/nvn_header_count.h"
+#include "video_core/nvn_hle_marker.h"
 
 namespace Core::NvnHook {
 namespace {
@@ -55,6 +56,11 @@ struct Counters {
     u64 decoded_calls{};
     u64 emitted_words{};
     u64 skipped_calls{}; ///< the write pointer moved to another chunk
+    // EDEN_NX2_NVN_HLE=BindTexture
+    u64 hle_calls{};      ///< written as a marker
+    u64 hle_fallbacks{};  ///< left to the driver: compute/task stage, unlearned, no room
+    u64 verify_checked{}; ///< EDEN_NX2_NVN_HLE_VERIFY: driver output compared with the marker's
+    u64 verify_mismatches{};
 };
 
 struct LookupFrame {
@@ -62,14 +68,30 @@ struct LookupFrame {
     u64 lr;
 };
 
+/// The words the driver's nvnCommandBufferBindTexture writes for a graphics stage, at most.
+using BindTextureWords = std::array<u32, 5>;
+
 struct CommandFrame {
     u64 lr;
     u64 command_buffer;
     u64 write_pointer;
+    bool decode;               ///< EDEN_NX2_NVN_EMITTED, top level
+    u32 learn_stage = ~0u;     ///< BindTexture: take macro 0xe1c's argument for this stage
+    u32 expected_count{};      ///< BindTexture verify: the words the marker stands for
+    BindTextureWords expected{};
 };
+
+constexpr u32 MaxStages = 16;
+constexpr u32 ComputeStage = 5;
+constexpr u32 TaskStage = 8; ///< the driver's other special case besides compute
 
 struct State {
     bool emitted{};
+    bool hle_bind_texture{};
+    bool hle_verify{};
+    u32 bind_texture_slot = ~0u;
+    /// Macro 0xe1c's argument per stage, as the driver wrote it (0 until seen; bit 31 set)
+    std::array<std::atomic<u32>, MaxStages> bind_texture_argument{};
     std::optional<u64> private0_value;
     u64 every = 300;
     std::FILE* out{};
@@ -106,6 +128,12 @@ State* Create() {
     }
     state->emitted = std::getenv("EDEN_NX2_NVN_EMITTED") != nullptr;
     VideoCommon::NvnHeaderCount::g_enabled = state->emitted;
+    if (const char* hle = std::getenv("EDEN_NX2_NVN_HLE")) {
+        state->hle_bind_texture = std::strstr(hle, "BindTexture") != nullptr;
+    }
+    state->hle_verify = std::getenv("EDEN_NX2_NVN_HLE_VERIFY") != nullptr;
+    // Verify keeps the driver's words: no marker reaches the front.
+    VideoCommon::NvnHleMarker::g_enabled = state->hle_bind_texture && !state->hle_verify;
     if (const char* value = std::getenv("EDEN_NX2_NVN_PRIVATE0")) {
         state->private0_value = std::strtoull(value, nullptr, 0);
     }
@@ -162,6 +190,9 @@ u32 SlotOf(State& state, const std::string& name, u64 driver) {
     state.slots[slot] = {.driver = driver,
                          .command_buffer = name.starts_with("nvnCommandBuffer")};
     state.slot_by_name.emplace(name, slot);
+    if (name == "nvnCommandBufferBindTexture") {
+        state.bind_texture_slot = slot;
+    }
     state.slot_count.store(slot + 1, std::memory_order_release);
     if (state.out != nullptr) {
         fmt::print(state.out, "n {} {:#x} {:#x} {}\n", slot, driver, SyntheticAddress(state, slot),
@@ -253,6 +284,96 @@ void DecodeEmitted(Counters& counters, Core::Memory::Memory& memory, u64 begin, 
         const u32 key = (((header >> 13) & 7) << 13) | (header & 0x1fff);
         ++counters.emitted_headers[key];
         i += 1 + data;
+    }
+}
+
+/// The driver's words for BindTexture on a graphics stage (sdk BindTexture, MKW and OoT: IMMD
+/// 0xe1c = argument, IMMD 0x68b if cmdbuf+0x13 bit 3, INCR 0x8e3 {0x20 + 8 * slot, handle}).
+u32 BindTextureExpansion(BindTextureWords& words, u32 argument, bool pipe_nop, u32 slot,
+                         u32 handle) {
+    u32 count = 0;
+    words[count++] = 0x80000e1cu | (argument << 16);
+    if (pipe_nop) {
+        words[count++] = 0x8000068bu;
+    }
+    words[count++] = 0x200208e3u;
+    words[count++] = 0x20 + 8 * slot;
+    words[count++] = handle;
+    return count;
+}
+
+/// nvnCommandBufferBindTexture(cmdbuf x0, stage w1, slot w2, handle x3). Returns whether the
+/// call was done here (a marker written, see nvn_hle_marker.h); otherwise the driver runs it,
+/// with `frame` (when set up) checked at its return.
+bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
+                    Core::Memory::Memory& memory, CommandFrame& frame, bool& want_return) {
+    const u64 command_buffer = jit.GetRegister(0);
+    const u32 stage = static_cast<u32>(jit.GetRegister(1));
+    const u32 slot = static_cast<u32>(jit.GetRegister(2));
+    const u32 handle = static_cast<u32>(jit.GetRegister(3));
+    if (stage == ComputeStage || stage == TaskStage || stage >= MaxStages || slot > 0xff) {
+        ++counters.hle_fallbacks;
+        return false;
+    }
+    const u32 learned = state.bind_texture_argument[stage].load(std::memory_order_relaxed);
+    if (learned == 0) {
+        frame.learn_stage = stage;
+        want_return = true;
+        ++counters.hle_fallbacks;
+        return false;
+    }
+    const u32 argument = learned & 0xffff;
+    const bool pipe_nop = (memory.Read8(command_buffer + 0x13) & 8) != 0;
+    if (state.hle_verify) {
+        frame.expected_count = BindTextureExpansion(frame.expected, argument, pipe_nop, slot, handle);
+        want_return = true;
+        return false;
+    }
+    const u64 write_pointer = memory.Read64(command_buffer);
+    const u64 end = memory.Read64(command_buffer + 8);
+    if (write_pointer == 0 || write_pointer + 12 > end) {
+        ++counters.hle_fallbacks; // the driver asks the game for more memory
+        return false;
+    }
+    namespace Marker = VideoCommon::NvnHleMarker;
+    const std::array<u32, 3> words{Marker::Header(Marker::BindTexture, 2),
+                                   slot | (stage << 8) | (pipe_nop ? 1u << 12 : 0) |
+                                       (argument << 16),
+                                   handle};
+    memory.WriteBlock(write_pointer, words.data(), sizeof(words));
+    memory.Write64(command_buffer, write_pointer + sizeof(words));
+    ++counters.hle_calls;
+    return true;
+}
+
+/// At a BindTexture's return: learn the stage's macro argument, or compare with the marker.
+void CheckBindTexture(State& state, Counters& counters, Core::Memory::Memory& memory,
+                      const CommandFrame& frame) {
+    const u64 end = memory.Read64(frame.command_buffer);
+    if (frame.write_pointer == 0 || end <= frame.write_pointer ||
+        end - frame.write_pointer > 5 * 4) {
+        return; // another chunk (the driver asked for memory first): not comparable
+    }
+    BindTextureWords written{};
+    const u32 count = static_cast<u32>((end - frame.write_pointer) / 4);
+    ReadGuest(memory, frame.write_pointer, written.data(), count * 4);
+    if (frame.learn_stage != ~0u) {
+        if ((written[0] & 0xe000ffffu) == 0x80000e1cu) {
+            state.bind_texture_argument[frame.learn_stage].store(
+                0x80000000u | (written[0] >> 16), std::memory_order_relaxed);
+        }
+        return;
+    }
+    ++counters.verify_checked;
+    if (count != frame.expected_count ||
+        !std::equal(written.begin(), written.begin() + count, frame.expected.begin())) {
+        if (counters.verify_mismatches++ < 16) {
+            LOG_ERROR(Core, "NVN HLE verify: BindTexture wrote {} words {:08x} {:08x} {:08x} {:08x} "
+                            "{:08x}, the marker stands for {} words {:08x} {:08x} {:08x} {:08x} {:08x}",
+                      count, written[0], written[1], written[2], written[3], written[4],
+                      frame.expected_count, frame.expected[0], frame.expected[1],
+                      frame.expected[2], frame.expected[3], frame.expected[4]);
+        }
     }
 }
 
@@ -383,9 +504,12 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
         }
         const CommandFrame frame = frames.back();
         frames.pop_back();
-        if (frames.empty()) {
-            DecodeEmitted(LocalCounters(state), memory, frame.write_pointer,
-                          memory.Read64(frame.command_buffer));
+        Counters& counters = LocalCounters(state);
+        if (frame.decode && frames.empty()) {
+            DecodeEmitted(counters, memory, frame.write_pointer, memory.Read64(frame.command_buffer));
+        }
+        if (frame.learn_stage != ~0u || frame.expected_count != 0) {
+            CheckBindTexture(state, counters, memory, frame);
         }
         jit.SetRegister(16, frame.lr);
         return;
@@ -393,12 +517,17 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
     Counters& counters = LocalCounters(state);
     ++counters.calls[slot];
     const Slot& target = state.slots[slot];
-    if (state.emitted && target.command_buffer) {
-        const u64 command_buffer = jit.GetRegister(0);
-        state.command_frames[thread_id % GuestThreadSlots].push_back(
-            {.lr = jit.GetRegister(30),
-             .command_buffer = command_buffer,
-             .write_pointer = memory.Read64(command_buffer)});
+    CommandFrame frame{.lr = jit.GetRegister(30), .decode = state.emitted && target.command_buffer};
+    bool want_return = frame.decode;
+    if (slot == state.bind_texture_slot && state.hle_bind_texture &&
+        HleBindTexture(state, counters, jit, memory, frame, want_return)) {
+        jit.SetRegister(16, frame.lr); // done: back to the caller
+        return;
+    }
+    if (want_return) {
+        frame.command_buffer = jit.GetRegister(0);
+        frame.write_pointer = memory.Read64(frame.command_buffer);
+        state.command_frames[thread_id % GuestThreadSlots].push_back(frame);
         jit.SetRegister(30, SyntheticAddress(state, EmittedReturnSlot));
     }
     jit.SetRegister(16, target.driver);
@@ -447,6 +576,16 @@ void OnPresent(u64 present) {
                 text += fmt::format("f {} {:#x} {}\n", present, key, front);
             }
         }
+    }
+    if (state.hle_bind_texture) {
+        u64 hle = 0, fallbacks = 0, checked = 0, mismatches = 0;
+        for (const Counters* counters : state.counters) {
+            hle += counters->hle_calls;
+            fallbacks += counters->hle_fallbacks;
+            checked += counters->verify_checked;
+            mismatches += counters->verify_mismatches;
+        }
+        text += fmt::format("h {} {} {} {} {}\n", present, hle, fallbacks, checked, mismatches);
     }
     if (state.private0_address != 0 && state.process != nullptr) {
         text += fmt::format("p0 {} {}\n", present,

@@ -21,6 +21,12 @@
 //   "p0 <present> <value>" (nvnPrivate0).
 // EDEN_NX2_NVN_PRIVATE0=<n>: nvnPrivate0 is set to n after every proc-address lookup
 // (dotfiles-o72.2: 0 makes the game's inlined NVN encoding call the proc table instead).
+// EDEN_NX2_NVN_HLE=BindTexture (dotfiles-o72.3): nvnCommandBufferBindTexture on graphics stages
+// runs here and writes a 3-word marker (video_core/nvn_hle_marker.h) instead of the driver's
+// 4-5 words; the front replays the driver's method calls from it without parsing them. Macro
+// 0xe1c's argument per stage is taken from the driver's first call on that stage. With
+// EDEN_NX2_NVN_HLE_VERIFY=1 the driver writes every call and its words are compared with what
+// the marker would have stood for. Counts: "h <present> <hle> <fallbacks> <checked> <mismatches>".
 
 #pragma once
 

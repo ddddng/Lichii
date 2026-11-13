@@ -39,6 +39,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nvn_header_count.h"
+#include "video_core/nvn_hle_marker.h"
 #include "video_core/nx2_list_grid.h"
 #include "video_core/nx2_list_macro_trace.h"
 #include "video_core/rasterizer_interface.h"
@@ -876,9 +877,52 @@ bool DmaPusher::WantsSegment() const {
            (engine == Engines::EngineTypes::Maxwell3D && dma_state.method >= MacroRegistersStart);
 }
 
+void DmaPusher::CallNvnHleMarker(u32 argument) {
+    namespace Marker = VideoCommon::NvnHleMarker;
+    if (dma_state.method == Marker::BindTexture) {
+        nvn_hle_word0 = argument;
+    } else if (dma_state.method == Marker::BindTexture + 1) {
+        ReplayNvnBindTexture(nvn_hle_word0, argument);
+    }
+}
+
+void DmaPusher::ReplayNvnBindTexture(u32 word0, u32 handle) {
+    // The method calls ProcessCommands makes for the driver's words, in their order: IMMD 0xe1c
+    // (an inline header keeps is_last_call), IMMD 0x68b if pipe_nop, INCR 0x8e3 with two words.
+    const DmaState saved = dma_state;
+    const bool saved_increment_once = dma_increment_once;
+    dma_state.subchannel = 0;
+    dma_state.method_count = 0;
+    dma_state.non_incrementing = true;
+    dma_state.dma_word_offset = u64(-s64(dma_state.dma_get));
+    dma_state.method = 0xe1c;
+    CallMethod(word0 >> 16);
+    if ((word0 >> 12) & 1) {
+        dma_state.method = 0x68b;
+        CallMethod(0);
+    }
+    dma_state.non_incrementing = false;
+    dma_state.dma_word_offset = saved.dma_word_offset;
+    dma_state.method = 0x8e3;
+    dma_state.method_count = 2;
+    dma_state.is_last_call = false;
+    CallMethod(0x20 + 8 * (word0 & 0xff));
+    dma_state.method = 0x8e4;
+    dma_state.method_count = 1;
+    dma_state.is_last_call = true;
+    CallMethod(handle);
+    dma_state = saved;
+    dma_increment_once = saved_increment_once;
+}
+
 void DmaPusher::CallMethod(u32 argument) {
     if (semaphore_watch != 0) [[unlikely]] {
         WatchArgument(dma_state.method, argument);
+    }
+    if (dma_state.subchannel == VideoCommon::NvnHleMarker::Subchannel &&
+        VideoCommon::NvnHleMarker::g_enabled) [[unlikely]] {
+        CallNvnHleMarker(argument);
+        return;
     }
     auto& split = VideoCommon::GpuSplit::Get();
     if (dma_state.method < non_puller_methods) {
@@ -945,6 +989,17 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         for (u32 i = 0; i < num_methods; ++i) {
             WatchArgument(dma_state.method + (dma_state.non_incrementing ? 0 : i), base_start[i]);
         }
+    }
+    if (dma_state.subchannel == VideoCommon::NvnHleMarker::Subchannel &&
+        VideoCommon::NvnHleMarker::g_enabled) [[unlikely]] {
+        // Only an incrementing marker's words are expected; one per method.
+        const u32 method = dma_state.method;
+        for (u32 i = 0; i < num_methods; ++i) {
+            dma_state.method = method + (dma_state.non_incrementing ? 0 : i);
+            CallNvnHleMarker(base_start[i]);
+        }
+        dma_state.method = method;
+        return;
     }
     auto& split = VideoCommon::GpuSplit::Get();
     if (dma_state.method < non_puller_methods) {
