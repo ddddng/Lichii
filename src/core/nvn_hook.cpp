@@ -69,7 +69,7 @@ struct LookupFrame {
 };
 
 /// The words the driver's nvnCommandBufferBindTexture writes for a graphics stage, at most.
-using BindTextureWords = std::array<u32, 5>;
+using BindTextureWords = u32[5];
 
 struct CommandFrame {
     u64 lr;
@@ -283,23 +283,10 @@ void DecodeEmitted(Counters& counters, Core::Memory::Memory& memory, u64 begin, 
         // The header's method field is in words; subchannel bits 13-15.
         const u32 key = (((header >> 13) & 7) << 13) | (header & 0x1fff);
         ++counters.emitted_headers[key];
+        VideoCommon::NvnHeaderCount::NoteWritten(
+            memory.GetPointerSilent(Common::ProcessAddress{begin + i * 4}), header);
         i += 1 + data;
     }
-}
-
-/// The driver's words for BindTexture on a graphics stage (sdk BindTexture, MKW and OoT: IMMD
-/// 0xe1c = argument, IMMD 0x68b if cmdbuf+0x13 bit 3, INCR 0x8e3 {0x20 + 8 * slot, handle}).
-u32 BindTextureExpansion(BindTextureWords& words, u32 argument, bool pipe_nop, u32 slot,
-                         u32 handle) {
-    u32 count = 0;
-    words[count++] = 0x80000e1cu | (argument << 16);
-    if (pipe_nop) {
-        words[count++] = 0x8000068bu;
-    }
-    words[count++] = 0x200208e3u;
-    words[count++] = 0x20 + 8 * slot;
-    words[count++] = handle;
-    return count;
 }
 
 /// nvnCommandBufferBindTexture(cmdbuf x0, stage w1, slot w2, handle x3). Returns whether the
@@ -322,10 +309,13 @@ bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
         ++counters.hle_fallbacks;
         return false;
     }
-    const u32 argument = learned & 0xffff;
+    namespace Marker = VideoCommon::NvnHleMarker;
+    // pipe_nop: the driver's IMMD 0x68b, written when cmdbuf+0x13 bit 3 is set (sdk BindTexture)
     const bool pipe_nop = (memory.Read8(command_buffer + 0x13) & 8) != 0;
+    const u32 word0 = Marker::BindTextureWord0(slot, stage, pipe_nop, learned);
     if (state.hle_verify) {
-        frame.expected_count = BindTextureExpansion(frame.expected, argument, pipe_nop, slot, handle);
+        // What the front would replay from this very marker, against the driver's words.
+        frame.expected_count = Marker::ExpandBindTexture(word0, handle, frame.expected);
         want_return = true;
         return false;
     }
@@ -335,11 +325,7 @@ bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
         ++counters.hle_fallbacks; // the driver asks the game for more memory
         return false;
     }
-    namespace Marker = VideoCommon::NvnHleMarker;
-    const std::array<u32, 3> words{Marker::Header(Marker::BindTexture, 2),
-                                   slot | (stage << 8) | (pipe_nop ? 1u << 12 : 0) |
-                                       (argument << 16),
-                                   handle};
+    const std::array<u32, 3> words{Marker::Header(Marker::BindTexture, 2), word0, handle};
     memory.WriteBlock(write_pointer, words.data(), sizeof(words));
     memory.Write64(command_buffer, write_pointer + sizeof(words));
     ++counters.hle_calls;
@@ -354,19 +340,19 @@ void CheckBindTexture(State& state, Counters& counters, Core::Memory::Memory& me
         end - frame.write_pointer > 5 * 4) {
         return; // another chunk (the driver asked for memory first): not comparable
     }
-    BindTextureWords written{};
+    u32 written[5]{};
     const u32 count = static_cast<u32>((end - frame.write_pointer) / 4);
-    ReadGuest(memory, frame.write_pointer, written.data(), count * 4);
+    ReadGuest(memory, frame.write_pointer, written, count * 4);
     if (frame.learn_stage != ~0u) {
         if ((written[0] & 0xe000ffffu) == 0x80000e1cu) {
             state.bind_texture_argument[frame.learn_stage].store(
-                0x80000000u | (written[0] >> 16), std::memory_order_relaxed);
+                0x80000000u | ((written[0] >> 16) & 0x1fff), std::memory_order_relaxed);
         }
         return;
     }
     ++counters.verify_checked;
     if (count != frame.expected_count ||
-        !std::equal(written.begin(), written.begin() + count, frame.expected.begin())) {
+        !std::equal(written, written + count, frame.expected)) {
         if (counters.verify_mismatches++ < 16) {
             LOG_ERROR(Core, "NVN HLE verify: BindTexture wrote {} words {:08x} {:08x} {:08x} {:08x} "
                             "{:08x}, the marker stands for {} words {:08x} {:08x} {:08x} {:08x} {:08x}",
@@ -573,7 +559,8 @@ void OnPresent(u64 present) {
                 text += fmt::format("e {} {:#x} {}\n", present, key, headers);
             }
             if (const u64 front = VideoCommon::NvnHeaderCount::g_headers[key]; front != 0) {
-                text += fmt::format("f {} {:#x} {}\n", present, key, front);
+                text += fmt::format("f {} {:#x} {} {}\n", present, key, front,
+                                    VideoCommon::NvnHeaderCount::g_table_headers[key]);
             }
         }
     }

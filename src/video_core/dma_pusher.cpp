@@ -774,7 +774,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
         } else {
             auto const command_header = commands[index]; //can copy
             // No command active - this is the first word of a new one
-            VideoCommon::NvnHeaderCount::Count(command_header.subchannel, command_header.method);
+            if (VideoCommon::NvnHeaderCount::g_enabled) [[unlikely]] {
+                VideoCommon::NvnHeaderCount::Count(
+                    command_header.subchannel, command_header.method, command_header.argument,
+                    memory_manager.GetPointer(dma_state.dma_get + (word_offset + index) * sizeof(u32)));
+            }
             switch (command_header.mode) {
             case SubmissionMode::Increasing:
                 SetState(command_header);
@@ -895,9 +899,10 @@ void DmaPusher::ReplayNvnBindTexture(u32 word0, u32 handle) {
     dma_state.method_count = 0;
     dma_state.non_incrementing = true;
     dma_state.dma_word_offset = u64(-s64(dma_state.dma_get));
+    namespace Marker = VideoCommon::NvnHleMarker;
     dma_state.method = 0xe1c;
-    CallMethod(word0 >> 16);
-    if ((word0 >> 12) & 1) {
+    CallMethod(Marker::BindTextureArgument(word0));
+    if (Marker::BindTexturePipeNop(word0)) {
         dma_state.method = 0x68b;
         CallMethod(0);
     }
@@ -906,7 +911,7 @@ void DmaPusher::ReplayNvnBindTexture(u32 word0, u32 handle) {
     dma_state.method = 0x8e3;
     dma_state.method_count = 2;
     dma_state.is_last_call = false;
-    CallMethod(0x20 + 8 * (word0 & 0xff));
+    CallMethod(0x20 + 8 * Marker::BindTextureSlot(word0));
     dma_state.method = 0x8e4;
     dma_state.method_count = 1;
     dma_state.is_last_call = true;
