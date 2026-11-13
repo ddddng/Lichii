@@ -98,7 +98,9 @@ struct State {
 
     Kernel::KProcess* process{};
     u64 synthetic_base{};
-    u64 bootstrap_entry{}; ///< nvnBootstrapLoader (exported)
+    /// nvnBootstrapLoader, every module's export: LM3 (Switch 1) exports it from a subsdk
+    /// (nnSdkEn) and from nnSdk (dotfiles-1gi).
+    std::vector<u64> bootstrap_entries;
     u64 lookup_driver{};   ///< nvnDeviceGetProcAddress, as nvnBootstrapLoader returned it
     u64 private0_address{};
     u64 private0_size{};
@@ -162,10 +164,14 @@ u64 SyntheticAddress(const State& state, u32 slot) {
     return state.synthetic_base + u64{slot} * 4;
 }
 
+bool IsBootstrap(const State& state, u64 address) {
+    return std::ranges::find(state.bootstrap_entries, address) != state.bootstrap_entries.end();
+}
+
 BlockEntryHook HookOf(u64 pc) {
     const State& state = *Get();
-    if (pc == state.bootstrap_entry) {
-        return pc != 0 ? BlockEntryHook::Call : BlockEntryHook::None;
+    if (IsBootstrap(state, pc)) {
+        return BlockEntryHook::Call;
     }
     if (pc >= state.synthetic_base && (pc & 3) == 0 && state.synthetic_base != 0 &&
         (pc - state.synthetic_base) / 4 < state.slot_count.load(std::memory_order_acquire)) {
@@ -387,8 +393,9 @@ void Install(Kernel::KProcess& process) {
             return {base + it->second.first, it->second.second};
         };
         if (const auto [address, size] = find("nvnBootstrapLoader"); address != 0) {
-            state.bootstrap_entry = address;
-            LOG_INFO(Core, "NVN hook: nvnBootstrapLoader in module {} at {:#x}", module, base);
+            state.bootstrap_entries.push_back(address);
+            LOG_INFO(Core, "NVN hook: nvnBootstrapLoader in module {} at {:#x}: {:#x}", module,
+                     base, address);
         }
         if (const auto [address, size] = find("nvnPrivate0"); address != 0) {
             state.private0_address = address;
@@ -417,9 +424,9 @@ void Install(Kernel::KProcess& process) {
     }
     state.process = &process;
     LOG_INFO(Core,
-             "NVN hook: nvnBootstrapLoader {:#x}, nvnPrivate0 {:#x} ({} bytes), synthetic "
+             "NVN hook: {} nvnBootstrapLoader exports, nvnPrivate0 {:#x} ({} bytes), synthetic "
              "addresses from {:#x}",
-             state.bootstrap_entry, state.private0_address,
+             state.bootstrap_entries.size(), state.private0_address,
              state.private0_size, state.synthetic_base);
 }
 
@@ -433,7 +440,7 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
     if (process != state.process) {
         return;
     }
-    const u32 slot = pc == state.bootstrap_entry
+    const u32 slot = IsBootstrap(state, pc)
                          ? MaxSlots
                          : static_cast<u32>((pc - state.synthetic_base) / 4);
     if (slot == LookupSlot) {
@@ -462,7 +469,11 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
         const LookupFrame frame = std::move(frames.back());
         frames.pop_back();
         const u64 driver = jit.GetRegister(0);
-        if (frame.name == "nvnDeviceGetProcAddress" && driver != 0) {
+        // A loader export that forwards to another hooked one returns its synthetic address.
+        const bool synthetic =
+            driver >= state.synthetic_base &&
+            (driver - state.synthetic_base) / 4 < state.slot_count.load(std::memory_order_relaxed);
+        if (!synthetic && frame.name == "nvnDeviceGetProcAddress" && driver != 0) {
             if (state.lookup_driver != 0 && state.lookup_driver != driver) {
                 LOG_WARNING(Core, "NVN hook: a second nvnDeviceGetProcAddress {:#x}", driver);
             }
@@ -472,7 +483,7 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
             }
             state.lookup_driver = driver;
             jit.SetRegister(0, SyntheticAddress(state, LookupSlot));
-        } else if (driver != 0 && driver != state.bootstrap_entry) {
+        } else if (!synthetic && driver != 0 && !IsBootstrap(state, driver)) {
             const u32 name_slot = SlotOf(state, frame.name, driver);
             if (name_slot != MaxSlots) {
                 jit.SetRegister(0, SyntheticAddress(state, name_slot));
