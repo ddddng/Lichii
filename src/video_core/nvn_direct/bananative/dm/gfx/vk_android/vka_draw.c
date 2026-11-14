@@ -975,7 +975,8 @@ void vka_draw_prof(char *b, size_t n, double draws) {
 // and dispatch is preceded by a checkpoint whose marker is its number; at a GPU hang (vka_dev.c hang_declare) each queue's last checkpoints and the draws they mark are
 // logged, to find the one that never finishes. Through the encoder thread when it records (vkCmdSetCheckpointNV in order with the draw calls)
 enum { NCK = 16384 };
-static struct { uint64_t n, frame, keys[VKA_NSTAGE]; int64_t count, instances; uint64_t ind, mdi; int disp; } g_ck[NCK];
+enum { CKR = 12 };   // the resources a checkpoint keeps: textures and buffers of the walk (walk_all), in stage order
+static struct { uint64_t n, frame, keys[VKA_NSTAGE]; int64_t count, instances; uint64_t ind, mdi; int disp, nr; vka_res r[CKR]; uint8_t st[CKR]; } g_ck[NCK];
 static uint64_t g_ckn;
 typedef struct { VkCommandBuffer cb; uint64_t marker; } ckpt_arg;
 static void ckpt_call(const void *a) { const ckpt_arg *c = a; vk.vkCmdSetCheckpointNV(c->cb, (const void *)(uintptr_t)c->marker); }
@@ -984,6 +985,9 @@ static void checkpoint(vka_shader *const *sh, int disp, int64_t count, int64_t i
     uint64_t vka_frame(void); uint64_t n = ++g_ckn; typeof(g_ck[0]) *e = &g_ck[n % NCK];
     e->n = n; e->frame = vka_frame(); e->disp = disp; e->count = count; e->instances = instances; e->ind = ind; e->mdi = mdi;
     for (int i = 0; i < VKA_NSTAGE; i++) e->keys[i] = sh[i] ? sh[i]->key : 0;
+    e->nr = 0;
+    for (int st = 0; st < VKA_NSTAGE; st++) for (int i = 0; i < g_wk.n[st] && e->nr < CKR; i++) { const vka_res *r = &g_wk.r[st][i];
+        if (r->what == VKA_R_TEX || r->what == VKA_R_IMG || r->what == VKA_R_TBUF || r->what == VKA_R_BUF) { e->st[e->nr] = (uint8_t)st; e->r[e->nr++] = *r; } }
     ckpt_arg a = {g_cb, n};
     if (!vka_enc_call(ckpt_call, &a, sizeof a)) ckpt_call(&a);
 }
@@ -997,7 +1001,10 @@ static void checkpoint_queue(VkQueue q, const char *name) {
         VRED("GPU hang: %s checkpoint %llu at stage %#x (of %llu made): %s frame %llu, count %lld instances %lld, indirect %#llx count at %#llx; shaders vs %016llx fs %016llx gs %016llx tcs %016llx tes %016llx cs %016llx task %016llx mesh %016llx",
              name, (unsigned long long)m, cd[i].stage, (unsigned long long)g_ckn, e->disp ? "dispatch" : "draw", (unsigned long long)e->frame, (long long)e->count, (long long)e->instances,
              (unsigned long long)e->ind, (unsigned long long)e->mdi, (unsigned long long)e->keys[0], (unsigned long long)e->keys[1], (unsigned long long)e->keys[2], (unsigned long long)e->keys[3],
-             (unsigned long long)e->keys[4], (unsigned long long)e->keys[5], (unsigned long long)e->keys[6], (unsigned long long)e->keys[7]); }
+             (unsigned long long)e->keys[4], (unsigned long long)e->keys[5], (unsigned long long)e->keys[6], (unsigned long long)e->keys[7]);
+        for (int k = 0; k < e->nr; k++) { const vka_res *r = &e->r[k]; char why[400] = "";
+            if (r->what != VKA_R_BUF) vka_tex_id_desc(r->tid, why, sizeof why);
+            VRED("GPU hang:   stage %u binding %u what %u dim %#x tid %d sid %d addr %#llx size %#llx %s", e->st[k], r->binding, r->what, r->dim, r->tid, r->sid, (unsigned long long)r->addr, (unsigned long long)r->size, why); } }
 }
 void vka_checkpoint_report(void) {
     if (!vk.vkGetQueueCheckpointDataNV) return;
