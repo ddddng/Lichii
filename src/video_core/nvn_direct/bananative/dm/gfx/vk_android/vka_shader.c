@@ -5,6 +5,10 @@
 // not in the pack yet (the app's delta update makes it, android/SHADERS.md#delta-updates), another v-<V>/ of the pack whose header carries this host's DMSH_VK_ABI is played
 // instead (the newest): what the replay reads of it is the same; the new library is taken from the next start. Modules are made at a program's first draw (the submit
 // thread), not at nvnProgramSetShaders
+// Lichii (dotfiles-25x.6, lab only): the library is the file EDEN_NX2_NVN_SHLIB names (else DM_VK_SHLIB, else the pack path above), the offline MKW library of the lab
+// (.pi/o72-replay/mkw-shaders/lib/v-<chain>/dmsh_vk.lib). Its header's game must be this build's profile (game_profile.h: Mario Kart World), so another title gets no
+// library and no draws. A program stage whose key the library lacks is counted and logged with its key (missing_key), its draws skipped; Lichii's own recompiler is
+// the product path (dotfiles-25x.11)
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
@@ -67,7 +71,8 @@ const char *vka_shader_lib_path(void) { return g_lib_path; }
 static int lib_load(void) {
     if (g_lib_state) return g_lib_state > 0;
     g_lib_state = -1;
-    char path[1024], err[256]; const char *e = getenv("DM_VK_SHLIB"); const char *dir = dm_module_dir(); dir = dir && *dir ? dir : ".";
+    char path[1024], err[256]; const char *e = getenv("EDEN_NX2_NVN_SHLIB"); const char *dir = dm_module_dir(); dir = dir && *dir ? dir : ".";   // Lichii: its switch first (see the top)
+    if (!e || !*e) e = getenv("DM_VK_SHLIB");
     if (e && *e) snprintf(path, sizeof path, "%s", e);
     else snprintf(path, sizeof path, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir, DMSH_VK_CHAIN);
     int have = !access(path, R_OK) && vka_shlib_open(&g_lib, path, DMSH_CHAIN, DMSH_VK_CHAIN, DM_GAME_ID, DMSH_VK_ABI, err, sizeof err);
@@ -367,6 +372,24 @@ int vka_shlib_check_all(const vka_shlib *L) {
     return (int)(nolayout + csfail);
 }
 
+// Lichii: the keys program stages asked for that the library lacks, each counted once and logged (the first 256) with how many there are so far
+static pthread_mutex_t g_miss_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t *g_miss; static size_t g_miss_cap, g_miss_n;
+static void missing_key(uint64_t key, unsigned stage) {
+    pthread_mutex_lock(&g_miss_mu);
+    if (2 * (g_miss_n + 1) > g_miss_cap) {
+        size_t nc = g_miss_cap ? 2 * g_miss_cap : 256; uint64_t *n = calloc(nc, sizeof *n);
+        for (size_t i = 0; i < g_miss_cap; i++) if (g_miss[i]) { size_t j = hslot(g_miss[i], nc); while (n[j]) j = (j + 1) & (nc - 1); n[j] = g_miss[i]; }
+        free(g_miss); g_miss = n; g_miss_cap = nc;
+    }
+    uint64_t k = key ? key : 1;   // (0 marks an empty slot)
+    size_t j = hslot(k, g_miss_cap); while (g_miss[j] && g_miss[j] != k) j = (j + 1) & (g_miss_cap - 1);
+    int fresh = !g_miss[j]; if (fresh) { g_miss[j] = k; g_miss_n++; }
+    size_t n = g_miss_n;
+    pthread_mutex_unlock(&g_miss_mu);
+    if (fresh && n <= 256) VRED("shader %016llx (program stage %u) is not in the shader library %s: its draws are skipped (%zu keys missing so far)", (unsigned long long)key, stage, g_lib_path, n);
+}
+
 // ---------- Programs ----------
 // By serial (a new serial at every nvnProgramSetShaders; mtl_prog_release drops it): the program's stage keys resolved to shaders, each at the NVN stage its entry names
 typedef struct { uint64_t serial; vka_progsh ps; } prent;
@@ -405,7 +428,7 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
         if (!prog_key(p, i, md)) continue;
         uint64_t key = vka_shlib_key(md);
         const dmsh_vk_entry *en = vka_shlib_find(&g_lib, key);
-        if (!en) { out->bad |= VKA_BAD_MISSING; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) VRED("shader %016llx (program stage %u) is not in the shader library", (unsigned long long)key, i); continue; }
+        if (!en) { out->bad |= VKA_BAD_MISSING; missing_key(key, i); continue; }
         int st = vka_nvn_stage(en->stage);
         if (st < 0) { out->bad |= VKA_BAD_MISSING; continue; }   // (vka_shlib_open refuses a stage past DMSH_VK_STAGE_MS)
         if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
