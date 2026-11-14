@@ -96,6 +96,7 @@ constexpr u32 ComputeStage = 5;
 constexpr u32 TaskStage = 8; ///< the driver's other special case besides compute
 
 struct State {
+    bool direct{}; ///< DirectMode()
     bool emitted{};
     bool hle_bind_texture{};
     bool hle_verify{};
@@ -128,9 +129,13 @@ struct State {
     std::array<std::vector<TraceFrame>, GuestThreadSlots> trace_frames;
 };
 
+bool EnvIsOne(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 State* Create() {
-    const char* hook = std::getenv("EDEN_NX2_NVN_HOOK");
-    if (hook == nullptr || std::strcmp(hook, "1") != 0) {
+    if (!EnvIsOne("EDEN_NX2_NVN_HOOK") && !EnvIsOne("EDEN_NX2_NVN_DIRECT")) {
         return nullptr;
     }
     auto* state = new State;
@@ -388,6 +393,11 @@ bool Enabled() {
     return Get() != nullptr;
 }
 
+bool DirectMode() {
+    const State* const state = Get();
+    return state != nullptr && state->direct;
+}
+
 void Install(Kernel::KProcess& process) {
     State* const state_pointer = Get();
     if (state_pointer == nullptr) {
@@ -436,6 +446,13 @@ void Install(Kernel::KProcess& process) {
         address = end;
     }
     state.process = &process;
+#ifdef LICHII_NVN_DIRECT
+    // One launch per process: the direct renderer's state lives as long as the process does.
+    state.direct = EnvIsOne("EDEN_NX2_NVN_DIRECT") && !state.bootstrap_entries.empty();
+#endif
+    if (state.direct) {
+        LOG_INFO(Core, "NVN hook: NVN2 direct mode: the game's NVN driver is replaced");
+    }
     NvnTrace::Install(process);
     LOG_INFO(Core,
              "NVN hook: {} nvnBootstrapLoader exports, nvnPrivate0 {:#x} ({} bytes), synthetic "

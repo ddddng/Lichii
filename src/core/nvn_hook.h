@@ -11,7 +11,7 @@
 // and returns to the caller. The same boundary nxnative (seedds, MIT) and Switch2Recomp's census
 // hook stand at; this code is Lichii's own.
 //
-// Off unless EDEN_NX2_NVN_HOOK=1. Output to the file EDEN_NX2_NVN_OUT names:
+// Off unless EDEN_NX2_NVN_HOOK=1 or EDEN_NX2_NVN_DIRECT=1. Output to the file EDEN_NX2_NVN_OUT names:
 //   "n <slot> <driver address> <synthetic address> <name>" once per name the game resolved;
 //   every EDEN_NX2_NVN_EVERY presents (default 300): "t <present> <steady ns>", then
 //   cumulative "c <present> <slot> <calls>" for each slot called, and with
@@ -48,6 +48,11 @@ class KProcess;
 namespace Core::NvnHook {
 
 [[nodiscard]] bool Enabled();
+
+/// NVN2 direct mode (dotfiles-25x): the game's NVN calls run in the direct renderer
+/// (video_core/nvn_direct), not in its NVN driver. Decided once per process by Install
+/// (EDEN_NX2_NVN_DIRECT=1, an NVN2 game); read by the Vulkan device, created after Install.
+[[nodiscard]] bool DirectMode();
 
 /// Finds the NVN driver's exports in the application's modules (after they are loaded).
 void Install(Kernel::KProcess& process);

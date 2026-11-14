@@ -52,6 +52,9 @@
 #ifdef __ANDROID__
 #include <jni.h>
 #endif
+#ifdef LICHII_NVN_DIRECT
+#include "video_core/nvn_direct/nvn_direct.h"
+#endif
 namespace Vulkan {
 namespace {
 
@@ -141,6 +144,40 @@ VkSurfaceFormatKHR ChooseOutputFormat(const vk::PhysicalDevice& physical, VkSurf
     return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
 #endif
 }
+
+#ifdef LICHII_NVN_DIRECT
+/// NVN2 direct mode (dotfiles-25x.2): the replay runs on this device. Its NVN queues take the
+/// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
+/// submission of the replay holds the scheduler's submit lock.
+void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
+                    Scheduler& scheduler) {
+    std::vector<const char*> extensions;
+    for (const std::string& name : device.GetLoadedExtensions()) {
+        extensions.push_back(name.c_str());
+    }
+    const std::span<const VkQueue> queues = device.GetNvnDirectQueues();
+    nvn_direct_device adopted{
+        .get_instance_proc_addr = dld.vkGetInstanceProcAddr,
+        .instance = instance,
+        .physical = device.GetPhysical(),
+        .device = *device.GetLogical(),
+        .queue_family = device.GetGraphicsFamily(),
+        .queue_count = static_cast<uint32_t>(queues.size()),
+        .queues = {},
+        .extensions = extensions.data(),
+        .extension_count = static_cast<uint32_t>(extensions.size()),
+        .queue_lock = [](void* mutex) { static_cast<std::mutex*>(mutex)->lock(); },
+        .queue_unlock = [](void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); },
+        .queue_context = &scheduler.submit_mutex,
+    };
+    for (size_t index = 0; index < queues.size(); ++index) {
+        adopted.queues[index] = queues[(index + 1) % queues.size()];
+    }
+    const bool up = nvn_direct_adopt_device(&adopted) != 0;
+    LOG_INFO(Render_Vulkan, "NVN2 direct mode: the replay {} on Lichii's device ({}, {} queues)",
+             up ? "is up" : "failed to start", device.GetModelName(), queues.size());
+}
+#endif
 
 } // Anonymous namespace
 
@@ -238,6 +275,11 @@ try
         .api = "Vulkan",
     };
     Report();
+#ifdef LICHII_NVN_DIRECT
+    if (device.IsNvnDirect()) {
+        AdoptNvnDirect(dld, *instance, device, scheduler);
+    }
+#endif
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
     throw std::runtime_error{fmt::format("Vulkan initialization error {}", exception.what())};

@@ -26,6 +26,7 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "core/nvn_hook.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
@@ -787,6 +788,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 
     // Descriptors feature list
+    // NVN2 direct mode (dotfiles-25x): the replay's descriptor tables are update-after-bind and
+    // partially bound arrays, and its pools use buffer device addresses; those stay enabled.
+    nvn_direct = Core::NvnHook::DirectMode();
+    const VkPhysicalDeviceDescriptorIndexingFeatures supported_descriptor_indexing =
+        features.descriptor_indexing;
     {
         auto& descriptor_indexing = features.descriptor_indexing;
         descriptor_indexing.shaderInputAttachmentArrayDynamicIndexing = false;
@@ -807,6 +813,23 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         descriptor_indexing.runtimeDescriptorArray =
             descriptor_indexing.runtimeDescriptorArray && WantsFsr4Port(driver_id);
     }
+    if (nvn_direct) {
+        auto& descriptor_indexing = features.descriptor_indexing;
+        descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind;
+        descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind;
+        descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind;
+        descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind;
+        descriptor_indexing.descriptorBindingUpdateUnusedWhilePending =
+            supported_descriptor_indexing.descriptorBindingUpdateUnusedWhilePending;
+        descriptor_indexing.descriptorBindingVariableDescriptorCount =
+            supported_descriptor_indexing.descriptorBindingVariableDescriptorCount;
+        descriptor_indexing.runtimeDescriptorArray =
+            supported_descriptor_indexing.runtimeDescriptorArray;
+    }
 
     // VK_EXT_descriptor_buffer requires VK_KHR_buffer_device_address
     if (extensions.descriptor_buffer && !features.buffer_device_address.bufferDeviceAddress) {
@@ -823,7 +846,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         extensions.buffer_device_address = false;
     } else
 #endif
-    if (!extensions.descriptor_buffer) {
+    if (!extensions.descriptor_buffer && !nvn_direct) {
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }
@@ -912,9 +935,59 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 #endif
+    // NVN2 direct mode (dotfiles-25x.2): what the replay (nvn_direct/bananative/dm/gfx/vk_android)
+    // needs beyond the emulator's device: dynamic rendering (it refuses to start without),
+    // graphics pipeline libraries, host memory import for the guest's memory pools, and up to
+    // four queues of the graphics family: one per NVN queue plus its own work on queue 0, which
+    // is Lichii's. robustBufferAccess stays on (Lichii requires it; the replay turns it off on
+    // its own device).
+    VkPhysicalDeviceDynamicRenderingFeatures direct_dynamic_rendering{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+    };
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT direct_pipeline_library{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
+    };
+    std::array<float, NvnDirectMaxQueues> direct_queue_priorities{};
+    if (nvn_direct) {
+        const bool pipeline_library =
+            supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+            supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+        direct_pipeline_library.pNext = &direct_dynamic_rendering;
+        VkPhysicalDeviceFeatures2 query{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                        .pNext = pipeline_library
+                                                     ? static_cast<void*>(&direct_pipeline_library)
+                                                     : static_cast<void*>(&direct_dynamic_rendering)};
+        physical.GetFeatures2(query);
+        direct_dynamic_rendering.pNext = const_cast<void*>(first_next);
+        first_next = query.pNext;
+        if (pipeline_library) {
+            loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        }
+        if (supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+        }
+        const auto ci = std::ranges::find(queue_cis, graphics_family,
+                                          &VkDeviceQueueCreateInfo::queueFamilyIndex);
+        const u32 available = physical.GetQueueFamilyProperties()[graphics_family].queueCount;
+        nvn_direct_queue_count = std::min(available, NvnDirectMaxQueues);
+        direct_queue_priorities.fill(1.0f);
+        ci->queueCount = nvn_direct_queue_count;
+        ci->pQueuePriorities = direct_queue_priorities.data();
+        LOG_INFO(Render_Vulkan,
+                 "NVN2 direct mode: dynamic rendering {}, graphics pipeline libraries {}, host "
+                 "memory import {}, {} of the graphics family's {} queues",
+                 direct_dynamic_rendering.dynamicRendering == VK_TRUE,
+                 direct_pipeline_library.graphicsPipelineLibrary == VK_TRUE,
+                 loaded_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME),
+                 nvn_direct_queue_count, available);
+    }
     logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
 
     graphics_queue = logical.GetQueue(graphics_family);
+    for (u32 index = 0; index < nvn_direct_queue_count; ++index) {
+        dld.vkGetDeviceQueue(*logical, graphics_family, index, &nvn_direct_queues[index]);
+    }
     present_queue = logical.GetQueue(present_family);
 
 #ifdef EGLANTINE_STREAMLINE
