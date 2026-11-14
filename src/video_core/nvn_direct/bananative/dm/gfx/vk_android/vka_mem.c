@@ -547,9 +547,25 @@ static void seg_free(const seg_t *s, int waited, uint64_t fence) {
                                                                (unsigned long)s->lo, (size_t)(s->hi - s->lo), (unsigned long long)fence, vka_hung() ? ", GPU hang" : " not reached in the hang time");
 }
 static void alias_drop_buf(VkBuffer buf);   // (Virtual pools below)
+// Lichii: an import's buffer, memory and view, freed by the completion thread once the GPU is past the fence (unplace)
+typedef struct { VkBuffer buf; VkDeviceMemory mem; void *view; size_t n; } import_free;
+static void import_free_run(void *arg) {
+    import_free *f = arg;
+    if (!vka_hung()) { vk.vkDestroyBuffer(V.dev, f->buf, NULL); vk.vkFreeMemory(V.dev, f->mem, NULL); munmap(f->view, f->n); }
+    free(f);
+}
 static void unplace(const seg_t *sp) {
     seg_t s = *sp; size_t n = s.hi - s.lo;
     uint64_t fence = vka_fence_last();
+    // Lichii (dotfiles-25x.4): an import keeps the guest's pages where they are (its view is a mapping of its own), so it is freed once the GPU is past the fence, without
+    // the caller waiting: with the NVN queues as Vulkan queues the last fence may be a queue's submission that waits for an event the game signals only after it gave the
+    // pool back (Mario Kart World at a course's load: a stall until the host let the wait through)
+    if (s.view && !vka_hung() && !vka_wait_done(fence, 0)) {
+        alias_drop_buf(s.buf);
+        import_free *f = malloc(sizeof *f); *f = (import_free){s.buf, s.mem, s.view, n};
+        vka_after(fence, import_free_run, f);
+        return;
+    }
     int waited = vka_wait_done(fence, vka_hang_ns()) && !vka_hung();
     alias_drop_buf(s.buf);
     if (s.view) {   // Lichii: an import (import_seg): nothing to copy back, the pages are the guest's; its view goes with the memory (kept, as the memory, while the GPU may use it)
