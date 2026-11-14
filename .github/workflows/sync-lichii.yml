@@ -1,0 +1,70 @@
+name: Mirror Lichii
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-lichii
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Fetch full upstream history, branches and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --mirror \
+            https://github.com/zortos293/Lichii.git \
+            "$RUNNER_TEMP/lichii.git"
+
+      - name: Push with original branch names, tags and commit SHAs
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ secrets.LICHII_MIRROR_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          repo="$RUNNER_TEMP/lichii.git"
+          destination="https://github.com/${GITHUB_REPOSITORY}.git"
+
+          # 保留 sync-lichii 分支用于运行自动同步
+          if git --git-dir="$repo" show-ref \
+            --verify --quiet refs/heads/sync-lichii; then
+            echo '::error::Upstream contains the reserved sync-lichii branch.'
+            exit 1
+          fi
+
+          # 获取上游所有分支和 Tags
+          mapfile -t refs < <(
+            git --git-dir="$repo" for-each-ref \
+              --format='%(refname)' refs/heads refs/tags
+          )
+
+          if (( ${#refs[@]} == 0 )); then
+            echo '::error::No upstream branches or tags found.'
+            exit 1
+          fi
+
+          # 保留原始名称，允许上游更新已有分支
+          refspecs=()
+          for ref in "${refs[@]}"; do
+            refspecs+=("+${ref}:${ref}")
+          done
+
+          # 优先使用内置 GITHUB_TOKEN
+          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+
+          git -C "$repo" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --atomic "$destination" "${refspecs[@]}"
+
+          echo 'Mirrored all upstream branches and tags.'
