@@ -251,7 +251,8 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             if (!overlap_downloads.empty()) {
                 ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
                     for (auto& download : overlap_downloads) {
-                        KeepNewerBytes(download, begin, end, image.modification_tick);
+                        WritebackRanges::KeepNewerBytes(download, begin, end,
+                                                        image.modification_tick);
                     }
                 });
             }
@@ -930,7 +931,7 @@ void TextureCache<P>::KeepInWaitingWritebacks(const ImageBase& image, u64 tick) 
     ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
         for (AsyncOverlapDownload& download : async_overlap_downloads) {
             if (!download.cancelled) {
-                KeepNewerBytes(download, begin, end, tick);
+                WritebackRanges::KeepNewerBytes(download, begin, end, tick);
             }
         }
     });

@@ -11,6 +11,7 @@
 
 using VideoCommon::WritebackRanges::AppendLanded;
 using VideoCommon::WritebackRanges::CapPageRecords;
+using VideoCommon::WritebackRanges::KeepNewerBytes;
 using VideoCommon::WritebackRanges::MaxTickedRanges;
 using VideoCommon::WritebackRanges::MaxPageRecords;
 using VideoCommon::WritebackRanges::NoteTick;
@@ -60,6 +61,48 @@ TEST_CASE("A landed write-back's own bytes are the ones it did not keep",
     AppendLanded(landed, 0x1000, 0x1000, 5, keep, TickedRanges{});
     CHECK(Kept(landed, 4) == std::vector<Range>{{0x1080, 0x1100}, {0x1400, 0x1800},
                                                 {0x1900, 0x1f00}});
+}
+
+namespace {
+/// A write-back waiting for the GPU, as the texture cache keeps them.
+struct WaitingDownload {
+    DAddr cpu_addr;
+    u64 size;
+    u64 tick;
+    std::vector<Range> keep;
+    TickedRanges keep_ticks;
+};
+} // Anonymous namespace
+
+TEST_CASE("A waiting write-back's kept bytes take the tick of a flush no newer than it",
+          "[video_core][texture_cache][writeback]") {
+    // A write-back at tick 20 of [0x1000, 0x2000) keeps [0x1400, 0x1500), which a smaller image
+    // wrote back at tick 9 after the written-back image loaded.
+    WaitingDownload download{0x1000, 0x1000, 20, {{0x1400, 0x1500}}, {{0x1400, 0x1500, 9}}};
+    // An image at tick 15 is flushed over part of it.
+    KeepNewerBytes(download, 0x1300, 0x1480, 15);
+    CHECK(download.keep == std::vector<Range>{{0x1400, 0x1500}});
+    std::vector<TickedRange> landed;
+    AppendLanded(landed, download.cpu_addr, download.size, download.tick, download.keep,
+                 download.keep_ticks);
+    // A guest read's download of an image at tick 12 leaves the flushed bytes there as they are,
+    // and writes the rest of the kept range.
+    CHECK(Kept(landed, 12) ==
+          std::vector<Range>{{0x1000, 0x1400}, {0x1500, 0x2000}, {0x1400, 0x1480}});
+}
+
+TEST_CASE("A waiting write-back keeps only the bytes of a flush newer than it",
+          "[video_core][texture_cache][writeback]") {
+    WaitingDownload download{0x1000, 0x1000, 20, {}, {}};
+    // No newer than it, outside its kept ranges: the write-back lands over them.
+    KeepNewerBytes(download, 0x1800, 0x1900, 15);
+    CHECK(download.keep.empty());
+    CHECK(download.keep_ticks.empty());
+    // Newer, over its end: kept within it, at the flushed image's tick.
+    KeepNewerBytes(download, 0x1f00, 0x2100, 25);
+    CHECK(download.keep == std::vector<Range>{{0x1f00, 0x2000}});
+    REQUIRE(download.keep_ticks.size() == 1);
+    CHECK(download.keep_ticks.front().tick == 25);
 }
 
 TEST_CASE("Ticked ranges keep the newest data's tick", "[video_core][texture_cache][writeback]") {

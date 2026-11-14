@@ -731,29 +731,8 @@ private:
     /// one range at cpu_addr, a sparse image's mapped segments, none for a stand-in address.
     template <typename Func>
     void ForEachWrittenRange(const ImageBase& image, Func&& func);
-    /// A write-back still waiting keeps the bytes [begin, end) that an image with newer
-    /// contents (`tick`) wrote to guest memory meanwhile (it lands later, over them otherwise).
-    template <typename Download>
-    static void KeepNewerBytes(Download& download, DAddr begin, DAddr end, u64 tick) {
-        if (download.tick >= tick) {
-            return;
-        }
-        begin = (std::max)(begin, download.cpu_addr);
-        end = (std::min)(end, download.cpu_addr + download.size);
-        if (begin >= end) {
-            return;
-        }
-        // The kept bytes are that image's: a guest read's downloads compare against its tick.
-        WritebackRanges::NoteTick(download.keep_ticks, begin, end, tick);
-        if (std::ranges::any_of(download.keep, [&](const auto& range) {
-                return range.first <= begin && end <= range.second;
-            })) {
-            return;
-        }
-        download.keep.emplace_back(begin, end);
-    }
-    /// KeepNewerBytes for every write-back waiting for the GPU and every range `image` was
-    /// written to, after it was written to guest memory.
+    /// WritebackRanges::KeepNewerBytes for every write-back waiting for the GPU and every range
+    /// `image` was written to, after it was written to guest memory.
     void KeepInWaitingWritebacks(const ImageBase& image, u64 tick);
     /// After a flush wrote `image` to guest memory: write-backs still waiting keep its bytes, and
     /// later ones see it as newer data (NoteOverlapWriteback), while write-backs are on.

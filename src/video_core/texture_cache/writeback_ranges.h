@@ -70,6 +70,34 @@ inline void NoteTick(TickedRanges& ranges, DAddr begin, DAddr end, u64 tick) {
     ranges = std::move(merged);
 }
 
+/// A write-back still waiting (cpu_addr, size, tick, keep, keep_ticks) keeps the bytes
+/// [begin, end) that an image with newer contents (`tick`) wrote to guest memory meanwhile (it
+/// lands later, over them otherwise). Bytes an image no newer wrote are the write-back's to land,
+/// but those it keeps for other data now hold that image's.
+template <typename Download>
+void KeepNewerBytes(Download& download, DAddr begin, DAddr end, u64 tick) {
+    begin = (std::max)(begin, download.cpu_addr);
+    end = (std::min)(end, download.cpu_addr + download.size);
+    if (begin >= end) {
+        return;
+    }
+    // The kept bytes are that image's: a guest read's downloads compare against its tick.
+    if (download.tick >= tick) {
+        for (const auto& [keep_begin, keep_end] : download.keep) {
+            NoteTick(download.keep_ticks, (std::max)(keep_begin, begin),
+                     (std::min)(keep_end, end), tick);
+        }
+        return;
+    }
+    NoteTick(download.keep_ticks, begin, end, tick);
+    if (std::ranges::any_of(download.keep, [&](const auto& range) {
+            return range.first <= begin && end <= range.second;
+        })) {
+        return;
+    }
+    download.keep.emplace_back(begin, end);
+}
+
 /// Write-back records per page past which records newer ones hold all of go, and past which the
 /// oldest goes in any case.
 inline constexpr size_t PageRecords = 8;
