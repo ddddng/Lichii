@@ -42,8 +42,9 @@ int dm_detclock_enabled(void) { return 0; }
 void dm_guest_frame_tick(void) {}
 void dm_cheats_present(void) {}
 void crash_set_wait_dump(void (*fn)(void)) { (void)fn; }
+void dm_log(const char* file, int line, const char* func, const char* fmt, ...); // dm.h
 void dm_host_shutdown(const char* why) {
-    fprintf(stderr, "[nvn_direct] the replay stops the emulator: %s\n", why ? why : "");
+    dm_log(__FILE__, __LINE__, __func__, "[dm] FATAL the replay stops the emulator: %s", why ? why : "");
     abort();
 }
 int front_screen_max_fps(void) { return 0; }

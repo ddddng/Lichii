@@ -28,8 +28,10 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
     return r;
 }
 
-// The message and its newline under one stream lock: written apart, another thread's line could land between them and two messages share a log line
-#define LOG(...) do { flockfile(stderr); fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } while (0)
+// Lichii: every line goes to Lichii's log (class Render.NvnDirect, nvn_direct_log.cpp) with its text unchanged: "[RED]" lines as errors, "FATAL" ones as critical, the rest as
+// information (dotfiles-25x.19). Upstream wrote them to stderr
+void dm_log(const char *file, int line, const char *func, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+#define LOG(...) dm_log(__FILE__, __LINE__, __func__, "[dm] " __VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 #include "plat/plat.h"   // the services whose system interface differs between Apple and Android (time, thread slots, thread suspension, memory copies, ...)
 

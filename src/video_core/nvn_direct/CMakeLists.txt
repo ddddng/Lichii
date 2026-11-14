@@ -15,6 +15,7 @@ add_library(nvn_direct STATIC
     nvn_dispatch.c
     nvn_direct_front.h
     nvn_direct_host.c
+    nvn_direct_log.cpp
     nvn_present.c
     nvn_tracking.c
     nvn_window.c
@@ -63,4 +64,4 @@ target_compile_definitions(nvn_direct PRIVATE __ANDROID__ _GNU_SOURCE)
 # Upstream's code is kept as it is: its warnings are not Lichii's to fix.
 target_compile_options(nvn_direct PRIVATE -w)
 target_compile_definitions(nvn_direct INTERFACE LICHII_NVN_DIRECT)
-target_link_libraries(nvn_direct PUBLIC Vulkan::Headers PRIVATE zstd::zstd ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS} m)
+target_link_libraries(nvn_direct PUBLIC Vulkan::Headers PRIVATE common zstd::zstd ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS} m)
