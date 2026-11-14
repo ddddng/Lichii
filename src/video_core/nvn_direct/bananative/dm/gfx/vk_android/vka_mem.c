@@ -205,22 +205,8 @@ static void swap_nomark_end(uintptr_t lo, uintptr_t hi, int exact) {
     uint64_t r = atomic_load(&g_snap_reads);
     if (!exact || g_sw_fail || r != g_sw_reads || (r & 1)) prot_mark(lo, hi - lo);
 }
-// The memory calls of this library: the system call, then the mark (after it, so a snapshot read meanwhile is older than the mark)
-// (A failed MAP_FIXED mmap or MREMAP_FIXED mremap may have unmapped its target already: marked too)
-void *mmap(void *a, size_t n, int prot, int fl, int fd, off_t off) {
-    long r = syscall(__NR_mmap, a, n, prot, fl, fd, off);
-    if (r == -1) { if (fl & MAP_FIXED) prot_mark((uintptr_t)a, n); return MAP_FAILED; }
-    prot_mark((uintptr_t)r, n); return (void *)r;
-}
-void *mmap64(void *a, size_t n, int prot, int fl, int fd, off64_t off) { return mmap(a, n, prot, fl, fd, (off_t)off); }
-int munmap(void *a, size_t n) { long r = syscall(__NR_munmap, a, n); prot_mark((uintptr_t)a, n); return (int)r; }
-int mprotect(void *a, size_t n, int prot) { long r = syscall(__NR_mprotect, a, n, prot); prot_mark((uintptr_t)a, n); return (int)r; }
-void *mremap(void *a, size_t n, size_t nn, int fl, ...) {
-    void *to = NULL; if (fl & MREMAP_FIXED) { va_list ap; va_start(ap, fl); to = va_arg(ap, void *); va_end(ap); }
-    long r = syscall(__NR_mremap, a, n, nn, fl, to); prot_mark((uintptr_t)a, n);
-    if (r == -1) { if (to) prot_mark((uintptr_t)to, nn); return MAP_FAILED; }
-    prot_mark((uintptr_t)r, nn); return (void *)r;
-}
+// Lichii: upstream defines mmap, mmap64, munmap, mprotect and mremap here, which interpose every caller in the process (Lichii's guest memory, the JIT, the driver).
+// They are left out: Lichii's own mappings are none of the replay's business, and the placement swap they kept marks for (placed pool maps) is not used in Lichii
 static int prot_runs_text(uintptr_t lo, uintptr_t hi, prun *out, int max);
 static uint64_t g_maps_lines;   // lines of /proc/self/maps read (placement phases, below)
 static struct { prun *r; int n, cap; uint64_t gen; int ok, off; } g_snap;   // under g_snapmu

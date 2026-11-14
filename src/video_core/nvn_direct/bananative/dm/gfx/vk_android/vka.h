@@ -184,6 +184,7 @@ int vks_tile_bound(vks_img *s, uint32_t lv, uint32_t ly, uint32_t tx, uint32_t t
 uint32_t vks_tiled(const vks_img *s);               // image levels bound tile by tile (the later ones are bound whole)
 uint64_t vks_img_bytes(vks_img *s);
 void vks_free(vks_img *s);                          // img_destroy, before vkDestroyImage
+void vka_qlock(void); void vka_qunlock(void);   // Lichii: around every submission to the replay's queues (vka_dev.c: Lichii's submit lock)
 void vks_queue_locked(uint32_t *nw, VkSemaphore *ws, uint64_t *wv, VkPipelineStageFlags *wst);   // before a vkQueueSubmit of the replay or an upload batch, under V.qmu
 void vks_stats(char *b, size_t n);
 uint64_t vks_bytes_nolock(void);

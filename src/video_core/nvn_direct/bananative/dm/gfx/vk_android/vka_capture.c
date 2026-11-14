@@ -51,7 +51,7 @@ int vcap_cb_run(VkCommandBuffer cb) {
     int ok = 0; VkFence f = VK_NULL_HANDLE; VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (!vk.vkEndCommandBuffer(cb) && !vk.vkCreateFence(V.dev, &fi, NULL, &f)) {
         VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
-        pthread_mutex_lock(&V.qmu); VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, f); pthread_mutex_unlock(&V.qmu);
+        vka_qlock(); VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, f); vka_qunlock();
         ok = !r && !vk.vkWaitForFences(V.dev, 1, &f, VK_TRUE, 30000000000ull);
         if (!ok) LOG("[RED] vk: capture / replay copy: submit %d, fence not reached in 30 s", r);
         if (ok || r) vk.vkDestroyFence(V.dev, f, NULL);   // a fence the GPU may still signal is left alone

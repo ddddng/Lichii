@@ -3,6 +3,7 @@
 // Feature and extension choices follow the probe of android/spike (results/honor-pnm-n49.md): placed memory maps, buffer device addresses, update-after-bind arrays, display timing
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "../../../../nvn_direct.h"
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,9 +11,18 @@
 #include <time.h>
 
 vka_fns vk;
-vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 static int g_state;   // 0 not tried, 1 up, -1 failed
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
+vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
+// Lichii: the device handed over (nvn_direct_adopt_device), and the lock every submission to its queues holds (Lichii's Scheduler::submit_mutex: Lichii submits to the
+// last of these queues too); V.qmu without one
+static nvn_direct_device g_adopt; static int g_adopted;
+void vka_qlock(void) { if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); }
+void vka_qunlock(void) { if (g_adopt.queue_unlock) g_adopt.queue_unlock(g_adopt.queue_context); else pthread_mutex_unlock(&V.qmu); }
+int nvn_direct_adopt_device(const nvn_direct_device *d) {
+    pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
+    return vka_init();
+}
 
 
 uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
@@ -25,42 +35,23 @@ static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name)
 
 static void *completion_main(void *arg);
 static int init_once(void) {
-    void *lib = vka_driver_open();   // DM_VK_DRIVER: a custom driver through libadrenotools (vka_driver.c); NULL = the system's
-    if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib || !(vk.vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { VRED("no libvulkan.so: %s", dlerror()); return 0; }
+    // Lichii: the replay runs on Lichii's Vulkan device (nvn_direct_adopt_device): its instance, physical device, device and the graphics family's queues; it makes none of
+    // its own. Without a device handed over there is no replay device and submissions run their CPU-side effects only (the null backend)
+    if (!g_adopted) return 0;
+    vk.vkGetInstanceProcAddr = g_adopt.get_instance_proc_addr;
 #define G(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(NULL, #f);
     VKA_GLOBAL_FNS(G)
 #undef G
-    uint32_t api = VK_API_VERSION_1_0; if (vk.vkEnumerateInstanceVersion) vk.vkEnumerateInstanceVersion(&api);
-    if (api < VK_API_VERSION_1_3) { VRED("Vulkan instance %u.%u: the replay needs 1.3", VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api)); return 0; }
-    uint32_t ne = 0; vk.vkEnumerateInstanceExtensionProperties(NULL, &ne, NULL);
-    VkExtensionProperties *ie = calloc(ne ? ne : 1, sizeof *ie); vk.vkEnumerateInstanceExtensionProperties(NULL, &ne, ie);
-    const char *iext[4]; uint32_t niext = 0;
-    if (has_ext(ie, ne, VK_KHR_SURFACE_EXTENSION_NAME) && has_ext(ie, ne, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME)) { iext[niext++] = VK_KHR_SURFACE_EXTENSION_NAME; iext[niext++] = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME; V.has_android_surface = 1; }
-    free(ie);
-    const char *layer = "VK_LAYER_KHRONOS_validation"; uint32_t nlayer = 0;
-    const char *ve = getenv("DM_VK_VALIDATE");
-    if (ve && atoi(ve)) {
-        uint32_t nl = 0; vk.vkEnumerateInstanceLayerProperties(&nl, NULL); VkLayerProperties *lp = calloc(nl ? nl : 1, sizeof *lp); vk.vkEnumerateInstanceLayerProperties(&nl, lp);
-        for (uint32_t i = 0; i < nl; i++) if (!strcmp(lp[i].layerName, layer)) nlayer = 1;
-        free(lp); VLOG("DM_VK_VALIDATE: validation layer %s", nlayer ? "on" : "not installed");
-    }
-    VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .pEngineName = "nxnative", .apiVersion = VK_API_VERSION_1_3};
-    VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = niext, .ppEnabledExtensionNames = iext,
-                                .enabledLayerCount = nlayer, .ppEnabledLayerNames = &layer};
-    VkResult r = vk.vkCreateInstance(&ici, NULL, &V.inst);
-    if (r) { VRED("vkCreateInstance %d", r); return 0; }
+    V.inst = g_adopt.instance; VkResult r;
 #define I(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(V.inst, #f);
     VKA_INSTANCE_FNS(I)
 #undef I
-    uint32_t npd = 1; VkPhysicalDevice pd[1];
-    if (vk.vkEnumeratePhysicalDevices(V.inst, &npd, pd) < 0 || !npd) { VRED("no Vulkan physical device"); return 0; }
-    V.pd = pd[0];
+    V.pd = g_adopt.physical;
     vk.vkGetPhysicalDeviceProperties(V.pd, &V.props); vk.vkGetPhysicalDeviceMemoryProperties(V.pd, &V.memp);
     if (V.props.apiVersion < VK_API_VERSION_1_3) { VRED("device %s is Vulkan %u.%u: the replay needs 1.3", V.props.deviceName, VK_API_VERSION_MAJOR(V.props.apiVersion), VK_API_VERSION_MINOR(V.props.apiVersion)); return 0; }
     uint32_t nq = 0; vk.vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq ? nq : 1, sizeof *qp); vk.vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &nq, qp);
-    V.qf = UINT32_MAX; for (uint32_t i = 0; i < nq && V.qf == UINT32_MAX; i++) if ((qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) V.qf = i;
+    V.qf = g_adopt.queue_family;   // Lichii: its graphics family
     { VkPhysicalDeviceFeatures pf; vk.vkGetPhysicalDeviceFeatures(V.pd, &pf); const VkPhysicalDeviceSparseProperties *sp = &V.props.sparseProperties;   // sparse residency: for sparse NVN
       VLOG("sparse: binding %d, residency buffer %d image2D %d image3D %d aliased %d, standard 2D block shape %d, non-resident strict %d, address space %llu MiB, sparse binding on queue family %u: %s; "
            "buffer / image granularity %llu",   // pools' textures (docs/reference/nvn-objects.md "Sparse texture arrays made at their full size")
@@ -70,12 +61,13 @@ static int init_once(void) {
       // Sparse residency images (vka_sparse.c) need it all: binding on the replay's queue, 2D residency, the standard block shape (NVN's 64 KB tiles) and strict non-resident reads
       // (an unbound tile reads 0, as an unmapped NVN page). The features are enabled with every other supported one (vkGetPhysicalDeviceFeatures2 below)
       V.sparse_res = pf.sparseBinding && pf.sparseResidencyImage2D && sp->residencyStandard2DBlockShape && sp->residencyNonResidentStrict && V.qf < nq && (qp[V.qf].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT); }
-    uint32_t fam_queues = V.qf < nq ? qp[V.qf].queueCount : 1;
+    uint32_t fam_queues = g_adopt.queue_count;   // Lichii: the queues it made and handed over
     free(qp);
     if (V.qf == UINT32_MAX) { VRED("no graphics + compute queue family"); return 0; }
 
-    uint32_t nde = 0; vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, NULL);
-    VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, de);
+    // Lichii: the extensions Lichii's device enabled (it enables what the replay needs in direct mode: vulkan_device.cpp), not every one the device supports
+    uint32_t nde = g_adopt.extension_count;
+    VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); for (uint32_t i = 0; i < nde; i++) snprintf(de[i].extensionName, sizeof de[i].extensionName, "%s", g_adopt.extensions[i]);
     const char *dext[16]; uint32_t ndext = 0;
     { char q[700]; size_t qn = 0; q[0] = 0;   // the vendor's own extensions (tile properties, render pass transforms ...): what a tiler-specific path could use
       for (uint32_t i = 0; i < nde && qn < sizeof q; i++) if (strstr(de[i].extensionName, "_QCOM_")) qn += (size_t)snprintf(q + qn, sizeof q - qn, " %s", de[i].extensionName + 3);
@@ -140,21 +132,21 @@ static int init_once(void) {
     // One Vulkan queue per NVN queue (up to 4 of the family's; DM_VK_MULTIQUEUE=0: one queue, every NVN queue in its FIFO as before)
     V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 1) ? (int)(fam_queues < 4 ? fam_queues : 4) : 1; if (V.nq < 1) V.nq = 1;
     float prios[4] = {1.f, 1.f, 1.f, 1.f}; (void)prio;
-    VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = (uint32_t)V.nq, .pQueuePriorities = prios};
-    VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext};
-    if ((r = vk.vkCreateDevice(V.pd, &dci, NULL, &V.dev))) { VRED("vkCreateDevice %d", r); return 0; }
+    (void)prios; (void)dext; (void)ndext;
+    V.dev = g_adopt.device;   // Lichii's device (see above)
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
 #undef D
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
-    vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
-    for (int i = 0; i < V.nq; i++) vk.vkGetDeviceQueue(V.dev, V.qf, (uint32_t)i, &V.qs[i]);
+    // Lichii: the queues it handed over; the last one is Lichii's own graphics queue, the host's here (V.q). With fewer than three everything goes to that one
+    for (int i = 0; i < V.nq; i++) V.qs[i] = g_adopt.queues[fam_queues - (uint32_t)V.nq + (uint32_t)i];
+    V.q = g_adopt.queues[fam_queues - 1];
     // With several, the last queue is the host's (upload batches, sparse binds, the present: V.q) and the NVN queues share the others: an upload a part waits for must not
     // sit behind another NVN queue's part that waits for an event (MKW's first window frame deadlocked so with the uploads on the first NVN queue)
     V.multi = V.nq > 2;
-    if (V.multi) V.q = V.qs[V.nq - 1]; else V.nq = 1;
+    if (V.multi) V.q = V.qs[V.nq - 1]; else { V.nq = 1; V.qs[0] = V.q; }
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
 
@@ -226,7 +218,6 @@ static int init_once(void) {
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
     if (!V.placed) VRED("no VK_EXT_map_memory_placed: guest memory stays anonymous and the GPU sees no memory pool");
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
-    vka_present_init();
     return 1;
 }
 int vka_init(void) {
@@ -254,7 +245,7 @@ static uint64_t sub_ex(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwai
                        uint32_t nsig, const VkSemaphore *sig_sems, const uint64_t *sig_vals, VkSemaphore bin_signal, VkResult *res) {
     int host = q < 0 || !V.multi; if (q < 0 || q >= V.nq - 1 || !V.multi) q = 0;   // (host: the host queue V.q; with signal, its fences are recorded under queue 0's slot... none signal: the replay's go through queues 0..nq-2)
     VkSemaphore sig[8]; uint64_t sv[8]; uint32_t ns = 0;
-    pthread_mutex_lock(&V.qmu);
+    vka_qlock();
     uint64_t qv = 0;
     if (signal && !V.multi) { sig[ns] = V.tl; sv[ns++] = signal; }
     else if (signal) { qv = ++V.qseq[q]; sig[ns] = V.qtl[q]; sv[ns++] = qv; }
@@ -272,7 +263,7 @@ static uint64_t sub_ex(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwai
     VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(host ? V.q : V.qs[q], 1, &si, VK_NULL_HANDLE);
     if (signal && V.multi) { if (r) V.qseq[q]--; g_fq[signal % FQ_RING].fence = signal; g_fq[signal % FQ_RING].q = r ? -1 : q; g_fq[signal % FQ_RING].qv = qv; }
     if (!r && signal > V.tl_queued) __atomic_store_n(&V.tl_queued, signal, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&V.qmu);
+    vka_qunlock();
     *res = r;
     return qv;
 }
@@ -283,7 +274,7 @@ int vka_queue_idle(void) {
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &q};
     VkResult r = q ? vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns()) : VK_SUCCESS;
     if (r) { VRED("queue idle: fence %llu not reached in %.1f s (%d): not waited for", (unsigned long long)q, vka_hang_ns() / 1e9, r); return 0; }
-    pthread_mutex_lock(&V.qmu); vk.vkQueueWaitIdle(V.q); for (int i = 0; V.multi && i < V.nq - 1; i++) vk.vkQueueWaitIdle(V.qs[i]); pthread_mutex_unlock(&V.qmu);
+    vka_qlock(); vk.vkQueueWaitIdle(V.q); for (int i = 0; V.multi && i < V.nq - 1; i++) vk.vkQueueWaitIdle(V.qs[i]); vka_qunlock();
     return 1;
 }
 uint64_t vka_fence_queued(void) { return __atomic_load_n(&V.tl_queued, __ATOMIC_ACQUIRE); }
@@ -372,7 +363,7 @@ static void *completion_main(void *arg) {
             VkResult r;
             if (V.multi) {   // the next fence in order: its queue's timeline, then V.tl signalled by the host (one fence a pass: they complete on different queues)
                 want = done + 1;
-                pthread_mutex_lock(&V.qmu); int fq = g_fq[want % FQ_RING].fence == want ? g_fq[want % FQ_RING].q : -2; uint64_t fqv = g_fq[want % FQ_RING].qv; pthread_mutex_unlock(&V.qmu);
+                vka_qlock(); int fq = g_fq[want % FQ_RING].fence == want ? g_fq[want % FQ_RING].q : -2; uint64_t fqv = g_fq[want % FQ_RING].qv; vka_qunlock();
                 if (fq == -2) r = VK_TIMEOUT, v = done;   // (submitted by the host but not recorded yet: the next pass)
                 else {
                     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.qtl[fq < 0 ? 0 : fq], .pValues = &fqv};
@@ -576,14 +567,14 @@ void vka_up_flush(void) {
     VkSemaphore ws[1]; uint64_t wv[1]; VkPipelineStageFlags wst[1]; uint32_t nw = 0;   // the sparse binds queued before it (vks_queue_locked)
     VkTimelineSemaphoreSubmitInfo ti = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &v};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &ti, .commandBufferCount = 1, .pCommandBuffers = &cb, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_utl};
-    pthread_mutex_lock(&V.qmu);
+    vka_qlock();
     if (!r) {
         vks_queue_locked(&nw, ws, wv, wst);
         ti.waitSemaphoreValueCount = nw; ti.pWaitSemaphoreValues = wv; si.waitSemaphoreCount = nw; si.pWaitSemaphores = ws; si.pWaitDstStageMask = wst;
         r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE);
         g_uval_pub = v;
     }
-    pthread_mutex_unlock(&V.qmu);
+    vka_qunlock();
     // Nothing on the GPU will signal it: the host does, so later batches and the slot are not held; only once the batch before it is done (a host signal must be below
     // every value still pending on the queue)
     if (r && !vka_hung() && (v == 1 || up_wait(v - 1))) { VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = g_utl, .value = v}; vk.vkSignalSemaphore(V.dev, &ss); }
@@ -671,13 +662,13 @@ static _Atomic int g_tail_n;   // DM_VK_GPU_FLOOR_AUTO=2: submissions with draws
 static void floor_set_(int s, int tail) {
     static _Atomic int cur = -1;
     if (!tail && atomic_load(&cur) == s) return;
-    pthread_mutex_lock(&V.qmu);
+    vka_qlock();
     if (tail) s = atomic_load(&g_tail_n) > 0 ? s : 0;
-    if (atomic_load(&cur) == s) { pthread_mutex_unlock(&V.qmu); return; }
+    if (atomic_load(&cur) == s) { vka_qunlock(); return; }
     struct { VkStructureType sType; void *pNext; uint32_t type, scale; } h = {(VkStructureType)1000302000, NULL, s >= 100 ? 2u : s > 0 ? 3u : 0u, s > 0 && s < 100 ? (uint32_t)s : 0u};
     VkResult r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
     int was = atomic_exchange(&cur, s);
-    pthread_mutex_unlock(&V.qmu);
+    vka_qunlock();
     if (was < 0 || VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1) VLOG("GPU clock floor: %d %% (%s): %d", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
 }
 // DM_VK_GPU_FLOOR_AUTO=2: the floor only for the tail. The driver's governor keeps the clock while the frame is recorded (its parts reach the GPU as fast as they are

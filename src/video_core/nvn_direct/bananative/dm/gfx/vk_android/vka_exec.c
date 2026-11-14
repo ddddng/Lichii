@@ -358,10 +358,10 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     if (r) {
         static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) VRED("submission %llu: %d (its effects run without the GPU)", (unsigned long long)fence, r);
         VkSemaphoreSignalInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = fence};
-        pthread_mutex_lock(&V.qmu);   // signalled by the host: later submissions may wait for it (with several queues the completion thread does, in fence order: vka_dev.c sub_ex)
+        vka_qlock();   // signalled by the host: later submissions may wait for it (with several queues the completion thread does, in fence order: vka_dev.c sub_ex)
         VkResult sr = vka_hung() ? VK_ERROR_DEVICE_LOST : V.multi ? VK_SUCCESS : vk.vkSignalSemaphore(V.dev, &si);
         if (!sr && fence > V.tl_queued) __atomic_store_n(&V.tl_queued, fence, __ATOMIC_RELEASE);
-        pthread_mutex_unlock(&V.qmu);
+        vka_qunlock();
         if (sr) { vka_fence_cpu(fence, ops, n, post_run); g_cb = VK_NULL_HANDLE; return fence; }
     }
     vka_fence_post(fence, ops, n, post_run);
