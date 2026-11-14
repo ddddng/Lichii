@@ -1,3 +1,4 @@
+
 name: Mirror Lichii
 
 on:
@@ -18,7 +19,15 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Fetch full upstream history, branches and tags
+      - name: Install git-filter-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/filter-venv"
+          "$RUNNER_TEMP/filter-venv/bin/pip" install --quiet git-filter-repo
+          echo "$RUNNER_TEMP/filter-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Clone every upstream branch and tag
         shell: bash
         run: |
           set -euo pipefail
@@ -26,45 +35,62 @@ jobs:
             https://github.com/zortos293/Lichii.git \
             "$RUNNER_TEMP/lichii.git"
 
-      - name: Push with original branch names, tags and commit SHAs
+      - name: Rename upstream workflow directory across Git history
         shell: bash
-        env:
-          PUSH_TOKEN: ${{ secrets.LICHII_MIRROR_TOKEN || github.token }}
         run: |
           set -euo pipefail
+          git -C "$RUNNER_TEMP/lichii.git" filter-repo --force \
+            --path-rename '.github/workflows/:.github/upstream-workflows/'
 
+          if git -C "$RUNNER_TEMP/lichii.git" show-ref \
+            --verify --quiet refs/heads/sync-lichii; then
+            echo '::error::Upstream has a sync-lichii branch. Rename your automation branch first.'
+            exit 1
+          fi
+
+          if git -C "$RUNNER_TEMP/lichii.git" rev-list --objects --all \
+              | grep -F ' .github/workflows/' ; then
+            echo '::error::An upstream workflow path was not renamed.'
+            exit 1
+          fi
+
+      - name: Sync all branch and tag names to this private repository
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           repo="$RUNNER_TEMP/lichii.git"
           destination="https://github.com/${GITHUB_REPOSITORY}.git"
 
-          # 保留 sync-lichii 分支用于运行自动同步
-          if git --git-dir="$repo" show-ref \
-            --verify --quiet refs/heads/sync-lichii; then
-            echo '::error::Upstream contains the reserved sync-lichii branch.'
-            exit 1
-          fi
-
-          # 获取上游所有分支和 Tags
           mapfile -t refs < <(
-            git --git-dir="$repo" for-each-ref \
-              --format='%(refname)' refs/heads refs/tags
+            git -C "$repo" for-each-ref --format='%(refname)' \
+              refs/heads refs/tags
           )
 
           if (( ${#refs[@]} == 0 )); then
-            echo '::error::No upstream branches or tags found.'
+            echo '::error::No branches or tags found.'
             exit 1
           fi
 
-          # 保留原始名称，允许上游更新已有分支
+          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
           refspecs=()
+
           for ref in "${refs[@]}"; do
             refspecs+=("+${ref}:${ref}")
+
+            if (( ${#refspecs[@]} >= 80 )); then
+              git -C "$repo" \
+                -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+                push "$destination" "${refspecs[@]}"
+              refspecs=()
+            fi
           done
 
-          # 优先使用内置 GITHUB_TOKEN
-          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+          if (( ${#refspecs[@]} > 0 )); then
+            git -C "$repo" \
+              -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              push "$destination" "${refspecs[@]}"
+          fi
 
-          git -C "$repo" \
-            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-            push --atomic "$destination" "${refspecs[@]}"
-
-          echo 'Mirrored all upstream branches and tags.'
+          echo 'Finished syncing all branches and tags.'
