@@ -15,6 +15,9 @@
 #include <fmt/ranges.h>
 
 #include "common/display_hdr.h"
+#include "common/fs/fs.h"
+#include "common/fs/fs_util.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
@@ -175,6 +178,15 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];
+    }
+    // The replay keeps its pipeline cache and the view formats it learns in DM_TEMP: Lichii's
+    // cache directory unless it is set (lab runs set their own), never the working directory
+    // or HOME, its fallback.
+    if (const char* temp = std::getenv("DM_TEMP"); temp == nullptr || *temp == '\0') {
+        const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nvn_direct";
+        if (Common::FS::CreateDirs(dir)) {
+            setenv("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str(), 0);
+        }
     }
     const bool up = nvn_direct_adopt_device(&adopted) != 0;
     LOG_INFO(Render_Vulkan, "NVN2 direct mode: the replay {} on Lichii's device ({}, {} queues)",
