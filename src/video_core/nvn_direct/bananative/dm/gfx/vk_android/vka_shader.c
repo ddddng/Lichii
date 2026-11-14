@@ -348,6 +348,19 @@ vka_shader *vka_shader_by_key(uint64_t key) {
     return ok ? vka_shader_make(&g_lib, key) : NULL;
 }
 
+// Lichii (dotfiles-25x.16): the keys of the game library's compute programs (a compute pipeline depends on its program alone: vka_pso.c makes them ahead). *keys is
+// malloc'd; returns their count (0: no library)
+unsigned vka_shlib_compute_keys(uint64_t **keys) {
+    *keys = NULL;
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    if (!ok) return 0;
+    unsigned n = g_lib.h->entry_count, m = 0;
+    uint64_t *k = malloc((n ? n : 1) * sizeof *k); if (!k) return 0;
+    for (unsigned i = 0; i < n; i++) if (vka_nvn_stage(g_lib.ent[i].stage) == 5) k[m++] = g_lib.ent[i].key;
+    *keys = k;
+    return m;
+}
+
 // Every shader of a library through the device's compiler: each module made, each stage's set-0 layout made, each compute shader's pipeline built (graphics pipelines need
 // a pair and state, so vertex and pixel shaders stop at the module and layout). DM_VK_SHLIB_CHECK=1 runs it when the game's library loads; the selftest runs it on DM_VK_SHLIB.
 // Returns the number of failures; one log line per failure kind and a summary

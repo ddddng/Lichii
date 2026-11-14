@@ -72,6 +72,12 @@ typedef struct nvn_direct_device {
     uint64_t (*memory_usage)(void* context);
     uint64_t (*memory_budget)(void* context);
     void* memory_context;
+    /// A pipeline the replay makes off the frame path (one its draws skip meanwhile, or one made
+    /// ahead from an earlier run's keys) starts and is done: Lichii's "building shaders" count
+    /// (VideoCore::ShaderNotify). NULL: not reported.
+    void (*pipeline_building)(void* context);
+    void (*pipeline_built)(void* context);
+    void* pipeline_context;
 } nvn_direct_device;
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.

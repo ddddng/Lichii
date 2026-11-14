@@ -144,6 +144,7 @@ uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_hang_ns(void);                         // how long a fence may make no progress before it is a hang (DM_VK_HANG_S, default 6 s)
 int vka_hung(void);
 // Lichii: the emulator shuts down (dotfiles-25x.18, nvn_direct_stop / nvn_direct_park in nvn_shutdown.c)
+void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
 void vka_stop(void);                                // vka_dev.c: as after a hang nothing more is submitted and every fence reads as done, silently; waits return at once
 int vka_stopping(void);
 void vka_worker_wake(void);                         // vka_worker.c: the game's waits for room in the worker's queue see the stop
@@ -357,6 +358,7 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (st
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
+unsigned vka_shlib_compute_keys(uint64_t **keys);   // Lichii: the game library's compute program keys (malloc'd), their count
 vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none

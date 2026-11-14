@@ -26,6 +26,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
+#include "video_core/shader_notify.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/present.h"
 #include "video_core/render_trace.h"
@@ -154,7 +155,7 @@ VkSurfaceFormatKHR ChooseOutputFormat(const vk::PhysicalDevice& physical, VkSurf
 /// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
 /// submission of the replay holds the scheduler's submit lock.
 void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
-                    Scheduler& scheduler, NvnDirectAstc* astc) {
+                    Scheduler& scheduler, NvnDirectAstc* astc, VideoCore::ShaderNotify& shader_notify) {
     std::vector<const char*> extensions;
     for (const std::string& name : device.GetLoadedExtensions()) {
         extensions.push_back(name.c_str());
@@ -182,6 +183,13 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
             return static_cast<const Device*>(context)->GetDeviceMemoryBudget();
         },
         .memory_context = const_cast<Device*>(&device),
+        .pipeline_building = [](void* notify) {
+            static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderBuilding();
+        },
+        .pipeline_built = [](void* notify) {
+            static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderComplete();
+        },
+        .pipeline_context = &shader_notify,
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];
@@ -307,7 +315,7 @@ try
             nvn_direct_astc.emplace(device, memory_allocator);
         }
         AdoptNvnDirect(dld, *instance, device, scheduler,
-                       nvn_direct_astc ? &*nvn_direct_astc : nullptr);
+                       nvn_direct_astc ? &*nvn_direct_astc : nullptr, gpu_.ShaderNotify());
     } else if (device.IsNvnDirect()) {
         LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }

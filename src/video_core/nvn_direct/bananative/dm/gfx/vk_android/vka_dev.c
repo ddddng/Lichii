@@ -628,6 +628,10 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 // ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
+void vka_pipeline_notify(int built) {   // (Lichii: nvn_direct_device.pipeline_building / pipeline_built, dotfiles-25x.16)
+    void (*fn)(void *) = built ? g_adopt.pipeline_built : g_adopt.pipeline_building;
+    if (fn) fn(g_adopt.pipeline_context);
+}
 int vka_mem_budget(uint64_t *usage, uint64_t *budget) {   // the host's device-local use and budget (Lichii: nvn_direct_device.memory_usage / memory_budget); 0 = no budget
     if (!g_adopt.memory_budget || !g_adopt.memory_usage || !(*budget = g_adopt.memory_budget(g_adopt.memory_context))) return 0;
     *usage = g_adopt.memory_usage(g_adopt.memory_context); return 1;
