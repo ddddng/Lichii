@@ -8,6 +8,7 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "nvn_direct_front.h"   // Lichii: raw global memory logs hold the game's addresses (gml_poll)
+#include "nvn_direct.h"   // Lichii: nvn_direct_astc_level (ASTC decoded on the GPU by the host)
 #include "../nvn/nvn_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../nvn/dmsh_abi_vk.h"
@@ -102,9 +103,10 @@ static int fmt_of_slow(int nf, vka_fmt *o) {
     fmt_ent e = fmt_ent_of(nf); int bw, bh, bpb = nvn_fmt_bpb(nf, &bw, &bh);
     if (e.vk == VK_FORMAT_D24_UNORM_S8_UINT && !(feats(e.vk) & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) e.vk = VK_FORMAT_D32_SFLOAT_S8_UINT;
     if (e.vk == VK_FORMAT_X8_D24_UNORM_PACK32 && !(feats(e.vk) & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) e.vk = VK_FORMAT_D32_SFLOAT;
-    // ASTC on a device without it (desktop GPUs): a BC3 image (sRGB views for the sRGB formats) that uploads transcode into on the CPU, when the host supplies the transcoder
-    if (e.vk >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && e.vk <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && bpb && vka_astc_transcode && !(feats(e.vk) & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-        static _Atomic int once; if (!atomic_exchange(&once, 1)) VLOG("ASTC textures: no ASTC on this device, transcoded to BC3 on the CPU at upload (vka_astc_transcode)");
+    // ASTC on a device without it (desktop GPUs): a BC3 image (sRGB views for the sRGB formats) that uploads decode into on the GPU when the host supplies the decoder
+    // (Lichii: astc_gpu_level), else transcode into on the CPU when the host supplies the transcoder
+    if (e.vk >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && e.vk <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && bpb && (vka_astc_gpu_on() || vka_astc_transcode) && !(feats(e.vk) & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+        static _Atomic int once; if (!atomic_exchange(&once, 1)) VLOG("ASTC textures: no ASTC on this device, %s", vka_astc_gpu_on() ? "decoded and re-compressed to BC3 on the GPU at upload (the host's decoder)" : "transcoded to BC3 on the CPU at upload (vka_astc_transcode)");
         *o = (vka_fmt){VK_FORMAT_BC3_UNORM_BLOCK, e.srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK, 0, e.srgb, 16, 4, 4, (uint8_t)bw, (uint8_t)bh};
         return 1;
     }
@@ -946,6 +948,45 @@ static void copy_bound(vka_img *im, VkCommandBuffer cb, const vka_span *s, uint3
 // band as zero texels): the staging is about what is mapped, never a whole level (Mario Kart World 1.8.0's 6144x6144 RGBA8 array levels, 144 MiB each, have about half of
 // their pages mapped at boot, and its 8192x8192 x68 arrays' levels a few MiB in all). 3D textures go by whole levels, as before. Each run is a point where the upload
 // batch may go to the queue (vka_up_point)
+// ASTC on a device without it, decoded on the GPU (dotfiles-25x.8: the host's decoder, Lichii's astc_decoder.comp and bc_encoder.comp, vk_nvn_direct_astc.cpp): level lv of
+// layer ly (image level i) from the block-linear bytes [o, o + n) of buffer b (staging), as the game stored them. Always recorded into an upload batch (*ub, which it may send and
+// replace: vka_up_point), so every decode goes to one queue and the decoder's tile image and buffer need only barriers between uses. 0 = not recorded, or no batch left
+int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l);   // vka_dev.c
+static int astc_gpu_level(VkCommandBuffer *ub, vka_img *im, uint32_t i, uint32_t lv, uint32_t ly, VkBuffer b, VkDeviceSize o, VkDeviceSize n) {
+    unsigned th, td; nvn_tex_level_tiles(&im->d, lv, &th, &td);
+    uint32_t w = im->w >> i ? im->w >> i : 1, h = im->h >> i ? im->h >> i : 1, gobs = nvn_tex_level_gobs(&im->d, lv), row = (w + im->f.astc_bw - 1) / im->f.astc_bw * 16;
+    if (gobs * 64 < row) gobs = (row + 63) / 64;
+    nvn_direct_astc_level l = {b, o, n, w, h, im->f.astc_bw, im->f.astc_bh, gobs, th, nvn_gob_switch2, im->img, i, ly, im->f.bpb == 16};
+    if (!vka_astc_gpu(*ub, &l)) { VRED_ONCE("texture serial %llu format %#x %ux%u level %u: ASTC not decoded on the GPU", (unsigned long long)im->serial, im->d.format, w, h, lv); return 0; }
+    *ub = vka_up_point(*ub);
+    return *ub != VK_NULL_HANDLE;
+}
+// The upload batch an ASTC decode goes into: cb when it is one, else the open batch (*own: begun here, vka_up_end after). NULL: none
+static VkCommandBuffer astc_gpu_batch(VkCommandBuffer cb, int *own) {
+    *own = !vka_up_is(cb);
+    if (!*own) return cb;
+    VkCommandBuffer ub = vka_up_begin();
+    if (!ub || !vka_up_is(ub)) { if (ub) vka_up_end(); *own = 0; VRED_ONCE("no upload batch for an ASTC decode: the texture keeps what it held"); return VK_NULL_HANDLE; }
+    return ub;
+}
+static void upload_astc_gpu(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *nbytes) {
+    const nvn_texdesc *d = &t->d;
+    if ((d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || d->target == NVN_TEXTURE_TARGET_3D) {
+        VRED_ONCE("texture serial %llu format %#x target %d: a linear or 3D ASTC texture is not decoded on the GPU", (unsigned long long)t->serial, d->format, d->target); return; }
+    int own; VkCommandBuffer ub = astc_gpu_batch(cb, &own);
+    for (uint32_t lv = 0; lv < im->levels && ub; lv++)
+        for (uint32_t ly = 0; ly < im->layers && ub; ly++) {
+            uint64_t off, len; sub_range(d, &t->L, lv, ly, &off, &len);
+            if (!len) continue;
+            // A copy of its bytes in the batch's staging, not the pool's imported memory: that may be given back once the fences before are done, and the batch's queue
+            // is not one of the fences' (a decode read from the pool lost the device with the NVN queues as Vulkan queues)
+            vka_span sp; if (!vka_scratch(len, 256, &sp)) { ub = VK_NULL_HANDLE; break; }
+            memcpy(sp.ptr, t->mem + off, len);
+            if (!astc_gpu_level(&ub, im, lv, lv, ly, sp.buf, sp.off, len)) ub = VK_NULL_HANDLE;
+            else *nbytes += len;
+        }
+    if (own) vka_up_end();
+}
 // A sparse ASTC texture on a device without ASTC (vka_astc_transcode): each changed level and layer gathered whole from the page table (unmapped pages as zero texels),
 // deswizzled into ASTC blocks, transcoded and copied. Whole subresources, not bands: a band of ASTC block rows is not a band of BC3 block rows. Mario Kart World's
 // 8192x8192x68 ASTC arrays are dense images from level 2 here (no residency image: sparse_new), so a level is at most 2048x2048. Not for residency images
@@ -953,6 +994,20 @@ static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, ui
     const nvn_texdesc *d = &im->d; const vka_fmt *f = &im->f; uint64_t mem = (uint64_t)(uintptr_t)im->mem;
     if (bind_only) return;
     if (im->rs || d->target == NVN_TEXTURE_TARGET_3D) { VRED_ONCE("sparse ASTC texture serial %llu format %#x: a residency image or 3D on a device without ASTC: not uploaded", (unsigned long long)im->serial, d->format); return; }
+    if (vka_astc_gpu_on()) {   // decoded on the GPU (astc_gpu_level) from the gathered bytes
+        int own; VkCommandBuffer ub = astc_gpu_batch(cb, &own);
+        for (uint32_t i = 0; i < im->levels && ub; i++)
+            for (uint32_t ly = 0; ly < im->layers && ub; ly++) {
+                uint32_t lv = i + im->base; uint64_t off, len; sub_range(d, &im->L, lv, ly, &off, &len);
+                if (!len || (!all && !nvn_sparse_since(im->vpool, mem + off, len, gen, stamp))) continue;
+                vka_span sp; if (!vka_scratch(len, 256, &sp)) { ub = VK_NULL_HANDLE; break; }
+                nvn_sparse_copy(im->vpool, sp.ptr, mem + off, len);
+                astc_zero_blocks(sp.ptr, len);   // (unmapped pages: zero texels, not ASTC's error colour)
+                if (!astc_gpu_level(&ub, im, i, lv, ly, sp.buf, sp.off, len)) ub = VK_NULL_HANDLE;
+            }
+        if (own) vka_up_end();
+        return;
+    }
     for (uint32_t i = 0; i < im->levels && cb; i++) {
         uint32_t lv = i + im->base, w = im->w >> i ? im->w >> i : 1, h = im->h >> i ? im->h >> i : 1;
         uint32_t abx = (w + f->astc_bw - 1) / f->astc_bw, aby = (h + f->astc_bh - 1) / f->astc_bh; size_t ap = (size_t)abx * 16;
@@ -1455,6 +1510,7 @@ static void nan_zero(int nf, uint8_t *p, size_t n) {
     else if (nf == 0x0a || nf == 0x16 || nf == 0x22 || nf == 0x2e) { for (size_t i = 0; i + 4 <= n; i += 4) { uint32_t v; memcpy(&v, p + i, 4); if ((v & 0x7f800000u) == 0x7f800000u) { v = 0; memcpy(p + i, &v, 4); } } }
 }
 static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *nbytes) {
+    if (im->f.astc_bw && !im->vpool && vka_astc_gpu_on()) { upload_astc_gpu(im, t, cb, nbytes); return; }
     if (!im->vpool && !VKA_ENV("DM_VK_UPLOAD_NAN_ZERO", 0) && !vka_upload_hook && upload_mt(im, t, cb, nbytes)) return;   // (the scrub and the hook are on the serial path)   // (a sparse pool's storage is read through its page table below, never at its address)
     const nvn_texdesc *d = &t->d; const vka_fmt *f = &im->f;
     int linear = d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET), is3d = d->target == NVN_TEXTURE_TARGET_3D;

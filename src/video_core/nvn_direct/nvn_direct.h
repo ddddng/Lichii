@@ -25,6 +25,23 @@ extern "C" {
 /// At most this many queues of the graphics family are handed to the replay.
 #define NVN_DIRECT_MAX_QUEUES 4
 
+/// One level of one layer of an ASTC texture on a device without ASTC (dotfiles-25x.8): its
+/// block-linear ASTC blocks as the game stored them, decoded and re-compressed to BC on the GPU
+/// into image's level and layer (VK_IMAGE_LAYOUT_GENERAL, a BC1 or BC3 format).
+typedef struct nvn_direct_astc_level {
+    VkBuffer source;
+    VkDeviceSize source_offset; ///< where the level (of the layer) starts
+    VkDeviceSize source_size;   ///< the level's bytes from there
+    uint32_t width, height;     ///< the level's texels
+    uint32_t block_width, block_height; ///< the ASTC block's texels
+    uint32_t gobs_x;            ///< GOB columns of a row of the level, as laid out
+    uint32_t block_height_log2; ///< GOBs of a block's height at this level (log2)
+    int switch2_gobs;           ///< the Switch 2's order of 16-byte pieces in a GOB
+    VkImage image;
+    uint32_t level, layer;
+    int bc3; ///< BC3 (with alpha), else BC1
+} nvn_direct_astc_level;
+
 /// Lichii's Vulkan device as the replay adopts it (vka_dev.c makes none of its own).
 typedef struct nvn_direct_device {
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
@@ -43,6 +60,11 @@ typedef struct nvn_direct_device {
     void (*queue_lock)(void* context);
     void (*queue_unlock)(void* context);
     void* queue_context;
+    /// Records the decode of an ASTC level (Lichii's astc_decoder.comp and bc_encoder.comp)
+    /// into cmdbuf, the replay's upload batch; 0 when nothing was recorded. NULL: no GPU
+    /// decode (ASTC textures then have no image unless the device samples ASTC).
+    int (*astc_to_bc)(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
+    void* astc_context;
 } nvn_direct_device;
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.

@@ -546,6 +546,10 @@ VkCommandBuffer vka_up_begin(void) {
 }
 void vka_up_end(void) { vka_scr_up = 0; }
 static int is_batch(VkCommandBuffer cb) { for (int i = 0; i < NUP; i++) if (cb && g_ub[i].cb == cb) return 1; return 0; }
+int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
+// ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
+int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
+int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
 // No batch can be begun (a slot's batch still runs after the hang time): the upload goes on in the submission being recorded, with its staging (the batch before it was sent,
 // so its image's first barrier and copies come before; an upload stopped half-way would leave a tracked image with part of its content for good)
 static VkCommandBuffer up_fallback(void) { vka_scr_up = 0; return vka_rp_cb(); }

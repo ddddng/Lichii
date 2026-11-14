@@ -151,7 +151,7 @@ VkSurfaceFormatKHR ChooseOutputFormat(const vk::PhysicalDevice& physical, VkSurf
 /// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
 /// submission of the replay holds the scheduler's submit lock.
 void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
-                    Scheduler& scheduler) {
+                    Scheduler& scheduler, NvnDirectAstc* astc) {
     std::vector<const char*> extensions;
     for (const std::string& name : device.GetLoadedExtensions()) {
         extensions.push_back(name.c_str());
@@ -170,6 +170,8 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .queue_lock = [](void* mutex) { static_cast<std::mutex*>(mutex)->lock(); },
         .queue_unlock = [](void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); },
         .queue_context = &scheduler.submit_mutex,
+        .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
+        .astc_context = astc,
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];
@@ -281,7 +283,12 @@ try
     // CPU-side effects only, fences complete at submit).
     if (const char* null_backend = std::getenv("EDEN_NX2_NVN_DIRECT_NULL");
         device.IsNvnDirect() && (null_backend == nullptr || std::strcmp(null_backend, "1") != 0)) {
-        AdoptNvnDirect(dld, *instance, device, scheduler);
+        // ASTC the device cannot sample: decoded and re-compressed to BC on the GPU (.8).
+        if (!device.IsOptimalAstcSupported() && device.IsKhrPushDescriptorSupported()) {
+            nvn_direct_astc.emplace(device, memory_allocator);
+        }
+        AdoptNvnDirect(dld, *instance, device, scheduler,
+                       nvn_direct_astc ? &*nvn_direct_astc : nullptr);
     } else if (device.IsNvnDirect()) {
         LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }

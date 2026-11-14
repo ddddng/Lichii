@@ -165,6 +165,7 @@ VkCommandBuffer vka_up_begin(void);
 void vka_up_end(void);
 VkCommandBuffer vka_up_point(VkCommandBuffer cb);
 VkCommandBuffer vka_up_cur(VkCommandBuffer cb);
+int vka_up_is(VkCommandBuffer cb);   // cb is an upload batch's
 void vka_up_flush(void);
 void vka_up_throttle(void);                         // waits while more than DM_VK_UPLOAD_INFLIGHT_MB of batch staging is in flight (no lock held)
 void vka_up_stats(uint64_t *batches, uint64_t *waits, double *wait_ms);
@@ -222,6 +223,7 @@ int vka_fmt_of(int nvn_format, vka_fmt *f);         // 0 = no Vulkan format (log
 void vka_upload_hook(const tex_t *t, uint32_t lv, uint32_t ly, uint8_t *lin, size_t pitch, size_t n) __attribute__((weak));
 int vka_upload_claim(const tex_t *t) __attribute__((weak));   // 1 = the host fills this texture (vka_upload_hook): uploaded from storage even where it would start cleared
 int vka_astc_transcode(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t depth, uint32_t bw, uint32_t bh, uint8_t *bc3) __attribute__((weak));
+int vka_astc_gpu_on(void);   // the host decodes ASTC on the GPU (Lichii: nvn_direct_device.astc_to_bc; vka_astc_gpu records one level, vka_dev.c)
 // An image's memory (vka_imgmem.c): space in a shared block (blk, at off, units of 256 bytes) or a dedicated allocation (blk NULL, off 0); size = its memory requirements' size
 // z: zero-shared memory (vka_imem_bind_zero; dm is the shared allocation, freed with its last image)
 typedef struct { VkDeviceMemory dm; uint64_t off, size; void *blk; uint32_t units; int z; } vka_imem;
