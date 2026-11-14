@@ -10,8 +10,11 @@
 #include "video_core/texture_cache/writeback_ranges.h"
 
 using VideoCommon::WritebackRanges::AppendLanded;
+using VideoCommon::WritebackRanges::CapPageRecords;
 using VideoCommon::WritebackRanges::MaxTickedRanges;
+using VideoCommon::WritebackRanges::MaxPageRecords;
 using VideoCommon::WritebackRanges::NoteTick;
+using VideoCommon::WritebackRanges::PageRecords;
 using VideoCommon::WritebackRanges::TickedRange;
 using VideoCommon::WritebackRanges::TickedRanges;
 
@@ -92,4 +95,64 @@ TEST_CASE("Ticked ranges past the limit merge without losing any byte or a newer
         });
         CHECK(held);
     }
+}
+
+namespace {
+/// A write-back record as the texture cache keeps them per page.
+struct Record {
+    DAddr begin;
+    DAddr end;
+    u64 tick;
+};
+
+bool HasRecord(const std::vector<Record>& records, DAddr begin, DAddr end, u64 tick) {
+    return std::ranges::any_of(records, [&](const Record& record) {
+        return record.begin == begin && record.end == end && record.tick == tick;
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("A page's write-back records keep the bytes only the oldest holds",
+          "[video_core][texture_cache][writeback]") {
+    constexpr DAddr page = 0x1000;
+    // The oldest record alone holds [0x1000, 0x1100); eight newer ones hold the rest of the page.
+    std::vector<Record> records{{0x1000, 0x1100, 1}};
+    for (u64 index = 0; index < PageRecords; ++index) {
+        const DAddr begin = 0x1100 + index * 0x100;
+        records.push_back(Record{begin, begin + 0x100, index + 2});
+    }
+    CapPageRecords(records, page, page + 0x1000);
+    CHECK(records.size() == PageRecords + 1);
+    CHECK(HasRecord(records, 0x1000, 0x1100, 1));
+}
+
+TEST_CASE("A page's write-back records drop the oldest that newer ones hold all of",
+          "[video_core][texture_cache][writeback]") {
+    constexpr DAddr page = 0x1000;
+    // Tick 1 is held by two newer records together, neither on its own; its bytes on the page
+    // before are not this page's. Tick 3 is held only by the older tick 2: it stays.
+    std::vector<Record> records{{0x0800, 0x1200, 1}, {0x1000, 0x1100, 5}, {0x1100, 0x1200, 6},
+                                {0x1800, 0x1a00, 2}, {0x1800, 0x1900, 3}};
+    for (u64 index = 0; records.size() <= PageRecords; ++index) {
+        const DAddr begin = 0x1c00 + index * 0x80;
+        records.push_back(Record{begin, begin + 0x80, index + 10});
+    }
+    CapPageRecords(records, page, page + 0x1000);
+    CHECK(records.size() == PageRecords);
+    CHECK_FALSE(HasRecord(records, 0x0800, 0x1200, 1));
+    CHECK(HasRecord(records, 0x1800, 0x1900, 3));
+    CHECK(HasRecord(records, 0x1800, 0x1a00, 2));
+}
+
+TEST_CASE("A page's write-back records drop the oldest past the hard limit",
+          "[video_core][texture_cache][writeback]") {
+    constexpr DAddr page = 0x1000;
+    std::vector<Record> records;
+    for (u64 index = 0; index <= MaxPageRecords; ++index) {
+        const DAddr begin = page + index * 0x40;
+        records.push_back(Record{begin, begin + 0x40, index + 1});
+    }
+    CapPageRecords(records, page, page + 0x1000);
+    CHECK(records.size() == MaxPageRecords);
+    CHECK_FALSE(HasRecord(records, page, page + 0x40, 1));
 }

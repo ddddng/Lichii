@@ -809,9 +809,9 @@ private:
     /// Per 4 KiB device page: the newest modification tick of a dropped GPU-written overlapping
     /// image over it (written back or lost), so older ones are not written back over it.
     std::unordered_map<DAddr, u64> overlap_writeback_ticks;
-    /// The same write-backs by byte range, per page they touch (a few each, newest kept): small
-    /// targets share pages, and a page-wide skip dropped a neighbour's data with them (black UI
-    /// boxes, EDEN_NX2_GC_DOWNLOAD_KEEP_BYTES).
+    /// The same write-backs by byte range, per page they touch (a few each, CapPageRecords):
+    /// small targets share pages, and a page-wide skip dropped a neighbour's data with them
+    /// (black UI boxes, EDEN_NX2_GC_DOWNLOAD_KEEP_BYTES).
     struct WritebackRange {
         DAddr begin;
         DAddr end;

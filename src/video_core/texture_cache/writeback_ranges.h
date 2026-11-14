@@ -70,6 +70,59 @@ inline void NoteTick(TickedRanges& ranges, DAddr begin, DAddr end, u64 tick) {
     ranges = std::move(merged);
 }
 
+/// Write-back records per page past which records newer ones hold all of go, and past which the
+/// oldest goes in any case.
+inline constexpr size_t PageRecords = 8;
+inline constexpr size_t MaxPageRecords = 32;
+
+/// Caps the write-back records (begin, end, tick) of the page [page_begin, page_end). Past
+/// PageRecords, the oldest records whose bytes in the page records at least as new all hold go:
+/// those protect the bytes from older write-backs as well. Only past MaxPageRecords does the
+/// oldest go regardless.
+template <typename Records>
+void CapPageRecords(Records& records, DAddr page_begin, DAddr page_end) {
+    const auto covered = [&](size_t index) {
+        const auto& record = records[index];
+        const DAddr begin = (std::max)(record.begin, page_begin);
+        const DAddr end = (std::min)(record.end, page_end);
+        boost::container::small_vector<std::pair<DAddr, DAddr>, 16> cover;
+        for (size_t other = 0; other < records.size(); ++other) {
+            const auto& range = records[other];
+            if (other != index && range.tick >= record.tick && range.begin < end &&
+                begin < range.end) {
+                cover.emplace_back((std::max)(range.begin, begin), (std::min)(range.end, end));
+            }
+        }
+        std::ranges::sort(cover);
+        DAddr cursor = begin;
+        for (const auto& [cover_begin, cover_end] : cover) {
+            if (cover_begin > cursor) {
+                break;
+            }
+            cursor = (std::max)(cursor, cover_end);
+        }
+        return cursor >= end;
+    };
+    while (records.size() > PageRecords) {
+        size_t oldest = records.size();
+        for (size_t index = 0; index < records.size(); ++index) {
+            if ((oldest == records.size() || records[index].tick < records[oldest].tick) &&
+                covered(index)) {
+                oldest = index;
+            }
+        }
+        if (oldest == records.size()) {
+            break;
+        }
+        records.erase(records.begin() + static_cast<std::ptrdiff_t>(oldest));
+    }
+    if (records.size() > MaxPageRecords) {
+        records.erase(std::ranges::min_element(records, {}, [](const auto& record) {
+            return record.tick;
+        }));
+    }
+}
+
 /// Appends to `landed` what a write-back of [cpu_addr, cpu_addr + size) at modification tick
 /// `tick` left in guest memory: its own bytes (all but the `keep` ranges it left as they were) at
 /// its tick, and each range of `kept` at the tick of the data that range holds.

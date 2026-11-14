@@ -914,10 +914,11 @@ void TextureCache<P>::NoteOverlapWriteback(const ImageBase& image, bool lost, u6
                                     }),
                      ranges.end());
         ranges.push_back(WritebackRange{begin, end, image_tick, lost});
-        if (ranges.size() > 8) {
-            ranges.erase(std::ranges::min_element(
-                ranges, {}, [](const WritebackRange& range) { return range.tick; }));
-        }
+        // Not simply the oldest past the limit: bytes only it holds would lose their protection
+        // from older write-backs (OverlapHasNewerData).
+        const DAddr page_begin = page << OverlapPageBits;
+        WritebackRanges::CapPageRecords(ranges, page_begin,
+                                        page_begin + (DAddr{1} << OverlapPageBits));
     }
 }
 
