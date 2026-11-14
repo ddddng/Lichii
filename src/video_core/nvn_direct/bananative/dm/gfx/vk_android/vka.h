@@ -148,6 +148,7 @@ void vka_fence_post(uint64_t fence, void *ops, int n, void (*run)(void *ops, int
 uint64_t vka_done(void);
 void vka_fence_cpu(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // no GPU behind it (no device, a failed submit): the effects run now and fence is done
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
+int vka_wait_fence(uint64_t fence, uint64_t timeout_ns);   // fence itself done (vka_dev.c): with several queues, maybe before an earlier fence of another queue
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg);   // deferred destruction: fn(arg) once fence is done
 
 // Host-visible scratch memory for one submission (uploads, deswizzled texels, readbacks); valid until the submission's fence

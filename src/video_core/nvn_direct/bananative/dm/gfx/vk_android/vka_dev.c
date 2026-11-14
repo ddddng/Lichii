@@ -293,6 +293,7 @@ static post_rec g_post[POST_RING];
 typedef struct after_rec { struct after_rec *next; uint64_t fence; void (*fn)(void *); void *arg; } after_rec;
 static after_rec *g_after;
 static uint64_t g_fence, g_submitted, g_done;
+static uint64_t g_fdone[FQ_RING];   // with several queues: fences done, by slot (a fence past g_done may be done before the fences before it)
 static pthread_mutex_t g_fmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_fcv = PTHREAD_COND_INITIALIZER, g_scv = PTHREAD_COND_INITIALIZER;
 
@@ -309,21 +310,27 @@ void vka_fence_cpu(uint64_t fence, void *ops, int n, void (*run)(void *, int)) {
     if (run) run(ops, n); else free(ops);
     pthread_mutex_lock(&g_fmu);
     if (fence > g_submitted) g_submitted = fence;
-    if (fence > g_done) __atomic_store_n(&g_done, fence, __ATOMIC_RELEASE);
+    if (V.multi && !vka_hung()) g_fdone[fence % FQ_RING] = fence;   // (g_done moves past it once the fences before it are done: completion_main)
+    else if (fence > g_done) __atomic_store_n(&g_done, fence, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&g_scv);
     pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
 }
 uint64_t vka_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE); }
-int vka_wait_done(uint64_t fence, uint64_t timeout_ns) {
+// Waits until fence and every fence before it are done (in fence order: what frees memory or reuses a slot needs). vka_wait_fence: until fence itself is, which with several
+// queues may be before an earlier fence of another queue (a sync the game fenced on one queue: dotfiles-25x.4)
+static int wait_fence(uint64_t fence, uint64_t timeout_ns, int own) {
     if (vka_done() >= fence) return 1;
-    if (!timeout_ns) return 0;
+    if (!timeout_ns) { if (!own) return 0; pthread_mutex_lock(&g_fmu); int d = g_fdone[fence % FQ_RING] == fence; pthread_mutex_unlock(&g_fmu); return d; }
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
     dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
     pthread_mutex_lock(&g_fmu);
-    while (g_done < fence) if (pthread_cond_timedwait(&g_fcv, &g_fmu, &dl)) break;
-    int ok = g_done >= fence; pthread_mutex_unlock(&g_fmu);
+    while (g_done < fence && !(own && g_fdone[fence % FQ_RING] == fence)) if (pthread_cond_timedwait(&g_fcv, &g_fmu, &dl)) break;
+    int ok = g_done >= fence || (own && g_fdone[fence % FQ_RING] == fence); pthread_mutex_unlock(&g_fmu);
     return ok;
 }
+int vka_wait_done(uint64_t fence, uint64_t timeout_ns) { return wait_fence(fence, timeout_ns, 0); }
+int vka_wait_fence(uint64_t fence, uint64_t timeout_ns) { return wait_fence(fence, timeout_ns, 1); }
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg) {
     pthread_mutex_lock(&g_fmu);
     if (g_done >= fence) { pthread_mutex_unlock(&g_fmu); fn(arg); return; }
@@ -353,6 +360,44 @@ static void hang_declare(uint64_t want, uint64_t at, double s, const char *what)
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
 }
 
+// The CPU-side effects of fence f (its slot cleared after: vka_fence_post may wait for it), outside g_fmu
+static void post_run_one(uint64_t f) {
+    post_rec *p = &g_post[f % POST_RING];
+    if (p->fence != f) return;
+    if (p->run) p->run(p->ops, p->n); else free(p->ops);
+    pthread_mutex_lock(&g_fmu); p->fence = 0; pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
+}
+// With the NVN queues as Vulkan queues each fence completes when its own queue's timeline reaches it (dotfiles-25x.4), and g_done follows the fences done in a row. In fence
+// order, a submission that waits for an event a later submission of another queue signals held back every fence after it: Mario Kart World waited for one of its queues'
+// syncs (an acquire, a queue's FenceSync) before submitting the signal another queue's earlier submission waited for, and the GPU hang detection ended the run.
+// Returns the fences that completed in this pass (*pending: the first one not done yet, 0 = none)
+static int multi_pass(uint64_t done, uint64_t sub, uint64_t *pending) {
+    static struct { int q; uint64_t qv; } fq[POST_RING];   // (at most POST_RING fences are pending: vka_fence_post)
+    uint64_t qc[4] = {0}; int n = 0; *pending = 0;
+    if (sub - done > POST_RING) sub = done + POST_RING;
+    for (int i = 0; i < V.nq; i++) vk.vkGetSemaphoreCounterValue(V.dev, V.qtl[i], &qc[i]);
+    vka_qlock();
+    for (uint64_t f = done + 1; f <= sub; f++) { unsigned k = (unsigned)(f - done - 1); fq[k].q = g_fq[f % FQ_RING].fence == f ? g_fq[f % FQ_RING].q : -2; fq[k].qv = g_fq[f % FQ_RING].qv; }
+    vka_qunlock();
+    for (uint64_t f = done + 1; f <= sub; f++) {
+        pthread_mutex_lock(&g_fmu); int d = g_fdone[f % FQ_RING] == f; pthread_mutex_unlock(&g_fmu);
+        if (d) continue;
+        int q = fq[f - done - 1].q; uint64_t qv = fq[f - done - 1].qv;
+        if (q == -2 || (q >= 0 && qc[q] < qv)) { if (!*pending) *pending = f; continue; }   // (-2: handed to the queue but not recorded yet; -1: not on the GPU)
+        post_run_one(f);
+        pthread_mutex_lock(&g_fmu); g_fdone[f % FQ_RING] = f; pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
+        n++;
+    }
+    return n;
+}
+static void multi_wait(void) {   // until any NVN queue's timeline moves (or 0.5 s)
+    VkSemaphore sems[4]; uint64_t vals[4]; uint32_t n = 0;
+    for (int i = 0; i < V.nq - 1; i++) { uint64_t c = 0; vk.vkGetSemaphoreCounterValue(V.dev, V.qtl[i], &c); if (V.qseq[i] > c) { sems[n] = V.qtl[i]; vals[n++] = c + 1; } }
+    if (!n) { struct timespec ts = {0, 200000}; nanosleep(&ts, NULL); return; }   // (a fence handed to the queue but not recorded yet)
+    VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .flags = VK_SEMAPHORE_WAIT_ANY_BIT, .semaphoreCount = n, .pSemaphores = sems, .pValues = vals};
+    VkResult r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
+    if (r && r != VK_TIMEOUT) { char w[64]; snprintf(w, sizeof w, "vkWaitSemaphores %d (the device is lost)", r); hang_declare(vka_done() + 1, vka_done(), 0, w); }
+}
 static void *completion_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
@@ -364,23 +409,27 @@ static void *completion_main(void *arg) {
         // submissions of the next frame, so its wait ended only when those were done too. DM_VK_DONE_LAST=1 (live) waits for the last one, as before, for A/B runs
         uint64_t sub = g_submitted, done = g_done, want = VKA_ENV("DM_VK_DONE_LAST", 0) ? sub : done + 1; pthread_mutex_unlock(&g_fmu);
         uint64_t v = 0;
-        if (!vka_hung()) {
-            VkResult r;
-            if (V.multi) {   // the next fence in order: its queue's timeline, then V.tl signalled by the host (one fence a pass: they complete on different queues)
-                want = done + 1;
-                vka_qlock(); int fq = g_fq[want % FQ_RING].fence == want ? g_fq[want % FQ_RING].q : -2; uint64_t fqv = g_fq[want % FQ_RING].qv; vka_qunlock();
-                if (fq == -2) r = VK_TIMEOUT, v = done;   // (submitted by the host but not recorded yet: the next pass)
-                else {
-                    VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.qtl[fq < 0 ? 0 : fq], .pValues = &fqv};
-                    r = fq < 0 ? VK_SUCCESS : vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
-                    if (!r) { VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = want}; uint64_t cur = 0; vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &cur); if (cur < want) vk.vkSignalSemaphore(V.dev, &ss); }
-                    v = r ? done : want;
-                }
-            } else {
-                VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &want};
-                r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
-                vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &v);
+        if (!vka_hung() && V.multi) {
+            uint64_t pending = 0; int n = multi_pass(done, sub, &pending);
+            pthread_mutex_lock(&g_fmu);
+            v = g_done; while (v < sub && g_fdone[(v + 1) % FQ_RING] == v + 1) v++;
+            pthread_mutex_unlock(&g_fmu);
+            if (v > done) { VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = v}; uint64_t cur = 0; vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &cur); if (cur < v) vk.vkSignalSemaphore(V.dev, &ss); }
+            uint64_t t = now_ns();
+            if (n || !pending) stall_t0 = 0;
+            else {   // no fence completed in this pass
+                if (!stall_t0 || stall_at != pending) { stall_t0 = t; stall_at = pending; stall_logged = 0; }
+                double st = (t - stall_t0) / 1e9;
+                if (st >= 2 && !stall_logged) { stall_logged = 1; VRED("GPU: fence %llu not reached after %.1f s (fences done in a row up to %llu, %llu handed to the queue)", (unsigned long long)pending, st, (unsigned long long)v, (unsigned long long)vka_fence_queued());
+                    void vka_exec_stall(void); vka_exec_stall(); }   // vka_exec.c: event waits nothing walked so far meets
+                if (t - stall_t0 >= vka_hang_ns()) hang_declare(pending, v, st, "no progress");
+                else multi_wait();
             }
+        } else if (!vka_hung()) {
+            VkResult r;
+            VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &want};
+            r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
+            vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &v);
             uint64_t t = now_ns();
             if (r == VK_TIMEOUT && v <= done) {   // no progress in this wait
                 if (!stall_t0 || stall_at != done) { stall_t0 = t - 500000000ull; stall_at = done; stall_logged = 0; }
@@ -395,12 +444,8 @@ static void *completion_main(void *arg) {
         }
         if (vka_hung()) v = sub;   // every fence submitted so far is taken as done: its CPU-side effects run, the guest's waits return
         if (v > sub) v = sub;
-        for (uint64_t f = done + 1; f <= v; f++) {
-            post_rec *p = &g_post[f % POST_RING];
-            if (p->fence == f) { if (p->run) p->run(p->ops, p->n); else free(p->ops); }
-        }
+        for (uint64_t f = done + 1; f <= v; f++) post_run_one(f);   // (with several queues: those not run at their own completion, after a hang)
         pthread_mutex_lock(&g_fmu);
-        for (uint64_t f = done + 1; f <= v; f++) if (g_post[f % POST_RING].fence == f) g_post[f % POST_RING].fence = 0;
         if (v > g_done) __atomic_store_n(&g_done, v, __ATOMIC_RELEASE);
         after_rec *run = NULL, **pp = &g_after;
         while (*pp) { after_rec *a = *pp; if (a->fence <= g_done) { *pp = a->next; a->next = run; run = a; } else pp = &a->next; }

@@ -30,6 +30,8 @@ void* nvn_direct_writable(uint64_t host);
 /// The front end writes [mem, mem + size) of a pool in place from now on (command memory): its
 /// pages are never write-tracked (a host write to a tracked page would fault outside the JIT).
 void nvn_direct_host_written(const void* mem, size_t size);
+/// The presenting queue's last fence, for the present this thread makes next (nvn_window.c).
+extern _Thread_local uint64_t nvn_direct_present_queue_fence;
 /// The ticket of the present this thread just made (nvn_window.c: mtl_present) and its window's
 /// present interval, for nvn_direct_present_take.
 void nvn_direct_present_note(uint64_t ticket, uint32_t interval);

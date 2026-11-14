@@ -380,14 +380,14 @@ uint64_t mtl_last_fence(void) { return vka_fence_last(); }
 static int synclog(void) { static int last; int v = VKA_ENV("DM_VK_SYNCLOG", 0); if (v != last) { last = v; atomic_store(&g_synclog, v); } return atomic_load(&g_synclog) > 0; }
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     if (timeout_ns && vka_done() < fence && synclog()) {
-        double t0 = ms_now(); int r = vka_wait_done(fence, timeout_ns);
+        double t0 = ms_now(); int r = vka_wait_fence(fence, timeout_ns);
         if (atomic_fetch_sub(&g_synclog, 1) > 0) VLOG("sync wait: frame %llu fence %llu (last reserved %llu, queued %llu, done %s): %.2f-%.2f ms, %.2f ms", (unsigned long long)g_frame, (unsigned long long)fence,
                                                 (unsigned long long)vka_fence_last(), (unsigned long long)vka_fence_queued(), r ? "yes" : "timeout", t0, ms_now(), ms_now() - t0);
         return r;
     }
-    return vka_wait_done(fence, timeout_ns);
+    return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence, dotfiles-25x.4)
 }
-int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return vka_wait_done(fence, timeout_ns); }
+int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return vka_wait_done(fence, timeout_ns); }   // (the presenting queue's last, and every fence before it: nvn_window.c)
 void mtl_finish(void) { vka_wait_done(vka_fence_last(), UINT64_MAX); }
 void mtl_present_flush(void);
 void vka_pso_pause(int on);

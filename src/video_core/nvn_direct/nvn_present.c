@@ -29,12 +29,19 @@ typedef struct {
 } pres_t;
 static pres_t g_pres[NPRES];
 static uint64_t g_reserved, g_filled;
+// The presenting queue's last submission, by ticket (dotfiles-25x.4): the present waits for it
+// and every fence before it. The last submission of any queue may be another queue's that waits for an event the game
+// signals only in its next frame (Mario Kart World's second queue): the next acquire then waited
+// for it, and the composite up to 1 s.
+_Thread_local uint64_t nvn_direct_present_queue_fence;
+static uint64_t g_queue_fence[NPRES];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 
 uint64_t vka_present_reserve(void) {
     pthread_mutex_lock(&g_mu);
     const uint64_t tk = ++g_reserved;
+    g_queue_fence[tk % NPRES] = nvn_direct_present_queue_fence;
     pthread_mutex_unlock(&g_mu);
     return tk;
 }
@@ -46,9 +53,9 @@ void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int cr
     pres_t* p = &g_pres[tk % NPRES];
     p->ticket = tk;
     p->serial = t->serial;
-    // The last submission handed to the queue (as upstream: one still being recorded on another
-    // thread would come after this present).
-    p->fence = vka_ok() ? vka_fence_queued() : 0;
+    // The presenting queue's last submission (handed to the queue: the worker fills presents in
+    // order with the submissions).
+    p->fence = vka_ok() ? g_queue_fence[tk % NPRES] : 0;
     p->has_crop = crop && crop[2] > 0 && crop[3] > 0;
     if (p->has_crop) memcpy(p->crop, crop, sizeof p->crop);
     if (tk > g_filled) g_filled = tk;

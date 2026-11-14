@@ -83,14 +83,19 @@ NVN(nvnWindowGetCrop, void, const NVNwindow* w, NVNrectangle* r) {
     r->width = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0;
     r->height = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0;
 }
-// The images go round in order; an acquire's sync is reached when every submission before it is
-// (as upstream's default mtl_acquire_fence).
+// The images go round in order; an acquire's sync is reached when the window's last present is:
+// its queue's last submission and every fence before it (mtl_wait_acq), as on the console, where
+// the image is free once the frame after it is on screen (dotfiles-25x.4). The last submission of
+// any queue, as upstream's default mtl_acquire_fence, may be another queue's that waits for an
+// event the game signals only after this acquire's wait (Mario Kart World's second queue: a GPU
+// hang). Only the presenting queue's own fence was too early: the game then rewrote data the
+// other queues still read (device lost at the title).
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow* w, NVNsync* s, int* idx) {
     win_t* o = (win_t*)w;
     *idx = o->ntex ? o->next++ % o->ntex : 0;
     if (s) {
         ((sync_t*)s)->fenced = 2;
-        ((sync_t*)s)->fence = mtl_last_fence();
+        ((sync_t*)s)->fence = o->last_pfence;
     }
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -103,11 +108,11 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue* q, NVNwindow
 // The image goes to the replay's present queue (mtl_present: after every submission before it);
 // Lichii's present on this thread then shows it (nvn_direct_present_take, core/nvn_hook.cpp).
 NVN(nvnQueuePresentTexture, void, NVNqueue* q, NVNwindow* w, int idx) {
-    (void)q;
     win_t* o = (win_t*)w;
     o->presents++;
     atomic_fetch_add(&g_frame, 1);
     if (idx < 0 || idx >= o->ntex || !o->tex[idx]) return;
+    o->pfence[idx] = o->last_pfence = nvn_direct_present_queue_fence = ((const queue_t*)q)->last_fence;
     const int interval = o->interval > 0 ? o->interval : 1;
     const int has_crop = o->crop[2] > 0 && o->crop[3] > 0;
     nvn_direct_present_note(mtl_present(CTX(o->tex[idx]), interval / 60.0, has_crop ? o->crop : NULL), (uint32_t)interval);
