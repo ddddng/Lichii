@@ -9,6 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <dirent.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 vka_fns vk;
 static int g_state;   // 0 not tried, 1 up, -1 failed
@@ -400,6 +406,23 @@ static void multi_wait(void) {   // until any NVN queue's timeline moves (or 0.5
     VkResult r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
     if (r && r != VK_TIMEOUT) { char w[64]; snprintf(w, sizeof w, "vkWaitSemaphores %d (the device is lost)", r); hang_declare(vka_done() + 1, vka_done(), 0, w); }
 }
+// DM_VK_STALL_STACKS=1 (lab, dotfiles-25x.15): at a GPU stall every thread of the process writes its stack to stderr (frame addresses: addr2line against the binary),
+// where ptrace is not permitted
+static void stall_stack_sig(int sig) {
+    (void)sig; void *b[48]; int n = backtrace(b, 48); char name[17] = {0}; prctl(PR_GET_NAME, name);
+    char h[96]; int k = snprintf(h, sizeof h, "[dm] [RED] vk: stall stack: thread %ld %s\n", (long)syscall(SYS_gettid), name); write(2, h, (size_t)k);
+    backtrace_symbols_fd(b, n, 2);
+}
+static void stall_stacks(void) {
+    if (!VKA_ENV("DM_VK_STALL_STACKS", 0)) return;
+    void *warm[2]; backtrace(warm, 2);   // (libgcc loaded outside the handler)
+    struct sigaction sa = {0}; sa.sa_handler = stall_stack_sig; sigaction(SIGRTMIN + 7, &sa, NULL);
+    DIR *d = opendir("/proc/self/task"); if (!d) return;
+    long self = (long)syscall(SYS_gettid); struct dirent *e;
+    while ((e = readdir(d))) { long tid = atol(e->d_name); if (tid <= 0 || tid == self) continue;
+        syscall(SYS_tgkill, (long)getpid(), tid, SIGRTMIN + 7); struct timespec ts = {0, 30000000}; nanosleep(&ts, NULL); }
+    closedir(d);
+}
 static void *completion_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
@@ -423,7 +446,7 @@ static void *completion_main(void *arg) {
                 if (!stall_t0 || stall_at != pending) { stall_t0 = t; stall_at = pending; stall_logged = 0; }
                 double st = (t - stall_t0) / 1e9;
                 if (st >= 2 && !stall_logged) { stall_logged = 1; VRED("GPU: fence %llu not reached after %.1f s (fences done in a row up to %llu, %llu handed to the queue)", (unsigned long long)pending, st, (unsigned long long)v, (unsigned long long)vka_fence_queued());
-                    void vka_exec_stall(void); vka_exec_stall(); }   // vka_exec.c: event waits nothing walked so far meets
+                    stall_stacks(); void vka_exec_stall(void); vka_exec_stall(); }   // vka_exec.c: event waits nothing walked so far meets
                 if (t - stall_t0 >= vka_hang_ns()) hang_declare(pending, v, st, "no progress");
                 else multi_wait();
             }
