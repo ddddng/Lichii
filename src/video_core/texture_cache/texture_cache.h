@@ -437,6 +437,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             if (Tegra::MemoryManager* const memory = AddressSpaceMemory(download.address_space)) {
                 SwizzleKeeping(*memory, download.gpu_addr, download.info, download.copies,
                                download.map.mapped_span, download.keep);
+                ReloadUnderLanded(download.cpu_addr, download.size, download.tick);
             } else {
                 NoteWritebackLost(download.cpu_addr, download.size, download.tick);
             }
@@ -609,19 +610,7 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
             if (!download.cancelled) {
                 SwizzleKeeping(*memory, download.gpu_addr, download.info, download.copies,
                                download.map.mapped_span, download.keep);
-                // Images the GPU did not write loaded these pages before the data landed (made
-                // in the meantime by a join): they load them again. Not one whose contents are
-                // newer than the landed data: a view made over a newer target took the target's
-                // pixels by a GPU copy without becoming GPU-modified, and reloading it put the
-                // older images' bytes in their place (The Duskbloods' 698x80 message banner band
-                // came out black or with other HUD text in it).
-                ForEachImageInRegion(download.cpu_addr, download.size,
-                                     [landed_tick = download.tick](ImageId, ImageBase& image) {
-                                         if (False(image.flags & ImageFlagBits::GpuModified) &&
-                                             image.modification_tick <= landed_tick) {
-                                             image.flags |= ImageFlagBits::CpuModified;
-                                         }
-                                     });
+                ReloadUnderLanded(download.cpu_addr, download.size, download.tick);
             }
             runtime.FreeDeferredStagingBuffer(download.map);
             device_memory.UpdatePagesCachedCount(download.cpu_addr, download.size, -1);
@@ -631,9 +620,24 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
 }
 
 template <class P>
+void TextureCache<P>::ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick) {
+    // Images the GPU did not write loaded these pages before the data landed (made in the
+    // meantime by a join, or kept from before it): they load them again. Not one whose contents
+    // are newer than the landed data: a view made over a newer target took the target's pixels
+    // by a GPU copy without becoming GPU-modified, and reloading it put the older images' bytes in
+    // their place (The Duskbloods' 698x80 message banner band came out black or with other HUD
+    // text in it).
+    ForEachImageInRegion(cpu_addr, size, [tick](ImageId, ImageBase& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified) && image.modification_tick <= tick) {
+            image.flags |= ImageFlagBits::CpuModified;
+        }
+    });
+}
+
+template <class P>
 bool TextureCache<P>::WritebackWouldReload(const ImageBase& image) {
-    // As FinishAsyncOverlapDownloads' reload: not GPU-written, contents no newer than the data,
-    // over any of the image's guest memory (a sparse image's mapped segments).
+    // As a landing write-back's reload (ReloadUnderLanded): not GPU-written, contents no newer
+    // than the data, over any of the image's guest memory (a sparse image's mapped segments).
     if (True(image.flags & ImageFlagBits::GpuModified)) {
         return false;
     }
@@ -845,6 +849,8 @@ void TextureCache<P>::WriteBackBadOverlaps(ImageId new_image_id) {
             const Image& overlap = slot_images[item.id];
             SwizzleKeeping(*gpu_memory, overlap.gpu_addr, overlap.info, item.copies,
                            item.map.mapped_span, item.keep);
+            ReloadUnderLanded(overlap.cpu_addr, overlap.guest_size_bytes,
+                              overlap.modification_tick);
             NoteOverlapWriteback(overlap);
         }
         ++join_writebacks;

@@ -769,6 +769,9 @@ private:
     /// The GPU memory of an address space the cache has seen, or null.
     [[nodiscard]] Tegra::MemoryManager* AddressSpaceMemory(size_t as_id);
     void FinishAsyncOverlapDownloads(bool wait_all);
+    /// After a write-back of [cpu_addr, cpu_addr + size) at modification tick `tick` landed,
+    /// waiting or not: images over it the GPU did not write, with contents no newer, load it again.
+    void ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick);
     /// Whether a write-back still waiting covers the image and would reload it when it lands
     /// (the image has not been GPU-written since that write-back's contents).
     [[nodiscard]] bool WritebackWouldReload(const ImageBase& image);
