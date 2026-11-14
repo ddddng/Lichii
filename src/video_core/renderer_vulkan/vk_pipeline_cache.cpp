@@ -861,6 +861,14 @@ namespace {
 constexpr u8 UsedPipelinesMaxAge = 16;
 constexpr u8 UsedPipelinesMaxAgeMoltenVK = 8;
 
+// Loading Shaders always waits for the pipelines the last two sessions used. Those of older
+// sessions build in the background prebuild from the start of the load, and the load waits for
+// them only while it has run less than OlderUsedPipelinesWait: where the driver's cache misses
+// (AMD's Windows driver after a new build or driver changed the SPIR-V: ~70 ms a pipeline, an
+// Ocarina used list of 14,687 took ~18 min) the game starts and they keep building.
+constexpr u8 AwaitedUsedSessions = 2;
+constexpr std::chrono::seconds OlderUsedPipelinesWait{60};
+
 u8 MaxUsedPipelineAge(const Device& device) {
     if (device.IsMoltenVK()) {
         return UsedPipelinesMaxAgeMoltenVK;
@@ -1411,6 +1419,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         size_t built{};
         size_t compute_built{};
         size_t graphics_built{};
+        /// Older sessions' used pipelines in the prebuild, shown in the load's progress
+        size_t older_used{};
         bool has_loaded{};
         std::unique_ptr<PipelineStatistics> statistics;
         /// Records the load never chooses, as in the old cache; begin is the index in records
@@ -1425,7 +1435,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     const auto built_one = [&state, &callback] {
         ++state.built;
         if (state.has_loaded) {
-            callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+            callback(VideoCore::LoadCallbackStage::Build, state.built,
+                     state.total + state.older_used);
         }
     };
     // The graphics and compute records read, by the index a PipelineRecord's begin stands for
@@ -1445,6 +1456,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<size_t>> compute_keys;
     std::vector<std::pair<size_t, GraphicsPipelineCacheKey>> boot_graphics;
     std::vector<std::pair<size_t, GraphicsPipelineCacheKey>> skipped_graphics;
+    struct OlderUsed {
+        size_t index;
+        GraphicsPipelineCacheKey key;
+        u8 age;
+    };
+    std::vector<OlderUsed> older_used;
     std::vector<CacheV2::ProgramRecord> stale_programs;
     for (const CacheV2::LogRecord& record : log->parsed.live) {
         if (record.kind != RecordKind::Program) {
@@ -1578,8 +1595,14 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             ++skipped_pipelines;
             continue;
         }
+        const auto used_age = used_pipelines.find(hash);
+        if (!build_all && used_age != used_pipelines.end() &&
+            used_age->second >= AwaitedUsedSessions) {
+            older_used.push_back({index, *key, used_age->second});
+            continue;
+        }
         const bool used = used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
-                                                 : used_pipelines.contains(hash);
+                                                 : used_age != used_pipelines.end();
         const bool spare = !used && build_all && queued_spare < spare_pipelines;
         if (used || spare) {
             queued_spare += spare ? 1 : 0;
@@ -1591,9 +1614,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         skipped_graphics.emplace_back(index, *key);
     }
 
-    // The skipped records go to the background prebuild, which holds each built until a draw takes
-    // it: as many as the kept limit leaves past the boot builds. A job reads its record again from
-    // the file, except one this boot wrote again (relinked), which isn't there yet (offset 0).
+    // Older sessions' used pipelines and the skipped records go to the background prebuild, which
+    // holds each built until a draw takes it: the used ones most recent session first, then as many
+    // skipped ones as the kept limit leaves past those and the boot builds. A job reads its record
+    // again from the file, except one this boot wrote again (relinked), which isn't there yet
+    // (offset 0).
     struct PrebuildRecord {
         GraphicsPipelineCacheKey key;
         u64 record_key;
@@ -1601,11 +1626,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         u64 payload_size;
         std::vector<u8> payload;
     };
-    std::vector<PrebuildRecord> prebuild;
-    for (const auto& [index, key] : NewestFirst(std::move(skipped_graphics),
-                                                PrebuildLimit(kept_pipelines, queued_graphics))) {
+    const auto prebuild_record = [&records](size_t index, const GraphicsPipelineCacheKey& key) {
         const CacheV2::LogRecord& record = *records[index];
-        prebuild.push_back({
+        return PrebuildRecord{
             .key = key,
             .record_key = record.key,
             .offset = record.offset,
@@ -1613,8 +1636,22 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             .payload = record.offset == 0 ? std::vector<u8>(record.payload.begin(),
                                                             record.payload.end())
                                           : std::vector<u8>{},
-        });
+        };
+    };
+    std::ranges::reverse(older_used);
+    std::ranges::stable_sort(older_used, {}, &OlderUsed::age);
+    std::vector<PrebuildRecord> older_prebuild;
+    older_prebuild.reserve(older_used.size());
+    for (const OlderUsed& older : older_used) {
+        older_prebuild.push_back(prebuild_record(older.index, older.key));
     }
+    std::vector<PrebuildRecord> prebuild;
+    for (const auto& [index, key] :
+         NewestFirst(std::move(skipped_graphics),
+                     PrebuildLimit(kept_pipelines, queued_graphics + older_used.size()))) {
+        prebuild.push_back(prebuild_record(index, key));
+    }
+    older_used.clear();
 
     for (auto& [key, indices] : compute_keys) {
         ++state.total;
@@ -1729,35 +1766,55 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     boot_graphics.clear();
 
-    // With the precache, the prebuild starts after it.
-    const size_t deferred_pipelines = prebuild.size();
-    const auto start_prebuild = [&] {
-        for (PrebuildRecord& record : prebuild) {
-            scheduled_prebuild->Add(
-                record.key, TranslationBytes(record.payload_size), DriverCompileBytes,
-                [this, record = std::move(record)]() mutable {
-                    if (record.payload.empty()) {
-                        auto read = CacheV2::ReadRecordPayload(
-                            cache_v2->Writer().File(), RecordKind::Graphics, record.record_key,
-                            record.offset, record.payload_size);
-                        if (!read) {
-                            return std::unique_ptr<GraphicsPipeline>{};
-                        }
-                        record.payload = std::move(*read);
-                    }
-                    bool incomplete{};
-                    try {
-                        return TranslateCachedGraphics(record.payload, record.key, nullptr,
-                                                       incomplete);
-                    } catch (const std::ios_base::failure&) {
+    const auto add_to_prebuild = [this](PrebuildRecord& record,
+                                        VideoCommon::ShaderJobHandle* job = nullptr) {
+        const GraphicsPipelineCacheKey key = record.key;
+        const u64 cpu_bytes = TranslationBytes(record.payload_size);
+        scheduled_prebuild->Add(
+            key, cpu_bytes, DriverCompileBytes,
+            [this, record = std::move(record)]() mutable {
+                if (record.payload.empty()) {
+                    auto read = CacheV2::ReadRecordPayload(cache_v2->Writer().File(),
+                                                           RecordKind::Graphics, record.record_key,
+                                                           record.offset, record.payload_size);
+                    if (!read) {
                         return std::unique_ptr<GraphicsPipeline>{};
                     }
-                });
+                    record.payload = std::move(*read);
+                }
+                bool incomplete{};
+                try {
+                    return TranslateCachedGraphics(record.payload, record.key, nullptr,
+                                                   incomplete);
+                } catch (const std::ios_base::failure&) {
+                    return std::unique_ptr<GraphicsPipeline>{};
+                }
+            },
+            job);
+    };
+    // Submitted after the boot builds, so they don't hold those back, and before the precache.
+    std::vector<VideoCommon::ShaderJobHandle> older_jobs;
+    older_jobs.reserve(older_prebuild.size());
+    for (PrebuildRecord& record : older_prebuild) {
+        VideoCommon::ShaderJobHandle job;
+        add_to_prebuild(record, &job);
+        if (job) {
+            older_jobs.push_back(std::move(job));
+        }
+    }
+    older_prebuild.clear();
+
+    // With the precache, the skipped records' prebuild starts after it.
+    const size_t prebuild_admitted = prebuild.size();
+    const size_t deferred_pipelines = older_jobs.size() + prebuild_admitted;
+    if (deferred_pipelines != 0) {
+        prebuild_load_begin = load_begin;
+    }
+    const auto start_prebuild = [&] {
+        for (PrebuildRecord& record : prebuild) {
+            add_to_prebuild(record);
         }
         prebuild.clear();
-        if (deferred_pipelines != 0) {
-            prebuild_load_begin = load_begin;
-        }
     };
     if (!precache) {
         start_prebuild();
@@ -1771,10 +1828,23 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     {
         std::scoped_lock lock{state.mutex};
-        callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+        state.older_used = older_jobs.size();
+        callback(VideoCore::LoadCallbackStage::Build, state.built, state.total + state.older_used);
         state.has_loaded = true;
     }
     boot.Wait();
+    size_t older_built = 0;
+    while (!older_jobs.empty() && !stop_loading.stop_requested()) {
+        older_built = static_cast<size_t>(std::ranges::count_if(
+            older_jobs, [](const VideoCommon::ShaderJobHandle& job) { return job.Ready(); }));
+        callback(VideoCore::LoadCallbackStage::Build, state.built + older_built,
+                 state.total + older_jobs.size());
+        if (older_built == older_jobs.size() ||
+            std::chrono::steady_clock::now() - load_begin >= OlderUsedPipelinesWait) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
     {
         const size_t used_sessions = std::min<size_t>(
             static_cast<size_t>(std::ranges::count_if(
@@ -1789,16 +1859,18 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         LOG_INFO(
             Render_Vulkan,
             "Shader cache v2 boot load{}: {:.1f} s, {} of {} compute and {} of {} graphics "
-            "pipelines built ({}{}), {} cached graphics pipelines skipped at boot, {} admitted "
-            "for background prebuild (newest first), {} left for their first draw (prebuild "
-            "limit {})",
+            "pipelines built ({}{}), {} used by older sessions in the background prebuild ({} "
+            "of them done before the game started), {} cached graphics pipelines skipped at "
+            "boot, {} admitted for background prebuild (newest first), {} left for their first "
+            "draw (prebuild limit {})",
             stop_loading.stop_requested() ? " stopped" : "",
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin).count(),
             state.compute_built, state.total - queued_graphics, state.graphics_built,
             queued_graphics, chosen,
             build_all ? fmt::format(", {} more by build_all_cached_shaders", queued_spare) : "",
-            skipped_pipelines, deferred_pipelines, skipped_pipelines - deferred_pipelines,
-            PrebuildLimit(kept_pipelines, queued_graphics));
+            older_jobs.size(), older_built, skipped_pipelines, prebuild_admitted,
+            skipped_pipelines - prebuild_admitted,
+            PrebuildLimit(kept_pipelines, queued_graphics + older_jobs.size()));
     }
 
     std::vector<DuplicateGraphicsRecord> no_duplicates;
@@ -1848,11 +1920,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         StutterTrace::BootMarker(
             "shader_load_end",
             fmt::format("seconds={:.3f} graphics_records={} compute_records={} queued={} skipped={} "
-                        "deferred={} cache_bytes={} driver_cache_bytes={}",
+                        "deferred={} older_used={} older_built={} cache_bytes={} "
+                        "driver_cache_bytes={}",
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
                             .count(),
                         graphics_records, compute_records, state.total, skipped_pipelines,
-                        deferred_pipelines,
+                        deferred_pipelines, older_jobs.size(), older_built,
                         bytes(pipeline_cache_filename), bytes(vulkan_pipeline_cache_filename)));
     }
     if (precache && !stop_loading.stop_requested()) {
