@@ -175,7 +175,6 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .queue_context = &scheduler.submit_mutex,
         .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
         .astc_context = astc,
-        .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
         .memory_usage = [](void* context) -> uint64_t {
             return static_cast<const Device*>(context)->GetDeviceMemoryUsage();
         },

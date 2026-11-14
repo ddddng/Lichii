@@ -34,10 +34,6 @@ public:
     /// nvn_direct_device::astc_to_bc.
     static int Record(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
 
-    /// nvn_direct_device::astc_opaque: ASTC::IsOpaque, as the texture cache's BC1 choice
-    /// (EDEN_NX2_ASTC_BC1=0 keeps every image BC3).
-    static int IsOpaque(const void* blocks, size_t size);
-
 private:
     static constexpr u32 TileWidth = 2048;
     static constexpr u32 TileHeight = 2048;

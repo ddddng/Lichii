@@ -65,9 +65,6 @@ typedef struct nvn_direct_device {
     /// decode (ASTC textures then have no image unless the device samples ASTC).
     int (*astc_to_bc)(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
     void* astc_context;
-    /// Whether an ASTC texture's blocks decode without alpha (Lichii's ASTC::IsOpaque): its image
-    /// is then BC1 instead of BC3, half the memory. NULL: always BC3.
-    int (*astc_opaque)(const void* blocks, size_t size);
     /// The process's device-local memory use and the budget it should stay within (Lichii's
     /// Device::GetDeviceMemoryUsage / GetDeviceMemoryBudget, EDEN_NX2_VRAM_LIMIT_MIB included):
     /// the replay lets go of images it can make again when the use nears the budget. NULL or a
