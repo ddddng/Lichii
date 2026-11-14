@@ -58,9 +58,6 @@ typedef struct nvn_direct_memory {
     /// guest has not mapped are zero pages of the view (their bytes in *unmapped). NULL on
     /// failure. The view is given back with munmap.
     void* (*map_view)(void* context, uint64_t address, uint64_t size, uint64_t* unmapped);
-    /// A memory pool [address, address + size) comes (add 1) or goes (add 0): Lichii registers
-    /// it as GPU memory (the Nx2 registry, the SMMU), as the driver's nx2:gpu calls would.
-    void (*track_pool)(void* context, uint64_t address, uint64_t size, int add);
     /// Arms (1) or disarms (0) Lichii's tracking of CPU writes to the pool pages [address,
     /// address + size): a write to an armed page is reported (nvn_direct_cpu_written).
     void (*track_pages)(void* context, uint64_t address, uint64_t size, int armed);

@@ -3,12 +3,12 @@
 
 // CPU write tracking of memory pools in direct mode (dotfiles-25x.5): upstream's nvn_dirty.h
 // interface (its nvn_dirty.c, MIT, is not built: its own fault handler and mprotect calls would
-// fight Lichii's fastmem protections) over Lichii's tracking. A pool is registered with Lichii's
-// device memory (track_pool: the Nx2 registry and the SMMU, as the driver's sub 101 would);
-// protecting pages arms Lichii's write tracking on them (track_pages: cached page counts), which
-// leaves them readable in direct mode (Core::Memory: no read traps, the replay reads them in
-// place); a CPU write to an armed page reaches RasterizerVulkan::OnCPUWrite, which reports it
-// here (nvn_direct_cpu_written): the pages get a new generation and are disarmed. As upstream, a
+// fight Lichii's fastmem protections) over Lichii's page types. Protecting pages arms them
+// (track_pages: rasterizer-cached pages by guest address, which stay readable in direct mode:
+// the replay reads them in place); a CPU write to an armed page takes Core::Memory's rasterizer
+// write path, which reports it here (nvn_direct_cpu_written): the pages get a new generation and
+// are disarmed. The pools are not mapped in the SMMU: with them there MKW stalled at ~127
+// presents, one guest core busy (runs nd-bis-2..4). As upstream, a
 // texture's upload takes nvn_dirty_now, protects its pages, then reads them; it is uploaded again
 // once any page has a generation past that stamp.
 //
@@ -62,17 +62,15 @@ static span_t* find(uintptr_t a, size_t len) {
     return s;
 }
 
-// EDEN_NX2_NVN_TRACK: 1 = pools registered and tracked; 2 = registered, no page armed; unset or
-// 0 = nothing (the default: with pools mapped in the SMMU MKW stalls at ~127 presents, one guest
-// core spinning; dotfiles-25x.5, runs nd-bis-*).
-static int track_mode(void) {
-    static int mode = -1;
-    if (mode < 0) { const char* e = getenv("EDEN_NX2_NVN_TRACK"); mode = e ? atoi(e) : 0; }
-    return mode;
+// EDEN_NX2_NVN_TRACK=0: nothing tracked (a texture is uploaded once, at its first use).
+static int track_on(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("EDEN_NX2_NVN_TRACK"); on = !e || atoi(e) != 0; }
+    return on;
 }
 void nvn_dirty_add_range(const void* mem, size_t size) {
     const uintptr_t lo = (uintptr_t)mem, hi = lo + size;
-    if (!size || nvn_direct_guest_of(lo) == lo || !track_mode()) return; // not guest memory (a host segment)
+    if (!size || nvn_direct_guest_of(lo) == lo || !track_on()) return; // not guest memory (a host segment)
     span_t* s = calloc(1, sizeof *s);
     const size_t pages = (size + PAGE_SIZE - 1 + (lo & (PAGE_SIZE - 1))) >> PAGE_SHIFT;
     s->lo = lo & ~(uintptr_t)(PAGE_SIZE - 1);
@@ -93,7 +91,6 @@ void nvn_dirty_add_range(const void* mem, size_t size) {
     g_nspans++;
     pthread_rwlock_unlock(&g_rw);
     pthread_mutex_unlock(&g_mu);
-    nvn_direct_track_pool(nvn_direct_guest_of(s->lo), s->hi - s->lo, 1);
 }
 
 // Arms (on) or disarms the pages [p, q] of s that are not already so, in runs (caller holds g_mu)
@@ -131,7 +128,6 @@ void nvn_dirty_remove_range(const void* mem) {
         atomic_store(&s->live, 0);
     }
     pthread_mutex_unlock(&g_mu);
-    if (s) nvn_direct_track_pool(nvn_direct_guest_of(s->lo), s->hi - s->lo, 0);
 }
 
 void nvn_direct_host_written(const void* mem, size_t size) {
@@ -152,7 +148,7 @@ const void* nvn_dirty_span(const void* addr, size_t len) { return len ? find((ui
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 
 void nvn_dirty_protect(const void* addr, size_t len) {
-    if (!len || track_mode() != 1) return;
+    if (!len) return;
     pthread_mutex_lock(&g_mu);
     span_t* s = find((uintptr_t)addr, len);
     if (s) {

@@ -887,6 +887,10 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
+        if (Core::NvnHook::DirectMode()) {
+            // NVN2 direct mode: cached pages are the replay's write-tracked pools, read in place.
+            return;
+        }
         if (!Kernel::Nx2ThreadStats::g_enabled) {
             DownloadFromRasterizer(v_address, size);
             return;
@@ -942,6 +946,12 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
+        if (Core::NvnHook::DirectMode()) {
+            // NVN2 direct mode: the replay's write-tracked pools, by guest address (they have no
+            // device address: dotfiles-25x.5).
+            Core::NvnHook::OnDirectCpuWrite(v_address, size);
+            return;
+        }
         if (!Kernel::Nx2ThreadStats::g_enabled) {
             WriteToRasterizer(v_address, size);
             return;
