@@ -56,6 +56,10 @@ namespace Core::Memory {
 class Memory;
 }
 
+namespace Common {
+struct PageTable;
+}
+
 namespace Kernel {
 class KProcess;
 }
@@ -86,6 +90,10 @@ constexpr u32 HaltedCallSvc = 0x10000;
 /// Direct mode: runs the NVN call that halted the JIT on this host thread, from Svc::Call (the
 /// kernel may wait or switch threads here). args: x0-x7, x0 the result.
 void RunHaltedCall(Core::System& system, std::array<u64, 8>& args);
+
+/// The guest unmaps [address, address + size) of a page table (Core::Memory::UnmapRegion): in
+/// direct mode the application's pool memory imported there is given back first.
+void OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size);
 
 /// A present (nx2:vi2), numbered from 1.
 void OnPresent(u64 present);

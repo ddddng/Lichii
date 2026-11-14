@@ -7,6 +7,7 @@
 // one object and a present through another meet. Every image stays in VK_IMAGE_LAYOUT_GENERAL after its first use: no layout tracking until the draw path needs it
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "nvn_direct_front.h"   // Lichii: raw global memory logs hold the game's addresses (gml_poll)
 #include "../nvn/nvn_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../nvn/dmsh_abi_vk.h"
@@ -701,7 +702,7 @@ static void gml_poll(void) {   // caller holds g_tmu
         if (w[0]) VRED_ONCE("a raw global memory write log ran out of slots: some stores are not followed into textures");
         for (int k = 1; k <= 1 << DMSH_GMEM_LOG_LOG2; k++) if (w[k]) {
             if (g_ngw == g_gwcap) { g_gwcap = g_gwcap ? 2 * g_gwcap : 256; g_gw = realloc(g_gw, (size_t)g_gwcap * sizeof *g_gw); }
-            uint64_t a = (uint64_t)w[k] << 12; g_gw[g_ngw++] = (gw_t){a, a + 4096, 0, g_gwseq++, g_gml[i].fence, GW_OPAQUE, 0, NULL}; g_gml_pages++;
+            uint64_t a = nvn_direct_host_of((uint64_t)w[k] << 12); g_gw[g_ngw++] = (gw_t){a, a + 4096, 0, g_gwseq++, g_gml[i].fence, GW_OPAQUE, 0, NULL}; g_gml_pages++;
         }
         g_gml[i].used = 0;
     }

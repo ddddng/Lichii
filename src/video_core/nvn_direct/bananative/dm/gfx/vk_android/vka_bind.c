@@ -1,6 +1,7 @@
 // From Banana Native (github.com/hugorosario/BananaNative, Android port of github.com/seedds/nxnative by seedds), MIT: see LICENSE in src/video_core/nvn_direct/bananative.
 // The binding walker (vka_bind.h): nvn_mtl.m encode_args' sources for each binding kind, written once for the Vulkan replay and its Mac test
 #include "vka_bind.h"
+#include "nvn_direct_front.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -137,7 +138,7 @@ void vka_drv_fill(const vka_bstate *s, int st, int bank, int pool, uint8_t *d) {
     if (bank == 0) {
         int base = c0_ssbo_base(st);
         if (base >= 0) for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) {
-            uint64_t a = s->ssbo[st][r].addr; uint32_t n = (uint32_t)s->ssbo[st][r].size;
+            uint64_t a = nvn_direct_guest_of(s->ssbo[st][r].addr); uint32_t n = (uint32_t)s->ssbo[st][r].size;   // Lichii: the game's address, as raw global memory's table keys it (vka_mem.c)
             memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4);
         }
         if (st != 5) { const float max_point = 2047.0f; memcpy(d + DMSH_C0_POINT_SIZE, &max_point, 4); memcpy(d + DMSH_C0_BASE_INSTANCE, &s->base_instance, 4); }
@@ -148,7 +149,7 @@ void vka_drv_fill(const vka_bstate *s, int st, int bank, int pool, uint8_t *d) {
             // a shader that indexes by them reads 0 otherwise and every workgroup of a column writes the same entry (upstream nxnative 0a759de7: nvn_mtl.m encode_args_; Fire Emblem Fortune's Weave's light culling)
             if (s->nvn2) memcpy(d + DMSH_C0_DISPATCH_NVN2, s->dispatch, 12);
             for (int r = 0; r < DMSH_C0_CS_UBO_SLOTS; r++) {
-                uint64_t a = s->ubo[5][r].addr; uint32_t n = (uint32_t)s->ubo[5][r].size;
+                uint64_t a = nvn_direct_guest_of(s->ubo[5][r].addr); uint32_t n = (uint32_t)s->ubo[5][r].size;   // Lichii: the game's address (as above)
                 memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r, &a, 8); memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r + 8, &n, 4);
             }
         }

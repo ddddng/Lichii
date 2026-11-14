@@ -94,6 +94,7 @@ static int init_once(void) {
     int x_mesh = mesh_ext && !(mesh_env && !strcmp(mesh_env, "0"));
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
+    int x_host = has_ext(de, nde, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);   // Lichii: memory pools are imported guest memory (vka_mem.c import_seg)
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
     free(de);
 
@@ -158,7 +159,8 @@ static int init_once(void) {
     VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT pgpl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT, .pNext = &pm3};
     VkPhysicalDeviceDriverProperties pdr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES, .pNext = x_gpl ? (void *)&pgpl : (void *)&pm3};
     VkPhysicalDeviceMeshShaderPropertiesEXT pmesh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT, .pNext = &pdr};
-    VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = x_mesh ? (void *)&pmesh : (void *)&pdr};
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT pemh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT, .pNext = x_mesh ? (void *)&pmesh : (void *)&pdr};
+    VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = x_host ? (void *)&pemh : x_mesh ? (void *)&pmesh : (void *)&pdr};
     vk.vkGetPhysicalDeviceProperties2(V.pd, &p2);
     VLOG("driver: %s (%s), driver ID %d, conformance %u.%u.%u.%u, driver version %#x; %s", pdr.driverName, pdr.driverInfo, pdr.driverID, pdr.conformanceVersion.major,
          pdr.conformanceVersion.minor, pdr.conformanceVersion.subminor, pdr.conformanceVersion.patch, V.props.driverVersion, vka_driver_tag() ? "custom (DM_VK_DRIVER)" : "the system's");
@@ -168,6 +170,9 @@ static int init_once(void) {
       VLOG("graphics pipeline libraries: %s", V.gpl ? "on (a pipeline the cache lacks is linked from stage libraries, the optimized one is made in the background; DM_VK_GPL=0 off)"
            : !x_gpl ? "not on this device" : !fgpl.graphicsPipelineLibrary ? "extension without the feature" : !pgpl.graphicsPipelineLibraryFastLinking ? "no fast linking" : "off (DM_VK_GPL=0)"); }
     V.placed_align = pmp.minPlacedMemoryMapAlignment ? pmp.minPlacedMemoryMapAlignment : 4096; V.max_alloc = pm3.maxMemoryAllocationSize;
+    // Lichii: without placed maps (a desktop driver) the pools are guest memory imported as host allocations, at the import alignment
+    V.host_import = !V.placed && x_host && vk.vkGetMemoryHostPointerPropertiesEXT && pemh.minImportedHostPointerAlignment;
+    if (V.host_import) V.placed_align = pemh.minImportedHostPointerAlignment > 4096 ? pemh.minImportedHostPointerAlignment : 4096;
     V.max_push = V.push_desc ? ppd.maxPushDescriptors : 0;
     if (V.mesh && !vk.vkCmdDrawMeshTasksEXT) V.mesh = V.task = 0;
     V.draw_indirect_count = f12.drawIndirectCount && vk.vkCmdDrawIndirectCount && vk.vkCmdDrawIndexedIndirectCount;
@@ -208,15 +213,15 @@ static int init_once(void) {
     VLOG("queues: %d of the family's (%s)", V.nq, V.multi ? "NVN queues on all but the last, the host's work on the last; waits between them on the GPU" : "one FIFO for every NVN queue");
     pthread_t th; if (pthread_create(&th, NULL, completion_main, NULL)) { VRED("cannot start the completion thread"); return 0; }
     pthread_detach(th);
-    VLOG("device %s, Vulkan %u.%u.%u, driver %#x; placed maps %s (range %s, alignment %llu), buffer device address %s, update-after-bind %s, display timing %s; guest memory type %u (%#x), max allocation %llu MiB, at most %u allocations",
+    VLOG("device %s, Vulkan %u.%u.%u, driver %#x; placed maps %s (range %s, alignment %llu), host memory import %s, buffer device address %s, update-after-bind %s, display timing %s; guest memory type %u (%#x), max allocation %llu MiB, at most %u allocations",
          V.props.deviceName, VK_API_VERSION_MAJOR(V.props.apiVersion), VK_API_VERSION_MINOR(V.props.apiVersion), VK_API_VERSION_PATCH(V.props.apiVersion), V.props.driverVersion,
-         V.placed ? "yes" : "no", V.placed_range ? "yes" : "no", (unsigned long long)V.placed_align, V.bda ? "yes" : "no", V.uab ? "yes" : "no", V.display_timing ? "yes" : "no",
+         V.placed ? "yes" : "no", V.placed_range ? "yes" : "no", (unsigned long long)V.placed_align, V.host_import ? "yes" : "no", V.bda ? "yes" : "no", V.uab ? "yes" : "no", V.display_timing ? "yes" : "no",
          V.guest_type, V.guest_type < 32 ? V.memp.memoryTypes[V.guest_type].propertyFlags : 0, (unsigned long long)(V.max_alloc >> 20), V.props.limits.maxMemoryAllocationCount);   // (images take one allocation each: Mario Kart World ran out of them)
     VLOG("draw path: push descriptors %s (%u), vertex input dynamic state %s, null descriptors %s, 8-bit indices %s, instance divisors %s, logic op %s, dual source %s, geometry %s, tessellation %s; "
          "uniform alignment %llu (range %llu), storage alignment %llu, subgroups %u (%u-%u)",
          V.push_desc ? "yes" : "no", V.max_push, V.vin_dyn ? "yes" : "no", V.null_desc ? "yes" : "no", V.idx8 ? "yes" : "no", V.divisor ? "yes" : "no", V.logic_op ? "yes" : "no",
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
-    if (!V.placed) VRED("no VK_EXT_map_memory_placed: guest memory stays anonymous and the GPU sees no memory pool");
+    if (!V.placed && !V.host_import) VRED("no VK_EXT_map_memory_placed or VK_EXT_external_memory_host: the GPU sees no memory pool");
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
     return 1;
 }

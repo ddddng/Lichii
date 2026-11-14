@@ -23,6 +23,8 @@
 #include "../nvn/nvn_dirty.h"
 #include "vka_place.h"
 #include "../../host/dm.h"
+#include "nvn_direct_front.h"
+#include "../../../../nvn_direct.h"
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
@@ -34,7 +36,11 @@
 #include <unistd.h>
 #include <time.h>
 
-typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias)
+typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; void *view; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias); view: Lichii's import view (import_seg)
+// Lichii: the table is keyed by the game's addresses (nvn_direct_guest_of), not by the host pointers the front end passes: GPU addresses the game wrote into its own data
+// (shader-loaded pointers through raw global memory's table, c0's storage table) are guest addresses, and look the same memory up without a translation. Every entry
+// point takes either and keys it (key); a virtual pool's own range (outside the arena) keeps its host address
+static inline uintptr_t key(uintptr_t a) { return (uintptr_t)nvn_direct_guest_of(a); }
 static seg_t *g_sg; static int g_nsg, g_sgcap;   // sorted by lo, disjoint
 // Bumped (under g_rw for writing) whenever a segment comes or goes: the replay's per-thread lookup cache (vka_addr, vka_addr_run) holds while it stands
 static _Atomic uint64_t g_sg_gen = 1;
@@ -343,8 +349,8 @@ static int prot_known(prun *r, int *n, uintptr_t lo, uintptr_t hi) {   // 1 = th
 }
 
 // ---------- Placing and giving back ----------
-static VkBuffer seg_buffer(VkDeviceSize n) {
-    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n,
+static VkBuffer seg_buffer(VkDeviceSize n, const void *next) {
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = next, .size = n,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                  VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | (V.bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0)};
@@ -383,10 +389,54 @@ static void prefault(uintptr_t lo, uintptr_t hi) {
 // Place [lo, hi) (no segment overlaps it; caller holds g_pl, and g_rw for writing only under DM_VK_MEM_LOCK_WHOLE). 1 = placed, 0 = failed with the range as it was; *grow = the size the driver wants when it is larger than the range
 // Where a placement's time goes (logged every 256 placements): buffer and allocation, the protections read, the copy, the maps, the prefault, the protections put back
 static uint64_t g_ph[6], g_ph_n;
-static __thread uint64_t t_place_bytes, t_pend_ns;   // this thread's bytes placed and time in pend_wait (mtl_pool_add's attribution: other threads place while it waits)
+static __thread uint64_t t_place_bytes, t_pend_ns;
+// Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host. The import is made of a view of its
+// own (nvn_direct_map_view: the same pages mapped once more, read-write), never of the fastmem arena: the arena's pages may be write-protected by Lichii's tracking or not
+// mapped, and on NVIDIA's driver one refused import makes every later one fail (dotfiles-25x.1). The pages stay the guest's: CPU writes through the arena and GPU writes
+// through the import meet in the same memory, nothing is copied or swapped. An import pins its pages: it is given back before the guest unmaps them (vka_mem_release)
+static uint64_t g_imp_n, g_imp_unmapped;
+static int import_seg(uintptr_t lo, uintptr_t hi) {
+    VkDeviceSize n = hi - lo; uint64_t p0 = mono_ns(), unmapped = 0; VkResult r;
+    void *view = nvn_direct_map_view(lo, n, &unmapped);
+    if (!view) { VRED("pool memory %#lx+%#llx: no view of its pages to import", (unsigned long)lo, (unsigned long long)n); return 0; }
+    if (!V.host_import_types) {
+        VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        if (!vk.vkGetMemoryHostPointerPropertiesEXT(V.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, view, &hp)) V.host_import_types = hp.memoryTypeBits;
+    }
+    seg_t s = {lo, hi, .refs = 1, .view = view};
+    VkExternalMemoryBufferCreateInfo eb = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    if (!(s.buf = seg_buffer(n, &eb))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); munmap(view, n); return 0; }
+    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
+    uint32_t bits = mr.memoryTypeBits & V.host_import_types, t = vka_mem_type(bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    if (t == UINT32_MAX) t = vka_mem_type(bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0);
+    if (t == UINT32_MAX || mr.size > n) {
+        VRED("pool memory %#lx+%#llx: no import (buffer types %#x, host pointer types %#x, %llu bytes wanted)", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits, V.host_import_types, (unsigned long long)mr.size);
+        vk.vkDestroyBuffer(V.dev, s.buf, NULL); munmap(view, n); return 0;
+    }
+    VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkImportMemoryHostPointerInfoEXT ih = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, .pNext = V.bda ? &af : NULL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = view};
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ih, .allocationSize = n, .memoryTypeIndex = t};
+    if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &s.mem)) || (r = vk.vkBindBufferMemory(V.dev, s.buf, s.mem, 0))) {
+        VRED("pool memory %#lx+%#llx: import %d (%.2f GiB imported so far)", (unsigned long)lo, (unsigned long long)n, r, g_placed_bytes / 1073741824.0);
+        if (s.mem) vk.vkFreeMemory(V.dev, s.mem, NULL);
+        vk.vkDestroyBuffer(V.dev, s.buf, NULL); munmap(view, n); return 0;
+    }
+    if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = s.buf}; s.bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
+    if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
+    sg_insert(&s);
+    g_placed_bytes += n; if (g_placed_bytes > g_placed_peak) g_placed_peak = g_placed_bytes; t_place_bytes += n;
+    if (!lock_whole()) pthread_rwlock_unlock(&g_rw);
+    g_ph[0] += mono_ns() - p0; g_imp_unmapped += unmapped;
+    if (++g_imp_n <= 4 || !(g_imp_n & 255) || unmapped)
+        VLOG("pool memory %#lx+%#llx imported (type %u, %.1f ms%s%.0f KiB of it not mapped by the guest); %llu imports, %.2f GiB, %.0f ms in all", (unsigned long)lo, (unsigned long long)n, t,
+             (mono_ns() - p0) / 1e6, unmapped ? ", " : "; ", unmapped / 1024.0, (unsigned long long)g_imp_n, g_placed_bytes / 1073741824.0, g_ph[0] / 1e6);
+    vka_mem_grew(n);
+    return 1;
+}   // this thread's bytes placed and time in pend_wait (mtl_pool_add's attribution: other threads place while it waits)
 static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
+    if (V.host_import) return import_seg(lo, hi);
     VkDeviceSize n = hi - lo; seg_t s = {lo, hi, .refs = 1}; VkResult r; uint64_t p0 = mono_ns(), p1, p2, p3, p4, p5;
-    if (!(s.buf = seg_buffer(n))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); return 0; }
+    if (!(s.buf = seg_buffer(n, NULL))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); return 0; }
     VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
     if (V.guest_type == UINT32_MAX || !(mr.memoryTypeBits >> V.guest_type & 1)) {
         VRED("pool memory %#lx+%#llx: the buffer takes types %#x, not the guest type %u", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits, V.guest_type);
@@ -502,6 +552,12 @@ static void unplace(const seg_t *sp) {
     uint64_t fence = vka_fence_last();
     int waited = vka_wait_done(fence, vka_hang_ns()) && !vka_hung();
     alias_drop_buf(s.buf);
+    if (s.view) {   // Lichii: an import (import_seg): nothing to copy back, the pages are the guest's; its view goes with the memory (kept, as the memory, while the GPU may use it)
+        seg_free(&s, waited, fence);
+        if (waited) munmap(s.view, n);
+        static int nlog; if (nlog++ < 4) VLOG("pool memory %#lx+%#zx: import given back (%.2f GiB imported)", (unsigned long)s.lo, n, vka_mem_placed_bytes(NULL) / 1073741824.0);
+        return;
+    }
     prun pr[MAXRUN]; int npr = prot_runs(s.lo, s.hi, pr, MAXRUN), exact = prot_known(pr, &npr, s.lo, s.hi);
     swap_begin(s.lo, s.hi);
     prot_readonly(pr, npr);
@@ -594,7 +650,7 @@ static void uncover(seglist *l, segvec *v) {
 void *vka_mem_mapped(size_t n) {
     if (!vka_init()) return NULL;
     seg_t s = {.refs = 1 << 30}; void *p = NULL; VkMemoryRequirements mr;
-    if (!(s.buf = seg_buffer(n))) return NULL;
+    if (!(s.buf = seg_buffer(n, NULL))) return NULL;
     vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
     VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = V.bda ? &af : NULL, .allocationSize = mr.size, .memoryTypeIndex = V.guest_type};
@@ -611,6 +667,7 @@ void *vka_mem_mapped(size_t n) {
 static void lazy_release_note(uintptr_t lo, uintptr_t hi);
 int vka_mem_release(uintptr_t lo, uintptr_t hi) {
     if (!vka_ok() || hi <= lo) return 0;
+    lo = key(lo); hi = lo + (hi - lo);
     segvec v = {0};
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
     int k = sg_find(lo); if (k < 0 || g_sg[k].hi <= lo) k++;
@@ -621,9 +678,12 @@ int vka_mem_release(uintptr_t lo, uintptr_t hi) {
     }
     pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);
     unplace_all(&v);
-    lazy_release_note(lo, hi);   // pools not placed yet (DM_VK_PLACE_LAZY) over the range: their storage leaves the guest too
+    lazy_release_note((uintptr_t)nvn_direct_host_of(lo), (uintptr_t)nvn_direct_host_of(lo) + (hi - lo));   // pools not placed yet (DM_VK_PLACE_LAZY) over the range: their storage leaves the guest too
     return 0;
 }
+// Lichii: the guest unmaps memory (Core::Memory::UnmapRegion): imports over it are given back before its pages can be reused (a hole punched under a live import leaves
+// the GPU with the old pages: dotfiles-25x.1)
+void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); }
 
 // The segments this thread found, by address block (the draws look up their vertex and uniform buffers, ~10 lookups a draw): valid while g_sg_gen stands.
 // A segment is unplaced only after the last fence reserved has completed (unplace), so one still in a cache that the generation has not caught yet is not freed under
@@ -640,6 +700,7 @@ void vka_mem_rec_thread(void) {
     if (!atomic_load_explicit(&g_rlc_tp, memory_order_relaxed) && VKA_ENV("DM_VK_LC_GLOBAL", 1)) atomic_compare_exchange_strong(&g_rlc_tp, &none, tp);
 }
 static const seg_t *lookup(uintptr_t a, seg_t *tmp) {   // the segment holding a, or NULL
+    a = key(a);
     lcache *c;
     if (__builtin_thread_pointer() == atomic_load_explicit(&g_rlc_tp, memory_order_relaxed)) c = &g_rlc;
     else { c = t_lc; if (!c) c = t_lc = calloc(1, sizeof *c); }
@@ -660,6 +721,7 @@ static const seg_t *lookup(uintptr_t a, seg_t *tmp) {   // the segment holding a
     return r;
 }
 int vka_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceAddress *bda) {
+    addr = key((uintptr_t)addr);
     seg_t tmp; const seg_t *g = lookup((uintptr_t)addr, &tmp);
     int ok = g && addr + len <= g->hi;
     if (ok) { if (buf) *buf = g->buf; if (off) *off = addr - g->lo + g->boff; if (bda) *bda = g->bda ? g->bda + (addr - g->lo) : 0; }
@@ -668,6 +730,7 @@ int vka_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDe
 
 // Diagnostics (DM_VK_NANSCAN): the segment holding addr and its neighbours
 void vka_mem_describe(uint64_t addr, char *out, size_t n) {
+    addr = key((uintptr_t)addr);
     pthread_rwlock_rdlock(&g_rw);
     int i = sg_find((uintptr_t)addr); size_t o = 0;
     o += (size_t)snprintf(out + o, n - o, "%d segments; ", g_nsg);
@@ -676,6 +739,7 @@ void vka_mem_describe(uint64_t addr, char *out, size_t n) {
     pthread_rwlock_unlock(&g_rw);
 }
 uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
+    addr = key((uintptr_t)addr);
     seg_t tmp; const seg_t *g = lookup((uintptr_t)addr, &tmp); uint64_t n = 0;
     if (g) { n = g->hi - addr; if (n > len) n = len; *buf = g->buf; *off = addr - g->lo + g->boff; }
     return n;
@@ -703,15 +767,15 @@ static void alias_drop_buf(VkBuffer buf) {   // the physical segment over buf is
     pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);
 }
 void mtl_pool_alias(const void *va, uint64_t n, const void *phys) {
-    uintptr_t lo = (uintptr_t)va, hi = lo + n;
+    uintptr_t lo = key((uintptr_t)va), hi = lo + n, pk = key((uintptr_t)phys);
     if (!vka_ok() || !n) return;
     if (phys) mtl_pool_need(phys, n, "a virtual pool's mapping");   // (the physical pool placed first: the alias names its segment)
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
     alias_cut(lo, hi);
-    int k = phys ? sg_find((uintptr_t)phys) : -1, ok = !phys;
-    if (k >= 0 && g_sg[k].mem && (uintptr_t)phys + n <= g_sg[k].hi) {
-        VkDeviceSize o = (uintptr_t)phys - g_sg[k].lo;
-        seg_t a = {lo, hi, VK_NULL_HANDLE, g_sg[k].buf, g_sg[k].bda ? g_sg[k].bda + o : 0, 0, g_sg[k].boff + o};
+    int k = phys ? sg_find(pk) : -1, ok = !phys;
+    if (k >= 0 && g_sg[k].mem && pk + n <= g_sg[k].hi) {
+        VkDeviceSize o = pk - g_sg[k].lo;
+        seg_t a = {lo, hi, VK_NULL_HANDLE, g_sg[k].buf, g_sg[k].bda ? g_sg[k].bda + o : 0, 0, g_sg[k].boff + o, NULL};
         sg_insert(&a); ok = 1;
     }
     pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);
@@ -754,10 +818,11 @@ static uint64_t part_gran(void) {
     if (v < 0) { int64_t m = VKA_ENV("DM_VK_PLACE_GRANULE_MB", 16); if (m < 1) m = 1; v = m << 20; uintptr_t al = pg_align(); v = (v + (int64_t)al - 1) & ~(int64_t)(al - 1); }
     return (uint64_t)v;
 }
-static int can_place(uint64_t size) { return size && vka_ok() && placed_on() && V.placed; }
+static int can_place(uint64_t size) { return size && vka_ok() && placed_on() && (V.placed || V.host_import); }
 // Place [mem, mem+size) (page aligned out): its segments into *l (which may list some already: they take no second reference). Caller holds g_pl. *lg: the placed total
 // crossed a 256 MiB step since the last line (*tot). *mine: the bytes this call placed
 static int place_pool(uintptr_t mem, uint64_t size, seglist *l, int *lg, uint64_t *tot, uint64_t *mine_out) {
+    mem = key(mem);
     uintptr_t al = pg_align(), lo = mem & ~(al - 1), hi = (mem + size + al - 1) & ~(al - 1);
     if (lock_whole()) pthread_rwlock_wrlock(&g_rw);
     // The placement's own time and bytes: from here (not the wait for another placement), less the time cover waited for give-backs (pend_wait, which lets other

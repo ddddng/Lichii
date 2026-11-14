@@ -27,6 +27,7 @@ _Static_assert(sizeof(mapping_request) == 0x28, "NVNmappingRequest");
 
 static uintptr_t g_arena;
 static uint64_t g_guest_size;
+static nvn_direct_memory g_memory;
 
 static inline uint64_t host_addr(uint64_t a) {
     return a != 0 && a < g_guest_size ? (uint64_t)g_arena + a : a;
@@ -34,6 +35,12 @@ static inline uint64_t host_addr(uint64_t a) {
 static inline void* host_ptr(uint64_t a) { return (void*)(uintptr_t)host_addr(a); }
 static inline uint64_t guest_addr(uint64_t h) {
     return h >= g_arena && h - g_arena < g_guest_size ? h - g_arena : h;
+}
+uint64_t nvn_direct_guest_of(uint64_t host) { return guest_addr(host); }
+uint64_t nvn_direct_host_of(uint64_t guest) { return host_addr(guest); }
+void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped) {
+    *unmapped = 0;
+    return g_memory.map_view ? g_memory.map_view(g_memory.context, address, size, unmapped) : NULL;
 }
 static inline float F_float(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 static inline double F_double(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
@@ -131,9 +138,10 @@ static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, uint64_t
 }
 static const dispatch_entry g_empty = {"(empty)", d_empty, 0};
 
-void nvn_direct_init(uint8_t* arena, uint64_t guest_size) {
+void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory) {
     g_arena = (uintptr_t)arena;
     g_guest_size = guest_size;
+    g_memory = *memory;
     nvn_nops_register();
     for (int i = 0; i < NVN_NFUNC; i++) {
         void* fn = nvn_slot[i].fn;

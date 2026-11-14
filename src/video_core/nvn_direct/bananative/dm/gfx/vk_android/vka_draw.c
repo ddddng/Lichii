@@ -7,6 +7,7 @@
 // tessellation's patch size, texel buffers, viewport swizzles other than a y flip
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "nvn_direct_front.h"
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include <math.h>
@@ -28,7 +29,7 @@ static int g_force_draws;
 void vka_draw_force(int on) { g_force_draws = on; }
 static int draws_on(void) {
     int env = VKA_ENV("DM_VK_DRAW", -1); if (env > 0) env = 1;
-    int on = g_force_draws || (env >= 0 ? env : V.placed);
+    int on = g_force_draws || (env >= 0 ? env : V.placed || V.host_import);   // Lichii: or imported pools (vka_mem.c)
     if (!on) VRED_ONCE("draws and dispatches are off (%s): their records are skipped; events, counters and fences still signal", env == 0 ? "DM_VK_DRAW=0" : "no placed guest memory, so the GPU would see no pool; DM_VK_DRAW=1 turns them on");
     return on;
 }
@@ -449,7 +450,8 @@ static VkPrimitiveTopology topo_class(VkPrimitiveTopology t) {   // the pipeline
 
 // ---------- Guest memory as descriptors ----------
 static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as the CPU sees them now
-    if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void *)(uintptr_t)addr, n); return 1; }
+    // Lichii: addr may be the game's own (a GPU address the game wrote into its data): read at its host pointer
+    if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void *)(uintptr_t)nvn_direct_host_of(addr), n); return 1; }
     return !plat_mem_read(addr, out, n);
 }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }

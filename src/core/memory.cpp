@@ -35,6 +35,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/memory.h"
+#include "core/nvn_hook.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -1065,6 +1066,8 @@ void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddre
 
 void Memory::UnmapRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                          bool separate_heap) {
+    // NVN2 direct mode: pool memory the replay imported here is given back before the pages go.
+    Core::NvnHook::OnGuestUnmap(page_table, GetInteger(base), size);
     impl->UnmapRegion(page_table, base, size, separate_heap);
 }
 

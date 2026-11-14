@@ -50,10 +50,25 @@ typedef struct nvn_direct_device {
 /// their CPU-side effects only and fences complete at submit (the null backend).
 int nvn_direct_adopt_device(const nvn_direct_device* device);
 
-/// Takes the front end's slot table (the names of upstream's names.txt, in its order) and the
-/// arena the game's addresses are offsets into: host = arena + address for every address below
-/// guest_size. Called once, when the game's NVN is taken over.
-void nvn_direct_init(uint8_t* arena, uint64_t guest_size);
+/// Lichii's guest memory as the replay's memory pools need it (dotfiles-25x.5).
+typedef struct nvn_direct_memory {
+    /// Maps the pages behind guest [address, address + size) (page aligned) once more, at a host
+    /// range of their own: read-write and never protected, so Vulkan imports them while the
+    /// guest's own view (the fastmem arena) may be write-tracked or partly unmapped. Pages the
+    /// guest has not mapped are zero pages of the view (their bytes in *unmapped). NULL on
+    /// failure. The view is given back with munmap.
+    void* (*map_view)(void* context, uint64_t address, uint64_t size, uint64_t* unmapped);
+    void* context;
+} nvn_direct_memory;
+
+/// Takes the front end's slot table (the names of upstream's names.txt, in its order), the
+/// arena the game's addresses are offsets into (host = arena + address for every address below
+/// guest_size) and the guest memory's views. Called once, when the game's NVN is taken over.
+void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory);
+
+/// The guest unmaps [address, address + size): the pool memory imported over it is given back
+/// first (after the GPU is done with it), so no import keeps pages the guest reuses.
+void nvn_direct_guest_unmap(uint64_t address, uint64_t size);
 int nvn_direct_name_count(void);
 const char* nvn_direct_name(int slot);
 /// Whether the front end implements the slot's function (else the hook's stub answers 0).
