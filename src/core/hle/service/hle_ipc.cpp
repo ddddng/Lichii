@@ -458,15 +458,15 @@ void HLERequestContext::ReadWriteBufferContents(std::span<u8> out, bool buffer_b
     if (buffer_b) {
         if (buffer_index < BufferDescriptorB().size()) {
             const auto& descriptor = BufferDescriptorB()[buffer_index];
-            memory.ReadBlockUnsafe(descriptor.Address(), out.data(),
-                                   (std::min)(out.size(), static_cast<std::size_t>(descriptor.Size())));
+            memory.ReadBlock(descriptor.Address(), out.data(),
+                             (std::min)(out.size(), static_cast<std::size_t>(descriptor.Size())));
         }
         return;
     }
     if (buffer_index < BufferDescriptorC().size()) {
         const auto& descriptor = BufferDescriptorC()[buffer_index];
-        memory.ReadBlockUnsafe(descriptor.Address(), out.data(),
-                               (std::min)(out.size(), static_cast<std::size_t>(descriptor.Size())));
+        memory.ReadBlock(descriptor.Address(), out.data(),
+                         (std::min)(out.size(), static_cast<std::size_t>(descriptor.Size())));
     }
 }
 
