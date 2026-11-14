@@ -9,7 +9,10 @@
 set(BN ${CMAKE_CURRENT_SOURCE_DIR}/bananative/dm)
 
 add_library(nvn_direct STATIC
+    gen/nvn_dispatch.inc
+    gen_dispatch.py
     nvn_direct.h
+    nvn_dispatch.c
     nvn_direct_front.h
     nvn_direct_host.c
     nvn_window.c
@@ -46,6 +49,8 @@ add_library(nvn_direct STATIC
 
 target_include_directories(nvn_direct PRIVATE
     bananative/shim
+    gen
+    .
     bananative/gen
     ${BN}/gfx/nvn/include
     ${BN}/gfx/nvn

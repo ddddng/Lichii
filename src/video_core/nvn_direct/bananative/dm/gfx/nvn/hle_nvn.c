@@ -1483,6 +1483,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
 static void nvn_nop(void) {}
+void *nvn_nop_fn(void) { return (void *)nvn_nop; }   // Lichii: the dispatch calls the empty implementations without a prototype directly
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
 #if !defined(__ANDROID__)

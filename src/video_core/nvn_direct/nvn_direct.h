@@ -50,6 +50,28 @@ typedef struct nvn_direct_device {
 /// their CPU-side effects only and fences complete at submit (the null backend).
 int nvn_direct_adopt_device(const nvn_direct_device* device);
 
+/// Takes the front end's slot table (the names of upstream's names.txt, in its order) and the
+/// arena the game's addresses are offsets into: host = arena + address for every address below
+/// guest_size. Called once, when the game's NVN is taken over.
+void nvn_direct_init(uint8_t* arena, uint64_t guest_size);
+int nvn_direct_name_count(void);
+const char* nvn_direct_name(int slot);
+/// Whether the front end implements the slot's function (else the hook's stub answers 0).
+int nvn_direct_implemented(int slot);
+/// Whether the function takes or returns floats (v registers).
+int nvn_direct_float_args(int slot);
+
+#define NVN_DISPATCH_FLOAT_ARGS 1
+#define NVN_DISPATCH_FLOAT_RETURN 2
+
+/// Runs an implemented slot's function with the guest's x0-x7 and v0-v7 (low 64 bits) as its
+/// arguments; returns x0, and v0 through *v0 for a float result. lr: the guest's return address
+/// (the call site the front end records).
+uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0);
+
+/// nvnDeviceGetInteger's answer for item, as the game's own driver gave it.
+void nvn_direct_set_device_integer(unsigned item, int value);
+
 #ifdef __cplusplus
 }
 #endif
