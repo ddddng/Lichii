@@ -142,6 +142,12 @@ int nvn_direct_present_take(nvn_direct_frame* frame);
 /// already), once the GPU finished drawing it (waits, bounded). 0: no frame was ever taken.
 int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
 
+/// Whether an implemented slot's call would wait for the replay's GPU now (dotfiles-25x.4):
+/// nvnSyncWait on a fenced sync the GPU has not reached, nvnQueueFinish on a queue whose last
+/// submission it has not. Lichii then sleeps the guest thread in the guest kernel until it would
+/// not, so the core runs the game's other threads meanwhile.
+int nvn_direct_call_blocks(int slot, const uint64_t x[8]);
+
 /// nvnDeviceGetInteger's answer for item, as the game's own driver gave it.
 void nvn_direct_set_device_integer(unsigned item, int value);
 

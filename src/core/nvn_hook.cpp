@@ -21,7 +21,9 @@
 
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/hle/kernel/svc.h"
 #include "core/arm/debug.h"
@@ -1001,10 +1003,36 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     }
     state.halted_calls.fetch_add(1, std::memory_order_relaxed);
     const Slot& target = state.slots[slot];
+    // A wait for the replay's GPU (SyncWait, QueueFinish) sleeps in the guest kernel until it
+    // would not wait (dotfiles-25x.4): a host wait here held the guest core, so the game's other
+    // threads there stopped (one of them may be the one whose submission the GPU waits for).
+    const bool sync_wait = std::string_view{nvn_direct_name(target.front)} == "nvnSyncWait";
+    bool waited = false;
+    if (nvn_direct_call_blocks(target.front, args.data())) {
+        auto& kernel = system.Kernel();
+        const s64 start = kernel.HardwareTimer().GetTick();
+        const u64 timeout = sync_wait ? args[1] : ~u64{0};
+        s64 slice = 50'000;
+        while (nvn_direct_call_blocks(target.front, args.data())) {
+            const s64 now = kernel.HardwareTimer().GetTick();
+            if (timeout != ~u64{0} && static_cast<u64>(now - start) >= timeout) {
+                break;
+            }
+            static_cast<void>(Kernel::GetCurrentThread(kernel).Sleep(kernel, now + slice));
+            slice = (std::min)(slice * 2, s64{1'000'000});
+        }
+        waited = true;
+        if (sync_wait) {
+            args[1] = 0; // (answered from the state now, without a host wait)
+        }
+    }
     // No halting call takes or returns floats (checked at the first one).
     const std::array<u64, 8> v{};
     u64 v0 = 0;
     args[0] = nvn_direct_call(target.front, args.data(), v.data(), t_halted_lr, &v0);
+    if (sync_wait && waited && args[0] == 0) {
+        args[0] = 1; // NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED: it was signalled while waiting
+    }
     if (std::string_view{nvn_direct_name(target.front)} != "nvnQueuePresentTexture") {
         return;
     }

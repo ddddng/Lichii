@@ -20,6 +20,8 @@
 #include "nvn_direct.h"
 #include "nvn_direct_front.h"
 #include "nvn_protos.h"
+#include "nvn_obj.h"
+#include "nvn_mtl.h"
 
 typedef struct { NVNbufferAddress data; const void* control; uint64_t ext; } shader_data_ext;
 typedef struct { NVNmemoryPool* phys; int64_t poff, voff; uint64_t size; int32_t storage_class, pad; } mapping_request;
@@ -173,6 +175,15 @@ int nvn_direct_float_args(int slot) {
     return g_slot[slot].d && (g_slot[slot].d->flags & (NVN_DISPATCH_FLOAT_ARGS | NVN_DISPATCH_FLOAT_RETURN));
 }
 
+int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
+    const char* const name = nvn_direct_name(slot);
+    if (!strcmp(name, "nvnSyncWait")) {
+        const sync_t* const s = host_ptr(x[0]);
+        return s->fenced && !(s->fenced == 2 ? mtl_wait_acq : mtl_wait)(s->fence, 0);   // (one not fenced yet answers at once: hle_nvn.c)
+    }
+    if (!strcmp(name, "nvnQueueFinish")) return !mtl_wait(((const queue_t*)host_ptr(x[0]))->last_fence, 0);
+    return 0;
+}
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
     return g_slot[slot].d->d(g_slot[slot].fn, x, v, v0);
