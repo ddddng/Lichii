@@ -23,6 +23,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "core/nvn_hook.h"
+#include "core/nvn_trace.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
 #include "video_core/nvn_header_count.h"
@@ -41,7 +42,9 @@ constexpr u32 EmittedReturnSlot = 1;
 /// What the game gets for nvnDeviceGetProcAddress (not exported: games get it from
 /// nvnBootstrapLoader): a lookup like nvnBootstrapLoader's.
 constexpr u32 LookupSlot = 2;
-constexpr u32 FirstNameSlot = 3;
+/// Synthetic address calls whose return the trace wants (nvn_trace.h) return to.
+constexpr u32 TraceReturnSlot = 3;
+constexpr u32 FirstNameSlot = 4;
 constexpr u32 GuestThreadSlots = 4096;
 
 struct Slot {
@@ -70,6 +73,13 @@ struct LookupFrame {
 
 /// The words the driver's nvnCommandBufferBindTexture writes for a graphics stage, at most.
 using BindTextureWords = u32[5];
+
+struct TraceFrame {
+    u64 lr;
+    u64 seq;
+    u32 slot;
+    u64 output; ///< the guest address of the output the trace records at the return
+};
 
 struct CommandFrame {
     u64 lr;
@@ -114,6 +124,8 @@ struct State {
     std::vector<Counters*> counters;
     /// EDEN_NX2_NVN_EMITTED: open command-buffer calls by guest thread (id modulo the size)
     std::array<std::vector<CommandFrame>, GuestThreadSlots> command_frames;
+    /// EDEN_NX2_NVN_TRACE: calls whose return the trace wants, by guest thread
+    std::array<std::vector<TraceFrame>, GuestThreadSlots> trace_frames;
 };
 
 State* Create() {
@@ -200,6 +212,7 @@ u32 SlotOf(State& state, const std::string& name, u64 driver) {
         state.bind_texture_slot = slot;
     }
     state.slot_count.store(slot + 1, std::memory_order_release);
+    NvnTrace::OnName(slot, name.c_str());
     if (state.out != nullptr) {
         fmt::print(state.out, "n {} {:#x} {:#x} {}\n", slot, driver, SyntheticAddress(state, slot),
                    name);
@@ -423,6 +436,7 @@ void Install(Kernel::KProcess& process) {
         address = end;
     }
     state.process = &process;
+    NvnTrace::Install(process);
     LOG_INFO(Core,
              "NVN hook: {} nvnBootstrapLoader exports, nvnPrivate0 {:#x} ({} bytes), synthetic "
              "addresses from {:#x}",
@@ -493,6 +507,18 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
         jit.SetRegister(16, frame.lr);
         return;
     }
+    if (slot == TraceReturnSlot) {
+        auto& frames = state.trace_frames[thread_id % GuestThreadSlots];
+        if (frames.empty()) {
+            LOG_CRITICAL(Core, "NVN hook: trace return without a call on thread {}", thread_id);
+            return;
+        }
+        const TraceFrame frame = frames.back();
+        frames.pop_back();
+        NvnTrace::OnReturn(frame.seq, frame.slot, frame.output, jit, memory);
+        jit.SetRegister(16, frame.lr);
+        return;
+    }
     if (slot == EmittedReturnSlot) {
         auto& frames = state.command_frames[thread_id % GuestThreadSlots];
         if (frames.empty()) {
@@ -521,6 +547,19 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
         jit.SetRegister(16, frame.lr); // done: back to the caller
         return;
     }
+    if (u64 seq = 0; NvnTrace::OnCall(slot, jit, memory, thread_id, seq)) {
+        // The trace's return frame stands alone: a trace run sets neither EDEN_NX2_NVN_EMITTED
+        // nor EDEN_NX2_NVN_HLE.
+        const u32 output = NvnTrace::OutputArgument(slot);
+        state.trace_frames[thread_id % GuestThreadSlots].push_back(
+            {.lr = jit.GetRegister(30),
+             .seq = seq,
+             .slot = slot,
+             .output = output != ~0u ? jit.GetRegister(output) : 0});
+        jit.SetRegister(30, SyntheticAddress(state, TraceReturnSlot));
+        jit.SetRegister(16, target.driver);
+        return;
+    }
     if (want_return) {
         frame.command_buffer = jit.GetRegister(0);
         frame.write_pointer = memory.Read64(frame.command_buffer);
@@ -531,6 +570,7 @@ void OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
 }
 
 void OnPresent(u64 present) {
+    NvnTrace::OnPresent(present);
     State* const state_pointer = Get();
     if (state_pointer == nullptr || state_pointer->out == nullptr ||
         present % state_pointer->every != 0) {
