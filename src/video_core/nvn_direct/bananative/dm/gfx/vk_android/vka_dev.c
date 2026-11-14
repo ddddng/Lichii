@@ -249,16 +249,16 @@ VkResult vka_submit_q(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwait
 static uint64_t sub_ex(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages,
                        uint32_t nsig, const VkSemaphore *sig_sems, const uint64_t *sig_vals, VkSemaphore bin_signal, VkResult *res) {
     int host = q < 0 || !V.multi; if (q < 0 || q >= V.nq - 1 || !V.multi) q = 0;   // (host: the host queue V.q; with signal, its fences are recorded under queue 0's slot... none signal: the replay's go through queues 0..nq-2)
-    VkSemaphore sig[8]; uint64_t sv[8]; uint32_t ns = 0;
+    VkSemaphore sig[24]; uint64_t sv[24]; uint32_t ns = 0;
     vka_qlock();
     uint64_t qv = 0;
     if (signal && !V.multi) { sig[ns] = V.tl; sv[ns++] = signal; }
     else if (signal) { qv = ++V.qseq[q]; sig[ns] = V.qtl[q]; sv[ns++] = qv; }
     if (bin_signal) { sig[ns] = bin_signal; sv[ns++] = 0; }
-    for (uint32_t i = 0; i < nsig && ns < 8; i++) { sig[ns] = sig_sems[i]; sv[ns++] = sig_vals[i]; }
+    for (uint32_t i = 0; i < nsig && ns < 24; i++) { sig[ns] = sig_sems[i]; sv[ns++] = sig_vals[i]; }
     // The waits, one for the upload batches on queue 0 (a submission on another queue), and one more for the sparse binds queued before it (vks_queue_locked)
-    VkSemaphore ws[10]; uint64_t wv[10]; VkPipelineStageFlags wst[10];
-    if (nwait > 8) { VRED_ONCE("vka_submit: %u waits, at most 8 taken: the rest are dropped", nwait); nwait = 8; }
+    VkSemaphore ws[20]; uint64_t wv[20]; VkPipelineStageFlags wst[20];
+    if (nwait > 18) { VRED_ONCE("vka_submit: %u waits, at most 18 taken: the rest are dropped", nwait); nwait = 18; }
     for (uint32_t i = 0; i < nwait; i++) { ws[i] = wait[i]; wv[i] = wait_vals[i]; wst[i] = stages[i]; }
     if (!host && vka_up_timeline() && vka_up_last()) { ws[nwait] = vka_up_timeline(); wv[nwait] = vka_up_last(); wst[nwait++] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT; }
     vks_queue_locked(&nwait, ws, wv, wst);
