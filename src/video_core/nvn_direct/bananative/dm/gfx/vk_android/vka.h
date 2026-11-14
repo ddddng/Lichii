@@ -213,7 +213,7 @@ typedef struct {
     uint8_t kind;          // 0 float / unorm / snorm, 1 uint, 2 sint, 3 depth, 4 stencil, 5 depth-stencil
     uint8_t srgb;          // stored as UNORM, cleared with an sRGB-encoded colour
     uint8_t bpb, bw, bh;
-    uint8_t astc_bw, astc_bh;   // an ASTC texture on a device without ASTC: the storage's block size; the image is BC3 filled by vka_astc_transcode (0: not such a texture)
+    uint8_t astc_bw, astc_bh;   // an ASTC texture on a device without ASTC: the storage's block size; the image is BC3 (BC1 when its first content is opaque: astc_bc1 in vka_tex.c) filled on the GPU or by vka_astc_transcode (0: not such a texture)
 } vka_fmt;
 int vka_fmt_of(int nvn_format, vka_fmt *f);         // 0 = no Vulkan format (logged once per format)
 // ASTC blocks (w x h x depth texels, bw x bh blocks, rows of blocks packed) transcoded to BC3 (rows of 4x4 blocks packed, 16 bytes each) on the CPU, for a device without
@@ -225,6 +225,7 @@ void vka_upload_hook(const tex_t *t, uint32_t lv, uint32_t ly, uint8_t *lin, siz
 int vka_upload_claim(const tex_t *t) __attribute__((weak));   // 1 = the host fills this texture (vka_upload_hook): uploaded from storage even where it would start cleared
 int vka_astc_transcode(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t depth, uint32_t bw, uint32_t bh, uint8_t *bc3) __attribute__((weak));
 int vka_astc_gpu_on(void);   // the host decodes ASTC on the GPU (Lichii: nvn_direct_device.astc_to_bc; vka_astc_gpu records one level, vka_dev.c)
+int vka_astc_opaque(const void *blocks, size_t n);   // the ASTC blocks decode without alpha (Lichii: nvn_direct_device.astc_opaque; 0 without the host's check)
 // An image's memory (vka_imgmem.c): space in a shared block (blk, at off, units of 256 bytes) or a dedicated allocation (blk NULL, off 0); size = its memory requirements' size
 // z: zero-shared memory (vka_imem_bind_zero; dm is the shared allocation, freed with its last image)
 typedef struct { VkDeviceMemory dm; uint64_t off, size; void *blk; uint32_t units; int z; } vka_imem;

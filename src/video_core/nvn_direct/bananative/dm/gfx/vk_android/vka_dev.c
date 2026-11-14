@@ -495,8 +495,9 @@ void vka_mem_grew(uint64_t bytes) {
     if (!s || atomic_fetch_add(&acc, bytes) + bytes < s) return;
     atomic_store(&acc, 0);
     int ni; uint32_t ns; uint64_t img = vka_tex_mem_nolock(&ni), scr = vka_scratch_bytes(&ns), pl = vka_mem_placed_nolock(), sp = vks_bytes_nolock();
-    VLOG("memory: placed pools %.0f MiB, images %.0f MiB (%d), sparse tile blocks %.0f MiB, scratch %.0f MiB (%u blocks): %.0f MiB", pl / 1048576.0, img / 1048576.0, ni, sp / 1048576.0,
-         scr / 1048576.0, ns, (pl + img + sp + scr) / 1048576.0);
+    void vka_tex_astc_counts(uint32_t *bc3, uint32_t *bc1); uint32_t a3, a1; vka_tex_astc_counts(&a3, &a1);
+    VLOG("memory: placed pools %.0f MiB, images %.0f MiB (%d; ASTC lookups as BC3 %u, as BC1 %u), sparse tile blocks %.0f MiB, scratch %.0f MiB (%u blocks): %.0f MiB", pl / 1048576.0, img / 1048576.0, ni, a3, a1,
+         sp / 1048576.0, scr / 1048576.0, ns, (pl + img + sp + scr) / 1048576.0);
 }
 // Idle blocks (their value reached) larger than the standard 16 MiB, or beyond 64 MiB of idle blocks in all, are freed (under g_smu): at every miss and at every retire.
 // Kept, every block stayed for the process's life: Mario Kart World 1.8.0's boot uploads (levels of up to 144 MiB, each in a block of its size) left 1.4 GB of scratch
@@ -595,6 +596,7 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 // ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
+int vka_astc_opaque(const void *blocks, size_t n) { return g_adopt.astc_opaque && g_adopt.astc_opaque(blocks, n); }
 // No batch can be begun (a slot's batch still runs after the hang time): the upload goes on in the submission being recorded, with its staging (the batch before it was sent,
 // so its image's first barrier and copies come before; an upload stopped half-way would leave a tracked image with part of its content for good)
 static VkCommandBuffer up_fallback(void) { vka_scr_up = 0; return vka_rp_cb(); }

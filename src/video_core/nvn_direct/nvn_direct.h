@@ -65,6 +65,9 @@ typedef struct nvn_direct_device {
     /// decode (ASTC textures then have no image unless the device samples ASTC).
     int (*astc_to_bc)(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
     void* astc_context;
+    /// Whether an ASTC texture's blocks decode without alpha (Lichii's ASTC::IsOpaque): its image
+    /// is then BC1 instead of BC3, half the memory. NULL: always BC3.
+    int (*astc_opaque)(const void* blocks, size_t size);
 } nvn_direct_device;
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.

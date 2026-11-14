@@ -175,6 +175,7 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .queue_context = &scheduler.submit_mutex,
         .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
         .astc_context = astc,
+        .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];

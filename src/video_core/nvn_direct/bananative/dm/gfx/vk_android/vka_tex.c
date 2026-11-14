@@ -106,7 +106,7 @@ static int fmt_of_slow(int nf, vka_fmt *o) {
     // ASTC on a device without it (desktop GPUs): a BC3 image (sRGB views for the sRGB formats) that uploads decode into on the GPU when the host supplies the decoder
     // (Lichii: astc_gpu_level), else transcode into on the CPU when the host supplies the transcoder
     if (e.vk >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && e.vk <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && bpb && (vka_astc_gpu_on() || vka_astc_transcode) && !(feats(e.vk) & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-        static _Atomic int once; if (!atomic_exchange(&once, 1)) VLOG("ASTC textures: no ASTC on this device, %s", vka_astc_gpu_on() ? "decoded and re-compressed to BC3 on the GPU at upload (the host's decoder)" : "transcoded to BC3 on the CPU at upload (vka_astc_transcode)");
+        static _Atomic int once; if (!atomic_exchange(&once, 1)) VLOG("ASTC textures: no ASTC on this device, %s", vka_astc_gpu_on() ? "decoded and re-compressed to BC1 (opaque) or BC3 on the GPU at upload (the host's decoder)" : "transcoded to BC3 on the CPU at upload (vka_astc_transcode)");
         *o = (vka_fmt){VK_FORMAT_BC3_UNORM_BLOCK, e.srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK, 0, e.srgb, 16, 4, 4, (uint8_t)bw, (uint8_t)bh};
         return 1;
     }
@@ -1314,6 +1314,17 @@ static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int m
     if (cb) vka_barrier(cb);
 }
 
+// An ASTC texture decoded on the GPU whose storage holds only opaque blocks when its image is made: a BC1 image instead of BC3, half the memory (dotfiles-25x.8, as Lichii's
+// texture cache decides it: AstcDataLooksOpaque at the image's creation; its storage up to 64 MiB scanned, a larger one stays BC3). Views and uploads follow the image's format
+static _Atomic uint32_t g_astc_n[2];   // ASTC textures given a BC3 / a BC1 format (the memory log line)
+void vka_tex_astc_counts(uint32_t *bc3, uint32_t *bc1) { *bc3 = atomic_load(&g_astc_n[0]); *bc1 = atomic_load(&g_astc_n[1]); }
+static void astc_bc1(const tex_t *t, vka_fmt *f) {
+    int sp = 0;
+    if (!f->astc_bw || !vka_astc_gpu_on()) return;
+    if (!t->mem || !t->L.size || t->L.size > 64u << 20 || (t->pool && (!nvn_pool_live(t->pool, NULL, &sp) || sp)) || !vka_astc_opaque(t->mem, (size_t)t->L.size)) { atomic_fetch_add(&g_astc_n[0], 1); return; }
+    atomic_fetch_add(&g_astc_n[1], 1);
+    f->vk = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; f->view = f->srgb ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK : VK_FORMAT_BC1_RGBA_UNORM_BLOCK; f->bpb = 8;
+}
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (!t || !t->serial || !vka_ok()) return NULL;
     pthread_mutex_lock(&g_tmu);
@@ -1321,6 +1332,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (e) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); return im; }
     vka_fmt f; vka_img *im = NULL; int throttle = 0;
     if (vka_fmt_of(t->d.format, &f)) {
+        astc_bc1(t, &f);
         // (not an image whose pool was finalized: a new pool over the same memory has new content. Shared with a texture of another live pool, the image follows the newest one's)
         for (int i = 0; i < g_nlive && !im; i++) if (t->mem && same_shape(g_live[i], t, &f, 1) && !img_pool_dead(g_live[i]) && !(g_live[i]->base && sparse_gpu(t, &f))) {   // (drawn into at level 0)
             im = g_live[i]; im->refs++;
@@ -1742,6 +1754,7 @@ void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n) { g_nf
 static VkImageView view_of(const treg_ent *e, vka_img *im, int vt_want, int storage) {
     vka_fmt f; const view_t *v = e->has_v ? &e->v : NULL;
     if (!vka_fmt_of(v && v->set_format ? v->format : e->t.d.format, &f)) f = im->f;
+    if (f.astc_bw && im->f.astc_bw) { f.vk = im->f.vk; f.view = f.srgb ? srgb_twin(im->f.vk) : im->f.vk; f.bpb = im->f.bpb; }   // (BC1 or BC3, as the image was made: astc_bc1)
     uint32_t tl = im->base + im->levels, l0 = v && v->set_levels ? v->base_level : 0, nl = v && v->set_levels && v->nlevels ? v->nlevels : tl > l0 ? tl - l0 : 1;
     if (im->vtrack && !storage && l0 < im->vmin) { uint32_t cut = im->vmin - l0; nl = nl > cut ? nl - cut : 1; l0 = im->vmin; }   // a sparse texture: from its wholly mapped levels
     if (l0 < im->base) { uint32_t cut = im->base - l0; nl = nl > cut ? nl - cut : 1; l0 = 0; } else l0 -= im->base;   // texture levels → the image's (a sparse texture's left-out levels)
