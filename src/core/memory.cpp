@@ -510,9 +510,12 @@ struct Memory::Impl {
                 const char* value = std::getenv("EDEN_NX2_NO_REACTIVE");
                 return value != nullptr && value[0] == '1';
             }();
+            // NVN2 direct mode tracks pool pages for CPU writes only: the replay reads them in
+            // place and its GPU writes land in the same pages, so nothing is flushed on a read.
             const bool reactive_flushing =
                 Settings::ReactiveFlushing() &&
-                !(nx2_no_reactive && Settings::CurrentProgramIsSwitch2());
+                !(nx2_no_reactive && Settings::CurrentProgramIsSwitch2()) &&
+                !Core::NvnHook::DirectMode();
             if (!reactive_flushing || !cached) {
                 perm |= Common::MemoryPermission::Read;
             }

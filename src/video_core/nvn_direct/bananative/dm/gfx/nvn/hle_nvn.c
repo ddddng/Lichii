@@ -903,7 +903,8 @@ NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) {
-    if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v;
+    volatile uint32_t *w = (volatile uint32_t *)nvn_direct_writable((uint64_t)(uintptr_t)e->val);   // Lichii: through the backing memory (nvn_tracking.c)
+    if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *w += v; else *w = v;
 #if defined(__ANDROID__)
     mtl_event_cpu(e->val, mode, v);   // (the replay's own order of signals and waits, vka_exec.c OP_WAIT_EVENT)
 #endif
@@ -1054,6 +1055,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     // dotfiles-o72.4 harness: records go to a shadow of the game's command memory (NVN_CMDMEM_ADDR), since the harness restores the pool bytes the real driver wrote
     // there; the shadow spreads the game's addresses (x4) because these records outgrow the NVN2 driver's commands (BindTexture: 24 bytes against 16-20) and the game
     // places each recording right behind the driver's last one
+    nvn_direct_host_written((const uint8_t *)NVN_CMDMEM_ADDR(pl->mem + off), n);   // Lichii: the records are written in place: never write-tracked (nvn_tracking.c)
     cmd_new_segment(CB(c), NVN_CMDMEM_ADDR(pl->mem + off), n);
     CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
 }

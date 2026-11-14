@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 /// The guest's return address of the NVN call this thread runs (its LR). Upstream records the
@@ -19,8 +20,17 @@ static inline uint64_t nvn_caller(void) { return nvn_direct_guest_lr; }
 uint64_t nvn_direct_guest_of(uint64_t host);
 /// The host pointer of a game address (anything at or past the guest address space: unchanged).
 uint64_t nvn_direct_host_of(uint64_t guest);
-/// nvn_direct_memory.map_view (nvn_direct.h).
+/// nvn_direct_memory's map_view, track_pool and track_pages (nvn_direct.h).
 void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped);
+void nvn_direct_track_pool(uint64_t address, uint64_t size, int add);
+void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed);
+/// Where the host writes a value into guest memory at host (an arena pointer or the game's
+/// address): its backing memory, which write tracking never protects. Anything else (a host
+/// segment): unchanged. The value must not cross a page.
+void* nvn_direct_writable(uint64_t host);
+/// The front end writes [mem, mem + size) of a pool in place from now on (command memory): its
+/// pages are never write-tracked (a host write to a tracked page would fault outside the JIT).
+void nvn_direct_host_written(const void* mem, size_t size);
 /// The ticket of the present this thread just made (nvn_window.c: mtl_present) and its window's
 /// present interval, for nvn_direct_present_take.
 void nvn_direct_present_note(uint64_t ticket, uint32_t interval);

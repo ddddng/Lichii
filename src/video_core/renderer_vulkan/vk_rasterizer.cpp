@@ -79,6 +79,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_list_grid.h"
 #include "video_core/nx2_profile.h"
+#include "core/nvn_hook.h"
 #ifdef LICHII_NVN_DIRECT
 #include "video_core/nvn_direct/nvn_direct.h"
 #endif
@@ -2857,6 +2858,10 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
     if (addr == 0 || size == 0) {
         return;
     }
+    if (device.IsNvnDirect()) {
+        Core::NvnHook::OnDirectCpuWrite(addr, size);
+        return;
+    }
     if (True(which & VideoCommon::CacheType::TextureCache)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.WriteMemory(addr, size);
@@ -2938,6 +2943,11 @@ void RasterizerVulkan::InvalidateCachedWrites(
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     DEBUG_ASSERT(addr != 0 || size != 0);
+    if (device.IsNvnDirect()) {
+        // NVN2 direct mode: only the replay's memory pools are tracked (dotfiles-25x.5).
+        Core::NvnHook::OnDirectCpuWrite(addr, size);
+        return false;
+    }
     {
         // The pages the write untracks change their host protection after the lock is dropped:
         // drawing waited for those system calls (~1 µs each, thousands a second at Ocarina of
@@ -2980,6 +2990,12 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
+    if (device.IsNvnDirect()) {
+        for (const auto& [addr, size] : ranges) {
+            Core::NvnHook::OnDirectCpuWrite(addr, size);
+        }
+        return;
+    }
     // Each cache's lock is taken once for all the writes, not once a write (jpkto/Lichii
     // f5edeabdbb): guest CPU write traps hold the buffer cache's for long. The caches are
     // independent (TextureCache::WriteMemory reads and changes only texture state, and the page
@@ -3017,6 +3033,10 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) {
         return;
     }
+    if (device.IsNvnDirect()) {
+        Core::NvnHook::OnDirectCpuWrite(addr, size);
+        return;
+    }
 
     {
         std::scoped_lock lock{texture_cache.mutex};
@@ -3031,6 +3051,10 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) return true;
+    if (device.IsNvnDirect()) {
+        Core::NvnHook::OnDirectCpuWrite(addr, size);
+        return true;
+    }
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
         // WriteMemory downloads GPU-written bytes elsewhere on the written pages, which only the

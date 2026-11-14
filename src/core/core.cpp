@@ -529,7 +529,7 @@ struct System::Impl {
 
         // Make the process created be the application
         kernel.SetApplicationProcess(process->GetHandle());
-        Core::NvnHook::Install(*process->GetHandle());
+        Core::NvnHook::Install(system, *process->GetHandle());
 
         // Set up the rest of the system.
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};

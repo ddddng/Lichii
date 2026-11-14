@@ -74,7 +74,7 @@ namespace Core::NvnHook {
 [[nodiscard]] bool DirectMode();
 
 /// Finds the NVN driver's exports in the application's modules (after they are loaded).
-void Install(Kernel::KProcess& process);
+void Install(Core::System& system, Kernel::KProcess& process);
 
 /// UserConfig::block_entry_hook (null when the hook is off).
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc);
@@ -90,6 +90,11 @@ constexpr u32 HaltedCallSvc = 0x10000;
 /// Direct mode: runs the NVN call that halted the JIT on this host thread, from Svc::Call (the
 /// kernel may wait or switch threads here). args: x0-x7, x0 the result.
 void RunHaltedCall(Core::System& system, std::array<u64, 8>& args);
+
+/// NVN2 direct mode: the guest CPU wrote tracked pool memory at a device address (from
+/// RasterizerVulkan's OnCPUWrite and cache invalidations): the replay's textures over it are
+/// uploaded again (dotfiles-25x.5).
+void OnDirectCpuWrite(u64 device_address, u64 size);
 
 /// The guest unmaps [address, address + size) of a page table (Core::Memory::UnmapRegion): in
 /// direct mode the application's pool memory imported there is given back first.

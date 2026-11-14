@@ -30,7 +30,11 @@
 #include "core/memory.h"
 #include "core/nvn_hook.h"
 #include "core/nvn_trace.h"
+#include "common/alignment.h"
 #include "core/hle/service/nx2_present.h"
+#include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
+#include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/host1x/host1x.h"
 #include "video_core/framebuffer_config.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
@@ -149,6 +153,16 @@ struct State {
     std::array<std::vector<DeviceIntegerFrame>, GuestThreadSlots> device_integer_frames;
     // Direct mode
     bool direct_ready{};                     ///< nvn_direct_init ran
+    Core::System* system{};
+    /// Memory pools as GPU memory (dotfiles-25x.5): by device address, their guest range.
+    struct TrackedPool {
+        u64 address;
+        u64 size;
+    };
+    std::mutex pool_mutex;
+    std::map<DAddr, TrackedPool> pools_by_device;
+    std::map<u64, DAddr> pools_by_address;
+    std::optional<Core::Asid> asid;
     std::vector<std::pair<u64, std::string>> driver_entries; ///< hooked to prove none runs
     std::atomic<u64> driver_entry_calls{};
     std::atomic<u64> halted_calls{};
@@ -540,7 +554,7 @@ u32 DirectSlotOf(State& state, const std::string& name) {
 /// which on a shared mapping makes a second mapping of the same pages; pages the guest has not
 /// mapped stay the reservation's zero pages.
 void* MapPoolView(void* context, u64 address, u64 size, u64* unmapped) {
-    auto& memory = *static_cast<Core::Memory::Memory*>(context);
+    auto& memory = static_cast<State*>(context)->process->GetMemory();
     u8* const view = static_cast<u8*>(mmap(nullptr, size, PROT_READ | PROT_WRITE,
                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
     if (view == MAP_FAILED) {
@@ -586,6 +600,71 @@ void* MapPoolView(void* context, u64 address, u64 size, u64* unmapped) {
     return view;
 }
 
+/// nvn_direct_memory.track_pool: a memory pool is GPU memory, as the driver's nx2:gpu calls
+/// (sub 101) make it: in the Nx2 registry at GPU address == CPU address, and in the SMMU at a
+/// device range of its own, so Lichii's write tracking (cached page counts) covers its pages.
+void TrackPool(void* context, u64 address, u64 size, int add) {
+    State& state = *static_cast<State*>(context);
+    auto& smmu = state.system->Host1x().MemoryManager();
+    auto& registry = Service::Nvidia::Devices::Nx2GpuMemoryRegistry::Get();
+    const u64 device_size = Common::AlignUp(size, 0x20000);
+    std::scoped_lock lock{state.pool_mutex};
+    if (!state.asid) {
+        state.asid = smmu.RegisterProcess(&state.process->GetMemory());
+    }
+    if (add) {
+        const DAddr device = smmu.Allocate(device_size);
+        if (device == 0) {
+            LOG_ERROR(Core, "NVN direct: pool {:#x}+{:#x}: out of SMMU space, its writes are not tracked",
+                      address, size);
+            return;
+        }
+        smmu.Map(device, address, size, *state.asid);
+        registry.Register(address, size);
+        registry.RecordDeviceRange(address, size, device);
+        state.pools_by_device.emplace(device, State::TrackedPool{address, size});
+        state.pools_by_address.emplace(address, device);
+        return;
+    }
+    const auto it = state.pools_by_address.find(address);
+    if (it == state.pools_by_address.end()) {
+        return;
+    }
+    const DAddr device = it->second;
+    state.pools_by_address.erase(it);
+    state.pools_by_device.erase(device);
+    static_cast<void>(registry.UnmapMemory(address, size));
+    smmu.Unmap(device, size);
+    smmu.Free(device, device_size);
+}
+
+/// nvn_direct_memory.track_pages: arms or disarms the write tracking of pool pages (their cached
+/// count in the SMMU; Core::Memory keeps them readable in direct mode).
+void TrackPages(void* context, u64 address, u64 size, int armed) {
+    State& state = *static_cast<State*>(context);
+    DAddr device{};
+    {
+        std::scoped_lock lock{state.pool_mutex};
+        auto it = state.pools_by_address.upper_bound(address);
+        if (it == state.pools_by_address.begin()) {
+            return;
+        }
+        --it;
+        const auto& pool = state.pools_by_device.at(it->second);
+        if (address + size > pool.address + pool.size) {
+            return;
+        }
+        device = it->second + (address - pool.address);
+    }
+    state.system->Host1x().MemoryManager().UpdatePagesCachedCount(device, size, armed ? 1 : -1);
+}
+
+/// nvn_direct_memory.backing: the backing memory of a guest page (never write-protected).
+void* Backing(void* context, u64 address) {
+    State& state = *static_cast<State*>(context);
+    return state.process->GetMemory().GetPointerSilent(address);
+}
+
 /// The guest's x0-x7 and the low halves of v0-v7.
 void ReadArguments(Dynarmic::A64::Jit& jit, std::array<u64, 8>& x, std::array<u64, 8>& v) {
     for (size_t i = 0; i < 8; ++i) {
@@ -621,7 +700,11 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
         std::scoped_lock lock{state.mutex};
         if (!state.direct_ready) {
             auto& page_table = state.process->GetPageTable();
-            const nvn_direct_memory views{.map_view = MapPoolView, .context = &memory};
+            const nvn_direct_memory views{.map_view = MapPoolView,
+                                          .track_pool = TrackPool,
+                                          .track_pages = TrackPages,
+                                          .backing = Backing,
+                                          .context = &state};
             nvn_direct_init(page_table.GetImpl().fastmem_arena,
                             u64{1} << page_table.GetAddressSpaceWidth(), &views);
             state.direct_ready = true;
@@ -674,7 +757,7 @@ bool DirectMode() {
     return state != nullptr && state->direct;
 }
 
-void Install(Kernel::KProcess& process) {
+void Install(Core::System& system, Kernel::KProcess& process) {
     State* const state_pointer = Get();
     if (state_pointer == nullptr) {
         return;
@@ -723,6 +806,7 @@ void Install(Kernel::KProcess& process) {
         address = end;
     }
     state.process = &process;
+    state.system = &system;
 #ifdef LICHII_NVN_DIRECT
     // One launch per process: the direct renderer's state lives as long as the process does.
     state.direct = EnvIsOne("EDEN_NX2_NVN_DIRECT") && !state.bootstrap_entries.empty();
@@ -949,6 +1033,32 @@ void PresentDirect(Core::System& system, State& state) {
 }
 } // namespace
 #endif
+
+void OnDirectCpuWrite(u64 device_address, u64 size) {
+#ifdef LICHII_NVN_DIRECT
+    State* const state = Get();
+    if (state == nullptr || !state->direct) {
+        return;
+    }
+    u64 address{};
+    {
+        std::scoped_lock lock{state->pool_mutex};
+        auto it = state->pools_by_device.upper_bound(device_address);
+        if (it == state->pools_by_device.begin()) {
+            return;
+        }
+        --it;
+        if (device_address - it->first >= it->second.size) {
+            return;
+        }
+        address = it->second.address + (device_address - it->first);
+    }
+    nvn_direct_cpu_written(address, size);
+#else
+    (void)device_address;
+    (void)size;
+#endif
+}
 
 void OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size) {
 #ifdef LICHII_NVN_DIRECT

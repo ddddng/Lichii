@@ -42,6 +42,18 @@ void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped) {
     *unmapped = 0;
     return g_memory.map_view ? g_memory.map_view(g_memory.context, address, size, unmapped) : NULL;
 }
+void nvn_direct_track_pool(uint64_t address, uint64_t size, int add) {
+    if (g_memory.track_pool) g_memory.track_pool(g_memory.context, address, size, add);
+}
+void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed) {
+    if (g_memory.track_pages) g_memory.track_pages(g_memory.context, address, size, armed);
+}
+void* nvn_direct_writable(uint64_t host) {
+    const uint64_t guest = guest_addr(host);
+    if (guest >= g_guest_size || !g_memory.backing) return (void*)(uintptr_t)host_addr(host);
+    void* const backing = g_memory.backing(g_memory.context, guest);
+    return backing ? backing : (void*)(uintptr_t)host_addr(host);
+}
 static inline float F_float(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 static inline double F_double(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
 static inline uint64_t R_float(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }

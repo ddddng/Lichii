@@ -65,11 +65,10 @@ int dm_sdk_ounce(void) { return 1; } // direct mode is for NVN2 (Switch 2) games
 
 // Guest memory. The front end and the replay reach it through host pointers into Lichii's
 // fastmem arena (the dispatch adds the arena's base to the game's addresses); every page they
-// are given is mapped by the guest. Write tracking is Lichii's (dotfiles-25x.5): the replay's
+// are given is mapped by the guest. Write tracking is Lichii's (nvn_tracking.c): the replay's
 // own fault and pre-write hooks are not installed.
 void dm_fault_hook_register(int (*fn)(void* addr, int is_write, void* uc)) { (void)fn; }
 void dm_guest_write_prep_register(void (*fn)(void* addr, size_t len)) { (void)fn; }
-void dm_guest_write_prepare(void* addr, size_t len) { (void)addr; (void)len; }
 uint64_t dm_guest_unmapped(uintptr_t a, size_t n) { (void)a; (void)n; return 0; }
 uint64_t dm_guest_read_mapped(void* dst, uintptr_t a, size_t n) {
     memcpy(dst, (const void*)a, n);
@@ -77,27 +76,3 @@ uint64_t dm_guest_read_mapped(void* dst, uintptr_t a, size_t n) {
 }
 // The placement swap's guest block (vka_mem.c): pools are not placed in Lichii.
 void svc_guest_range(uint8_t** base, size_t* size) { *base = NULL; *size = 0; }
-
-// Upstream's write-protect tracker (nvn_dirty.c, not built): nothing is tracked, no write is seen.
-void nvn_dirty_add_range(const void* mem, size_t size) { (void)mem; (void)size; }
-void nvn_dirty_remove_range(const void* mem) { (void)mem; }
-void nvn_dirty_protect(const void* addr, size_t len) { (void)addr; (void)len; }
-void nvn_dirty_hold(const void* addr, size_t len) { (void)addr; (void)len; }
-void nvn_dirty_unhold(void) {}
-uint64_t nvn_dirty_now(void) { return 0; }
-int nvn_dirty_since(const void* addr, size_t len, uint64_t stamp) { (void)addr; (void)len; (void)stamp; return 0; }
-const void* nvn_dirty_span(const void* addr, size_t len) { (void)addr; (void)len; return NULL; }
-int nvn_dirty_since_span(const void* span, const void* addr, size_t len, uint64_t stamp) {
-    (void)span; (void)addr; (void)len; (void)stamp;
-    return 0;
-}
-int nvn_dirty_bounds_since(const void* span, const void* addr, size_t len, uint64_t stamp, size_t* lo, size_t* hi) {
-    (void)span; (void)addr; (void)len; (void)stamp; (void)lo; (void)hi;
-    return 0;
-}
-void nvn_dirty_stats(uint64_t* faults, uint64_t* preps) { *faults = *preps = 0; }
-void nvn_dirty_mp_stats(uint64_t* calls, uint64_t* pages, uint64_t* ns) { *calls = *pages = *ns = 0; }
-void nvn_dirty_debug(const void* span, const void* addr, size_t len, uint64_t stamp, char* out, size_t n) {
-    (void)span; (void)addr; (void)len; (void)stamp;
-    if (n) out[0] = 0;
-}

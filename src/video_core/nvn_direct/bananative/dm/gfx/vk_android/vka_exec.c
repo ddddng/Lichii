@@ -5,6 +5,7 @@
 // until the shader side lands. Every transfer op is followed by a full memory barrier: correct, not fast
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "nvn_direct_front.h"
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_timestamp.h"
 #include "vka_present_rot.h"
@@ -122,13 +123,13 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
         if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last
             uint64_t back = (uint64_t)((double)(tmax - gq[q++]) * g_sq_ns); uint64_t tk = nvn_timestamp_from_ns(g > back ? g - back : 0), tt = ops[i].type;
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
-            memcpy((void *)(uintptr_t)ops[i].addr, rec, sizeof rec); continue;
+            memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
-        if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)(uintptr_t)ops[i].addr; if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
+        if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
         else {
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
-            memcpy((void *)(uintptr_t)ops[i].addr, rec, sizeof rec);
+            memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec);
         }
     }
     free(ops);
