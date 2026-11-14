@@ -1,10 +1,12 @@
-
-name: Mirror Lichii
+name: Mirror Lichii (branches, tags and releases)
 
 on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
+  push:
+    branches: [sync-lichii]
+    paths: ['.github/workflows/sync-lichii.yml']
 
 permissions:
   contents: write
@@ -16,7 +18,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     steps:
       - name: Install git-filter-repo
@@ -27,7 +29,7 @@ jobs:
           "$RUNNER_TEMP/filter-venv/bin/pip" install --quiet git-filter-repo
           echo "$RUNNER_TEMP/filter-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Clone every upstream branch and tag
+      - name: Clone all upstream branches and tags
         shell: bash
         run: |
           set -euo pipefail
@@ -35,26 +37,20 @@ jobs:
             https://github.com/zortos293/Lichii.git \
             "$RUNNER_TEMP/lichii.git"
 
-      - name: Rename upstream workflow directory across Git history
+      - name: Relocate upstream workflow files throughout history
         shell: bash
         run: |
           set -euo pipefail
-          git -C "$RUNNER_TEMP/lichii.git" filter-repo --force \
+          repo="$RUNNER_TEMP/lichii.git"
+          git -C "$repo" filter-repo --force \
             --path-rename '.github/workflows/:.github/upstream-workflows/'
 
-          if git -C "$RUNNER_TEMP/lichii.git" show-ref \
-            --verify --quiet refs/heads/sync-lichii; then
-            echo '::error::Upstream has a sync-lichii branch. Rename your automation branch first.'
+          if git -C "$repo" show-ref --verify --quiet refs/heads/sync-lichii; then
+            echo '::error::The upstream now has a sync-lichii branch.'
             exit 1
           fi
 
-          if git -C "$RUNNER_TEMP/lichii.git" rev-list --objects --all \
-              | grep -F ' .github/workflows/' ; then
-            echo '::error::An upstream workflow path was not renamed.'
-            exit 1
-          fi
-
-      - name: Sync all branch and tag names to this private repository
+      - name: Push original branch and tag names
         shell: bash
         env:
           PUSH_TOKEN: ${{ github.token }}
@@ -62,23 +58,20 @@ jobs:
           set -euo pipefail
           repo="$RUNNER_TEMP/lichii.git"
           destination="https://github.com/${GITHUB_REPOSITORY}.git"
+          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
 
           mapfile -t refs < <(
             git -C "$repo" for-each-ref --format='%(refname)' \
               refs/heads refs/tags
           )
-
           if (( ${#refs[@]} == 0 )); then
-            echo '::error::No branches or tags found.'
+            echo '::error::No upstream refs found.'
             exit 1
           fi
 
-          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
           refspecs=()
-
           for ref in "${refs[@]}"; do
             refspecs+=("+${ref}:${ref}")
-
             if (( ${#refspecs[@]} >= 80 )); then
               git -C "$repo" \
                 -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
@@ -86,11 +79,153 @@ jobs:
               refspecs=()
             fi
           done
-
           if (( ${#refspecs[@]} > 0 )); then
             git -C "$repo" \
               -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
               push "$destination" "${refspecs[@]}"
           fi
 
-          echo 'Finished syncing all branches and tags.'
+      - name: Mirror all Releases and their downloadable assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: zortos293/Lichii
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          source = os.environ['SOURCE_REPO']
+          destination = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          api_root = 'https://api.github.com/'
+
+          def api_get(endpoint, *, missing_ok=False):
+              request = urllib.request.Request(
+                  api_root + endpoint,
+                  headers={
+                      'Accept': 'application/vnd.github+json',
+                      'Authorization': 'Bearer ' + token,
+                      'User-Agent': 'lichii-private-mirror',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=90) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if missing_ok and error.code == 404:
+                      return None
+                  raise
+
+          def gh(*args):
+              subprocess.run(['gh', *args], check=True)
+
+          page = 1
+          releases = []
+          while True:
+              batch = api_get(f'repos/{source}/releases?per_page=100&page={page}')
+              releases.extend(batch)
+              if len(batch) < 100:
+                  break
+              page += 1
+
+          print(f'Found {len(releases)} upstream releases.', flush=True)
+          for release in reversed(releases):
+              tag = release['tag_name']
+              title = release['name'] or tag
+              notes = release['body'] or ''
+              draft = bool(release['draft'])
+              prerelease = bool(release['prerelease'])
+              encoded_tag = urllib.parse.quote(tag, safe='')
+
+              current = api_get(
+                  f'repos/{destination}/releases/tags/{encoded_tag}',
+                  missing_ok=True,
+              )
+              with tempfile.TemporaryDirectory() as workdir:
+                  notes_file = Path(workdir) / 'release-notes.md'
+                  notes_file.write_text(notes, encoding='utf-8')
+                  opts = [
+                      '--repo', destination,
+                      '--title', title,
+                      '--notes-file', str(notes_file),
+                      '--draft=' + str(draft).lower(),
+                      '--prerelease=' + str(prerelease).lower(),
+                      '--latest=false',
+                  ]
+                  if current is None:
+                      print(f'Creating release {tag}', flush=True)
+                      gh('release', 'create', tag, '--verify-tag', *opts)
+                  elif (
+                      current['name'] != title
+                      or (current['body'] or '') != notes
+                      or current['draft'] != draft
+                      or current['prerelease'] != prerelease
+                  ):
+                      print(f'Updating release {tag}', flush=True)
+                      gh('release', 'edit', tag, *opts)
+                  else:
+                      print(f'Release {tag}: metadata unchanged', flush=True)
+
+                  current = api_get(
+                      f'repos/{destination}/releases/tags/{encoded_tag}'
+                  )
+                  existing = {asset['name']: asset for asset in current['assets']}
+                  for asset in release['assets']:
+                      name = asset['name']
+                      old = existing.get(name)
+                      if old is not None:
+                          same_size = old['size'] == asset['size']
+                          same_digest = (
+                              not old.get('digest')
+                              or not asset.get('digest')
+                              or old['digest'] == asset['digest']
+                          )
+                          if same_size and same_digest:
+                              continue
+
+                      print(f'  Copying asset: {name}', flush=True)
+                      # The upstream repository is public; its Release download
+                      # URL works without an additional credential.
+                      url = asset['browser_download_url']
+                      file_path = Path(workdir) / name
+                      req = urllib.request.Request(
+                          url, headers={'User-Agent': 'lichii-private-mirror'}
+                      )
+                      digest = hashlib.sha256()
+                      size = 0
+                      with urllib.request.urlopen(req, timeout=180) as stream:
+                          with file_path.open('wb') as out:
+                              while True:
+                                  chunk = stream.read(4 * 1024 * 1024)
+                                  if not chunk:
+                                      break
+                                  out.write(chunk)
+                                  digest.update(chunk)
+                                  size += len(chunk)
+                      if size != asset['size']:
+                          raise RuntimeError(f'{tag}/{name}: download size mismatch')
+                      expected = asset.get('digest')
+                      if expected and expected.startswith('sha256:'):
+                          if digest.hexdigest() != expected.removeprefix('sha256:'):
+                              raise RuntimeError(f'{tag}/{name}: SHA-256 mismatch')
+
+                      gh('release', 'upload', tag, str(file_path),
+                         '--repo', destination, '--clobber')
+                      file_path.unlink()
+
+          latest = api_get(f'repos/{source}/releases/latest', missing_ok=True)
+          if latest is not None:
+              print(f'Setting latest Release: {latest["tag_name"]}', flush=True)
+              gh('release', 'edit', latest['tag_name'],
+                 '--repo', destination, '--latest')
+          print('Releases and assets are synchronized.', flush=True)
+          PY
