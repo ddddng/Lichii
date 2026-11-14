@@ -1698,6 +1698,7 @@ static void bindless_init(void) {
         VRED("bindless set (%u textures, %u samplers, %u images): %d", g_ntex_slots, g_nsamp_slots, g_nimg_slots, r); g_set = VK_NULL_HANDLE; return; }
     VLOG("bindless tables: %u textures, %u samplers, %u images (update after bind)", g_ntex_slots, g_nsamp_slots, g_nimg_slots);
 }
+void vka_bindless_init(void) { bindless_init(); }   // (Lichii: before the pipelines made ahead, whose layouts hold the set: vka_pso_start)
 VkDescriptorSet vka_bindless_set(void) { return g_set; }
 VkDescriptorSetLayout vka_bindless_layout(void) { return g_dsl; }
 

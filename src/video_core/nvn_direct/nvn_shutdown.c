@@ -13,12 +13,32 @@
 //   stop, and the pipeline cache is saved a last time. None of the replay's threads uses the
 //   device after that.
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
 #include "nvn_direct.h"
 
 void nvn_direct_present_wake(void); // nvn_present.c
+
+static _Atomic int g_parked;
+
+// The shutdown should reach nvn_direct_park within seconds of the stop: if it does not, a line
+// (and with DM_VK_STALL_STACKS=1 every thread's stack) says where it waits.
+static void* watchdog_main(void* arg) {
+    (void)arg;
+    pthread_setname_np(pthread_self(), "vk-shutdown");
+    for (int i = 0; i < 50; i++) {
+        if (atomic_load(&g_parked)) return NULL;
+        struct timespec ts = {0, 100000000};
+        nanosleep(&ts, NULL);
+    }
+    VRED("shutdown: the device not released 5 s after the stop (Lichii's shutdown waits elsewhere; DM_VK_STALL_STACKS=1 logs every thread's stack)");
+    vka_stall_stacks();
+    return NULL;
+}
 
 void nvn_direct_stop(void) {
     if (vka_stopping()) return;
@@ -26,10 +46,13 @@ void nvn_direct_stop(void) {
     vka_worker_wake();
     nvn_direct_present_wake();
     VLOG("the emulator stops: nothing more is replayed or submitted, every fence reads as done");
+    pthread_t th;
+    if (!pthread_create(&th, NULL, watchdog_main, NULL)) pthread_detach(th);
 }
 
 void nvn_direct_park(void) {
     nvn_direct_stop();
+    atomic_store(&g_parked, 1);
     if (!vka_ok()) return;
     // Bounded: a thread stuck in the driver must not keep the emulator from shutting down. The
     // device's own wait for idle follows (RendererVulkan's destructor).

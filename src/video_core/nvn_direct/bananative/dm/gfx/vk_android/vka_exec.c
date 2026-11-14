@@ -290,7 +290,7 @@ static void part_submit(const void *a) {   // the part ends and goes to the queu
     if (pa.q != UINT32_MAX) qf.write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, pa.q);
     VkResult r = vk.vkEndCommandBuffer(cb);
     if (!r) r = submit_part(pa.queue, cb, 0, &pa.sy);
-    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); }
+    if (r && !vka_stopping()) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); }   // (Lichii: refused after vka_stop)
 }
 static void part_begin(const void *a) {
     part_arg pa; memcpy(&pa, a, sizeof pa); VkCommandBuffer cb = pa.cb;
@@ -360,7 +360,7 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     if (vka_nan_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
     if (r) {
-        static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) VRED("submission %llu: %d (its effects run without the GPU)", (unsigned long long)fence, r);
+        static _Atomic int nred; if (!vka_stopping() && atomic_fetch_add(&nred, 1) < 8) VRED("submission %llu: %d (its effects run without the GPU)", (unsigned long long)fence, r);
         VkSemaphoreSignalInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = V.tl, .value = fence};
         vka_qlock();   // signalled by the host: later submissions may wait for it (with several queues the completion thread does, in fence order: vka_dev.c sub_ex)
         VkResult sr = vka_hung() ? VK_ERROR_DEVICE_LOST : V.multi ? VK_SUCCESS : vk.vkSignalSemaphore(V.dev, &si);

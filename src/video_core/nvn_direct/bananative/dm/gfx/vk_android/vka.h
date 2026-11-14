@@ -145,10 +145,13 @@ uint64_t vka_hang_ns(void);                         // how long a fence may make
 int vka_hung(void);
 // Lichii: the emulator shuts down (dotfiles-25x.18, nvn_direct_stop / nvn_direct_park in nvn_shutdown.c)
 void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
+void vka_stall_stacks(void);                         // vka_dev.c: DM_VK_STALL_STACKS=1: every thread's stack to stderr (lab)
 void vka_stop(void);                                // vka_dev.c: as after a hang nothing more is submitted and every fence reads as done, silently; waits return at once
 int vka_stopping(void);
 void vka_worker_wake(void);                         // vka_worker.c: the game's waits for room in the worker's queue see the stop
 int vka_worker_idle(uint64_t timeout_ns);           // the worker has replayed every job queued (1), or timed out (0)
+void vka_bindless_init(void);                       // vka_tex.c: the bindless set and its layout (every pipeline layout holds it)
+void vka_pso_start(void);                           // vka_pso.c: the pipeline cache opened, the prewarm and the compute pipelines made ahead started
 int vka_pso_park(uint64_t timeout_ns);              // vka_pso.c: no pipeline built from now on, the last save made; 1 = no build was in progress at the end
 int vka_queue_idle(void);                           // vkQueueWaitIdle bounded by the hang time (0 = not idle: hung or timed out)                                 // 1 = a GPU hang was declared (vka_dev.c): nothing more is submitted, waits return at once
 void vka_fence_post(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // effects run by the completion thread when fence completes

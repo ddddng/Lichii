@@ -229,6 +229,7 @@ static int init_once(void) {
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
     if (!V.placed && !V.host_import) VRED("no VK_EXT_map_memory_placed or VK_EXT_external_memory_host: the GPU sees no memory pool");
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
+    vka_pso_start();   // Lichii (dotfiles-25x.16): the pipeline cache, the prewarm and the compute pipelines made ahead from the start, not from the first pipeline
     return 1;
 }
 int vka_init(void) {
@@ -421,7 +422,9 @@ static void stall_stack_sig(int sig) {
     char h[96]; int k = snprintf(h, sizeof h, "[dm] [RED] vk: stall stack: thread %ld %s\n", (long)syscall(SYS_gettid), name); write(2, h, (size_t)k);
     backtrace_symbols_fd(b, n, 2);
 }
-static void stall_stacks(void) {
+void vka_stall_stacks(void);
+static void stall_stacks(void) { vka_stall_stacks(); }
+void vka_stall_stacks(void) {   // (Lichii: also the shutdown watchdog, nvn_shutdown.c)
     if (!VKA_ENV("DM_VK_STALL_STACKS", 0)) return;
     void *warm[2]; backtrace(warm, 2);   // (libgcc loaded outside the handler)
     struct sigaction sa = {0}; sa.sa_handler = stall_stack_sig; sigaction(SIGRTMIN + 7, &sa, NULL);

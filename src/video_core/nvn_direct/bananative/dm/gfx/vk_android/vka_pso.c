@@ -171,7 +171,8 @@ static void pc_open_once(void) {
     pw_start();
     cs_ahead_start();
 }
-static void pc_open(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, pc_open_once); }   // (the prewarm threads it starts call it too: they wait for it)
+static void pc_open(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, pc_open_once); }
+void vka_pso_start(void) { vka_bindless_init(); pc_open(); }   // (Lichii, from vka_init: the layouts made ahead hold the bindless set, so it comes first)   // (the prewarm threads it starts call it too: they wait for it)
 // The cache and the prewarm list to their files. vkGetPipelineCacheData runs without g_mu (the cache is internally synchronized): holding it there kept the replay thread's
 // pipeline lookups waiting for a 17 MB copy once a minute
 static void save_now(void) {
@@ -620,6 +621,7 @@ static opt_job *g_opt_head, **g_opt_tail = &g_opt_head; static pthread_mutex_t g
 static uint64_t g_opt_waiting;
 static void *opt_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-psopt");
+    setpriority(PRIO_PROCESS, 0, 10);   // Lichii (dotfiles-25x.16): under the game's threads and the asynchronous ones (the linked pipeline already draws)
     for (;;) {
         pause_point();
         pthread_mutex_lock(&g_opt_mu);
@@ -879,14 +881,14 @@ static void busy_wait(gval *g) {
     while (g->busy) pthread_cond_wait(&g_busy_cv, &g_mu);
     atomic_fetch_add(&g_pw_wait_ns, now_ns() - t0);
 }
-// Lichii (dotfiles-25x.16): a pipeline the frame path would have to compile is made on the asynchronous threads (DM_VK_ASYNC_PSO, default 2; 0 = on the frame path as
+// Lichii (dotfiles-25x.16): a pipeline the frame path would have to compile is made on the asynchronous threads (DM_VK_ASYNC_PSO, default 4; 0 = on the frame path as
 // before), and its draws are skipped until it is there: a scene's new objects show a frame or a few late instead of the frame stopping for each compile (a cold cache: 138
 // builds over 50 ms on the frame path in one boot and race, frames up to 8.7 s, ux-cold-1). What stays on the frame path is what costs no compile: the pipeline cache's
 // pipeline (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) and the link of graphics pipeline libraries all made before (t_lib_peek). A key another thread is
 // making (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify)
 enum { MK_FRAME, MK_PREWARM, MK_ASYNC };
-static int async_threads(void) { static int n = -1; if (n < 0) { n = VKA_ENV("DM_VK_ASYNC_PSO", 2); if (n > 8) n = 8; if (n < 0) n = 0; } return n; }
-typedef struct async_job { struct async_job *next; gval *g; gkey_full fk; size_t len; vka_layout lay; } async_job;
+static int async_threads(void) { static int n = -1; if (n < 0) { n = VKA_ENV("DM_VK_ASYNC_PSO", 4); if (n > 8) n = 8; if (n < 0) n = 0; } return n; }
+typedef struct async_job { struct async_job *next; gval *g; gkey_full fk; size_t len; vka_layout lay; uint64_t queued; } async_job;
 static async_job *g_as_head, **g_as_tail = &g_as_head; static pthread_mutex_t g_as_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_as_cv = PTHREAD_COND_INITIALIZER;
 static void async_queue(gval *g, const gkey_full *fk, size_t len, const vka_layout *lay);
 // The cache's pipeline at once (a fraction of a millisecond), or VK_NULL_HANDLE: the driver would have to compile (frame path; its time is the frame's)
@@ -951,8 +953,9 @@ static void *async_main(void *a) {
         pthread_mutex_unlock(&g_as_mu);
         uint64_t t0 = now_ns();
         gfx_make(j->g, &j->fk, j->len, j->fk.sh, &j->lay, &j->fk.k, MK_ASYNC);
-        uint64_t d = now_ns() - t0; atomic_fetch_add(&g_async_made, 1); atomic_fetch_add(&g_async_ns, d);
+        uint64_t t1 = now_ns(), d = t1 - t0; atomic_fetch_add(&g_async_made, 1); atomic_fetch_add(&g_async_ns, d);
         vka_pipeline_notify(1);
+        if (t1 - j->queued > 1000000000ull) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 50) VLOG("pipeline made asynchronously %.1f s after its first draw (%.0f ms making it): its draws were skipped meanwhile", (t1 - j->queued) / 1e9, d / 1e6); }
         free(j);
     }
     return NULL;
@@ -967,7 +970,7 @@ static void async_queue(gval *g, const gkey_full *fk, size_t len, const vka_layo
     pthread_once(&once, async_start);
     const int started = g_as_threads;
     async_job *j = calloc(1, sizeof *j);
-    if (j) { j->g = g; memcpy(&j->fk, fk, len); j->len = len; j->lay = *lay; }
+    if (j) { j->g = g; memcpy(&j->fk, fk, len); j->len = len; j->lay = *lay; j->queued = now_ns(); }
     if (!j || !started) {   // no thread: made here, as before
         free(j); gfx_make(g, fk, len, fk->sh, lay, &fk->k, MK_ASYNC); return;
     }
@@ -1058,8 +1061,8 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
 }
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; return cs_obtain(cs, lay, 0, &made); }
 
-// Lichii (dotfiles-25x.16): every compute program of the game's shader library made into its pipeline ahead, from the first pipeline on, on DM_VK_CS_AHEAD background
-// threads (default 2, nice 10; 0 = off). Its pipeline depends on the program alone (its layout is the program's), so the library's key list is the whole list; the frame
+// Lichii (dotfiles-25x.16): every compute program of the game's shader library made into its pipeline ahead, from the device's start on, on DM_VK_CS_AHEAD background
+// threads (default 4, nice 10; 0 = off). Its pipeline depends on the program alone (its layout is the program's), so the library's key list is the whole list; the frame
 // path compiled them on a miss (38 over 50 ms, 8.3 s in a cold boot and race: ux-cold-1). A dispatch is not skipped as a draw is (what it writes may be read as
 // indirect arguments): one whose pipeline a thread here is making waits for it (busy_wait), one not reached yet is compiled on the frame path as before
 static uint64_t *g_ca_keys; static unsigned g_ca_n; static _Atomic uint32_t g_ca_next, g_ca_done, g_ca_made; static int g_ca_threads; static uint64_t g_ca_t0;
@@ -1083,7 +1086,7 @@ static void *cs_ahead_main(void *a) {
     return NULL;
 }
 static void cs_ahead_start(void) {
-    int nt = VKA_ENV("DM_VK_CS_AHEAD", 2);
+    int nt = VKA_ENV("DM_VK_CS_AHEAD", 4);
     if (nt <= 0 || !(g_ca_n = vka_shlib_compute_keys(&g_ca_keys))) return;
     if (nt > 4) nt = 4;
     g_ca_t0 = now_ns();
