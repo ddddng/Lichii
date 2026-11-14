@@ -971,6 +971,41 @@ void vka_draw_prof(char *b, size_t n, double draws) {
     memset(g_ps, 0, sizeof g_ps);
     memset(g_pt, 0, sizeof g_pt);
 }
+// Checkpoints (lab, dotfiles-25x.15; the device needs VK_NV_device_diagnostic_checkpoints, which Lichii enables in direct mode with EDEN_NX2_NVN_CHECKPOINTS=1): every draw
+// and dispatch is preceded by a checkpoint whose marker is its number; at a GPU hang (vka_dev.c hang_declare) each queue's last checkpoints and the draws they mark are
+// logged, to find the one that never finishes. Through the encoder thread when it records (vkCmdSetCheckpointNV in order with the draw calls)
+enum { NCK = 16384 };
+static struct { uint64_t n, frame, keys[VKA_NSTAGE]; int64_t count, instances; uint64_t ind, mdi; int disp; } g_ck[NCK];
+static uint64_t g_ckn;
+typedef struct { VkCommandBuffer cb; uint64_t marker; } ckpt_arg;
+static void ckpt_call(const void *a) { const ckpt_arg *c = a; vk.vkCmdSetCheckpointNV(c->cb, (const void *)(uintptr_t)c->marker); }
+static void checkpoint(vka_shader *const *sh, int disp, int64_t count, int64_t instances, uint64_t ind, uint64_t mdi) {
+    if (!vk.vkCmdSetCheckpointNV) return;
+    uint64_t vka_frame(void); uint64_t n = ++g_ckn; typeof(g_ck[0]) *e = &g_ck[n % NCK];
+    e->n = n; e->frame = vka_frame(); e->disp = disp; e->count = count; e->instances = instances; e->ind = ind; e->mdi = mdi;
+    for (int i = 0; i < VKA_NSTAGE; i++) e->keys[i] = sh[i] ? sh[i]->key : 0;
+    ckpt_arg a = {g_cb, n};
+    if (!vka_enc_call(ckpt_call, &a, sizeof a)) ckpt_call(&a);
+}
+static void checkpoint_queue(VkQueue q, const char *name) {
+    uint32_t n = 0; vk.vkGetQueueCheckpointDataNV(q, &n, NULL);
+    VkCheckpointDataNV cd[16]; for (uint32_t i = 0; i < 16; i++) cd[i] = (VkCheckpointDataNV){VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+    if (n > 16) n = 16;
+    vk.vkGetQueueCheckpointDataNV(q, &n, cd);
+    for (uint32_t i = 0; i < n; i++) { uint64_t m = (uint64_t)(uintptr_t)cd[i].pCheckpointMarker; const typeof(g_ck[0]) *e = &g_ck[m % NCK];
+        if (e->n != m) { VRED("GPU hang: %s checkpoint %llu at stage %#x (no longer in the ring of %d, last made %llu)", name, (unsigned long long)m, cd[i].stage, NCK, (unsigned long long)g_ckn); continue; }
+        VRED("GPU hang: %s checkpoint %llu at stage %#x (of %llu made): %s frame %llu, count %lld instances %lld, indirect %#llx count at %#llx; shaders vs %016llx fs %016llx gs %016llx tcs %016llx tes %016llx cs %016llx task %016llx mesh %016llx",
+             name, (unsigned long long)m, cd[i].stage, (unsigned long long)g_ckn, e->disp ? "dispatch" : "draw", (unsigned long long)e->frame, (long long)e->count, (long long)e->instances,
+             (unsigned long long)e->ind, (unsigned long long)e->mdi, (unsigned long long)e->keys[0], (unsigned long long)e->keys[1], (unsigned long long)e->keys[2], (unsigned long long)e->keys[3],
+             (unsigned long long)e->keys[4], (unsigned long long)e->keys[5], (unsigned long long)e->keys[6], (unsigned long long)e->keys[7]); }
+}
+void vka_checkpoint_report(void) {
+    if (!vk.vkGetQueueCheckpointDataNV) return;
+    vka_qlock();
+    if (V.multi) for (int i = 0; i < V.nq - 1; i++) { char nm[16]; snprintf(nm, sizeof nm, "queue %d", i); checkpoint_queue(V.qs[i], nm); }
+    checkpoint_queue(V.q, "host queue");
+    vka_qunlock();
+}
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!d->inited) vka_dstate_reset(d);
@@ -1188,6 +1223,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     DY.valid = 1;
 
     PT(7);
+    checkpoint(sh, 0, dw ? dw->count : di->count, dw ? dw->instances : di->instances, ind, mdi);
     // The draw
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
     if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
@@ -1288,6 +1324,7 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
                  sh[5]->e->local[0], sh[5]->e->local[1], sh[5]->e->local[2], sh[5]->e->shared, sh[5]->e->flags, skip ? " SKIPPED" : "");
     if (skip) { vka_barrier(g_cb); g_dispatches++; return; }
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    checkpoint(sh, 1, (int64_t)dp->x * dp->y * dp->z, 1, dp->ind, 0);
     if (dp->ind) vk.vkCmdDispatchIndirect(g_cb, ib, io);
     else if (dp->x > 0 && dp->y > 0 && dp->z > 0) {
         if (sb && (uint64_t)dp->x * dp->y * dp->z > ns) spill_dispatch((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, ns);

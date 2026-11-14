@@ -361,6 +361,7 @@ static void hang_declare(uint64_t want, uint64_t at, double s, const char *what)
     VRED("GPU hang: %s; fence %llu not reached in %.1f s (the timeline at %llu, %llu handed to the queue, %llu reserved): nothing more is submitted, every fence reads as done",
          what, (unsigned long long)want, s, (unsigned long long)at, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_fence_last());
     vka_exec_hang_report(at + 1);
+    vka_checkpoint_report();
     if (!VKA_ENV("DM_VK_HANG_EXIT", 1)) { VRED("GPU hang: DM_VK_HANG_EXIT=0, the game runs on without the GPU"); return; }
     VRED("GPU hang: the host exits (DM_VK_HANG_EXIT=0 runs on without the GPU)");
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
