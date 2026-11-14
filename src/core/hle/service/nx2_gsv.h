@@ -85,6 +85,7 @@
 #include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_movie_clock.h"
 #include "core/hle/service/nx2_video_input_queue.h"
+#include "core/hle/service/nx2_present.h"
 #include "core/hle/service/nx2_present_pacer.h"
 #include "core/hle/service/nx2_video_ready.h"
 #include "core/hle/service/sm/sm.h"
@@ -1898,16 +1899,6 @@ inline void Nx2RelayoutDecoderImage(Core::System& system, u64 address,
 // shapes read from the SDK: TIPC 1 -> u32 < 0x400, TIPC 3 -> u32 < 8, TIPC 11/31(u32) and
 // 32(handle, u32) -> one handle at word 3 then the result. Handles returned here are events (a
 // guess); everything else is auto-stubbed through the nx2: prefix.
-/// Rate of the nx2:vi2 vsync event the game starts frames on: Settings frame_rate_limit, or
-/// EDEN_NX2_VSYNC_HZ=<rate> for experiments.
-inline u32 Nx2VsyncRateHz() {
-    static const long long forced = [] {
-        const char* text = std::getenv("EDEN_NX2_VSYNC_HZ");
-        return text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 0LL;
-    }();
-    return forced != 0 ? static_cast<u32>(forced)
-                       : (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
-}
 
 class INx2Vi2Session final : public ServiceFramework<INx2Vi2Session> {
 public:
@@ -2003,20 +1994,10 @@ private:
     void PresentClientBuffer(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
-        if (Kernel::Nx2ThreadStats::g_enabled) {
-            Kernel::Nx2ThreadStats::OnPresent(&ctx.GetThread());
-        }
         if (Common::DkbFrameTrace::Enabled()) {
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
-        const u64 present = Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (Core::g_nx2_present_time_services.load(std::memory_order_relaxed) != 0) {
-            const u64 present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now().time_since_epoch())
-                                       .count();
-            Core::g_nx2_present_times_ns[present % Core::g_nx2_present_times_ns.size()].store(
-                present_ns, std::memory_order_relaxed);
-        }
+        const u64 present = m_present.Count(ctx.GetThread());
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -2081,7 +2062,7 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24], w[7]);
         const auto composited = std::chrono::steady_clock::now();
-        PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
+        m_present.PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess(), m_presents);
         const auto paced = std::chrono::steady_clock::now();
         Core::NvnHook::OnPresent(present);
         if (const u32 recorder = w[18] & 0xf; recorder != 0) {
@@ -2097,7 +2078,7 @@ private:
             const auto ms = [](auto duration) {
                 return std::chrono::duration<double, std::milli>(duration).count();
             };
-            if (m_frame_trace.rate.Ready(paced)) {
+            if (m_present.frame_trace.rate.Ready(paced)) {
                 LOG_INFO(Service,
                          "DKB frame present={} word12={:#x} requested_interval={} "
                          "requested_hz={} effective_interval={} effective_hz={} forced_interval={} "
@@ -2106,19 +2087,22 @@ private:
                          "composite_wall_ms={:.3f} target_ms={:.3f} sleep_requested_ms={:.3f} "
                          "sleep_actual_wall_ms={:.3f} pace_wall_ms={:.3f} deadline_reset={}",
                          m_presents, w[12], w[12] >> 16, w[12] & 0xffff,
-                         m_frame_trace.interval, m_frame_trace.refresh, m_frame_trace.forced,
+                         m_present.frame_trace.interval, m_present.frame_trace.refresh,
+                         m_present.frame_trace.forced,
                          Settings::values.use_speed_limit.GetValue(), Settings::SpeedLimit(),
-                         m_frame_trace.switches, m_frame_trace.switch_from,
-                         m_frame_trace.switch_to,
-                         m_frame_trace.last_present == std::chrono::steady_clock::time_point{}
-                             ? -1.0 : ms(entered - m_frame_trace.last_present),
+                         m_present.frame_trace.switches, m_present.frame_trace.switch_from,
+                         m_present.frame_trace.switch_to,
+                         m_present.frame_trace.last_present ==
+                                 std::chrono::steady_clock::time_point{}
+                             ? -1.0
+                             : ms(entered - m_present.frame_trace.last_present),
                          ms(paced - entered), ms(waited - entered), ms(composited - waited),
-                         m_frame_trace.target_ms, m_frame_trace.sleep_requested_ms,
-                         m_frame_trace.sleep_actual_ms, ms(paced - composited),
-                         m_frame_trace.deadline_reset);
-                m_frame_trace.switches = 0;
+                         m_present.frame_trace.target_ms, m_present.frame_trace.sleep_requested_ms,
+                         m_present.frame_trace.sleep_actual_ms, ms(paced - composited),
+                         m_present.frame_trace.deadline_reset);
+                m_present.frame_trace.switches = 0;
             }
-            m_frame_trace.last_present = entered;
+            m_present.frame_trace.last_present = entered;
         }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
         // game is blocked here while Eden's GPU thread catches up (fence) and composites.
@@ -2176,10 +2160,11 @@ private:
     u32 m_previous_fence_value{};
 
     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
-    // present faster than that. Every slot is reported free here: hold each present until the
-    // next vblank instead (title 4 ran at up to 160 fps, its timing and audio with it).
-    Nx2PresentPacer m_present_pacer;
-    u32 m_swap_word{};
+    // present faster than that. Every slot is reported free here: the bookkeeping holds each
+    // present until the next vblank instead (title 4 ran at up to 160 fps, its timing and audio
+    // with it), and counts, captures and limits it as direct mode's presents.
+    Nx2PresentBookkeeping m_present{system};
+
 
     Nx2FrameInterval::Controller m_frame_interval;
     std::optional<u32> m_game_frame_interval; ///< The game's value while Eden owns the interval
@@ -2248,15 +2233,6 @@ private:
         }
     }
 
-    struct FrameTrace {
-        Common::DkbFrameTrace::RateLimit rate;
-        std::chrono::steady_clock::time_point last_present{};
-        std::optional<u32> previous_word;
-        u64 switches{};
-        u32 switch_from{}, switch_to{}, interval{}, refresh{}, forced{};
-        double target_ms{}, sleep_requested_ms{}, sleep_actual_ms{};
-        bool deadline_reset{};
-    } m_frame_trace;
 
     /// EDEN_NX2_PRESENT_FENCE_TRACE: a present's fence from the present's entry until the GPU
     /// thread reaches it. The guest action that notes it keeps it alive.
@@ -2383,108 +2359,6 @@ private:
         trace = {.pending = std::move(trace.pending)};
     }
 
-    /**
-     * Holds this present until the next vblank its word asks for, or for longer when an FPS limit
-     * (the setting, or EDEN_NX2_FPS_LIMIT) is below that rate.
-     *
-     * Fire Emblem: Fortune's Weave sends 0x1003c during its boot logos and 0x2003c (two vblanks
-     * per frame, 30 fps) after; paced at every vblank it ran at double speed.
-     * EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
-     *
-     * @param timing  Present word 12: (swap interval << 16) | refresh rate.
-     * @param process Owning process, for the Mario Kart World dynamic FPS case; may be null.
-     */
-    void PaceToVblank(u32 timing, const Kernel::KProcess* process) {
-        const bool trace = Common::DkbFrameTrace::Enabled();
-        if (trace) {
-            if (m_frame_trace.previous_word && *m_frame_trace.previous_word != timing) {
-                ++m_frame_trace.switches;
-                m_frame_trace.switch_from = *m_frame_trace.previous_word;
-                m_frame_trace.switch_to = timing;
-            }
-            m_frame_trace.previous_word = timing;
-            m_frame_trace.target_ms = 0;
-            m_frame_trace.sleep_requested_ms = 0;
-            m_frame_trace.sleep_actual_ms = 0;
-            m_frame_trace.deadline_reset = false;
-        }
-        static const u32 forced_interval = [] {
-            const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
-            return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
-        }();
-        const bool mkw_dynamic =
-            process != nullptr && process->GetProgramId() == Settings::MarioKartWorldProgramId &&
-            process->IsMkwDynamicFpsPatchApplied();
-        u32 swap_interval = std::clamp<u32>(timing >> 16, 1, 4);
-        if (mkw_dynamic) {
-            swap_interval = 1;
-        }
-        if (forced_interval != 0) {
-            swap_interval = forced_interval;
-        }
-        const u32 refresh_rate = (timing & 0xffff) >= 30 && (timing & 0xffff) <= 240 ? timing & 0xffff : 60;
-        if (trace) {
-            m_frame_trace.interval = swap_interval;
-            m_frame_trace.refresh = refresh_rate;
-            m_frame_trace.forced = forced_interval;
-        }
-        static const u32 forced_fps_limit = [] {
-            const char* value = std::getenv("EDEN_NX2_FPS_LIMIT");
-            return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
-        }();
-        const u32 fps_limit =
-            forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
-        // With a frame rate limit other than 60 Hz the vsync event already paces the game; holding
-        // its swap interval here as well kept it at 60 fps (interval 2 of a 120 Hz event). Only an
-        // explicit FPS limit still applies then.
-        const bool timer_paced = Nx2VsyncRateHz() != 60;
-        const bool speed_limited = !timer_paced && Settings::values.use_speed_limit.GetValue() &&
-                                   Settings::SpeedLimit() != 0;
-        if (!speed_limited && fps_limit == 0) {
-            Tegra::g_nx2_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
-            return;
-        }
-        if (timing != std::exchange(m_swap_word, timing)) {
-            LOG_INFO(Service,
-                     "nx2:vi2 present #{} swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
-                     m_presents, swap_interval, refresh_rate, fps_limit, timing);
-        }
-        const auto vblank_interval =
-            timer_paced ? std::chrono::nanoseconds{0}
-                        : std::chrono::nanoseconds{100'000'000'000LL * swap_interval /
-                                                   refresh_rate /
-                                                   (speed_limited ? Settings::SpeedLimit() : 100)};
-        const auto interval = PacedInterval(vblank_interval, fps_limit);
-        Tegra::g_nx2_guest_frame_interval_ns.store(
-            static_cast<u64>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(interval).count()),
-            std::memory_order_relaxed);
-        if (trace) {
-            m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const auto pacing = m_present_pacer.Advance(now, interval);
-        if (trace) {
-            m_frame_trace.deadline_reset = pacing.reset;
-        }
-        if (now < pacing.deadline) {
-            // Sleep this service thread in the guest kernel. It runs on guest core 3, and a host
-            // sleep held that core for the whole wait: game threads scheduled there ran only
-            // between presents (Fortune's Weave's loader read one RomFS block per frame).
-            const auto wait =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(pacing.deadline - now);
-            const auto sleep_start = trace ? std::chrono::steady_clock::now()
-                                           : std::chrono::steady_clock::time_point{};
-            static_cast<void>(Kernel::GetCurrentThread(kernel).Sleep(
-                kernel, kernel.HardwareTimer().GetTick() + wait.count() + 2));
-            if (trace) {
-                m_frame_trace.sleep_requested_ms =
-                    std::chrono::duration<double, std::milli>(wait).count();
-                m_frame_trace.sleep_actual_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - sleep_start).count();
-            }
-        }
-    }
 
     /// Waits until the fence is reached. With `unless_gpu_waits`, gives up after a few ms once a
     /// GPU channel was seen suspended on a semaphore (it may be one this thread releases later).
@@ -2682,50 +2556,10 @@ private:
             fences.push_back({static_cast<s32>(fence_id), fence_value});
         }
         system.GPU().RequestComposite(std::move(layers), std::move(fences));
-        CaptureFrame();
         DumpRanges();
-        system.SpeedLimiter().DoSpeedLimiting(system.CoreTiming().GetGlobalTimeUs());
-        system.GetPerfStats().EndSystemFrame();
-        system.GetPerfStats().BeginSystemFrame();
+        m_present.Finish(m_presents);
     }
 
-    // EDEN_NX2_FRAME_CAPTURE=<dir>: every 120th present, save what the renderer shows as
-    // nx2-frame-<n>.tga in <dir> (lets hidden test runs check the output; idea from changes.patch).
-    void CaptureFrame() {
-        static const char* const directory = std::getenv("EDEN_NX2_FRAME_CAPTURE");
-        static const u64 every = [] {
-            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_EVERY");
-            return value != nullptr ? (std::max)(u64{1}, static_cast<u64>(std::strtoull(value, nullptr, 10))) : u64{120};
-        }();
-        if (directory == nullptr || (m_presents % every) != 1 % every || m_capture_pending->exchange(true)) {
-            return;
-        }
-        const auto layout = Layout::DefaultFrameLayout(1280, 720);
-        auto pixels = std::make_shared<std::vector<u8>>(layout.width * layout.height * 4);
-        const std::string path =
-            fmt::format("{}/nx2-frame-{:05}.tga", directory, m_presents);
-        auto pending = m_capture_pending; // the screenshot callback can outlive the session
-        system.GPU().Renderer().RequestScreenshot(
-            pixels->data(),
-            [pixels, layout, path, pending](bool invert_y) {
-                std::array<u8, 18> header{};
-                header[2] = 2; // uncompressed true colour
-                header[12] = static_cast<u8>(layout.width);
-                header[13] = static_cast<u8>(layout.width >> 8);
-                header[14] = static_cast<u8>(layout.height);
-                header[15] = static_cast<u8>(layout.height >> 8);
-                header[16] = 32;
-                // Descriptor bit 5: rows top to bottom. invert_y means the data is bottom-up.
-                header[17] = invert_y ? 0x08 : 0x28;
-                if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
-                    std::fwrite(header.data(), 1, header.size(), file);
-                    std::fwrite(pixels->data(), 1, pixels->size(), file);
-                    std::fclose(file);
-                }
-                pending->store(false);
-            },
-            layout);
-    }
 
     // EDEN_NX2_DUMP=<present>:<hex address>:<hex size>[,<hex address>:<hex size>...]: at that
     // present, flush those GPU ranges back from the host GPU and save their bytes as
@@ -3120,7 +2954,6 @@ private:
     u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
     u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white
     std::atomic<bool> m_told_hdr{};   // the last HDR status answer was HDR
-    std::shared_ptr<std::atomic<bool>> m_capture_pending = std::make_shared<std::atomic<bool>>(false);
 };
 
 // True the first time a Switch 2 video command is seen, so each one is logged once in full and new
