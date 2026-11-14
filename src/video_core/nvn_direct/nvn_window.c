@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // NVN windows in direct mode: what upstream's window block of hle_nvn.c did (left out there),
-// without its pacing, frame statistics and present thread. A present only counts here;
-// Lichii's hook does the present's bookkeeping and pacing (core/nvn_hook.cpp) and, once the
-// replay presents through Lichii (dotfiles-25x.7), hands it the image. The window and sync
-// layouts are the front end's (nvn_obj.h).
+// without its pacing, frame statistics and present thread. A present hands the image to the
+// replay's present queue (nvn_present.c); Lichii's hook shows it and does the present's
+// bookkeeping and pacing (core/nvn_hook.cpp). The window and sync layouts are the front end's
+// (nvn_obj.h).
 
 #include <stdatomic.h>
 #include <string.h>
@@ -14,6 +14,7 @@
 #include "nvn_protos.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "nvn_direct_front.h"
 
 typedef struct { const char* name; void* fn; } nvn_impl;
 // As hle_nvn.c's NVN(): an implementation with its signature checked against the prototype,
@@ -99,8 +100,15 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue* q, NVNwindow
                ? (NVNqueueAcquireTextureResult)0
                : (NVNqueueAcquireTextureResult)1;
 }
+// The image goes to the replay's present queue (mtl_present: after every submission before it);
+// Lichii's present on this thread then shows it (nvn_direct_present_take, core/nvn_hook.cpp).
 NVN(nvnQueuePresentTexture, void, NVNqueue* q, NVNwindow* w, int idx) {
-    (void)q; (void)idx;
-    ((win_t*)w)->presents++;
+    (void)q;
+    win_t* o = (win_t*)w;
+    o->presents++;
     atomic_fetch_add(&g_frame, 1);
+    if (idx < 0 || idx >= o->ntex || !o->tex[idx]) return;
+    const int interval = o->interval > 0 ? o->interval : 1;
+    const int has_crop = o->crop[2] > 0 && o->crop[3] > 0;
+    nvn_direct_present_note(mtl_present(CTX(o->tex[idx]), interval / 60.0, has_crop ? o->crop : NULL), (uint32_t)interval);
 }

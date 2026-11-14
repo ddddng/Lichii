@@ -21,3 +21,6 @@ uint64_t nvn_direct_guest_of(uint64_t host);
 uint64_t nvn_direct_host_of(uint64_t guest);
 /// nvn_direct_memory.map_view (nvn_direct.h).
 void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped);
+/// The ticket of the present this thread just made (nvn_window.c: mtl_present) and its window's
+/// present interval, for nvn_direct_present_take.
+void nvn_direct_present_note(uint64_t ticket, uint32_t interval);

@@ -30,6 +30,8 @@
 #include "core/memory.h"
 #include "core/nvn_hook.h"
 #include "core/nvn_trace.h"
+#include "core/hle/service/nx2_present.h"
+#include "video_core/framebuffer_config.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
 #include "video_core/nvn_header_count.h"
@@ -150,7 +152,8 @@ struct State {
     std::vector<std::pair<u64, std::string>> driver_entries; ///< hooked to prove none runs
     std::atomic<u64> driver_entry_calls{};
     std::atomic<u64> halted_calls{};
-    std::chrono::steady_clock::time_point last_present{};
+    std::optional<Service::Nx2PresentBookkeeping> present; ///< direct mode's presents
+    u64 presents{};                                         ///< direct mode's presents so far
 
     Kernel::KProcess* process{};
     u64 synthetic_base{};
@@ -896,6 +899,57 @@ bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
     return false;
 }
 
+#ifdef LICHII_NVN_DIRECT
+namespace {
+/// Direct mode's present (nvnQueuePresentTexture, dotfiles-25x.7): the replay's image goes to
+/// Lichii's presenter as a layer whose address names the frame (AccelerateDisplay finds it), and
+/// the present's bookkeeping is nx2:vi2's (Service::Nx2PresentBookkeeping): counts, capture,
+/// speed limiter, perf stats, pacing to the vblank.
+void PresentDirect(Core::System& system, State& state) {
+    if (!state.present) {
+        state.present.emplace(system);
+    }
+    auto& present = *state.present;
+    const u64 own = ++state.presents;
+    const u64 number = present.Count(Kernel::GetCurrentThread(system.Kernel()));
+    nvn_direct_frame frame{};
+    const bool shown = nvn_direct_present_take(&frame) != 0;
+    if (own <= 4 || own % 600 == 0) {
+        LOG_INFO(Core, "NVN direct: present #{} ({}x{}, {})", own, frame.width, frame.height,
+                 shown ? "shown" : "nothing to show");
+    }
+    if (shown) {
+        // The game's present waits for the previous frame's composite (as many images as the
+        // window has are in flight between the replay and Lichii's presenter).
+        system.GPU().WaitForComposite();
+        u32 crop_width = frame.crop[2] > 0 ? static_cast<u32>(frame.crop[2]) : frame.width;
+        u32 crop_height = frame.crop[3] > 0 ? static_cast<u32>(frame.crop[3]) : frame.height;
+        if (frame.crop[2] <= 0 && !Settings::IsDockedMode()) {
+            // As nx2:vi2: a handheld frame is the top-left 1920x1080 of the image.
+            crop_width = (std::min)(crop_width, 1920U);
+            crop_height = (std::min)(crop_height, 1080U);
+        }
+        std::vector<Tegra::FramebufferConfig> layers{Tegra::FramebufferConfig{
+            .address = NVN_DIRECT_FRAME_TAG | frame.id,
+            .width = frame.width,
+            .height = frame.height,
+            .stride = frame.width,
+            .pixel_format = Service::android::PixelFormat::Rgba8888,
+            .transform_flags = Service::android::BufferTransformFlags::Unset,
+            .crop_rect = {frame.crop[0], frame.crop[1],
+                          frame.crop[0] + static_cast<int>(crop_width),
+                          frame.crop[1] + static_cast<int>(crop_height)},
+            .blending = Tegra::BlendMode::Opaque,
+        }};
+        system.GPU().RequestComposite(std::move(layers), {});
+    }
+    present.Finish(own);
+    present.PaceToVblank((frame.interval << 16) | 60, system.ApplicationProcess(), own);
+    OnPresent(number);
+}
+} // namespace
+#endif
+
 void OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size) {
 #ifdef LICHII_NVN_DIRECT
     const State* const state = Get();
@@ -927,26 +981,7 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     if (std::string_view{nvn_direct_name(target.front)} != "nvnQueuePresentTexture") {
         return;
     }
-    // The present's bookkeeping, as nx2:vi2's PresentClientBuffer does it for the driver's
-    // presents, and pacing to 60 Hz with a kernel sleep (the null backend shows nothing yet).
-    const u64 present = Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (present <= 4 || present % 600 == 0) {
-        LOG_INFO(Core, "NVN direct: present #{}", present);
-    }
-    auto& thread = Kernel::GetCurrentThread(system.Kernel());
-    if (Kernel::Nx2ThreadStats::g_enabled) {
-        Kernel::Nx2ThreadStats::OnPresent(&thread);
-    }
-    OnPresent(present);
-    constexpr auto Period = std::chrono::nanoseconds{16'666'667};
-    const auto now = std::chrono::steady_clock::now();
-    const auto due = state.last_present + Period;
-    if (now < due) {
-        Kernel::Svc::SleepThread(system, (due - now).count());
-        state.last_present = due;
-    } else {
-        state.last_present = now;
-    }
+    PresentDirect(system, state);
 #else
     (void)system;
     (void)args;

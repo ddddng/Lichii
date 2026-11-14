@@ -101,15 +101,3 @@ void nvn_dirty_debug(const void* span, const void* addr, size_t len, uint64_t st
     (void)span; (void)addr; (void)len; (void)stamp;
     if (n) out[0] = 0;
 }
-
-// Upstream's present (vka_present.c, not built): Lichii presents (nvn_window.c).
-struct tex_t;
-uint64_t vka_present_reserve(void) { return 0; }
-void vka_present_fill(uint64_t tk, const struct tex_t* t, double period_s, const int crop[4]) {
-    (void)tk; (void)t; (void)period_s; (void)crop;
-}
-uint64_t vka_present_inline(const struct tex_t* t, double period_s, const int crop[4]) {
-    (void)t; (void)period_s; (void)crop;
-    return 0;
-}
-void mtl_present_flush(void) {}

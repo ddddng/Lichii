@@ -15,6 +15,7 @@ add_library(nvn_direct STATIC
     nvn_dispatch.c
     nvn_direct_front.h
     nvn_direct_host.c
+    nvn_present.c
     nvn_window.c
     ${BN}/gfx/nvn/android_stub.c
     ${BN}/gfx/nvn/hle_nvn.c

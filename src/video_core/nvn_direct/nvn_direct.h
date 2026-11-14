@@ -84,6 +84,32 @@ int nvn_direct_float_args(int slot);
 /// (the call site the front end records).
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0);
 
+/// A presented image as Lichii's presenter shows it (dotfiles-25x.7). The image stays in
+/// VK_IMAGE_LAYOUT_GENERAL; it is drawn on the replay's queues and finished at fence.
+typedef struct nvn_direct_frame {
+    uint64_t id;
+    VkImage image;
+    VkImageView view; ///< 2D, level 0, layer 0, in the image's own format
+    VkFormat format;
+    uint32_t width, height;
+    int32_t crop[4]; ///< x, y, width, height the game shows (nvnWindowSetCrop); width 0: all of it
+    uint32_t interval; ///< the window's present interval (vblanks per frame)
+    uint64_t fence;
+} nvn_direct_frame;
+
+/// Lichii's framebuffer address of a direct-mode frame: id | NVN_DIRECT_FRAME_TAG (no device
+/// address has that bit).
+#define NVN_DIRECT_FRAME_TAG (1ull << 62)
+
+/// The image of the present the calling thread just made (nvnQueuePresentTexture): waits until
+/// the replay reached it and keeps a reference to it for Lichii. 0: nothing to show (the null
+/// backend, or a texture the replay never drew or uploaded).
+int nvn_direct_present_take(nvn_direct_frame* frame);
+
+/// On Lichii's GPU thread: the frame taken with id (the newest one held if it was let go
+/// already), once the GPU finished drawing it (waits, bounded). 0: no frame was ever taken.
+int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
+
 /// nvnDeviceGetInteger's answer for item, as the game's own driver gave it.
 void nvn_direct_set_device_integer(unsigned item, int value);
 
