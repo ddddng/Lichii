@@ -226,6 +226,8 @@ int vka_upload_claim(const tex_t *t) __attribute__((weak));   // 1 = the host fi
 int vka_astc_transcode(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t depth, uint32_t bw, uint32_t bh, uint8_t *bc3) __attribute__((weak));
 int vka_astc_gpu_on(void);   // the host decodes ASTC on the GPU (Lichii: nvn_direct_device.astc_to_bc; vka_astc_gpu records one level, vka_dev.c)
 int vka_astc_opaque(const void *blocks, size_t n);   // the ASTC blocks decode without alpha (Lichii: nvn_direct_device.astc_opaque; 0 without the host's check)
+int vka_mem_budget(uint64_t *usage, uint64_t *budget);   // the host's device-local memory use and budget (vka_dev.c; 0 = none given)
+void vka_tex_budget(void);   // images let go of when the device-local use nears the budget (vka_tex.c; the replay thread, between submissions)
 // An image's memory (vka_imgmem.c): space in a shared block (blk, at off, units of 256 bytes) or a dedicated allocation (blk NULL, off 0); size = its memory requirements' size
 // z: zero-shared memory (vka_imem_bind_zero; dm is the shared allocation, freed with its last image)
 typedef struct { VkDeviceMemory dm; uint64_t off, size; void *blk; uint32_t units; int z; } vka_imem;
@@ -272,6 +274,7 @@ typedef struct vka_img {
     struct vka_img *zold;    // the zero-shared image it left while a holder had it (vka_tex.c img_own): destroyed once holds drop to 0
     // Large images (DM_VK_BIGIMG_MB, vka_tex.c "Large images"): draws that bound it for sampling, other textures found over its storage (the first serials)
     uint32_t nsamp, novl; uint64_t ovl[4];
+    uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }

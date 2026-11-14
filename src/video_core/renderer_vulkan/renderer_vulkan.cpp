@@ -176,6 +176,13 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
         .astc_context = astc,
         .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
+        .memory_usage = [](void* context) -> uint64_t {
+            return static_cast<const Device*>(context)->GetDeviceMemoryUsage();
+        },
+        .memory_budget = [](void* context) -> uint64_t {
+            return static_cast<const Device*>(context)->GetDeviceMemoryBudget();
+        },
+        .memory_context = const_cast<Device*>(&device),
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];

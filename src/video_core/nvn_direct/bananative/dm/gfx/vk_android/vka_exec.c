@@ -234,6 +234,7 @@ void vka_rp_sub_begin(void) {
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
     if (!vka_init()) return;
+    vka_tex_budget();
     memset(&g_psy, 0, sizeof g_psy); g_qi = queue_of(S.serial);
     vka_gpu_floor();
     if (vka_hung()) { VRED_ONCE("GPU hang: submissions from now on run their effects without the GPU"); return; }   // no command buffer: mtl_sub_commit takes the CPU path

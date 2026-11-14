@@ -597,6 +597,10 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
 int vka_astc_opaque(const void *blocks, size_t n) { return g_adopt.astc_opaque && g_adopt.astc_opaque(blocks, n); }
+int vka_mem_budget(uint64_t *usage, uint64_t *budget) {   // the host's device-local use and budget (Lichii: nvn_direct_device.memory_usage / memory_budget); 0 = no budget
+    if (!g_adopt.memory_budget || !g_adopt.memory_usage || !(*budget = g_adopt.memory_budget(g_adopt.memory_context))) return 0;
+    *usage = g_adopt.memory_usage(g_adopt.memory_context); return 1;
+}
 // No batch can be begun (a slot's batch still runs after the hang time): the upload goes on in the submission being recorded, with its staging (the batch before it was sent,
 // so its image's first barrier and copies come before; an upload stopped half-way would leave a tracked image with part of its content for good)
 static VkCommandBuffer up_fallback(void) { vka_scr_up = 0; return vka_rp_cb(); }

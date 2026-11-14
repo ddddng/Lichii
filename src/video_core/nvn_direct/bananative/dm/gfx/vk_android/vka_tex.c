@@ -143,6 +143,7 @@ static vka_img **g_live; static int g_nlive, g_livecap;
 static uint64_t *g_cpuw; static size_t g_cpuwcap, g_cpuwn;   // serials the CPU wrote before their image existed (a set, open addressing)
 static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_img_bytes;
+static uint64_t g_tick;   // the VRAM budget's clock (vka_tex_budget): one tick a submission
 static int g_zwant;   // (under g_tmu) img_create_ may make a zero-shared image: vka_tex_get's new image whose content is ST_ZERO ("Zero-shared images" below)
 
 // The images' memory for the stats line: all of it, and the part whose content the GPU wrote (render targets, copy and storage destinations); the rest was filled from the
@@ -1329,7 +1330,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (!t || !t->serial || !vka_ok()) return NULL;
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = map_get(t->serial);
-    if (e) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); return im; }
+    if (e) { vka_img *im = e->im; if (im) im->used = g_tick; pthread_mutex_unlock(&g_tmu); return im; }
     vka_fmt f; vka_img *im = NULL; int throttle = 0;
     if (vka_fmt_of(t->d.format, &f)) {
         astc_bc1(t, &f);
@@ -1353,6 +1354,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             throttle = ucb != VK_NULL_HANDLE;
         }
     }
+    if (im) im->used = g_tick;
     map_put(t->serial, im);
     pthread_mutex_unlock(&g_tmu);
     if (throttle) vka_up_throttle();
@@ -1567,6 +1569,37 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
     free(part);
     *nbytes = bytes;
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("texture serial %llu %ux%u format %#x: %llu bytes uploaded from guest memory", (unsigned long long)t->serial, im->w, im->h, d->format, (unsigned long long)bytes);
+}
+
+// VRAM budget (dotfiles-25x.8): when the process's device-local use passes BUDGET_HIGH % of the host's budget, compressed images no draw or copy took for BUDGET_IDLE ticks
+// (a tick a submission: ~2 s) go, oldest first, until the use is down to BUDGET_LOW %. Only compressed ones: their content is always their texture's storage (no render
+// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Not one held outside the recording
+// thread, waiting for a copy back, zero-shared, sparse or of a finalized pool, and only ones with an allocation of their own (4 MiB and up, vka_imgmem.c), whose memory
+// goes back to the driver with them (an image in a shared block may leave the block allocated). Without a budget all images stay (Mario Kart World's race peaked at 12.9 GB under a 10 GB cap)
+enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
+static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
+void vka_tex_budget(void) {
+    static uint64_t evicted, evicted_bytes;
+    if (++g_tick % 4) return;   // (the use read about once a frame)
+    uint64_t usage, budget;
+    if (!vka_mem_budget(&usage, &budget) || usage * 100 <= budget * BUDGET_HIGH) return;
+    uint64_t want = usage - budget / 100 * BUDGET_LOW, freed = 0;
+    pthread_mutex_lock(&g_tmu);
+    vka_img **c = malloc((size_t)(g_nlive ? g_nlive : 1) * sizeof *c); int nc = 0;
+    for (int i = 0; c && i < g_nlive; i++) { vka_img *im = g_live[i];
+        if (compressed(&im->f) && !im->m.blk && im->m.dm && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick) c[nc++] = im; }
+    qsort(c, (size_t)nc, sizeof *c, budget_cmp);
+    int n = 0;
+    for (int k = 0; k < nc && freed < want; k++) { vka_img *im = c[k]; uint64_t bytes = im->bytes;
+        int refs = im->refs;   // (the serials' references: none held outside; the last unref may destroy it at once)
+        for (size_t i = 0; i < g_mapcap && refs; i++) if (g_map[i].im == im && g_map[i].serial && g_map[i].serial != ~0ull) { map_del(g_map[i].serial); refs--; unref_locked(im); }
+        freed += bytes; n++; }
+    free(c);
+    pthread_mutex_unlock(&g_tmu);
+    evicted += (uint64_t)n; evicted_bytes += freed;
+    static _Atomic int nlog; if (n && atomic_fetch_add(&nlog, 1) < 16)
+        VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle compressed images let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
+             budget / 1048576.0, n, freed / 1048576.0, (unsigned long long)evicted, evicted_bytes / 1048576.0);
 }
 
 void mtl_tex_init(const tex_t *t) { (void)t; }
@@ -1897,7 +1930,7 @@ VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int sto
     if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
     if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) return id_view(id, cb, dim, storage, NULL);
     vmemo *m = vm_slot(id, dim);
-    if (vm_hit(m, id, dim)) return m->v;
+    if (vm_hit(m, id, dim)) { m->im->used = g_tick; return m->v; }
     uint32_t gen = atomic_load_explicit(&g_tgen, memory_order_acquire), ver = g_tver ? atomic_load_explicit(&g_tver[id], memory_order_acquire) : 0;
     vka_img *im = NULL; VkImageView v = id_view(id, cb, dim, 0, &im);
     if (v && im && g_tver && !in_fb(im)) *m = (vmemo){id, dim, ver, gen, im, v};
