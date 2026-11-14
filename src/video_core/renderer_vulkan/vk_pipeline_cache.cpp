@@ -862,8 +862,8 @@ constexpr u8 UsedPipelinesMaxAge = 16;
 constexpr u8 UsedPipelinesMaxAgeMoltenVK = 8;
 
 // Loading Shaders always waits for the pipelines the last two sessions used. Those of older
-// sessions build in the background prebuild from the start of the load, and the load waits for
-// them only while it has run less than OlderUsedPipelinesWait: where the driver's cache misses
+// sessions go first in the background prebuild, and the load waits for them only while it has
+// run less than OlderUsedPipelinesWait: where the driver's cache misses
 // (AMD's Windows driver after a new build or driver changed the SPIR-V: ~70 ms a pipeline, an
 // Ocarina used list of 14,687 took ~18 min) the game starts and they keep building.
 constexpr u8 AwaitedUsedSessions = 2;
@@ -1615,10 +1615,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
 
     // Older sessions' used pipelines and the skipped records go to the background prebuild, which
-    // holds each built until a draw takes it: the used ones most recent session first, then as many
-    // skipped ones as the kept limit leaves past those and the boot builds. A job reads its record
-    // again from the file, except one this boot wrote again (relinked), which isn't there yet
-    // (offset 0).
+    // holds each built until a draw takes it: as many as the kept limit leaves past the boot
+    // builds, the used ones first (most recent session first), the rest left for their first draw.
+    // A job reads its record again from the file, except one this boot wrote again (relinked),
+    // which isn't there yet (offset 0).
     struct PrebuildRecord {
         GraphicsPipelineCacheKey key;
         u64 record_key;
@@ -1640,18 +1640,18 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     };
     std::ranges::reverse(older_used);
     std::ranges::stable_sort(older_used, {}, &OlderUsed::age);
-    std::vector<PrebuildRecord> older_prebuild;
-    older_prebuild.reserve(older_used.size());
-    for (const OlderUsed& older : older_used) {
-        older_prebuild.push_back(prebuild_record(older.index, older.key));
-    }
+    const size_t prebuild_limit = PrebuildLimit(kept_pipelines, queued_graphics);
+    const size_t older_admitted = std::min(older_used.size(), prebuild_limit);
+    const size_t older_left = older_used.size() - older_admitted;
     std::vector<PrebuildRecord> prebuild;
-    for (const auto& [index, key] :
-         NewestFirst(std::move(skipped_graphics),
-                     PrebuildLimit(kept_pipelines, queued_graphics + older_used.size()))) {
-        prebuild.push_back(prebuild_record(index, key));
+    for (size_t older = 0; older < older_admitted; ++older) {
+        prebuild.push_back(prebuild_record(older_used[older].index, older_used[older].key));
     }
     older_used.clear();
+    for (const auto& [index, key] :
+         NewestFirst(std::move(skipped_graphics), prebuild_limit - older_admitted)) {
+        prebuild.push_back(prebuild_record(index, key));
+    }
 
     for (auto& [key, indices] : compute_keys) {
         ++state.total;
@@ -1792,29 +1792,48 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             },
             job);
     };
-    // Submitted after the boot builds, so they don't hold those back, and before the precache.
+    // With the precache, the prebuild starts after it, as its jobs would queue ahead of the
+    // precache's. The older sessions' pipelines come first.
+    const size_t deferred_pipelines = prebuild.size();
     std::vector<VideoCommon::ShaderJobHandle> older_jobs;
-    older_jobs.reserve(older_prebuild.size());
-    for (PrebuildRecord& record : older_prebuild) {
-        VideoCommon::ShaderJobHandle job;
-        add_to_prebuild(record, &job);
-        if (job) {
-            older_jobs.push_back(std::move(job));
-        }
-    }
-    older_prebuild.clear();
-
-    // With the precache, the skipped records' prebuild starts after it.
-    const size_t prebuild_admitted = prebuild.size();
-    const size_t deferred_pipelines = older_jobs.size() + prebuild_admitted;
-    if (deferred_pipelines != 0) {
-        prebuild_load_begin = load_begin;
-    }
     const auto start_prebuild = [&] {
-        for (PrebuildRecord& record : prebuild) {
-            add_to_prebuild(record);
+        for (size_t index = 0; index < prebuild.size(); ++index) {
+            VideoCommon::ShaderJobHandle job;
+            add_to_prebuild(prebuild[index], index < older_admitted ? &job : nullptr);
+            if (job) {
+                older_jobs.push_back(std::move(job));
+            }
         }
         prebuild.clear();
+        if (deferred_pipelines != 0) {
+            prebuild_load_begin = load_begin;
+        }
+    };
+    // Loading Shaders goes on while the older sessions' pipelines build, until the load has run
+    // OlderUsedPipelinesWait.
+    const auto await_older = [&] {
+        if (older_jobs.empty()) {
+            return;
+        }
+        size_t older_built = 0;
+        while (!stop_loading.stop_requested()) {
+            older_built = static_cast<size_t>(std::ranges::count_if(
+                older_jobs, [](const VideoCommon::ShaderJobHandle& job) { return job.Ready(); }));
+            callback(VideoCore::LoadCallbackStage::Build, state.built + older_built,
+                     state.total + older_jobs.size());
+            if (older_built == older_jobs.size() ||
+                std::chrono::steady_clock::now() - load_begin >= OlderUsedPipelinesWait) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2: {} of the {} pipelines only older sessions used built before "
+                 "the game started, {:.1f} s into the load; the rest keep building in the "
+                 "background",
+                 older_built, older_jobs.size(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
+                     .count());
     };
     if (!precache) {
         start_prebuild();
@@ -1833,17 +1852,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         state.has_loaded = true;
     }
     boot.Wait();
-    size_t older_built = 0;
-    while (!older_jobs.empty() && !stop_loading.stop_requested()) {
-        older_built = static_cast<size_t>(std::ranges::count_if(
-            older_jobs, [](const VideoCommon::ShaderJobHandle& job) { return job.Ready(); }));
-        callback(VideoCore::LoadCallbackStage::Build, state.built + older_built,
-                 state.total + older_jobs.size());
-        if (older_built == older_jobs.size() ||
-            std::chrono::steady_clock::now() - load_begin >= OlderUsedPipelinesWait) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    if (!precache) {
+        await_older();
     }
     {
         const size_t used_sessions = std::min<size_t>(
@@ -1859,18 +1869,17 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         LOG_INFO(
             Render_Vulkan,
             "Shader cache v2 boot load{}: {:.1f} s, {} of {} compute and {} of {} graphics "
-            "pipelines built ({}{}), {} used by older sessions in the background prebuild ({} "
-            "of them done before the game started), {} cached graphics pipelines skipped at "
-            "boot, {} admitted for background prebuild (newest first), {} left for their first "
-            "draw (prebuild limit {})",
+            "pipelines built ({}{}), {} only older sessions used and {} more cached graphics "
+            "pipelines skipped at boot, {} admitted for background prebuild (older sessions' "
+            "first, then newest first), {} left for their first draw (prebuild limit {})",
             stop_loading.stop_requested() ? " stopped" : "",
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin).count(),
             state.compute_built, state.total - queued_graphics, state.graphics_built,
             queued_graphics, chosen,
             build_all ? fmt::format(", {} more by build_all_cached_shaders", queued_spare) : "",
-            older_jobs.size(), older_built, skipped_pipelines, prebuild_admitted,
-            skipped_pipelines - prebuild_admitted,
-            PrebuildLimit(kept_pipelines, queued_graphics + older_jobs.size()));
+            older_admitted + older_left, skipped_pipelines, deferred_pipelines,
+            older_left + skipped_pipelines - (deferred_pipelines - older_admitted),
+            prebuild_limit);
     }
 
     std::vector<DuplicateGraphicsRecord> no_duplicates;
@@ -1920,12 +1929,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         StutterTrace::BootMarker(
             "shader_load_end",
             fmt::format("seconds={:.3f} graphics_records={} compute_records={} queued={} skipped={} "
-                        "deferred={} older_used={} older_built={} cache_bytes={} "
-                        "driver_cache_bytes={}",
+                        "deferred={} older_used={} cache_bytes={} driver_cache_bytes={}",
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
                             .count(),
                         graphics_records, compute_records, state.total, skipped_pipelines,
-                        deferred_pipelines, older_jobs.size(), older_built,
+                        deferred_pipelines, older_admitted + older_left,
                         bytes(pipeline_cache_filename), bytes(vulkan_pipeline_cache_filename)));
     }
     if (precache && !stop_loading.stop_requested()) {
@@ -1937,6 +1945,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     if (precache) {
         start_prebuild();
+        await_older();
     }
     if (compact) {
         scheduled_prebuild->AfterTranslations([this] { cache_v2->Writer().Compact(); });
