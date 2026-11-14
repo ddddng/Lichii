@@ -5,6 +5,9 @@
 
 add_subdirectory(host_shaders)
 add_subdirectory(gpu_logging)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ARCHITECTURE_x86_64)
+    add_subdirectory(nvn_direct)
+endif()
 
 if(LIBVA_FOUND)
     set_source_files_properties(host1x/ffmpeg.cpp
@@ -552,6 +555,9 @@ add_custom_command(
 target_sources(video_core PRIVATE "${lowering_stamp}")
 target_include_directories(video_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
+if (TARGET nvn_direct)
+    target_link_libraries(video_core PUBLIC nvn_direct)
+endif()
 if (ENABLE_OPENGL)
     target_link_libraries(video_core PUBLIC glad)
 endif()
