@@ -136,10 +136,8 @@ static int init_once(void) {
     V.bda = f12.bufferDeviceAddress; V.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound && f12.runtimeDescriptorArray;
     V.placed = placed && fmp.memoryMapPlaced; V.placed_range = placed && fmp.memoryMapRangePlaced; V.unmap_reserve = placed && fmp.memoryUnmapReserve;
     float prio = 1.f;
-    // One Vulkan queue, every NVN queue in its FIFO; DM_VK_MULTIQUEUE=1: one Vulkan queue per NVN queue (up to 4 of the family's). Lichii (dotfiles-25x.15): one queue
-    // by default. With several, 5 of 53 Mario Kart World boots stalled on the GPU in NVN queue 1's part between its wait for the second queue's 4th event signal and
-    // its own 5th (its waits met), then lost the device (Xid 109); one queue: 15 of 15 boots clean
-    V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 0) ? (int)(fam_queues < 4 ? fam_queues : 4) : 1; if (V.nq < 1) V.nq = 1;
+    // One Vulkan queue per NVN queue (up to 4 of the family's; DM_VK_MULTIQUEUE=0: one queue, every NVN queue in its FIFO as before)
+    V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 1) ? (int)(fam_queues < 4 ? fam_queues : 4) : 1; if (V.nq < 1) V.nq = 1;
     float prios[4] = {1.f, 1.f, 1.f, 1.f}; (void)prio;
     (void)prios; (void)dext; (void)ndext;
     V.dev = g_adopt.device;   // Lichii's device (see above)
