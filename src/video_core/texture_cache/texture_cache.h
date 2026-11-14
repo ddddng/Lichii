@@ -960,6 +960,33 @@ void TextureCache<P>::NoteFlushed(const ImageBase& image, u64 tick) {
 }
 
 template <class P>
+void TextureCache<P>::KeepNewerLanded(const ImageBase& image, u64 tick, KeepRanges& keep) {
+    keep.clear();
+    if (overlap_writeback_ranges.empty()) {
+        return;
+    }
+    const auto waiting = [this](const WritebackRange& range) {
+        return std::ranges::any_of(
+            async_overlap_downloads, [&](const AsyncOverlapDownload& download) {
+                return !download.cancelled && download.tick == range.tick &&
+                       download.cpu_addr == range.begin &&
+                       download.cpu_addr + download.size == range.end;
+            });
+    };
+    ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
+        const DAddr first_page = begin >> OverlapPageBits;
+        const DAddr last_page = (end - 1) >> OverlapPageBits;
+        for (DAddr page = first_page; page <= last_page; ++page) {
+            const auto it = overlap_writeback_ranges.find(page);
+            if (it != overlap_writeback_ranges.end()) {
+                WritebackRanges::AppendNewerLanded(keep, it->second, begin, end, tick, waiting);
+            }
+        }
+    });
+    WritebackRanges::MergeRanges(keep);
+}
+
+template <class P>
 bool TextureCache<P>::OverlapWritebacksEnabled() {
     // As RunGarbageCollector and WriteBackBadOverlaps: staging maps that release themselves
     // (OpenGL) cannot wait, so neither writes back there.
@@ -2949,7 +2976,12 @@ void TextureCache<P>::PopAsyncFlushes() {
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
-                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+                // Newer data written meanwhile stays: a write-back queued after this flush was
+                // committed can land before it pops, and the snapshot is older.
+                KeepRanges keep;
+                KeepNewerLanded(image, download_info.tick, keep);
+                SwizzleKeeping(*gpu_memory, image.gpu_addr, image.info, copies, download_span,
+                               keep);
                 NoteFlushed(image, download_info.tick);
                 ClearStaleImage(image);
             } else {

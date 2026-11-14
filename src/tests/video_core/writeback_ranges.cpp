@@ -10,10 +10,12 @@
 #include "video_core/texture_cache/writeback_ranges.h"
 
 using VideoCommon::WritebackRanges::AppendLanded;
+using VideoCommon::WritebackRanges::AppendNewerLanded;
 using VideoCommon::WritebackRanges::CapPageRecords;
 using VideoCommon::WritebackRanges::KeepNewerBytes;
 using VideoCommon::WritebackRanges::MaxTickedRanges;
 using VideoCommon::WritebackRanges::MaxPageRecords;
+using VideoCommon::WritebackRanges::MergeRanges;
 using VideoCommon::WritebackRanges::NoteTick;
 using VideoCommon::WritebackRanges::PageRecords;
 using VideoCommon::WritebackRanges::TickedRange;
@@ -185,6 +187,48 @@ TEST_CASE("A page's write-back records drop the oldest that newer ones hold all 
     CHECK_FALSE(HasRecord(records, 0x0800, 0x1200, 1));
     CHECK(HasRecord(records, 0x1800, 0x1900, 3));
     CHECK(HasRecord(records, 0x1800, 0x1a00, 2));
+}
+
+namespace {
+/// A write-back record with whether its data was lost, as the texture cache keeps them per page.
+struct LandedRecord {
+    DAddr begin;
+    DAddr end;
+    u64 tick;
+    bool lost;
+};
+} // Anonymous namespace
+
+TEST_CASE("A flush's snapshot leaves the bytes newer landed write-backs hold",
+          "[video_core][texture_cache][writeback]") {
+    // A snapshot at tick 20 of [0x1000, 0x2000).
+    const std::vector<LandedRecord> records{
+        {0x1000, 0x1400, 30, false}, // newer, landed
+        {0x1300, 0x1500, 25, false}, // newer, overlapping the one before
+        {0x1400, 0x1600, 10, false}, // older
+        {0x1600, 0x1700, 30, true},  // newer, but its data is gone
+        {0x1700, 0x1800, 30, false}, // newer, still waiting
+        {0x1800, 0x2400, 30, false}, // newer, past the snapshot's end
+        {0x3000, 0x3100, 40, false}, // newer, elsewhere
+    };
+    const auto waiting = [](const LandedRecord& record) { return record.begin == 0x1700; };
+    std::vector<Range> keep;
+    // A record over two pages is in both pages' records.
+    AppendNewerLanded(keep, records, 0x1000, 0x2000, 20, waiting);
+    AppendNewerLanded(keep, records, 0x1000, 0x2000, 20, waiting);
+    MergeRanges(keep);
+    CHECK(keep == std::vector<Range>{{0x1000, 0x1500}, {0x1800, 0x2000}});
+}
+
+TEST_CASE("A flush's snapshot is written whole without newer data over it",
+          "[video_core][texture_cache][writeback]") {
+    const std::vector<LandedRecord> records{{0x1000, 0x2000, 20, false},
+                                            {0x1400, 0x1800, 5, false}};
+    std::vector<Range> keep;
+    AppendNewerLanded(keep, records, 0x1000, 0x2000, 20,
+                      [](const LandedRecord&) { return false; });
+    MergeRanges(keep);
+    CHECK(keep.empty());
 }
 
 TEST_CASE("A page's write-back records drop the oldest past the hard limit",

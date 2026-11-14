@@ -175,4 +175,33 @@ void AppendLanded(Landed& landed, DAddr cpu_addr, u64 size, u64 tick, const Keep
     }
 }
 
+/// Appends to `keep` the bytes of [begin, end) that the write-back records (begin, end, tick,
+/// lost) newer than `tick` hold in guest memory: not a lost one's, whose data is gone, nor one
+/// `waiting` says has yet to land (it lands over them later).
+template <typename Keep, typename Records, typename Waiting>
+void AppendNewerLanded(Keep& keep, const Records& records, DAddr begin, DAddr end, u64 tick,
+                       const Waiting& waiting) {
+    for (const auto& record : records) {
+        if (record.tick > tick && !record.lost && record.begin < end && begin < record.end &&
+            !waiting(record)) {
+            keep.emplace_back((std::max)(record.begin, begin), (std::min)(record.end, end));
+        }
+    }
+}
+
+/// Sorts the ranges [first, second) and merges those that overlap or touch.
+template <typename Ranges>
+void MergeRanges(Ranges& ranges) {
+    std::ranges::sort(ranges);
+    Ranges merged;
+    for (const auto& range : ranges) {
+        if (!merged.empty() && range.first <= merged.back().second) {
+            merged.back().second = (std::max)(merged.back().second, range.second);
+        } else {
+            merged.push_back(range);
+        }
+    }
+    ranges = std::move(merged);
+}
+
 } // namespace VideoCommon::WritebackRanges
