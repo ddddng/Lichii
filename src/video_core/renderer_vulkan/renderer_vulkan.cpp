@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -276,8 +277,13 @@ try
     };
     Report();
 #ifdef LICHII_NVN_DIRECT
-    if (device.IsNvnDirect()) {
+    // EDEN_NX2_NVN_DIRECT_NULL=1: the null backend (no replay device: submissions run their
+    // CPU-side effects only, fences complete at submit).
+    if (const char* null_backend = std::getenv("EDEN_NX2_NVN_DIRECT_NULL");
+        device.IsNvnDirect() && (null_backend == nullptr || std::strcmp(null_backend, "1") != 0)) {
         AdoptNvnDirect(dld, *instance, device, scheduler);
+    } else if (device.IsNvnDirect()) {
+        LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }
 #endif
 } catch (const vk::Exception& exception) {

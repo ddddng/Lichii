@@ -124,9 +124,14 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
     if (op == Dynarmic::A64::InstructionCacheOperation::BlockEntryHook) {
-        Core::NvnHook::OnBlockEntry(
-            value, *m_parent.m_jit, m_memory, m_process,
-            static_cast<u32>(Kernel::GetCurrentThread(m_parent.m_system.Kernel()).GetThreadId()));
+        if (Core::NvnHook::OnBlockEntry(
+                value, *m_parent.m_jit, m_memory, m_process,
+                static_cast<u32>(
+                    Kernel::GetCurrentThread(m_parent.m_system.Kernel()).GetThreadId()))) {
+            // An NVN call that may block: it runs from the kernel, as an SVC.
+            m_parent.m_svc = Core::NvnHook::HaltedCallSvc;
+            m_parent.m_jit->HaltExecution(SupervisorCall);
+        }
         return;
     }
     last_code_addr = u64(-1); //invalidate cached page
