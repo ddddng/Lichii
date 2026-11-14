@@ -694,6 +694,14 @@ bool DirectMode() {
     return state != nullptr && state->direct;
 }
 
+void StopDirect() {
+#ifdef LICHII_NVN_DIRECT
+    if (DirectMode()) {
+        nvn_direct_stop();
+    }
+#endif
+}
+
 void Install(Kernel::KProcess& process) {
     State* const state_pointer = Get();
     if (state_pointer == nullptr) {

@@ -319,6 +319,13 @@ try
 
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
+#ifdef LICHII_NVN_DIRECT
+    // NVN2 direct mode (dotfiles-25x.18): the replay's threads leave the device (and the ASTC
+    // decode it calls back into) before both go away.
+    if (device.IsNvnDirect()) {
+        nvn_direct_park();
+    }
+#endif
     void(device.GetLogical().WaitIdle());
 }
 

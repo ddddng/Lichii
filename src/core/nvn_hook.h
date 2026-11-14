@@ -73,6 +73,11 @@ namespace Core::NvnHook {
 /// (EDEN_NX2_NVN_DIRECT=1, an NVN2 game); read by the Vulkan device, created after Install.
 [[nodiscard]] bool DirectMode();
 
+/// Direct mode, the emulator shutting down (dotfiles-25x.18): the game's threads waiting on the
+/// host inside a halted NVN call return, so the kernel can suspend them. Before the cores are
+/// suspended (System::Pause, ShutdownMainProcess). Nothing otherwise.
+void StopDirect();
+
 /// Finds the NVN driver's exports in the application's modules (after they are loaded).
 void Install(Kernel::KProcess& process);
 

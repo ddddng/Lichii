@@ -325,14 +325,14 @@ uint64_t vka_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE); }
 // Waits until fence and every fence before it are done (in fence order: what frees memory or reuses a slot needs). vka_wait_fence: until fence itself is, which with several
 // queues may be before an earlier fence of another queue (a sync the game fenced on one queue: dotfiles-25x.4)
 static int wait_fence(uint64_t fence, uint64_t timeout_ns, int own) {
-    if (vka_done() >= fence) return 1;
+    if (vka_done() >= fence || vka_stopping()) return 1;   // (Lichii: vka_stop)
     if (!timeout_ns) { if (!own) return 0; pthread_mutex_lock(&g_fmu); int d = g_fdone[fence % FQ_RING] == fence; pthread_mutex_unlock(&g_fmu); return d; }
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
     dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
     pthread_mutex_lock(&g_fmu);
-    while (g_done < fence && !(own && g_fdone[fence % FQ_RING] == fence)) if (pthread_cond_timedwait(&g_fcv, &g_fmu, &dl)) break;
-    int ok = g_done >= fence || (own && g_fdone[fence % FQ_RING] == fence); pthread_mutex_unlock(&g_fmu);
+    while (g_done < fence && !(own && g_fdone[fence % FQ_RING] == fence) && !vka_stopping()) if (pthread_cond_timedwait(&g_fcv, &g_fmu, &dl)) break;
+    int ok = g_done >= fence || (own && g_fdone[fence % FQ_RING] == fence) || vka_stopping(); pthread_mutex_unlock(&g_fmu);
     return ok;
 }
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns) { return wait_fence(fence, timeout_ns, 0); }
@@ -353,6 +353,16 @@ int vka_hung(void) { return atomic_load_explicit(&g_hung, memory_order_acquire);
 uint64_t vka_hang_ns(void) {
     double s = VKA_ENVF("DM_VK_HANG_S", 6.0); if (!(s > 0.5)) s = 6.0;
     return (uint64_t)(s * 1e9);
+}
+// Lichii: the emulator shuts down (dotfiles-25x.18): as after a hang nothing more is submitted and every fence reads as done (the completion thread runs the effects of those
+// submitted), without the hang's report or exit; waits for fences return at once, also those the replay worker has not submitted yet, so the game's threads leave their
+// halted calls and the emulator's cores stop
+static _Atomic int g_stopping;
+int vka_stopping(void) { return atomic_load_explicit(&g_stopping, memory_order_acquire); }
+void vka_stop(void) {
+    if (atomic_exchange(&g_stopping, 1)) return;
+    atomic_store(&g_hung, 1);
+    pthread_mutex_lock(&g_fmu); pthread_cond_broadcast(&g_scv); pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
 }
 static void *hang_exit_main(void *arg) { (void)arg; pthread_setname_np(pthread_self(), "vk-hang"); dm_host_shutdown("GPU hang"); return NULL; }
 void vka_exec_hang_report(uint64_t fence);   // vka_exec.c: what the stuck submission held

@@ -155,6 +155,16 @@ int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
 /// not, so the core runs the game's other threads meanwhile.
 int nvn_direct_call_blocks(int slot, const uint64_t x[8]);
 
+/// The emulator shuts down (dotfiles-25x.18), before the guest's cores are suspended: nothing
+/// more is replayed or submitted, every fence reads as done, and the game's threads waiting on the
+/// host inside an NVN call (a fence, the replay worker's queue, a present) return. For the rest of
+/// the process.
+void nvn_direct_stop(void);
+
+/// Before Lichii's device goes away (after nvn_direct_stop, which it implies): waits (bounded)
+/// until the replay's threads no longer use the device and saves the pipeline cache a last time.
+void nvn_direct_park(void);
+
 /// nvnDeviceGetInteger's answer for item, as the game's own driver gave it.
 void nvn_direct_set_device_integer(unsigned item, int value);
 

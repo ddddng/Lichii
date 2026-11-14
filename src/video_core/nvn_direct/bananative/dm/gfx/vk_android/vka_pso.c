@@ -133,6 +133,7 @@ static _Atomic uint64_t g_save_ns_total, g_hy_draws, g_pw_wait_ns;
 static void pw_load(void); static void pw_start(void); static int pw_save(void);
 static void *saver_main(void *a);
 static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;   // one save at a time (the saver thread, a forced save)
+static int g_pc_parked;   // Lichii: vka_pso_park made the last save (under g_save_mu): no more, the device goes away after it
 static pthread_mutex_t g_sv_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_sv_cv = PTHREAD_COND_INITIALIZER; static int g_sv_want, g_sv_up;
 static void pc_open_once(void) {
     const char *e = getenv("DM_VK_PCACHE"), *t = getenv("DM_TEMP"), *home = getenv("HOME");
@@ -203,14 +204,14 @@ static void *saver_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-pcache");
     for (;;) {
         pthread_mutex_lock(&g_sv_mu); while (!g_sv_want) pthread_cond_wait(&g_sv_cv, &g_sv_mu); g_sv_want = 0; pthread_mutex_unlock(&g_sv_mu);
-        pthread_mutex_lock(&g_save_mu); save_now(); pthread_mutex_unlock(&g_save_mu);
+        pthread_mutex_lock(&g_save_mu); if (!g_pc_parked) save_now(); pthread_mutex_unlock(&g_save_mu);
     }
     return NULL;
 }
 // From the replay thread at each submission: a save is due DM_VK_PCACHE_SAVE_S seconds (default 20) after the last one when pipelines were made since; it runs on the saver
 // thread. force (the end of the run, the shader library check): now, on the caller's thread
 void vka_pso_save(int force) {
-    if (!g_pc) return;
+    if (!g_pc || vka_stopping()) return;
     uint64_t t = now_ns();
     if (!force) {
         if (__atomic_load_n(&g_made, __ATOMIC_RELAXED) == g_saved_at) return;
@@ -354,9 +355,9 @@ static struct { _Atomic pid_t tid; _Atomic uint64_t t0, vs, fs; const char *_Ato
 static void vka_pso_wait_dump(void) {
     uint64_t t = now_ns(); int n = 0;
     for (int i = 0; i < NBUILD; i++) { pid_t id = atomic_load(&g_build[i].tid); if (!id) continue; n++;
-        fprintf(stderr, "[dm] [vk] %s being made by thread %d for %.1f s: shaders %016llx %016llx\n", atomic_load(&g_build[i].what), (int)id, (t - atomic_load(&g_build[i].t0)) / 1e9,
+        VLOG("%s being made by thread %d for %.1f s: shaders %016llx %016llx", atomic_load(&g_build[i].what), (int)id, (t - atomic_load(&g_build[i].t0)) / 1e9,
                 (unsigned long long)atomic_load(&g_build[i].vs), (unsigned long long)atomic_load(&g_build[i].fs)); }
-    if (!n) fprintf(stderr, "[dm] [vk] no pipeline being made\n");
+    if (!n) VLOG("no pipeline being made");
 }
 void crash_set_wait_dump(void (*fn)(void));
 static void build_reg(void) { crash_set_wait_dump(vka_pso_wait_dump); }
@@ -367,6 +368,21 @@ static int build_begin(const char *what, uint64_t vs, uint64_t fs) {
     return -1;
 }
 static void build_end(int i) { if (i >= 0) atomic_store(&g_build[i].tid, 0); }
+// Lichii (dotfiles-25x.18): the emulator shuts down and the device goes away after this. The prewarm and optimizer threads stop between pipelines (as for mtl_drain, but
+// the game submits no more, so for good); the builds in progress are waited for (bounded), then the cache and the prewarm list are saved a last time, and the saver
+// thread never saves again. 1: no build was in progress at the end
+int vka_pso_park(uint64_t timeout_ns) {
+    vka_pso_pause(1);
+    uint64_t t0 = now_ns(); int busy;
+    for (;;) {
+        busy = 0; for (int i = 0; i < NBUILD; i++) busy += atomic_load(&g_build[i].tid) != 0;
+        if (!busy || now_ns() - t0 >= timeout_ns) break;
+        usleep(1000);
+    }
+    if (busy) vka_pso_wait_dump();
+    pthread_mutex_lock(&g_save_mu); if (g_pc && !g_pc_parked) save_now(); g_pc_parked = 1; pthread_mutex_unlock(&g_save_mu);
+    return !busy;
+}
 // The whole pipeline (optimized), with creation feedback (core in 1.3) for the line of a slow one: whether the pipeline cache had it and each stage's share. how: NULL = on the
 // frame path (counted as the frame's), else where it was made (" in the background", " (prewarm)")
 static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], const char *how) {

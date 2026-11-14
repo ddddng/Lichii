@@ -109,11 +109,25 @@ static int up(void) {
 static void push(const job_t *j) {
     uint64_t t0 = wns();
     pthread_mutex_lock(&g_mu);
-    while (g_qin - g_qout >= NJOB || (j->kind == J_PRESENT && g_pres_in - g_pres_out >= (uint64_t)g_frames)) pthread_cond_wait(&g_cv, &g_mu);
+    while (!vka_stopping() && (g_qin - g_qout >= NJOB || (j->kind == J_PRESENT && g_pres_in - g_pres_out >= (uint64_t)g_frames))) pthread_cond_wait(&g_cv, &g_mu);
+    if (vka_stopping()) {   // Lichii: the emulator shuts down (vka_stop): nothing more is replayed (its fences read as done, its present shows nothing)
+        pthread_mutex_unlock(&g_mu);
+        if (j->kind == J_SUB) free(j->h);
+        return;
+    }
     { uint64_t w = wns() - t0; g_room_ns += w; atomic_fetch_add_explicit(&g_room_all, w, memory_order_relaxed); }
     g_q[g_qin % NJOB] = *j; g_qin++; if (j->kind == J_PRESENT) g_pres_in++;
     pthread_cond_broadcast(&g_cv);
     pthread_mutex_unlock(&g_mu);
+}
+void vka_worker_wake(void) { pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }
+int vka_worker_idle(uint64_t timeout_ns) {
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    uint64_t ns = (uint64_t)dl.tv_nsec + timeout_ns; dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
+    pthread_mutex_lock(&g_mu);
+    while (g_qout != g_qin) if (pthread_cond_timedwait(&g_cv, &g_mu, &dl)) break;
+    int idle = g_qout == g_qin; pthread_mutex_unlock(&g_mu);
+    return idle;
 }
 
 // Syncs fenced inside the submission's command lists (OP_FENCE_SYNC), given the submission's fence now: the lists are walked as exec walks them (jumps, calls)

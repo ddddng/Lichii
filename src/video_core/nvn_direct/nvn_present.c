@@ -63,6 +63,13 @@ void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int cr
     pthread_mutex_unlock(&g_mu);
 }
 
+// The emulator shuts down (nvn_direct_stop): the waits for a fill see vka_stopping.
+void nvn_direct_present_wake(void) {
+    pthread_mutex_lock(&g_mu);
+    pthread_cond_broadcast(&g_cv);
+    pthread_mutex_unlock(&g_mu);
+}
+
 uint64_t vka_present_inline(const tex_t* t, double period_s, const int crop[4]) {
     const uint64_t tk = vka_present_reserve();
     vka_present_fill(tk, t, period_s, crop);
@@ -71,7 +78,7 @@ uint64_t vka_present_inline(const tex_t* t, double period_s, const int crop[4]) 
 
 void mtl_present_flush(void) {
     pthread_mutex_lock(&g_mu);
-    while (g_filled < g_reserved) pthread_cond_wait(&g_cv, &g_mu);
+    while (g_filled < g_reserved && !vka_stopping()) pthread_cond_wait(&g_cv, &g_mu);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -109,9 +116,10 @@ int nvn_direct_present_take(nvn_direct_frame* out) {
     if (!tk) return 0;
     t_ticket = 0;
     pthread_mutex_lock(&g_mu);
-    while (g_filled < tk) pthread_cond_wait(&g_cv, &g_mu);
+    while (g_filled < tk && !vka_stopping()) pthread_cond_wait(&g_cv, &g_mu);
     const pres_t p = g_pres[tk % NPRES];
     pthread_mutex_unlock(&g_mu);
+    if (vka_stopping()) return 0;   // the emulator shuts down (nvn_direct_stop): the worker may never fill it
     if (!vka_ok() || p.ticket != tk) return 0;
     vka_img* im = vka_tex_acquire(p.serial);
     if (!im) return 0;   // the replay never drew or uploaded it (a boot frame): nothing to show

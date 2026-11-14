@@ -603,6 +603,7 @@ struct System::Impl {
         exit_requested = false;
         if (gpu_core)
             gpu_core->NotifyShutdown();
+        Core::NvnHook::StopDirect();
 
         stop_event.request_stop();
         core_timing.SyncPause(false);

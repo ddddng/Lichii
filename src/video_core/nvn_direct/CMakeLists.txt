@@ -17,6 +17,7 @@ add_library(nvn_direct STATIC
     nvn_direct_host.c
     nvn_direct_log.cpp
     nvn_present.c
+    nvn_shutdown.c
     nvn_tracking.c
     nvn_window.c
     ${BN}/gfx/nvn/android_stub.c
