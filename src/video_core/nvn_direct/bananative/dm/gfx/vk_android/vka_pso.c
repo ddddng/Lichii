@@ -881,13 +881,14 @@ static void busy_wait(gval *g) {
     while (g->busy) pthread_cond_wait(&g_busy_cv, &g_mu);
     atomic_fetch_add(&g_pw_wait_ns, now_ns() - t0);
 }
-// Lichii (dotfiles-25x.16): a pipeline the frame path would have to compile is made on the asynchronous threads (DM_VK_ASYNC_PSO, default 4; 0 = on the frame path as
-// before), and its draws are skipped until it is there: a scene's new objects show a frame or a few late instead of the frame stopping for each compile (a cold cache: 138
-// builds over 50 ms on the frame path in one boot and race, frames up to 8.7 s, ux-cold-1). What stays on the frame path is what costs no compile: the pipeline cache's
-// pipeline (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) and the link of graphics pipeline libraries all made before (t_lib_peek). A key another thread is
-// making (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify)
+// Lichii (dotfiles-25x.16), opt-in (DM_VK_ASYNC_PSO=1; DM_VK_ASYNC_THREADS, default 4): a pipeline the frame path would have to compile is made on asynchronous threads
+// and its draws are skipped until it is there, so a frame never stops for a compile (a cold cache: 138 builds over 50 ms on the frame path in one boot and race, frames up
+// to 8.7 s, ux-cold-1; with it none, ux-cold-3). Off by default: a skipped draw that renders something once is lost for good (ux-cold-3: the Grand Prix mode list's
+// blurred backdrop, taken once when the menu opens, stayed black). What stays on the frame path is what costs no compile: the pipeline cache's pipeline
+// (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) and the link of graphics pipeline libraries all made before (t_lib_peek). A key another thread is making
+// (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify)
 enum { MK_FRAME, MK_PREWARM, MK_ASYNC };
-static int async_threads(void) { static int n = -1; if (n < 0) { n = VKA_ENV("DM_VK_ASYNC_PSO", 4); if (n > 8) n = 8; if (n < 0) n = 0; } return n; }
+static int async_threads(void) { static int n = -1; if (n < 0) { n = VKA_ENV("DM_VK_ASYNC_PSO", 0) ? VKA_ENV("DM_VK_ASYNC_THREADS", 4) : 0; if (n > 8) n = 8; if (n < 0) n = 0; } return n; }
 typedef struct async_job { struct async_job *next; gval *g; gkey_full fk; size_t len; vka_layout lay; uint64_t queued; } async_job;
 static async_job *g_as_head, **g_as_tail = &g_as_head; static pthread_mutex_t g_as_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_as_cv = PTHREAD_COND_INITIALIZER;
 static void async_queue(gval *g, const gkey_full *fk, size_t len, const vka_layout *lay);
@@ -963,7 +964,7 @@ static void *async_main(void *a) {
 static int g_as_threads;
 static void async_start(void) {
     for (int i = 0; i < async_threads(); i++) { pthread_t th; if (!pthread_create(&th, NULL, async_main, NULL)) { pthread_detach(th); g_as_threads++; } }
-    VLOG("pipelines the frame path would compile: made on %d asynchronous threads, their draws skipped until then (DM_VK_ASYNC_PSO=0: on the frame path)", g_as_threads);
+    VLOG("pipelines the frame path would compile: made on %d asynchronous threads, their draws skipped until then (DM_VK_ASYNC_PSO=1)", g_as_threads);
 }
 static void async_queue(gval *g, const gkey_full *fk, size_t len, const vka_layout *lay) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
