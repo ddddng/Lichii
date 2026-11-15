@@ -180,8 +180,54 @@ static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
 static void fsc_reset(void);
+// Lab (dotfiles-25x.17): DM_VK_DRAWQ_FROM=<present> (+ DM_VK_DRAWQ_N presents, default 120), DM_VK_DRAWQ_FILE=<path>: each draw inside a pass in that window is made inside an
+// occlusion query, and once its submission is done a line per draw goes to the file: present, pass, its shaders (vertex or task / mesh, fragment), what it draws (index
+// buffer, count, instances, first) and its targets, and the samples that passed. An object that comes and goes shows as a draw of the same mesh that passes no samples in
+// some frames while it passes many in the frames around them.
+enum { DQ_SLOT = 16384 };
+typedef struct { uint64_t present, pass, kv, kf, ibuf; int32_t count, inst, first, pad; const void *col, *dep; uint64_t ind; uint32_t args[5]; } dq_rec;   // ind, args: an indirect draw's record and what it held at recording
+static struct { int on; uint64_t from, n; VkQueryPool qp; FILE *f; PFN_vkCmdBeginQuery begin; PFN_vkCmdEndQuery end; PFN_vkCmdResetQueryPool reset; PFN_vkGetQueryPoolResults get;
+                uint32_t nq[NSLOT]; dq_rec *rec[NSLOT]; } DQ = {-1};
+uint64_t vka_present_filled(void);
+typedef struct { VkCommandBuffer cb; uint32_t q; } dq_arg;   // (made on the encoder thread when it is on: the command buffer goes with the call)
+static void dq_reset(const void *a) { dq_arg x; memcpy(&x, a, sizeof x); DQ.reset(x.cb, DQ.qp, x.q * DQ_SLOT, DQ_SLOT); }
+static void dq_begin(const void *a) { dq_arg x; memcpy(&x, a, sizeof x); DQ.begin(x.cb, DQ.qp, x.q, 0); }
+static void dq_end(const void *a) { dq_arg x; memcpy(&x, a, sizeof x); DQ.end(x.cb, DQ.qp, x.q); }
+static int dq_window(void) { uint64_t p = vka_present_filled(); return p >= DQ.from && p < DQ.from + DQ.n; }
+static void dq_sub_begin(unsigned slot) {   // the slot's last submission is done: its draws' results out, its queries reset for this one
+    if (DQ.on < 0) {
+        DQ.on = 0; DQ.from = (uint64_t)VKA_ENV("DM_VK_DRAWQ_FROM", 0); DQ.n = (uint64_t)VKA_ENV("DM_VK_DRAWQ_N", 120);
+        const char *path = getenv("DM_VK_DRAWQ_FILE");
+        if (!DQ.from || !path) return;
+        DQ.begin = (PFN_vkCmdBeginQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdBeginQuery"); DQ.end = (PFN_vkCmdEndQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdEndQuery");
+        DQ.reset = (PFN_vkCmdResetQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkCmdResetQueryPool"); DQ.get = (PFN_vkGetQueryPoolResults)vk.vkGetDeviceProcAddr(V.dev, "vkGetQueryPoolResults");
+        PFN_vkCreateQueryPool create = (PFN_vkCreateQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkCreateQueryPool");
+        VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION, .queryCount = NSLOT * DQ_SLOT};
+        if (!DQ.begin || !DQ.end || !DQ.reset || !DQ.get || !create || create(V.dev, &ci, NULL, &DQ.qp) || !(DQ.f = fopen(path, "w"))) { VRED("draw queries: not made"); return; }
+        for (int i = 0; i < NSLOT; i++) DQ.rec[i] = calloc(DQ_SLOT, sizeof(dq_rec));
+        DQ.on = 1; VLOG("draw queries: presents %llu to %llu into %s", (unsigned long long)DQ.from, (unsigned long long)(DQ.from + DQ.n), path);
+    }
+    if (!DQ.on) return;
+    if (DQ.nq[slot] > 1) {
+        static uint64_t r[DQ_SLOT];
+        if (!DQ.get(V.dev, DQ.qp, slot * DQ_SLOT + 1, DQ.nq[slot] - 1, sizeof r, r, 8, VK_QUERY_RESULT_64_BIT))
+            for (uint32_t i = 0; i + 1 < DQ.nq[slot]; i++) { const dq_rec *e = &DQ.rec[slot][i + 1];
+                uint32_t now[5] = {0}; if (e->ind) memcpy(now, (const void *)(uintptr_t)e->ind, sizeof now);
+                fprintf(DQ.f, "%llu %llu %016llx %016llx %llx %d %d %d %p %p %llu", (unsigned long long)e->present, (unsigned long long)e->pass, (unsigned long long)e->kv, (unsigned long long)e->kf,
+                        (unsigned long long)e->ibuf, e->count, e->inst, e->first, e->col, e->dep, (unsigned long long)r[i]);
+                if (e->ind) fprintf(DQ.f, " ind %llx rec %u,%u,%u,%d,%u done %u,%u,%u,%d,%u", (unsigned long long)e->ind, e->args[0], e->args[1], e->args[2], (int)e->args[3], e->args[4], now[0], now[1], now[2], (int)now[3], now[4]);
+                fputc('\n', DQ.f); }
+        else VRED_ONCE("draw queries: results not ready");
+        fflush(DQ.f);
+    }
+    DQ.nq[slot] = 0;
+    if (!dq_window()) return;
+    dq_arg x = {g_cb, slot}; if (!vka_enc_call(dq_reset, &x, sizeof x)) dq_reset(&x);
+    DQ.nq[slot] = 1;   // (query 0 unused: nq counts the reset range as in use)
+}
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
+    dq_sub_begin(g_slot);
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
     g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1);   // live: from this submission
@@ -522,7 +568,19 @@ static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as th
     if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void *)(uintptr_t)nvn_direct_host_of(addr), n); return 1; }
     return !plat_mem_read(addr, out, n);
 }
-static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
+// Lab (dotfiles-25x.17): DM_VK_WALK_CHECK=1: each word the binding walk reads out of a uniform buffer (a texture handle, a storage buffer's address) is also read as the GPU
+// will see it (the copies, fills and inline updates recorded before it applied: vka_tex_gpu_bytes); the reads that differ are counted (every 10 s) and the first logged
+static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) {
+    (void)ctx;
+    int ok = cpu_read(addr, out, n);
+    if (ok && n <= 8 && VKA_ENV("DM_VK_WALK_CHECK", 0)) {
+        int vka_tex_gpu_bytes(uint64_t addr, void *out, size_t n);
+        static uint64_t reads, diff, t0; uint64_t g = 0, c = 0; memcpy(&c, out, n); reads++;
+        if (vka_tex_gpu_bytes(nvn_direct_host_of(addr), &g, n) && g != c) { diff++; static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 32) VLOG("walk check: %zu bytes at %#llx: the CPU's %#llx, the GPU's %#llx", n, (unsigned long long)addr, (unsigned long long)c, (unsigned long long)g); }
+        uint64_t t = now_ns(); if (t >= t0 + 10000000000ull) { if (t0) VLOG("walk check: %llu uniform-buffer words read in the last 10 s, %llu differ from the GPU's", (unsigned long long)reads, (unsigned long long)diff); reads = diff = 0; t0 = t; }
+    }
+    return ok;
+}
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
 static int g_ubo_snap;   // DM_VK_UBO_SNAPSHOT (lab, dotfiles-25x.15): 1 = a dispatch's uniform buffers, 2 = every draw's too, bound as a copy of the CPU's bytes at recording
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
@@ -1416,6 +1474,17 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     checkpoint(sh, 0, dw ? dw->count : di->count, dw ? dw->instances : di->instances, ind, mdi, d, dw ? dw->prim : di->prim, dw ? dw->first : 0, di ? di->base_vertex : 0);
     if (no_call) { g_null_tex = 0; g_draws++; return; }
     // The draw
+    uint32_t dq = 0;
+    if (DQ.on > 0 && DQ.nq[g_slot] && DQ.nq[g_slot] < DQ_SLOT && R.on) {
+        dq = g_slot * DQ_SLOT + DQ.nq[g_slot];
+        dq_rec *e = &DQ.rec[g_slot][DQ.nq[g_slot]++];
+        *e = (dq_rec){vka_present_filled(), vka_n_rp, sh[7] ? sh[7]->key : sh[0] ? sh[0]->key : 0, sh[1] ? sh[1]->key : 0, di ? di->ibuf : 0, dw ? dw->count : di->count,
+                      dw ? dw->instances : di->instances, dw ? dw->first : di->base_vertex, 0, R.has_rt && R.rt.n ? (const void *)R.rt.color[0] : NULL, R.has_rt ? (const void *)R.rt.depth : NULL, ind, {0}};
+        if (ind) memcpy(e->args, (const void *)(uintptr_t)ind, dw ? 16 : 20);
+        dq_arg x = {g_cb, dq}; if (!vka_enc_call(dq_begin, &x, sizeof x)) dq_begin(&x);
+    }
+    #undef SKIP   // (a draw skipped from here on ends its query first)
+    #define SKIP(...) do { if (dq) { dq_arg x_ = {g_cb, dq}; if (!vka_enc_call(dq_end, &x_, sizeof x_)) dq_end(&x_); } g_skipped++, vka_skip_line[__LINE__ & 2047]++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return; } while (0)
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
     if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
         static uint32_t largest; if ((uint32_t)dw->count > largest) { largest = (uint32_t)dw->count; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("mesh draw: largest so far %u workgroups (task %016llx mesh %016llx)", largest, sh[6] ? (unsigned long long)sh[6]->key : 0ull, (unsigned long long)sh[7]->key); }
@@ -1437,7 +1506,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         vk.vkCmdDrawIndexed(g_cb, nout, inst, 0, di ? di->base_vertex : 0, binst);
     } else if (dw) {
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
-                   VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's");
+                   if (vka_rc_mode() != 1) VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's (library shaders; recompiled ones read the draw's: vk_nvn_direct_shaders.cpp)");
                    VkBuffer cb_; VkDeviceSize co_;
                    if (mdi_gpu && vka_addr(ind, (uint64_t)(dw->mdi_max - 1) * (uint32_t)dw->mdi_stride + 16, NULL, NULL, NULL) && vka_addr(mdi, 4, &cb_, &co_, NULL) && !(co_ & 3) && dw->mdi_stride >= 16 && !(dw->mdi_stride & 3))
                        vk.vkCmdDrawIndirectCount(g_cb, b, o, cb_, co_, (uint32_t)dw->mdi_max, (uint32_t)dw->mdi_stride);
@@ -1464,6 +1533,9 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
                    else vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20); }
         else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
     }
+    if (dq) { dq_arg x = {g_cb, dq}; if (!vka_enc_call(dq_end, &x, sizeof x)) dq_end(&x); }
+    #undef SKIP
+    #define SKIP(...) do { g_skipped++, vka_skip_line[__LINE__ & 2047]++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return; } while (0)
     g_draws++;
     pass_log(d, sh, 1);
     PT(8);
