@@ -121,6 +121,7 @@ add_executable(tests
     video_core/split_fence_wait.cpp
     video_core/nx2_written_pages.cpp
     video_core/command_snapshot_suspensions.cpp
+    video_core/safe_command_reads.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
     hid_core/sensor_info.cpp
@@ -216,6 +217,7 @@ add_executable(tests
     core/internal_network/network.cpp
     core/numeric_name_info.cpp
     core/numeric_name_info_ipc.cpp
+    core/cmif_out_buffer.cpp
     video_core/memory_tracker.cpp
     video_core/invalidation_accumulator.cpp
     video_core/memory_manager_runs.cpp
