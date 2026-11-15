@@ -425,6 +425,23 @@ try
     } else if (device.IsNvnDirect()) {
         LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }
+    // Lab (EDEN_NX2_VRAM_TRACE=1, dotfiles-25x.8 / vvt.9): every second NVML's figure for this
+    // process beside the heap usage Lichii counts (GetDeviceMemoryUsage), in either renderer: what
+    // the driver keeps outside the memory heaps (the replay's DM_VK_VRAM_TRACE adds its own lines).
+    if (const char* trace = std::getenv("EDEN_NX2_VRAM_TRACE"); trace != nullptr && std::strcmp(trace, "1") == 0) {
+        vram_trace = std::jthread([this](std::stop_token stop) {
+            NvmlProcessMemory nvml{device};
+            while (!stop.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                const u64 process = nvml.Get();
+                // (the driver's heap usage: Lichii's figure plus what VMA holds unused in its blocks)
+                const u64 heaps = device.GetDeviceMemoryUsage() + device.GetDeviceMemorySlack();
+                LOG_INFO(Render_Vulkan, "VRAM trace: NVML {} MiB, heap usage {} MiB (VMA unused {} MiB), outside the heaps {} MiB",
+                         process >> 20, heaps >> 20, device.GetDeviceMemorySlack() >> 20,
+                         (static_cast<s64>(process) - static_cast<s64>(heaps)) >> 20);
+            }
+        });
+    }
 #endif
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <thread>
 #include <variant>
 
 #include "common/dynamic_library.h"
@@ -150,6 +151,7 @@ private:
     std::optional<TurboMode> turbo_mode;
 #ifdef LICHII_NVN_DIRECT
     std::optional<NvnDirectAstc> nvn_direct_astc; ///< The replay's ASTC decode (NVN2 direct mode).
+    std::jthread vram_trace; ///< Lab (EDEN_NX2_VRAM_TRACE=1): NVML vs heap usage every second.
 #endif
 
     Frame applet_frame;
