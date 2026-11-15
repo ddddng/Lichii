@@ -1196,13 +1196,14 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     }
     // DM_VK_SKIP_SHADERS=<key>[,<key>...] (lab, dotfiles-25x.15): draws with any of these shaders are skipped and counted (each skip logged up to 64 times), to test
     // whether a draw is what hangs the GPU. DM_VK_SKIP_MODE (bits) instead keeps the draw with part of it left out: 1 = its vertex shader's textures read as unbound,
-    // 2 = its pixel shader's, 4 = recorded with everything but the draw call itself
+    // 2 = its pixel shader's, 4 = recorded with everything but the draw call itself, 8 = drawn as it is (only counted and logged)
     g_null_tex = 0; int no_call = 0;
     { static uint64_t keys[8]; static int nk = -1;
       if (nk < 0) { nk = 0; const char *e = getenv("DM_VK_SKIP_SHADERS"); while (e && *e && nk < 8) { char *x; keys[nk++] = strtoull(e, &x, 16); e = *x == ',' ? x + 1 : NULL; } }
       for (int k = 0; k < nk; k++) for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && sh[st]->key == keys[k]) {
           int mode = (int)VKA_ENV("DM_VK_SKIP_MODE", 0);
-          static _Atomic int n; uint64_t vka_frame(void); if (atomic_fetch_add(&n, 1) < 64) VRED("DM_VK_SKIP_SHADERS: draw with shader %016llx %s (mode %d, frame %llu)", (unsigned long long)keys[k], mode ? "changed" : "skipped", mode, (unsigned long long)vka_frame());
+          static _Atomic int n; uint64_t vka_frame(void); int c = atomic_fetch_add(&n, 1) + 1;
+          if (c <= 64) VRED("DM_VK_SKIP_SHADERS: draw %d with shader %016llx %s (mode %d, frame %llu)", c, (unsigned long long)keys[k], mode == 8 ? "drawn" : mode ? "changed" : "skipped", mode, (unsigned long long)vka_frame());
           if (!mode) { g_skipped++; return; }
           g_null_tex = (mode & 1 ? 1u << 0 : 0) | (mode & 2 ? 1u << 1 : 0); no_call = (mode & 4) != 0;
           k = nk; break; } }
