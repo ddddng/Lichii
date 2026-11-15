@@ -253,12 +253,15 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (!buffer) {
         // No memory left for it (#262: Mario Kart World on an 8 GB laptop with Intel UHD, a
         // 128 MiB upload). Free the idle staging buffers and try again, then wait for the GPU so
-        // the ones still in use are idle too.
-        ReleaseIdleBuffers();
+        // the ones it was still reading are idle too. Those handed out in the current tick may
+        // feed commands not recorded yet (the caller's input while it asks for its output), so
+        // they stay.
+        const u64 current_tick = scheduler.CurrentTick();
+        ReleaseIdleBuffers(current_tick);
         buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
         if (!buffer) {
             scheduler.Finish();
-            ReleaseIdleBuffers();
+            ReleaseIdleBuffers(current_tick);
             buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
         }
     }
@@ -338,11 +341,11 @@ u64 StagingBufferPool::CachedBytes(MemoryUsage usage) {
     return bytes;
 }
 
-void StagingBufferPool::ReleaseIdleBuffers() {
+void StagingBufferPool::ReleaseIdleBuffers(u64 before_tick) {
     for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
         for (StagingBuffers& staging : *cache) {
-            std::erase_if(staging.entries, [this](const StagingBuffer& entry) {
-                return !entry.deferred && scheduler.IsFree(entry.tick);
+            std::erase_if(staging.entries, [this, before_tick](const StagingBuffer& entry) {
+                return !entry.deferred && entry.tick < before_tick && scheduler.IsFree(entry.tick);
             });
             staging.delete_index = 0;
             staging.iterate_index = 0;
