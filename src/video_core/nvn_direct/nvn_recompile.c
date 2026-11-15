@@ -97,9 +97,31 @@ static const uint8_t* rc_control(uint64_t key) {
     return c;
 }
 
+// Loops the recompiler's safety check ended (Lichii's 8192 iterations; RuntimeInfo::loop_guard_binding): each shader with loops has a word in static
+// memory the check sets, looked at every 4096 draws and dispatches and logged once per shader: a loop that would not end has wrong inputs, which the
+// check hides (dotfiles-25x.15: the library's modules have no such check, and such a loop hangs the GPU)
+typedef struct { uint64_t key; const volatile uint32_t* word; int noted; } rc_guard;
+static rc_guard* g_guards; static size_t g_nguards, g_guards_cap;
+static void guard_add(uint64_t key, const vka_span* s) {
+    pthread_mutex_lock(&g_mu);
+    if (g_nguards == g_guards_cap) { size_t nc = g_guards_cap ? 2 * g_guards_cap : 256; rc_guard* n = realloc(g_guards, nc * sizeof *n); if (!n) { pthread_mutex_unlock(&g_mu); return; } g_guards = n; g_guards_cap = nc; }
+    g_guards[g_nguards++] = (rc_guard){key, (const volatile uint32_t*)s->ptr, 0};
+    pthread_mutex_unlock(&g_mu);
+}
+static void guard_poll(void) {
+    static unsigned calls;
+    if (++calls % 4096) return;
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_nguards; i++) if (!g_guards[i].noted && *g_guards[i].word) {
+        g_guards[i].noted = 1;
+        VRED("recompiled shader %016llx: a loop ran 8192 iterations and the recompiler's safety check ended it (its inputs would not end it)", (unsigned long long)g_guards[i].key);
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
 // The draw or dispatch whose shaders are resolved now (vka_draw.c): the state translation reads
 static const vka_dstate* g_draw;
-void vka_rc_draw(const vka_dstate* d) { g_draw = d; }
+void vka_rc_draw(const vka_dstate* d) { g_draw = d; guard_poll(); }
 
 // ---------- NVN2 compute's c[0] ----------
 typedef struct { unsigned ub, sb, hb, ib, size, push; } cs_layout;
@@ -248,6 +270,7 @@ static int rc_bind(const nvn_direct_shader_desc* s, int st, const cs_layout* l, 
         }
         NO("binding %u: a handle at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
     }
+    case NVN_DIRECT_DESC_LOOP_GUARD: b->kind = VKA_KIND_LOOP_GUARD; b->flags |= DMSH_VK_BF_RW; return 1;
     case NVN_DIRECT_DESC_IMAGE: case NVN_DIRECT_DESC_IMAGE_BUFFER: {
         b->dim = dim_of(s);
         int c2 = c2_off(st, l, s->cbuf_index, s->cbuf_offset);
@@ -458,7 +481,11 @@ vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t pr
         free(b);
         if (L) {
             r->sh = vka_shader_make(L, key);
-            if (r->sh) { r->sh->nvn2_control = control; g_made++; }
+            if (r->sh) {
+                r->sh->nvn2_control = control; g_made++;
+                for (unsigned k = 0; k < r->sh->e->bind_count; k++) if (r->sh->b[k].kind == VKA_KIND_LOOP_GUARD && !r->sh->loop_guard.buf && vka_static(16, V.sb_align, &r->sh->loop_guard)) {
+                    memset(r->sh->loop_guard.ptr, 0, 16); guard_add(key, &r->sh->loop_guard); }
+            }
         } else if (!*why) snprintf(why, sizeof why, "%s", err);
         if (*why || !r->sh) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VRED("recompiled shader %016llx (NVN stage %d): %s", (unsigned long long)key, r->st, *why ? why : "refused"); }
     } else {
@@ -494,7 +521,7 @@ static int rec_name(const dmsh_vk_bind* b, char* o, size_t n) {
     case DMSH_VK_KIND_TEX_UBO: return snprintf(o, n, "tex@c%d+%#x", b->reg + 3, b->off);
     case DMSH_VK_KIND_TBUF: return snprintf(o, n, "tbuf%d", b->reg);
     case DMSH_VK_KIND_IMG: return snprintf(o, n, "img%d", b->reg);
-    case DMSH_VK_KIND_SUPPORT: case DMSH_VK_KIND_GMEM_MAP: case DMSH_VK_KIND_GMEM_LOG: return 0;   // the library translator's own buffers
+    case DMSH_VK_KIND_SUPPORT: case DMSH_VK_KIND_GMEM_MAP: case DMSH_VK_KIND_GMEM_LOG: case VKA_KIND_LOOP_GUARD: return 0;   // either translator's own buffers
     default: return snprintf(o, n, "kind%u:%d:%#x", b->kind, b->reg, b->off);
     }
 }

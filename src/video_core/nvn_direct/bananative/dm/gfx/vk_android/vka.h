@@ -363,6 +363,7 @@ typedef struct vka_shader {
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
     const uint8_t *nvn2_control;        // Lichii (dotfiles-25x.11): a recompiled shader's NVN2 control section (nvn_recompile.c), NULL for the library's
+    vka_span loop_guard;                // Lichii: a recompiled shader's loop guard word (static memory; none when it has no loops)
 } vka_shader;
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)

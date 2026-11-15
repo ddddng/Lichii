@@ -423,6 +423,9 @@ public:
     /// Mesh emulation (RuntimeInfo::mesh_as_compute): the output storage buffer and the
     /// pointer type to one of its words.
     Id mesh_output_buffer{};
+    Id loop_guard_buffer{}; ///< RuntimeInfo::loop_guard_binding's buffer
+    Id loop_guard_word_pointer{};
+    Id loop_guard_flag{}; ///< private u32: a loop's safety check ended a loop in this invocation
     Id mesh_output_u32{};
     // With a task program: its payload, offset and argument buffers (RuntimeInfo), and the mesh
     // workgroup's index within its task (what the mesh program reads at input address 0).
@@ -487,6 +490,7 @@ private:
     void DefineOutputs(const IR::Program& program);
     void DefineMesh(const IR::Program& program);
     void DefineMeshEmulationOutput();
+    void DefineLoopGuard(const IR::Program& program);
 };
 
 } // namespace Shader::Backend::SPIRV

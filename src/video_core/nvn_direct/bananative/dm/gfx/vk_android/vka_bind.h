@@ -41,6 +41,7 @@ enum {
     VKA_R_GMEM_MAP,   // the guest → device address table of raw global memory
     VKA_R_GMEM_LOG,   // that memory's write log, cleared per draw or dispatch
     VKA_R_SHARED_SPILL,   // a compute program's shared memory past the device's limit (DMSH_VK_KIND_SHARED_SPILL): size = bytes of one workgroup's slice
+    VKA_R_LOOP_GUARD,     // Lichii: the shader's loop guard word (VKA_KIND_LOOP_GUARD)
 };
 typedef struct {
     uint8_t what, desc, flags, dim;    // VKA_R_*, VkDescriptorType, DMSH_VK_BF_*, DMSH_VK_DIM_*
@@ -57,6 +58,8 @@ typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);
 // VKA_BANK_NVN2_CS_C0, which the walk's caller fills from the shader
 #define VKA_KIND_NVN2_CS_C0 64
 #define VKA_BANK_NVN2_CS_C0 0x100
+// Lichii (dotfiles-25x.11): a recompiled shader's loop guard word (nvn_recompile.c): a VKA_R_LOOP_GUARD the walk's caller binds from the shader
+#define VKA_KIND_LOOP_GUARD 65
 
 #define VKA_WALK_REFUSE (-1)
 // Walks one stage's binding records (e->bind_count of them from b) for NVN stage nvn_stage. Writes at most max results to out and returns their count, or VKA_WALK_REFUSE with

@@ -73,7 +73,9 @@ enum {
     NVN_DIRECT_DESC_IMAGE_BUFFER,
     NVN_DIRECT_DESC_TEXTURE,
     NVN_DIRECT_DESC_IMAGE,
+    NVN_DIRECT_DESC_LOOP_GUARD,     ///< storage buffer whose first word a loop's safety check sets when it ends a loop (at first_binding + NVN_DIRECT_LOOP_GUARD_SLOT)
 };
+#define NVN_DIRECT_LOOP_GUARD_SLOT 62
 typedef struct nvn_direct_shader_desc {
     uint8_t kind;              ///< NVN_DIRECT_DESC_*
     uint8_t vk_type;           ///< VkDescriptorType

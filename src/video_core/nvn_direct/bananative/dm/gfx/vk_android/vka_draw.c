@@ -682,6 +682,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             case VKA_R_GMEM_MAP: ok = gmem_map(bi); break;
             case VKA_R_GMEM_LOG: ok = gmem_log(bi); break;
             case VKA_R_SHARED_SPILL: ok = st == 5 && g_spill_range && g_spill.buf; if (ok) *bi = (VkDescriptorBufferInfo){g_spill.buf, g_spill.off, g_spill_range}; break;
+            case VKA_R_LOOP_GUARD: ok = sh->loop_guard.buf != VK_NULL_HANDLE; if (ok) *bi = (VkDescriptorBufferInfo){sh->loop_guard.buf, sh->loop_guard.off, 16}; break;   // (Lichii, nvn_recompile.c)
             default: ok = 0; break;
             }
             if (!ok) { if (V.null_desc) *bi = (VkDescriptorBufferInfo){VK_NULL_HANDLE, 0, VK_WHOLE_SIZE}; else *bi = (VkDescriptorBufferInfo){storage ? g_sink.buf : g_zero.buf, storage ? g_sink.off : g_zero.off, 65536}; }

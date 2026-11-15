@@ -14,6 +14,7 @@
 
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/settings.h"
 #include "shader_recompiler/backend/nvn_storage_descriptor.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -501,6 +502,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineWriteStorageCasLoopFunction(program.info);
     DefineGlobalMemoryFunctions(program);
     DefineMeshEmulationOutput();
+    DefineLoopGuard(program);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
 }
@@ -2011,6 +2013,41 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     }
     for (const u32 line : mesh_info.primitive_lines) {
         mesh_primitive_targets.push_back(target(line, true));
+    }
+}
+
+void EmitContext::DefineLoopGuard(const IR::Program& program) {
+    if (runtime_info.loop_guard_binding == ~0U || Settings::values.disable_shader_loop_safety_checks ||
+        std::ranges::none_of(program.syntax_list, [](const IR::AbstractSyntaxNode& node) {
+            return node.type == IR::AbstractSyntaxNode::Type::Repeat;
+        })) {
+        return;
+    }
+    // (Sirit shares identical types: the u32 storage buffer type of the program's own storage
+    // buffers is decorated already, as in DefineMeshEmulationOutput)
+    AddExtension("SPV_KHR_storage_buffer_storage_class");
+    Id struct_pointer{storage_types.U32.array};
+    if (!Sirit::ValidId(struct_pointer)) {
+        const Id array_type{TypeRuntimeArray(U32[1])};
+        Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+        const Id struct_type{TypeStruct(array_type)};
+        Decorate(struct_type, spv::Decoration::Block);
+        MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+        struct_pointer = TypePointer(spv::StorageClass::StorageBuffer, struct_type);
+    }
+    const Id buffer{AddGlobalVariable(struct_pointer, spv::StorageClass::StorageBuffer)};
+    Decorate(buffer, spv::Decoration::Binding, runtime_info.loop_guard_binding);
+    Decorate(buffer, spv::Decoration::DescriptorSet, 0U);
+    Name(buffer, "loop_guard");
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(buffer);
+    }
+    loop_guard_buffer = buffer;
+    loop_guard_word_pointer = TypePointer(spv::StorageClass::StorageBuffer, U32[1]);
+    loop_guard_flag = AddGlobalVariable(TypePointer(spv::StorageClass::Private, U32[1]),
+                                        spv::StorageClass::Private, u32_zero_value);
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(loop_guard_flag);
     }
 }
 

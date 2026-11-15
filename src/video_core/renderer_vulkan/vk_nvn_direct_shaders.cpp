@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
@@ -409,6 +410,15 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
         stage == Shader::Stage::Geometry || stage == Shader::Stage::Mesh) {
         runtime_info.convert_depth_mode = source.convert_depth != 0;
     }
+    // (not task and mesh programs: their epilogue's markers expect the program's own returns)
+    const bool loop_guard = stage != Shader::Stage::Task && stage != Shader::Stage::Mesh &&
+                            !Settings::values.disable_shader_loop_safety_checks &&
+                            std::ranges::any_of(program.syntax_list, [](const Shader::IR::AbstractSyntaxNode& node) {
+                                return node.type == Shader::IR::AbstractSyntaxNode::Type::Repeat;
+                            });
+    if (loop_guard) {
+        runtime_info.loop_guard_binding = source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT;
+    }
     Shader::Maxwell::ConvertLegacyToGeneric(program, runtime_info);
     Shader::Backend::Bindings bindings;
     bindings.unified = source.first_binding;
@@ -503,6 +513,14 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
         desc = handle(desc, image);
         desc.unsupported |= image.count != 1 || image.is_byte_addressed;
         add(desc, 1);
+    }
+    if (binding > source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT) {
+        throw Shader::RuntimeError("{} bindings, the stage's range has {}", binding - source.first_binding,
+                                   NVN_DIRECT_LOOP_GUARD_SLOT);
+    }
+    if (loop_guard) {
+        binding = source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT;
+        add({.kind = NVN_DIRECT_DESC_LOOP_GUARD, .vk_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .count = 1}, 1);
     }
     if (const u32 end = BindingEnd(spirv); end > binding) {
         throw Shader::RuntimeError("The SPIR-V binds up to {}, its descriptors end at {}", end,
