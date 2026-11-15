@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
@@ -188,3 +189,96 @@ TEST_CASE("A route through a pointer array keeps the bound slots past those sear
     CHECK(std::ranges::find(route, std::pair{1U, 0U}) == route.end());
 }
 
+TEST_CASE("A table pointer assigned under the access's predicate routes among its own buffer",
+          "[shader][global_memory_routes]") {
+    const bool same = GENERATE(true, false);
+    ObjectPool<IR::Inst> pool{256};
+    IR::Block entry{pool};
+    IR::Block definition{pool};
+    IR::Block merge{pool};
+    IR::Block access{pool};
+    IR::Block exit{pool};
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks = {&entry, &definition, &merge, &access, &exit};
+    program.post_order_blocks = {&exit, &access, &merge, &definition, &entry};
+    for (u32 index = 0; index < program.blocks.size(); ++index) {
+        program.blocks[index]->SetOrder(index);
+    }
+    entry.AddBranch(&definition);
+    entry.AddBranch(&merge);
+    definition.AddBranch(&merge);
+    merge.AddBranch(&access);
+    merge.AddBranch(&exit);
+    access.AddBranch(&exit);
+    const auto word = [](IR::IREmitter& ir, u32 offset) {
+        return ir.GetCbuf(ir.Imm32(0), ir.Imm32(offset));
+    };
+    const auto address = [](IR::IREmitter& ir, const IR::U32& low, const IR::U32& high) {
+        return IR::U64{ir.PackUint2x32(ir.CompositeConstruct(low, high))};
+    };
+    const auto phi = [](IR::Block& block) {
+        block.AppendNewInst(IR::Opcode::Phi, {});
+        IR::Inst* const inst{&block.back()};
+        inst->SetFlags(IR::Type::U32);
+        return inst;
+    };
+    IR::IREmitter start{entry};
+    start.WriteGlobal32(address(start, word(start, 0x110), word(start, 0x114)), start.Imm32(1));
+    const IR::U1 predicate{start.ILessThan(start.LocalInvocationIdX(), start.Imm32(16), false)};
+    const IR::U1 update_guard{start.ConditionRef(predicate)};
+    // The register held a float (0.5) on the path that does not assign the table pointer.
+    IR::IREmitter update{definition};
+    const IR::U32 table_low{word(update, 0x180)};
+    const IR::U32 table_high{word(update, 0x184)};
+    IR::Inst* const low{phi(merge)};
+    IR::Inst* const high{phi(merge)};
+    low->AddPhiOperand(&entry, start.Imm32(0x3f000000));
+    low->AddPhiOperand(&definition, table_low);
+    high->AddPhiOperand(&entry, start.Imm32(0));
+    high->AddPhiOperand(&definition, table_high);
+    IR::IREmitter select{merge};
+    const IR::U1 access_predicate{
+        same ? predicate : select.ILessThan(select.LocalInvocationIdY(), select.Imm32(4), false)};
+    const IR::U1 access_guard{select.ConditionRef(access_predicate)};
+    IR::IREmitter load{access};
+    const IR::Value entry_words{load.LoadGlobal64(IR::U64{load.IAdd(
+        address(load, IR::U32{IR::Value{low}}, IR::U32{IR::Value{high}}), load.Imm64(u64{0x20}))})};
+    const IR::U32 pointer_low{load.CompositeExtract(entry_words, 0)};
+    const IR::U32 pointer_high{load.CompositeExtract(entry_words, 1)};
+    load.WriteGlobal32(address(load, load.IAdd(pointer_low, load.Imm32(16)), pointer_high),
+                       load.Imm32(7));
+    IR::Inst* const routed{&access.Instructions().back()};
+    program.syntax_list = {
+        {.data{.block = &entry}, .type = IR::AbstractSyntaxNode::Type::Block},
+        {.data{.if_node{update_guard, &definition, &merge}},
+         .type = IR::AbstractSyntaxNode::Type::If},
+        {.data{.block = &definition}, .type = IR::AbstractSyntaxNode::Type::Block},
+        {.data{.end_if{&merge}}, .type = IR::AbstractSyntaxNode::Type::EndIf},
+        {.data{.block = &merge}, .type = IR::AbstractSyntaxNode::Type::Block},
+        {.data{.if_node{access_guard, &access, &exit}}, .type = IR::AbstractSyntaxNode::Type::If},
+        {.data{.block = &access}, .type = IR::AbstractSyntaxNode::Type::Block},
+        {.data{.end_if{&exit}}, .type = IR::AbstractSyntaxNode::Type::EndIf},
+        {.data{.block = &exit}, .type = IR::AbstractSyntaxNode::Type::Block},
+        {{}, IR::AbstractSyntaxNode::Type::Return},
+    };
+    HostTranslateInfo host{};
+    host.min_ssbo_alignment = 16;
+    host.support_int64 = true;
+    NativeEnvironment env;
+    Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
+
+    REQUIRE(routed->GetOpcode() == IR::Opcode::WriteGlobal32);
+    if (!same) {
+        // Another predicate can reach the access with the float: every bound buffer
+        CHECK_FALSE(program.global_memory_route.contains(routed));
+        return;
+    }
+    REQUIRE(program.global_memory_route.contains(routed));
+    const auto& descriptors{program.info.storage_buffers_descriptors};
+    const auto& route{program.global_memory_routes.at(program.global_memory_route.at(routed))};
+    REQUIRE(route.size() == 1);
+    CHECK(descriptors[route.front()].cbuf_offset == 0x180);
+    CHECK(descriptors[route.front()].indirect_offset == 0x20);
+}

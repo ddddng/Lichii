@@ -78,6 +78,8 @@ struct NativeCandidates {
     /// instruction the search does not follow, or a table entry it left out, and can carry a
     /// pointer bound for another access.
     bool complete{};
+    /// The access block the table holder search left phi inputs out for (see AllowsPhi)
+    const IR::Block* pruned_at{};
 };
 
 /// A global access left for the backend to route among its own candidate buffers
@@ -1182,7 +1184,7 @@ bool CollectPointerSlots(const IR::Value& offset, small_vector<std::pair<u32, u3
 /// can point into a different buffer, so the search does not stop at the first pointer. A pointer
 /// read from an array at a dynamic offset contributes every mapped slot of the array.
 NativeCandidates NativePointerCandidates(const IR::U32& low_addr, Environment& env, bool& dynamic,
-                                         StorageInfo& info) {
+                                         StorageInfo& info, const TrackingConditions& conditions) {
     NativeCandidates result;
     auto& candidates{result.pointers};
     // Whether each pointer source the search reached (a constant buffer read or a table load)
@@ -1342,11 +1344,27 @@ NativeCandidates NativePointerCandidates(const IR::U32& low_addr, Environment& e
                         table_complete = false;
                     }
                     continue;
-                case IR::Opcode::Phi:
+                case IR::Opcode::Phi: {
+                    // A predicated table pointer assignment: the input of the path that skips it
+                    // cannot reach an access under the same predicate.
+                    small_vector<size_t, 4> feasible;
                     for (size_t arg = 0; arg < holder->NumArgs(); ++arg) {
-                        enqueue_holder(holder->Arg(arg), true);
+                        if (conditions.AllowsPhi(holder, arg)) {
+                            feasible.push_back(arg);
+                        }
+                    }
+                    if (feasible.empty()) {
+                        for (size_t arg = 0; arg < holder->NumArgs(); ++arg) {
+                            feasible.push_back(arg);
+                        }
+                    } else if (feasible.size() < holder->NumArgs()) {
+                        result.pruned_at = conditions.current;
+                    }
+                    for (const size_t arg : feasible) {
+                        enqueue_holder(holder->Arg(arg), feasible.size() > 1);
                     }
                     continue;
+                }
                 case IR::Opcode::SelectU32:
                     enqueue_holder(holder->Arg(1), true);
                     enqueue_holder(holder->Arg(2), true);
@@ -1489,10 +1507,17 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     if (native && !low_addr.IsImmediate()) {
         const IR::Inst* const start{low_addr.InstRecursive()};
         auto it{info.native_candidates.find(start)};
+        if (it != info.native_candidates.end() && it->second.pruned_at &&
+            it->second.pruned_at != conditions.current) {
+            // Searched for an access in another block, whose conditions left other inputs out
+            info.native_candidates.erase(it);
+            it = info.native_candidates.end();
+        }
         if (it == info.native_candidates.end()) {
             bool dynamic{};
             it = info.native_candidates
-                     .emplace(start, NativePointerCandidates(low_addr, env, dynamic, info))
+                     .emplace(start,
+                              NativePointerCandidates(low_addr, env, dynamic, info, conditions))
                      .first;
             if (dynamic) {
                 info.native_dynamic.insert(start);
