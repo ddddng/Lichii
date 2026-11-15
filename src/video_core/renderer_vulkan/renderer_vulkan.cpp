@@ -279,6 +279,7 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .queue_context = &scheduler.submit_mutex,
         .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
         .astc_context = astc,
+        .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
         // NVML's figure when there is one (it counts what the driver keeps for itself), else the
         // heap usage (dotfiles-25x.8).
         .memory_usage = [](void* context) -> uint64_t {

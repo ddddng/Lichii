@@ -649,6 +649,7 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 // ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
+int vka_astc_opaque(const void *blocks, size_t n) { return g_adopt.astc_opaque && g_adopt.astc_opaque(blocks, n); }   // Lichii (dotfiles-25x.25): BC1 for opaque ASTC (vka_tex.c astc_bc1)
 // Lichii's shader recompiler (nvn_direct_device.shader_translate, dotfiles-25x.11): a program stage translated, its result given back with vka_shader_translated_free
 int vka_shader_translate(const nvn_direct_shader_source *s, nvn_direct_shader *o) {
     if (g_adopt.shader_translate) return g_adopt.shader_translate(g_adopt.shader_context, s, o);
