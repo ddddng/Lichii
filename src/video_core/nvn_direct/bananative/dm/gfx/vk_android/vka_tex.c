@@ -1043,6 +1043,9 @@ static void upload_astc_gpu(vka_img *im, const tex_t *t, VkCommandBuffer cb, uin
 // A sparse ASTC texture on a device without ASTC (vka_astc_transcode): each changed level and layer gathered whole from the page table (unmapped pages as zero texels),
 // deswizzled into ASTC blocks, transcoded and copied. Whole subresources, not bands: a band of ASTC block rows is not a band of BC3 block rows. Mario Kart World's
 // 8192x8192x68 ASTC arrays are dense images from level 2 here (no residency image: sparse_new), so a level is at most 2048x2048. Not for residency images
+// Lichii (dotfiles-25x.25, diagnostic): sparse ASTC textures' levels x layers with data uploaded, [0] opaque [1] with alpha; texture copies into them by source image: [0] BC1,
+// [1] BC3 whose storage scans opaque now, [2] BC3 with alpha or unscanned (the VRAM line)
+static uint64_t g_arr_sub[2], g_arr_src[3];
 static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, uint64_t stamp, int all, int bind_only) {
     const nvn_texdesc *d = &im->d; const vka_fmt *f = &im->f; uint64_t mem = (uint64_t)(uintptr_t)im->mem;
     if (bind_only) return;
@@ -1055,6 +1058,7 @@ static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, ui
                 if (!len || (!all && !nvn_sparse_since(im->vpool, mem + off, len, gen, stamp))) continue;
                 vka_span sp; if (!vka_scratch(len, 256, &sp)) { ub = VK_NULL_HANDLE; break; }
                 nvn_sparse_copy(im->vpool, sp.ptr, mem + off, len);
+                if (mem_any(sp.ptr, len)) g_arr_sub[!vka_astc_opaque(sp.ptr, len)]++;   // (Lichii, dotfiles-25x.25: the arrays' content, opaque or not; unmapped pages read as zero blocks, opaque)
                 astc_zero_blocks(sp.ptr, len);   // (unmapped pages: zero texels, not ASTC's error colour)
                 if (!astc_gpu_level(&ub, im, i, lv, ly, sp.buf, sp.off, len)) ub = VK_NULL_HANDLE;
             }
@@ -1440,6 +1444,7 @@ static int astc_reformat(vka_img *im, VkCommandBuffer cb);
 int vka_tex_astc_copy(vka_img *s, vka_img *d, VkCommandBuffer cb) {
     pthread_mutex_lock(&g_tmu);
     acopy_add((uintptr_t)s->mem); acopy_add((uintptr_t)d->mem);
+    if (d->vpool) g_arr_src[s->f.bpb == 8 ? 0 : s->mem && s->L.size <= 64u << 20 && !s->vpool && !dm_guest_unmapped((uintptr_t)s->mem, s->L.size) && vka_astc_opaque(s->mem, (size_t)s->L.size) ? 1 : 2]++;
     int ok = s->f.bpb == d->f.bpb || ((s->f.bpb == 16 || astc_reformat(s, cb)) && (d->f.bpb == 16 || astc_reformat(d, cb)));
     pthread_mutex_unlock(&g_tmu);
     return ok;
@@ -1720,8 +1725,9 @@ static void img_classes(char *o, size_t n) {
     size_t k = (size_t)snprintf(o, n, "images by class:");
     for (int i = 0; i < NCLS && k < n; i++) k += (size_t)snprintf(o + k, n - k, " %s %.0f MiB (%d),", name[i], b[i] / 1048576.0, c[i]);
     if (k < n) k += (size_t)snprintf(o + k, n - k, " dedicated %.0f MiB (%d), over another image's storage %.0f MiB (%d)", ded / 1048576.0, nded, dup / 1048576.0, ndup);
-    if (k < n) snprintf(o + k, n - k, "; ASTC images made BC1 %llu, BC3 for alpha or unscanned %llu, BC3 for copies %llu, BC1 made again as BC3 %llu", (unsigned long long)g_bc1_n[0],
-                        (unsigned long long)g_bc1_n[1], (unsigned long long)g_bc1_n[2], (unsigned long long)g_bc1_n[3]);
+    if (k < n) snprintf(o + k, n - k, "; ASTC images made BC1 %llu, BC3 for alpha or unscanned %llu, BC3 for copies %llu, BC1 made again as BC3 %llu; sparse ASTC levels x layers opaque %llu, with alpha %llu; copies into them from BC1 %llu, BC3 opaque %llu, BC3 alpha %llu", (unsigned long long)g_bc1_n[0],
+                        (unsigned long long)g_bc1_n[1], (unsigned long long)g_bc1_n[2], (unsigned long long)g_bc1_n[3], (unsigned long long)g_arr_sub[0], (unsigned long long)g_arr_sub[1],
+                        (unsigned long long)g_arr_src[0], (unsigned long long)g_arr_src[1], (unsigned long long)g_arr_src[2]);
 }
 void vka_tex_budget(void) {
     static uint64_t evicted, evicted_bytes;
