@@ -340,6 +340,8 @@ jobs:
             "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
             "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded \
+            "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG:FULL /OPT:REF /OPT:ICF" \
             "-DCMAKE_C_FLAGS=$flags" \
             "-DCMAKE_CXX_FLAGS=-EHsc $flags"
 
@@ -511,6 +513,9 @@ jobs:
               throw "build/release/bin/$exe was not produced"
             }
           }
+          # Symbols ship as their own artifact, not in the release zip.
+          New-Item -ItemType Directory -Force build/release/symbols | Out-Null
+          Move-Item build/release/bin/*.pdb build/release/symbols/
           windeployqt --release --no-translations build/release/bin/lichii.exe
 
       # A self-contained app bundle: macdeployqt copies Qt and every other Homebrew library both
@@ -593,6 +598,15 @@ jobs:
           path: build/release/bin/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload Windows symbols
+        if: startsWith(matrix.platform, 'windows')
+        uses: actions/upload-artifact@v7
+        with:
+          name: symbols-${{ matrix.platform }}-${{ github.sha }}
+          path: build/release/symbols/
+          if-no-files-found: error
+          retention-days: 90
 
       # Both Linux files go in one artifact: the tar.gz and the AppImage.
       - name: Upload Linux binary
