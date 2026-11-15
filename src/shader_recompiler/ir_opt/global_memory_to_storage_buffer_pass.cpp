@@ -62,9 +62,18 @@ using StorageInstVector = small_vector<StorageInst, 24>;
 using StorageWritesSet =
     flat_set<StorageBufferAddr, std::less<StorageBufferAddr>, small_vector<StorageBufferAddr, 16>>;
 
+/// Slots first + n * stride of a pointer array read at a dynamic offset (stride is not zero)
+struct PointerArray {
+    StorageBufferAddr first;
+    u32 stride;
+};
+
 /// The pointers a native global access's address can come from, see NativePointerCandidates
 struct NativeCandidates {
     small_vector<StorageBufferAddr, 4> pointers;
+    /// Arrays the pointers were read from at a dynamic offset. The search takes their first slots
+    /// only, and any slot is one the address can come from.
+    small_vector<PointerArray, 2> arrays;
     /// Every path of the address reaches one of the pointers. Otherwise a path goes through an
     /// instruction the search does not follow, or a table entry it left out, and can carry a
     /// pointer bound for another access.
@@ -75,6 +84,7 @@ struct NativeCandidates {
 struct RoutedAccess {
     IR::Inst* inst;
     StorageBufferSet buffers;
+    small_vector<PointerArray, 2> arrays;
 };
 
 struct StorageInfo {
@@ -1199,6 +1209,10 @@ NativeCandidates NativePointerCandidates(const IR::U32& low_addr, Environment& e
                 const bool complete{CollectPointerSlots(offset, slots, slot_visited) &&
                                     !slots.empty()};
                 for (const auto& [first, stride] : slots) {
+                    if (stride != 0) {
+                        result.arrays.push_back(
+                            {.first{.index = index.U32(), .offset = first}, .stride = stride});
+                    }
                     for (u32 slot = 0; slot < (stride ? max_slots : 1U); ++slot) {
                         const StorageBufferAddr pointer{.index = index.U32(),
                                                         .offset = first + slot * stride};
@@ -1366,6 +1380,11 @@ NativeCandidates NativePointerCandidates(const IR::U32& low_addr, Environment& e
                 table_complete &=
                     CollectPointerSlots(holder->Arg(1), slots, slot_visited) && !slots.empty();
                 for (const auto& [first, stride] : slots) {
+                    if (stride != 0) {
+                        result.arrays.push_back(
+                            {.first{.index = index, .offset = first, .indirect = indirect},
+                             .stride = stride});
+                    }
                     for (u32 slot = 0; slot < (stride ? max_slots : 1U); ++slot) {
                         const StorageBufferAddr pointer{
                             .index = index, .offset = first + slot * stride, .indirect = indirect};
@@ -1492,7 +1511,7 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
             // run time. Rebasing on one of them drops the other path's accesses.
             bool accepted{};
             // Its own buffers, routed among alone when the candidates are complete and all bound
-            RoutedAccess routed{.inst = &inst};
+            RoutedAccess routed{.inst = &inst, .arrays = it->second.arrays};
             bool all_bound{it->second.complete};
             if (paired_found) {
                 // The paired pointer is the other input of the select or phi; bind it too.
@@ -2296,7 +2315,17 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     // bound for another access. An access whose candidates are complete was built from one of
     // them, so the backend routes it among them alone (one routing function per distinct set).
     std::map<std::vector<u32>, u32> route_indices;
-    for (const RoutedAccess& routed : info.routed) {
+    for (RoutedAccess& routed : info.routed) {
+        // A dynamic index can reach slots past those searched, bound for other accesses
+        for (const PointerArray& array : routed.arrays) {
+            for (const StorageBufferAddr& buffer : info.set) {
+                if (buffer.index == array.first.index && buffer.indirect == array.first.indirect &&
+                    buffer.offset >= array.first.offset &&
+                    (buffer.offset - array.first.offset) % array.stride == 0) {
+                    routed.buffers.insert(buffer);
+                }
+            }
+        }
         if (routed.buffers.size() == info.set.size()) {
             continue;
         }

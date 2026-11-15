@@ -140,3 +140,51 @@ TEST_CASE("A native access built from its own candidates is routed among them al
     CHECK(std::ranges::count(selections, 3) >= 2);
     CHECK(std::ranges::count(selections, 2) == 2);
 }
+
+TEST_CASE("A route through a pointer array keeps the bound slots past those searched",
+          "[shader][global_memory_routes]") {
+    ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    IR::IREmitter ir{block};
+    const auto address = [&](const IR::U32& low, const IR::U32& high) {
+        return IR::U64{ir.PackUint2x32(ir.CompositeConstruct(low, high))};
+    };
+    // c0[0x100 + (i << 3)]: the search takes slots 0x100 to 0x178, another access binds 0x180
+    const IR::U32 index{ir.GetCbuf(ir.Imm32(0), ir.Imm32(0x300))};
+    const IR::U32 slot{ir.IAdd(ir.ShiftLeftLogical(index, ir.Imm32(3)), ir.Imm32(0x100))};
+    const IR::U32 high{ir.GetCbuf(ir.Imm32(0), ir.IAdd(slot, ir.Imm32(4)))};
+    const IR::U32 value{ir.LoadGlobal32(address(ir.GetCbuf(ir.Imm32(0), slot), high))};
+    IR::Inst* const dynamic{value.InstRecursive()};
+    ir.WriteGlobal32(address(ir.GetCbuf(ir.Imm32(0), ir.Imm32(0x180)),
+                             ir.GetCbuf(ir.Imm32(0), ir.Imm32(0x184))),
+                     value);
+    ir.WriteGlobal32(
+        address(ir.GetCbuf(ir.Imm32(1), ir.Imm32(0)), ir.GetCbuf(ir.Imm32(1), ir.Imm32(4))), value);
+
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
+                           {{}, IR::AbstractSyntaxNode::Type::Return}};
+    HostTranslateInfo host{};
+    host.min_ssbo_alignment = 16;
+    host.support_int64 = true;
+    NativeEnvironment env;
+    Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
+
+    REQUIRE(dynamic->GetOpcode() == IR::Opcode::LoadGlobal32);
+    const auto& descriptors{program.info.storage_buffers_descriptors};
+    REQUIRE(descriptors.size() == 18);
+    REQUIRE(program.global_memory_route.contains(dynamic));
+    std::vector<std::pair<u32, u32>> route;
+    const u32 route_index{program.global_memory_route.at(dynamic)};
+    for (const u32 descriptor : program.global_memory_routes.at(route_index)) {
+        route.emplace_back(descriptors[descriptor].cbuf_index, descriptors[descriptor].cbuf_offset);
+    }
+    CHECK(route.size() == 17);
+    CHECK(std::ranges::find(route, std::pair{0U, 0x180U}) != route.end());
+    CHECK(std::ranges::find(route, std::pair{1U, 0U}) == route.end());
+}
+
