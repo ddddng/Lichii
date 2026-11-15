@@ -225,6 +225,7 @@ static uint64_t g_bar_in, g_bar_kept, g_bar_late;
 void vka_rp_end(void) {
     if (PC.n) pc_flush();
     if (!R.on) return;
+    vka_checkpoint_op(-2);
     vk.vkCmdEndRendering(g_cb);
     vka_barrier(g_cb);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples)
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
@@ -497,13 +498,18 @@ static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as th
 }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
+static int g_ubo_snap;   // DM_VK_UBO_SNAPSHOT (lab, dotfiles-25x.15): 1 = a dispatch's uniform buffers, 2 = every draw's too, bound as a copy of the CPU's bytes at recording
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
     if (!size || size > V.ub_range) size = size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range;
     VkBuffer b; VkDeviceSize o;
     uint64_t run = vka_addr_run(addr, size, &b, &o);
-    if (run && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
+    if (run && !g_ubo_snap && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
+    if (run && g_ubo_snap && size > run) size = run;
     vka_span s; if (!vka_scratch(size, V.ub_align, &s)) return 0;
-    if (!cpu_read(addr, s.ptr, size)) { memset(s.ptr, 0, size); VRED_ONCE("uniform buffer at %#llx is not readable: it reads zeros", (unsigned long long)addr); }
+    int vka_tex_gpu_bytes(uint64_t addr, void *out, size_t n);
+    if (g_ubo_snap && run && vka_tex_gpu_bytes(addr, s.ptr, size)) ;   // (the inline updates recorded before it, which the GPU applies first)
+    else if (!cpu_read(addr, s.ptr, size)) { memset(s.ptr, 0, size); VRED_ONCE("uniform buffer at %#llx is not readable: it reads zeros", (unsigned long long)addr); }
+    else if (g_ubo_snap) ;
     else if (run) VRED_ONCE("uniform buffer at %#llx is not %llu-byte aligned: bound as a copy of the CPU's bytes", (unsigned long long)addr, (unsigned long long)V.ub_align);
     else VRED_ONCE("uniform buffer at %#llx is not in placed guest RAM: bound as a copy of the CPU's bytes", (unsigned long long)addr);
     *bi = (VkDescriptorBufferInfo){s.buf, s.off, size}; return 1;
@@ -1073,6 +1079,75 @@ void vka_draw_prof(char *b, size_t n, double draws) {
     memset(g_ps, 0, sizeof g_ps);
     memset(g_pt, 0, sizeof g_pt);
 }
+// Checkpoints (lab, dotfiles-25x.15; the device needs VK_NV_device_diagnostic_checkpoints, which Lichii enables in direct mode with EDEN_NX2_NVN_CHECKPOINTS=1): every draw
+// and dispatch is preceded by a checkpoint whose marker is its number; at a GPU hang (vka_dev.c hang_declare) each queue's last checkpoints and the draws they mark are
+// logged, to find the one that never finishes. Through the encoder thread when it records (vkCmdSetCheckpointNV in order with the draw calls)
+enum { NCK = 16384 };
+enum { CKR = 12 };   // the resources a checkpoint keeps: textures and buffers of the walk (walk_all), in stage order
+// With the draw's state as recorded (viewport, the pass's area / layers / samples / first colour target, vertex buffers, primitive) and each buffer's first 8 words then
+static struct { uint64_t n, frame, keys[VKA_NSTAGE]; int64_t count, instances; uint64_t ind, mdi; int disp, nr; vka_res r[CKR]; uint8_t st[CKR]; float bd[CKR][8];
+                int prim, first, bvert, pass, ncol; float vp[4], dr[2]; uint32_t aw, ah, layers, samples, cw, ch; uint64_t cser; NVNbufferRange vb[4]; } g_ck[NCK];
+static uint64_t g_ckn;
+typedef struct { VkCommandBuffer cb; uint64_t marker; } ckpt_arg;
+static void ckpt_call(const void *a) { const ckpt_arg *c = a; vk.vkCmdSetCheckpointNV(c->cb, (const void *)(uintptr_t)c->marker); }
+static void checkpoint(vka_shader *const *sh, int disp, int64_t count, int64_t instances, uint64_t ind, uint64_t mdi, const vka_dstate *d, int prim, int first, int bvert) {
+    if (!vk.vkCmdSetCheckpointNV) return;
+    uint64_t vka_frame(void); uint64_t n = ++g_ckn; typeof(g_ck[0]) *e = &g_ck[n % NCK];
+    e->n = n; e->frame = vka_frame(); e->disp = disp; e->count = count; e->instances = instances; e->ind = ind; e->mdi = mdi;
+    e->prim = prim; e->first = first; e->bvert = bvert; e->pass = R.on; e->ncol = (int)R.ncolor; e->aw = R.area.extent.width; e->ah = R.area.extent.height; e->layers = R.layers; e->samples = R.samples;
+    e->cser = R.nci > 0 && R.cim[0] ? R.cim[0]->serial : 0; e->cw = R.nci > 0 ? R.cext[0].width : 0; e->ch = R.nci > 0 ? R.cext[0].height : 0;
+    memcpy(e->vp, d->vp[0], sizeof e->vp); memcpy(e->dr, d->dr, sizeof e->dr); for (int i = 0; i < 4; i++) e->vb[i] = d->vbuf[i];
+    for (int i = 0; i < VKA_NSTAGE; i++) e->keys[i] = sh[i] ? sh[i]->key : 0;
+    e->nr = 0;
+    for (int st = 0; st < VKA_NSTAGE; st++) for (int i = 0; i < g_wk.n[st] && e->nr < CKR; i++) { const vka_res *r = &g_wk.r[st][i];
+        if (r->what == VKA_R_TEX || r->what == VKA_R_IMG || r->what == VKA_R_TBUF || r->what == VKA_R_BUF) {
+            memset(e->bd[e->nr], 0, sizeof e->bd[0]); if (r->what == VKA_R_BUF && r->addr) cpu_read(r->addr, e->bd[e->nr], sizeof e->bd[0]);
+            e->st[e->nr] = (uint8_t)st; e->r[e->nr++] = *r; } }
+    ckpt_arg a = {g_cb, n};
+    if (!vka_enc_call(ckpt_call, &a, sizeof a)) ckpt_call(&a);
+}
+static void checkpoint_print(const char *what, const typeof(g_ck[0]) *e) {
+    VRED("GPU hang: %s %llu: prim %d first %d base vertex %d, viewport %g,%g %gx%g depth %g-%g, pass %d area %ux%u layers %u samples %u colour targets %d (first serial %llu %ux%u), vertex buffers %#llx+%#llx %#llx+%#llx %#llx+%#llx",
+         what, (unsigned long long)e->n, e->prim, e->first, e->bvert, e->vp[0], e->vp[1], e->vp[2], e->vp[3], e->dr[0], e->dr[1], e->pass, e->aw, e->ah, e->layers, e->samples, e->ncol, (unsigned long long)e->cser, e->cw, e->ch,
+         (unsigned long long)e->vb[0].address, (unsigned long long)e->vb[0].size, (unsigned long long)e->vb[1].address, (unsigned long long)e->vb[1].size, (unsigned long long)e->vb[2].address, (unsigned long long)e->vb[2].size);
+    for (int k = 0; k < e->nr; k++) { const vka_res *r = &e->r[k]; char why[400] = "";
+        if (r->what != VKA_R_BUF) vka_tex_id_desc(r->tid, why, sizeof why);
+        else { float now[8] = {0}; int rd = r->addr && cpu_read(r->addr, now, sizeof now);   // (what the GPU reads in place when it runs it: the bytes now, if the CPU rewrote them)
+            snprintf(why, sizeof why, "words %g %g %g %g %g %g %g %g%s now %g %g %g %g %g %g %g %g", e->bd[k][0], e->bd[k][1], e->bd[k][2], e->bd[k][3], e->bd[k][4], e->bd[k][5], e->bd[k][6], e->bd[k][7],
+                     rd && memcmp(now, e->bd[k], sizeof now) ? " CHANGED," : ";", now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]); }
+        VRED("GPU hang:   stage %u binding %u what %u dim %#x tid %d sid %d addr %#llx size %#llx %s", e->st[k], r->binding, r->what, r->dim, r->tid, r->sid, (unsigned long long)r->addr, (unsigned long long)r->size, why); }
+}
+static void checkpoint_queue(VkQueue q, const char *name) {
+    uint32_t n = 0; vk.vkGetQueueCheckpointDataNV(q, &n, NULL);
+    VkCheckpointDataNV cd[16]; for (uint32_t i = 0; i < 16; i++) cd[i] = (VkCheckpointDataNV){VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+    if (n > 16) n = 16;
+    vk.vkGetQueueCheckpointDataNV(q, &n, cd);
+    for (uint32_t i = 0; i < n; i++) { uint64_t m = (uint64_t)(uintptr_t)cd[i].pCheckpointMarker; const typeof(g_ck[0]) *e = &g_ck[m % NCK];
+        if (e->n != m) { VRED("GPU hang: %s checkpoint %llu at stage %#x (no longer in the ring of %d, last made %llu)", name, (unsigned long long)m, cd[i].stage, NCK, (unsigned long long)g_ckn); continue; }
+        VRED("GPU hang: %s checkpoint %llu at stage %#x (of %llu made): %s (prim %d) frame %llu, count %lld instances %lld, indirect %#llx count at %#llx; shaders vs %016llx fs %016llx gs %016llx tcs %016llx tes %016llx cs %016llx task %016llx mesh %016llx",
+             name, (unsigned long long)m, cd[i].stage, (unsigned long long)g_ckn, e->disp == 2 ? "other command (prim: -1000 - op, -2 pass end, -3000 - v event signal, -4000 - v event wait)" : e->disp ? "dispatch" : "draw", e->prim, (unsigned long long)e->frame, (long long)e->count, (long long)e->instances,
+             (unsigned long long)e->ind, (unsigned long long)e->mdi, (unsigned long long)e->keys[0], (unsigned long long)e->keys[1], (unsigned long long)e->keys[2], (unsigned long long)e->keys[3],
+             (unsigned long long)e->keys[4], (unsigned long long)e->keys[5], (unsigned long long)e->keys[6], (unsigned long long)e->keys[7]);
+        if (cd[i].stage != VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) continue;
+        checkpoint_print("the draw after the last checkpoint this queue finished (the one running)", e);
+        // The same shaders' last instance before it that finished, for comparison
+        for (uint64_t b = m - 1; b + NCK > m && b > 0; b--) { const typeof(g_ck[0]) *p = &g_ck[b % NCK]; if (p->n == b && !memcmp(p->keys, e->keys, sizeof e->keys)) { checkpoint_print("its shaders' instance before", p); break; } } }
+}
+// A checkpoint before a command that is not a draw or dispatch (prim = -1000 - op: copies, clears, fills, game barriers; -2: a render pass's end)
+void vka_checkpoint_op(int op) {
+    if (!vk.vkCmdSetCheckpointNV || !g_cb) return;
+    uint64_t vka_frame(void); uint64_t n = ++g_ckn; typeof(g_ck[0]) *e = &g_ck[n % NCK];
+    memset(e, 0, sizeof *e); e->n = n; e->frame = vka_frame(); e->prim = op; e->disp = 2;
+    ckpt_arg a = {g_cb, n};
+    if (!vka_enc_call(ckpt_call, &a, sizeof a)) ckpt_call(&a);
+}
+void vka_checkpoint_report(void) {
+    if (!vk.vkGetQueueCheckpointDataNV) return;
+    vka_qlock();
+    if (V.multi) for (int i = 0; i < V.nq - 1; i++) { char nm[16]; snprintf(nm, sizeof nm, "queue %d", i); checkpoint_queue(V.qs[i], nm); }
+    checkpoint_queue(V.q, "host queue");
+    vka_qunlock();
+}
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!d->inited) vka_dstate_reset(d);
@@ -1118,6 +1193,13 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (d->rast_discard && d->tf_on) SKIP("transform feedback is not on Vulkan yet (F_TF): the draw is skipped");
         if (d->tf_on) VRED_ONCE("transform feedback is not on Vulkan yet: the draw is drawn without capture");
     }
+    // DM_VK_SKIP_SHADERS=<key>[,<key>...] (lab, dotfiles-25x.15): draws with any of these shaders are skipped and counted (each skip logged up to 64 times), to test
+    // whether a draw is what hangs the GPU
+    { static uint64_t keys[8]; static int nk = -1;
+      if (nk < 0) { nk = 0; const char *e = getenv("DM_VK_SKIP_SHADERS"); while (e && *e && nk < 8) { char *x; keys[nk++] = strtoull(e, &x, 16); e = *x == ',' ? x + 1 : NULL; } }
+      for (int k = 0; k < nk; k++) for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && sh[st]->key == keys[k]) {
+          static _Atomic int n; uint64_t vka_frame(void); if (atomic_fetch_add(&n, 1) < 64) VRED("DM_VK_SKIP_SHADERS: draw with shader %016llx skipped (frame %llu)", (unsigned long long)keys[k], (unsigned long long)vka_frame());
+          g_skipped++; return; } }
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)
@@ -1228,7 +1310,10 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
     if (vka_nan_on()) vka_nan_draw(mesh ? sh[7]->key : sh[0]->key, fs ? fs->key : 0);
     PT(5);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
+    g_ubo_snap = VKA_ENV("DM_VK_UBO_SNAPSHOT", 0) >= 2;
+    int bound = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL);
+    g_ubo_snap = 0;
+    if (!bound) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     PT(6);
     if (!mesh) vin_bind(d);
 
@@ -1292,6 +1377,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     DY.valid = 1;
 
     PT(7);
+    checkpoint(sh, 0, dw ? dw->count : di->count, dw ? dw->instances : di->instances, ind, mdi, d, dw ? dw->prim : di->prim, dw ? dw->first : 0, di ? di->base_vertex : 0);
     // The draw
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
     if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
@@ -1377,7 +1463,10 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     }
     c0_at c0 = {0};
     walk_all(d, sh);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
+    g_ubo_snap = VKA_ENV("DM_VK_UBO_SNAPSHOT", 0) >= 1;
+    int bound = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0);
+    g_ubo_snap = 0;
+    if (!bound) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (dp->ind && c0.buf) {   // the group counts the GPU wrote, into c0's dispatch words before the dispatch reads them (nvn_mtl.m g_c0_dim_buf); NVN2 reads them at c0 + 4 too
         VkBufferCopy c[2] = {{io, c0.off + DMSH_C0_DISPATCH, 12}, {io, c0.off + DMSH_C0_DISPATCH_NVN2, 12}};
         vk.vkCmdCopyBuffer(g_cb, ib, c0.buf, d->b.nvn2 ? 2 : 1, c);
@@ -1393,6 +1482,7 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
                  sh[5]->e->local[0], sh[5]->e->local[1], sh[5]->e->local[2], sh[5]->e->shared, sh[5]->e->flags, skip ? " SKIPPED" : "");
     if (skip) { vka_barrier(g_cb); g_dispatches++; return; }
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    checkpoint(sh, 1, (int64_t)dp->x * dp->y * dp->z, 1, dp->ind, 0, d, -1, 0, 0);
     if (dp->ind) vk.vkCmdDispatchIndirect(g_cb, ib, io);
     else if (dp->x > 0 && dp->y > 0 && dp->z > 0) {
         if (sb && (uint64_t)dp->x * dp->y * dp->z > ns) spill_dispatch((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, ns);

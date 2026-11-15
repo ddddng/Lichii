@@ -967,6 +967,13 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         if (supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
         }
+        // EDEN_NX2_NVN_CHECKPOINTS=1 (lab, dotfiles-25x.15): a checkpoint before each of the
+        // replay's draws and dispatches, logged at a GPU hang (vka_draw.c vka_checkpoint_report).
+        if (const char* checkpoints = std::getenv("EDEN_NX2_NVN_CHECKPOINTS");
+            checkpoints != nullptr && checkpoints[0] == '1' &&
+            supported_extensions.contains(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        }
         const auto ci = std::ranges::find(queue_cis, graphics_family,
                                           &VkDeviceQueueCreateInfo::queueFamilyIndex);
         const u32 available = physical.GetQueueFamilyProperties()[graphics_family].queueCount;

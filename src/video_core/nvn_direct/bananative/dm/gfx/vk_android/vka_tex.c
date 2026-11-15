@@ -830,6 +830,15 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
     *seen = cap;
     return c;
 }
+// Guest bytes [addr, addr + n) as the GPU will read them after what was recorded so far (pending copies, fills and inline updates applied, gw_content): 1 = out has them
+// (dotfiles-25x.15: a uniform buffer bound as a copy taken at recording, DM_VK_UBO_SNAPSHOT)
+int vka_tex_gpu_bytes(uint64_t addr, void *out, size_t n) {
+    pthread_mutex_lock(&g_tmu);
+    uint64_t seen; uint8_t *c = gw_content((const uint8_t *)(uintptr_t)addr, n, &seen);
+    pthread_mutex_unlock(&g_tmu);
+    if (!c) return 0;
+    memcpy(out, c, n); free(c); return 1;
+}
 // Storage the guest has not mapped (all or part of it): its content as zeros, in a copy (NULL: all mapped). A memory pool is placed memory only once the GPU gets an address
 // in it (vka_mem.c mtl_pool_need); before, placing mapped the whole pool read-write, and Mario Kart World 1.8.0 uploads a texture of a CPU_NO_ACCESS pool whose pages its
 // SDK has not mapped (SIGSEGV in the deswizzle at 0x4074003000, phone m22)

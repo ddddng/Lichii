@@ -48,7 +48,8 @@
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds) \
-    X(vkGetMemoryHostPointerPropertiesEXT)   /* Lichii: pools imported from guest memory (vka_mem.c) */
+    X(vkGetMemoryHostPointerPropertiesEXT)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
+    X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */
 #define VKA_DECL(f) PFN_##f f;
 typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS(VKA_DECL) VKA_INSTANCE_FNS(VKA_DECL) VKA_DEVICE_FNS(VKA_DECL) } vka_fns;
 extern vka_fns vk;   // a missing optional entry point is NULL
@@ -464,7 +465,9 @@ void vka_enc_start(VkCommandBuffer cb);     // after vkBeginCommandBuffer on the
 void vka_enc_stop(void);                    // before vkEndCommandBuffer / a submit / a pool use: every deferred call made, none deferred from now on
 void vka_enc_sync(void);                    // every deferred call made (a direct call that must land in order follows)
 int vka_enc_on(void);
-int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n);   // fn on the encoder thread in order (1), or 0: encoder off
+int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n);
+void vka_checkpoint_report(void);
+void vka_checkpoint_op(int op);   // a checkpoint before a command that is not a draw (vka_draw.c)   // GPU hang: the last checkpoint each queue passed, and the draw or dispatch it marks (vka_draw.c)   // fn on the encoder thread in order (1), or 0: encoder off
 void vka_enc_switch(VkCommandBuffer cb);    // recording goes on in cb (queued reset / begin)
 void vka_enc_stats(char *b, size_t n, double frames);   // the replay statistics' line (empty when unused)
 int vka_nan_split(vka_img *const *ims, int n);
