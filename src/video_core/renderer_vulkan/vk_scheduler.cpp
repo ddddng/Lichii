@@ -756,6 +756,9 @@ void Scheduler::TracePassEnd(vk::CommandBuffer cmdbuf, VkExtent2D extent) {
 
 void Scheduler::ReportPassTimes(const std::vector<u64>& submission_begin,
                                 const std::vector<u64>& submission_end) {
+    if (!trace_pass_pool) {
+        return;
+    }
     const u32 count = trace_pass_count;
     trace_pass_count = 0;
     struct Result {
