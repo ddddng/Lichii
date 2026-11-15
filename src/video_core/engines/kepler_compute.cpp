@@ -1251,11 +1251,17 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     const auto tonemapped = ConstBuffer0Image(InputImageHandleOffset);
     const auto output = ConstBuffer0Image(OutputImageHandleOffset);
     const auto valid = [](const std::optional<Texture::TICEntry>& image) {
-        return image && image->format == Texture::TextureFormat::B10G11R11 &&
-               image->Address() != 0 && image->IsBlockLinear() && image->Width() != 0 &&
+        return image && image->Address() != 0 && image->IsBlockLinear() && image->Width() != 0 &&
                image->Height() != 0;
     };
-    if (!valid(tonemapped) || !valid(output) || output->Address() == tonemapped->Address() ||
+    // The tonemap pass renders B10G11R11; the update's output pass samples that memory through an
+    // E5B9G9R9 descriptor (see TryOcarinaUpscale). The copy reads it as the tonemap rendered it.
+    const auto input_format = tonemapped ? tonemapped->format : Texture::TextureFormat{};
+    if (!valid(tonemapped) || !valid(output) ||
+        (input_format != Texture::TextureFormat::B10G11R11 &&
+         input_format != Texture::TextureFormat::E5B9G9R9) ||
+        output->format != Texture::TextureFormat::B10G11R11 ||
+        output->Address() == tonemapped->Address() ||
         (base_output
              ? tonemapped->Width() > output->Width() || tonemapped->Height() > output->Height()
              : tonemapped->Width() != output->Width() ||
@@ -1264,7 +1270,8 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
         static bool warned = false;
         if (!std::exchange(warned, true)) {
             const auto size = [](const std::optional<Texture::TICEntry>& image) {
-                return image ? fmt::format("{}x{}", image->Width(), image->Height())
+                return image ? fmt::format("{}x{} format {:#x}", image->Width(), image->Height(),
+                                           static_cast<u32>(image->format.Value()))
                              : std::string{"unreadable"};
             };
             LOG_WARNING(HW_GPU,
@@ -1314,10 +1321,10 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     if (!std::exchange(logged, true)) {
         LOG_INFO(HW_GPU,
                  "Ocarina of Time: anti-aliasing network bypassed ({}): "
-                 "shader {:016x}, {:#x} {}x{} -> {:#x} {}x{}",
+                 "shader {:016x}, {:#x} {}x{} (format {:#x}) -> {:#x} {}x{}",
                  copied ? "copy of the tonemapped image" : "copy failed", native_key,
-                 tonemapped->Address(), source.width, source.height, output->Address(), width,
-                 height);
+                 tonemapped->Address(), source.width, source.height, static_cast<u32>(input_format),
+                 output->Address(), width, height);
     }
     return copied;
 }
