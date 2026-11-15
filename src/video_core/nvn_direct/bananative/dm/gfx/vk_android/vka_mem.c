@@ -868,16 +868,19 @@ void mtl_pool_alias(const void *va, uint64_t n, const void *phys) {
     if (phys) mtl_pool_need(phys, n, "a virtual pool's mapping");   // (the physical pool placed first: the alias names its segment)
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
     alias_cut(lo, hi);
-    int k = phys ? sg_find(pk) : -1, ok = !phys;
-    if (k >= 0 && g_sg[k].mem && pk + n <= g_sg[k].hi) {
-        VkDeviceSize o = pk - g_sg[k].lo;
-        seg_t a = {lo, hi, VK_NULL_HANDLE, g_sg[k].buf, g_sg[k].bda ? g_sg[k].bda + o : 0, 0, g_sg[k].boff + o, NULL};
-        sg_insert(&a); ok = 1;
+    int ok = 1;
+    // One alias a physical segment the range lies in: a physical pool placed in pieces (cover) takes one alias a piece (Lichii: 64 MiB udmabufs, dotfiles-25x.21)
+    for (uintptr_t p = pk, e = pk + n, v = lo; phys && p < e;) {
+        int k = sg_find(p);
+        if (k < 0 || !g_sg[k].mem || p >= g_sg[k].hi) { ok = 0; break; }
+        uintptr_t q = g_sg[k].hi < e ? g_sg[k].hi : e; VkDeviceSize o = p - g_sg[k].lo;
+        seg_t a = {v, v + (q - p), VK_NULL_HANDLE, g_sg[k].buf, g_sg[k].bda ? g_sg[k].bda + o : 0, 0, g_sg[k].boff + o, NULL};
+        sg_insert(&a); v += q - p; p = q;
     }
     pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);
     static _Atomic uint64_t na, nf;
     if (phys && ok && atomic_fetch_add(&na, 1) == 0) VLOG("virtual pool pages %#lx+%#llx alias physical pool memory at %p for the GPU (later mappings not logged)", (unsigned long)lo, (unsigned long long)n, phys);
-    if (!ok && atomic_fetch_add(&nf, 1) < 8) VRED("virtual pool pages %#lx+%#llx: the physical pool memory at %p is not in one placed segment: the GPU does not see them", (unsigned long)lo, (unsigned long long)n, phys);
+    if (!ok && atomic_fetch_add(&nf, 1) < 8) VRED("virtual pool pages %#lx+%#llx: the physical pool memory at %p is not all placed: the GPU does not see (all of) them", (unsigned long)lo, (unsigned long long)n, phys);
 }
 
 // The placed segments in address order (raw global memory's table, vka_draw.c gmem_map): at most max, the count returned
