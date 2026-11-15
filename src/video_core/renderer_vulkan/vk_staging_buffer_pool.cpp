@@ -272,7 +272,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
                  {&device_local_cache, &upload_cache, &download_cache}) {
                 for (StagingBuffers& staging : *cache) {
                     for (StagingBuffer& entry : staging.entries) {
-                        if (!entry.deferred && entry.tick >= current_tick) {
+                        if (entry.tick >= current_tick) {
                             entry.tick = next_tick;
                         }
                     }
@@ -374,7 +374,7 @@ void StagingBufferPool::ReleaseIdleBuffers() {
     for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
         for (StagingBuffers& staging : *cache) {
             std::erase_if(staging.entries, [this](const StagingBuffer& entry) {
-                return !entry.deferred && scheduler.IsFree(entry.tick);
+                return scheduler.IsFree(entry.tick);
             });
             staging.delete_index = 0;
             staging.iterate_index = 0;
