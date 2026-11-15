@@ -390,3 +390,96 @@ TEST_CASE("List words: a placeholder names a slot the back has", "[video_core][m
     CHECK_FALSE(List::IsPlaceholder(List::PlaceholderMagic | 0xFFFCU));
     CHECK_FALSE(List::GridSlot(past, past + 1, past + 2).has_value());
 }
+
+TEST_CASE("List words: the front never takes a call that does more than move one",
+          "[video_core][macro]") {
+    constexpr u32 slot = 11;
+    std::array<u32, 0xc00> data_ram{};
+    std::array<u32, 0x1000> registers{};
+    std::vector<u32> params;
+    std::vector<u32> released;
+    List::DataRamWords channel{data_ram.data(), {}, {}};
+    List::ComputeFront front;
+    const auto prepare = [&](std::initializer_list<Mme> instructions, u64 generation) {
+        const auto code = Code(std::span<const Mme>{instructions.begin(), instructions.size()});
+        auto call =
+            ListCall{code, generation, 0, params, data_ram, registers, {}, registers, released};
+        return front.PrepareCall(call, channel, slot, 1);
+    };
+    // r0 = parameter + 1: a computation.
+    const Mme add_one{
+        .end = true, .dst = {0, 24}, .src_a = {28, 24}, .src_b = {25, 24}, .imm = {1, 0}};
+    CHECK_FALSE(prepare({add_one, Mme{}}, 1));
+    // The parameter sent to a method other than an inline QMD grid word or the upload's data.
+    CHECK_FALSE(prepare({Fifo(0x100, true), Mme{}}, 2));
+    // The upload's data without a linear one-line upload the front can place.
+    CHECK_FALSE(prepare({Fifo(List::UploadData, true), Mme{}}, 3));
+    CHECK(released.empty());
+    CHECK(List::FrontHolds()[slot] == 0);
+    // An inline QMD grid word: the back dispatches from the slot.
+    REQUIRE(prepare({Fifo(List::InlineQmdGridFirst, true), Mme{}}, 4));
+    CHECK(List::FrontHolds()[slot] == 1);
+    auto none = ListCall{{}, 0, 0, params, data_ram, registers, {}, registers, released};
+    front.ConcretizeAll(none, channel);
+    CHECK(released == std::vector<u32>{slot});
+    CHECK(List::FrontHolds()[slot] == 0);
+}
+
+TEST_CASE("List words: a call that computes with a held one runs on the words themselves",
+          "[video_core][macro]") {
+    constexpr u32 slot = 12;
+    constexpr u32 a = 0x30;
+    constexpr u32 b = 0x31;
+    const u32 word = List::Placeholder(slot, 0);
+    std::array<u32, 0xc00> data_ram{};
+    std::array<u32, 0x1000> registers{};
+    std::vector<u32> params;
+    std::vector<u32> released;
+    List::DataRamWords channel{data_ram.data(), {}, {}};
+    List::ComputeFront front;
+    bool concretized{};
+    List::Reason reason{};
+    const auto call = [&](const std::vector<u32>& code, u64 generation) {
+        return ListCall{code, generation, 0, params, data_ram, registers, {}, registers, released};
+    };
+    const auto store = Code(std::vector<Mme>{
+        Mme{.end = true, .op = {31, 0}, .src_a = {25, 24}, .src_b = {28, 24}, .imm = {a, 0}},
+        Mme{}});
+    auto stores = call(store, 1);
+    REQUIRE(front.PrepareCall(stores, channel, slot, 1));
+    params = {word};
+    REQUIRE(front.Run(stores, channel, concretized, reason));
+    REQUIRE(data_ram[a] == word);
+
+    // Loads A, adds 1, stores it at B. The add uses the word: the front reads the words back
+    // (ReadSlots gives 7) and the caller runs the call on them, never on the placeholder.
+    const auto compute = Code(std::vector<Mme>{
+        Mme{.op = {30, 0}, .dst = {0, 24}, .src_a = {25, 24}, .imm = {a, 0}},
+        Mme{.dst = {1, 24}, .src_a = {0, 24}, .src_b = {25, 24}, .imm = {1, 0}},
+        Mme{.end = true, .op = {31, 0}, .src_a = {25, 24}, .src_b = {1, 24}, .imm = {b, 0}},
+        Mme{}});
+    params.clear();
+    auto computes = call(compute, 2);
+    REQUIRE_FALSE(front.Run(computes, channel, concretized, reason));
+    CHECK(concretized);
+    CHECK(reason == List::Reason::Escaped);
+    CHECK(data_ram[a] == 7U);
+    CHECK(data_ram[b] == 0U);
+    CHECK(channel.words.empty());
+    CHECK(released == std::vector<u32>{slot});
+    CHECK(List::FrontHolds()[slot] == 0);
+
+    // A 3D macro that may read a held word gets the words first (Maxwell3D's
+    // ConcretizeListWords).
+    data_ram[a] = word;
+    ++List::FrontHolds()[slot];
+    channel.words.push_back({a, word});
+    released.clear();
+    const u32 slots_read = List::ConcretizeDataRam(
+        channel.words, data_ram,
+        [](std::span<const u32>, std::span<u32> words) { std::ranges::fill(words, 9U); },
+        [&](u32 held) { released.push_back(held); });
+    CHECK(slots_read == 1);
+    CHECK(data_ram[a] == 9U);
+    CHECK(released == std::vector<u32>{slot});
+}

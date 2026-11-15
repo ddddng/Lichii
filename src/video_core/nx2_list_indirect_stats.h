@@ -57,7 +57,7 @@ inline void ReadSwitch() {
 enum class Kept : u32 {
     Off,       ///< EDEN_NX2_LIST_INDIRECT=0, the split without macros on its front, no slots
     NotCall,   ///< Not all the parameters of a compute macro call (3D lists, commands, ...)
-    Placement, ///< Not contiguous in mapped device memory
+    Placement, ///< Not contiguous in mapped device memory, or an unmap still queued
     NoSlot,    ///< Every slot held
     Refused,   ///< The engine's front or the call's dry run refused it
     Count,
@@ -65,7 +65,7 @@ enum class Kept : u32 {
 inline constexpr std::array<const char*, static_cast<size_t>(Kept::Count)> kept_names{
     "off",
     "not all of a compute macro call's parameters",
-    "not contiguous in mapped device memory",
+    "not contiguous in mapped device memory or an unmap queued",
     "no free slot",
     "the call's dry run refused",
 };

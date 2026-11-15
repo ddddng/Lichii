@@ -1755,7 +1755,9 @@ struct ListCallContext {
     const EmitFunc& emit;
 
     [[nodiscard]] std::optional<u64> DeviceWord(u64 gpu_address) const {
-        // GPU maps drain the split before later command reads, including this macro call.
+        if (!split.Ran(split.LastMappingChange())) {
+            return std::nullopt; // An unmap queued before this call may change the device word
+        }
         const auto first = memory.GpuToCpuAddress(gpu_address);
         const auto last = memory.GpuToCpuAddress(gpu_address + 3);
         if (!first || !last || *last != *first + 3) {

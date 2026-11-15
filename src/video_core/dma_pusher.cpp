@@ -1282,9 +1282,14 @@ bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
         Nx2ListIndirect::Stats::NoteKept(Kept::Off);
         return false;
     }
-    // GPU maps drain the split before later command reads (GPUThread::RunCommand), so the
-    // back finds the same mappings here. The words must occupy contiguous device memory.
+    // GPU maps drain the split before later command reads (GPUThread::RunCommand), and an unmap
+    // still queued could move the words: the back must find the same mappings. The words must
+    // occupy contiguous device memory.
     const u64 bytes = u64{count} * sizeof(u32);
+    if (!split.Ran(split.LastMappingChange())) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::Placement);
+        return false;
+    }
     const auto device = memory_manager.GpuToCpuAddress(dma_state.dma_get);
     const auto last = memory_manager.GpuToCpuAddress(dma_state.dma_get + bytes - 1);
     if (!device || !last || *last != *device + bytes - 1) {
