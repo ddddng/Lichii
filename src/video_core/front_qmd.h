@@ -580,7 +580,7 @@ private:
         const u64 size = four_words ? 16 : sizeof(u32);
         const auto device = memory.Device(address);
         // The word a reduction or a maximum combines the payload with, before this write.
-        std::optional<u32> base;
+        std::optional<Base> base;
         if (device && (reduction || maximum)) {
             base = WordAt(split, memory, address, *device);
         }
@@ -605,31 +605,45 @@ private:
             }
         };
         if (reduction) {
+            const u32 op = (flags >> 20) & 7;
             const bool is_signed = ((flags >> 24) & 1) != 0;
-            const u32 value =
-                base ? Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload) : 0;
-            note(*device, value, base.has_value(), false);
+            // Over a lower bound, only ADD and the unsigned MIN and MAX give one.
+            const bool keeps_bound = op == 0 || (!is_signed && (op == 1 || op == 2));
+            if (base && (base->exact || keeps_bound)) {
+                note(*device, Tegra::ReduceSemaphore(op, is_signed, base->value, payload), true,
+                     !base->exact);
+            } else {
+                note(*device, 0, false, false);
+            }
         } else if (four_words) {
             // The payload as 64 bits, a timestamp after it.
             note(*device, payload, true, false);
             note(*device + 4, 0, true, false);
         } else if (maximum) {
             // Whatever the word held, it holds the payload at least.
-            const u32 value = base ? (std::max)(*base, payload) : payload;
-            note(*device, value, true, !base.has_value());
+            const u32 value = base ? (std::max)(base->value, payload) : payload;
+            note(*device, value, true, !base || !base->exact);
         } else {
             note(*device, payload, true, false);
         }
     }
 
+    /// A word the back finds: `value`, or `value` at least where not `exact`.
+    struct Base {
+        u32 value;
+        bool exact;
+    };
+
     /// The word the back finds at `address` (`device`) when it runs the entry just sent, where
     /// the front knows it: the last release sent there, if nothing sent since may have written
     /// over it, else memory, once the back ran every write sent there before the entry. The entry
     /// itself is held unpublished (PublishHold): an idle back that ran it before this read would
-    /// leave its own increment in memory, and the front would count it twice.
+    /// leave its own increment in memory, and the front would count it twice. Memory gives a
+    /// lower bound only: a fence-flagged release the back ran lands once the host GPU passed it
+    /// (FenceManager::SignalFence), so memory may hold an older value of the word until then.
     template <typename Memory>
-    [[nodiscard]] std::optional<u32> WordAt(const GpuSplit& split, const Memory& memory,
-                                            GPUVAddr address, u64 device) const {
+    [[nodiscard]] std::optional<Base> WordAt(const GpuSplit& split, const Memory& memory,
+                                             GPUVAddr address, u64 device) const {
         // The back reads the syncpoint shim from the syncpoints.
         if (memory.InSyncpointShim(address, sizeof(u32)) ||
             Tegra::Nx2MirrorShadow::Get().Diverts(device)) {
@@ -638,15 +652,15 @@ private:
         // The last write sent to the word's granule, placed or not.
         const u64 target = memory.WritesTarget(split, address, sizeof(u32));
         if (const auto queued = split.QueuedSemaphoreWriteAt(device)) {
-            if (queued->known && !queued->at_least && queued->position >= target) {
-                return queued->payload;
+            if (queued->known && queued->position >= target) {
+                return Base{queued->payload, !queued->at_least};
             }
             return std::nullopt;
         }
         if (memory.GpuWritten(device, sizeof(u32)) || !split.Ran(target)) {
             return std::nullopt;
         }
-        return memory.ReadWord(address);
+        return Base{memory.ReadWord(address), false};
     }
 
     Tegra::NativeQmdScheduler scheduler{Tegra::NativeQmdScheduler::OwnTable{}};

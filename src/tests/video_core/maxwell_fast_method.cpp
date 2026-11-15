@@ -1792,7 +1792,8 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     CHECK(release->payload == 5);
     Access::RunBack(split);
 
-    // One that waits for a dependency runs at the decrement, a maximum with the word in memory.
+    // One that waits for a dependency runs at the decrement, a maximum with the word in memory:
+    // at least, as memory may hold an older value than the back finds.
     f.memory.Write<u32>(words + 0x10, 9);
     inline_qmd(qmds + 0x100, make_qmd(1, 0x10, Enable | OneWord | Maximum, 7), false);
     CHECK_FALSE(queued(0x10).has_value());
@@ -1802,7 +1803,7 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     release = queued(0x10);
     REQUIRE(release.has_value());
     CHECK(release->known);
-    CHECK_FALSE(release->at_least);
+    CHECK(release->at_least);
     CHECK(release->payload == 9);
     Access::RunBack(split);
     CHECK(word(0x10) == 9);
@@ -1819,13 +1820,13 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     Access::RunBack(split);
     CHECK(word(0x10) == 12);
 
-    // A reduction over the release before it, still queued.
+    // A reduction over the release before it, still queued: a lower bound over one.
     inline_qmd(qmds + 0x300, make_qmd(0, 0x20, Enable | OneWord | Maximum, 4), false);
     inline_qmd(qmds + 0x400, make_qmd(0, 0x20, Enable | OneWord | Reduction, 3), false);
     release = queued(0x20);
     REQUIRE(release.has_value());
     CHECK(release->known);
-    CHECK_FALSE(release->at_least);
+    CHECK(release->at_least);
     CHECK(release->payload == 7);
     Access::RunBack(split);
     CHECK(word(0x20) == 7);
@@ -1878,6 +1879,26 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     std::memcpy(pages.backing + (payload_address - MappedPages::gpu_address), &nine, sizeof(nine));
     Access::RunBack(split);
     CHECK(word(0x50) == 9);
+
+    // Over the word in memory, which may be older than the back finds it (a fence-flagged
+    // release lands once the host GPU passed it): an ADD holds its sum at least, an XOR could
+    // hold anything.
+    constexpr u32 Xor = 7U << 20;
+    f.memory.Write<u32>(words + 0x60, 5);
+    f.memory.Write<u32>(words + 0x200, 5);
+    inline_qmd(qmds + 0x900, make_qmd(0, 0x60, Enable | OneWord | Reduction, 3), false);
+    release = queued(0x60);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK(release->at_least);
+    CHECK(release->payload == 8);
+    inline_qmd(qmds + 0xa00, make_qmd(0, 0x200, Enable | OneWord | Reduction | Xor, 3), false);
+    release = queued(0x200);
+    REQUIRE(release.has_value());
+    CHECK_FALSE(release->known);
+    Access::RunBack(split);
+    CHECK(word(0x60) == 8);
+    CHECK(word(0x200) == 6);
     CHECK(DrainCheck::g_compared > compared);
     CHECK(DrainCheck::g_differences == differences);
 }
