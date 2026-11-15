@@ -1005,7 +1005,9 @@ static void checkpoint_print(const char *what, const typeof(g_ck[0]) *e) {
          (unsigned long long)e->vb[0].address, (unsigned long long)e->vb[0].size, (unsigned long long)e->vb[1].address, (unsigned long long)e->vb[1].size, (unsigned long long)e->vb[2].address, (unsigned long long)e->vb[2].size);
     for (int k = 0; k < e->nr; k++) { const vka_res *r = &e->r[k]; char why[400] = "";
         if (r->what != VKA_R_BUF) vka_tex_id_desc(r->tid, why, sizeof why);
-        else snprintf(why, sizeof why, "words %g %g %g %g %g %g %g %g", e->bd[k][0], e->bd[k][1], e->bd[k][2], e->bd[k][3], e->bd[k][4], e->bd[k][5], e->bd[k][6], e->bd[k][7]);
+        else { float now[8] = {0}; int rd = r->addr && cpu_read(r->addr, now, sizeof now);   // (what the GPU reads in place when it runs it: the bytes now, if the CPU rewrote them)
+            snprintf(why, sizeof why, "words %g %g %g %g %g %g %g %g%s now %g %g %g %g %g %g %g %g", e->bd[k][0], e->bd[k][1], e->bd[k][2], e->bd[k][3], e->bd[k][4], e->bd[k][5], e->bd[k][6], e->bd[k][7],
+                     rd && memcmp(now, e->bd[k], sizeof now) ? " CHANGED," : ";", now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]); }
         VRED("GPU hang:   stage %u binding %u what %u dim %#x tid %d sid %d addr %#llx size %#llx %s", e->st[k], r->binding, r->what, r->dim, r->tid, r->sid, (unsigned long long)r->addr, (unsigned long long)r->size, why); }
 }
 static void checkpoint_queue(VkQueue q, const char *name) {
@@ -1015,8 +1017,8 @@ static void checkpoint_queue(VkQueue q, const char *name) {
     vk.vkGetQueueCheckpointDataNV(q, &n, cd);
     for (uint32_t i = 0; i < n; i++) { uint64_t m = (uint64_t)(uintptr_t)cd[i].pCheckpointMarker; const typeof(g_ck[0]) *e = &g_ck[m % NCK];
         if (e->n != m) { VRED("GPU hang: %s checkpoint %llu at stage %#x (no longer in the ring of %d, last made %llu)", name, (unsigned long long)m, cd[i].stage, NCK, (unsigned long long)g_ckn); continue; }
-        VRED("GPU hang: %s checkpoint %llu at stage %#x (of %llu made): %s frame %llu, count %lld instances %lld, indirect %#llx count at %#llx; shaders vs %016llx fs %016llx gs %016llx tcs %016llx tes %016llx cs %016llx task %016llx mesh %016llx",
-             name, (unsigned long long)m, cd[i].stage, (unsigned long long)g_ckn, e->disp == 2 ? "other command (prim: -1000 - op, -2 pass end)" : e->disp ? "dispatch" : "draw", (unsigned long long)e->frame, (long long)e->count, (long long)e->instances,
+        VRED("GPU hang: %s checkpoint %llu at stage %#x (of %llu made): %s (prim %d) frame %llu, count %lld instances %lld, indirect %#llx count at %#llx; shaders vs %016llx fs %016llx gs %016llx tcs %016llx tes %016llx cs %016llx task %016llx mesh %016llx",
+             name, (unsigned long long)m, cd[i].stage, (unsigned long long)g_ckn, e->disp == 2 ? "other command (prim: -1000 - op, -2 pass end, -3000 - v event signal, -4000 - v event wait)" : e->disp ? "dispatch" : "draw", e->prim, (unsigned long long)e->frame, (long long)e->count, (long long)e->instances,
              (unsigned long long)e->ind, (unsigned long long)e->mdi, (unsigned long long)e->keys[0], (unsigned long long)e->keys[1], (unsigned long long)e->keys[2], (unsigned long long)e->keys[3],
              (unsigned long long)e->keys[4], (unsigned long long)e->keys[5], (unsigned long long)e->keys[6], (unsigned long long)e->keys[7]);
         if (cd[i].stage != VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) continue;
@@ -1083,6 +1085,13 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (d->rast_discard && d->tf_on) SKIP("transform feedback is not on Vulkan yet (F_TF): the draw is skipped");
         if (d->tf_on) VRED_ONCE("transform feedback is not on Vulkan yet: the draw is drawn without capture");
     }
+    // DM_VK_SKIP_SHADERS=<key>[,<key>...] (lab, dotfiles-25x.15): draws with any of these shaders are skipped and counted (each skip logged up to 64 times), to test
+    // whether a draw is what hangs the GPU
+    { static uint64_t keys[8]; static int nk = -1;
+      if (nk < 0) { nk = 0; const char *e = getenv("DM_VK_SKIP_SHADERS"); while (e && *e && nk < 8) { char *x; keys[nk++] = strtoull(e, &x, 16); e = *x == ',' ? x + 1 : NULL; } }
+      for (int k = 0; k < nk; k++) for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && sh[st]->key == keys[k]) {
+          static _Atomic int n; uint64_t vka_frame(void); if (atomic_fetch_add(&n, 1) < 64) VRED("DM_VK_SKIP_SHADERS: draw with shader %016llx skipped (frame %llu)", (unsigned long long)keys[k], (unsigned long long)vka_frame());
+          g_skipped++; return; } }
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)

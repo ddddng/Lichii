@@ -848,6 +848,7 @@ static void evsem_signal(volatile uint32_t *val, uint32_t mode, uint32_t v) {   
     evtr('S', e, v, t);
     if (VKA_ENV("DM_VK_EVENTLOG", 0)) { static int n; if (n++ < 60) VLOG("event signal: queue %d event %p value %u -> timeline %llu (frame %llu, part %d)", g_qi, (void *)val, v, (unsigned long long)t, (unsigned long long)g_frame, g_nx); }
     vka_rp_end();
+    vka_checkpoint_op(-3000 - (int)(v > 999 ? 999 : v));   // (lab: the part ends with this event signal, EDEN_NX2_NVN_CHECKPOINTS)
     if (g_psy.ns < PWS) { g_psy.ss[g_psy.ns] = e->sem; g_psy.sv[g_psy.ns++] = t; } else VRED_ONCE("more than %d event signals in one part", PWS);
     for (int i = 0; i < e->ng; i++) { evgate *g = &e->g[i];
         if (!g->pending || !gate_met(g, v)) continue;
@@ -868,6 +869,7 @@ static void evsem_wait(const p_wait_event *w) {   // a wait walked here: met on 
     evtr(g ? 'G' : 'W', e, w->value, t);
     if (!g && t > e->wmax) e->wmax = t;
     vka_rp_end();
+    vka_checkpoint_op(-4000 - (int)(w->value > 999 ? 999 : w->value));   // (lab: the part ends before this event wait)
     if (!chunk()) VRED_ONCE("an event wait in a submission of more than %d parts: the whole part waits", NCHUNK);
     if (g_psy.nw < PWS) { g_psy.ws[g_psy.nw] = g ? g->sem : e->sem; g_psy.wv[g_psy.nw++] = t; } else VRED_ONCE("more than %d event waits in one part", PWS);
 }
