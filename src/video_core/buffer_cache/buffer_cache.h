@@ -4369,7 +4369,8 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
             if (native_pointer) {
                 const u32 bare = (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
-                // An NVN descriptor's word is its size.
+                // An NVN descriptor's word is its size. The binding still stops where the mapping
+                // or its device range does.
                 if (sized) {
                     return next_qword_is_size ? (std::min)(packed_size, limit) : bare;
                 }
@@ -4388,10 +4389,9 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             }
             return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
         }();
-        if ((native_pointer || table_pointer) && size != 0 && (is_written || !sized)) {
+        if ((native_pointer || table_pointer) && size != 0) {
             // Stop where the mapping or its device range does: the binding is one device range, and
-            // a written one isn't split into separate ranges without sparse sources. A read-only
-            // NVN descriptor keeps its size and is gathered from its ranges.
+            // a written one isn't split into separate ranges without sparse sources.
             const u32 wanted = size;
             size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr, size));
             if (native_pointer && compute) {
