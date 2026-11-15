@@ -1644,6 +1644,25 @@ enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
 static int budget_uncompressed(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_BUDGET_UNCOMPRESSED", 1) != 0; return v; }
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
 static void blocks_compact(void);
+// Lichii (dotfiles-25x.25): the live images' memory by class, for the VRAM line (caller holds g_tmu): render targets (attachment use, GPU-written), other GPU-written
+// images, ASTC decoded to BC3, other compressed, uncompressed copies of their storage, sparse textures' dense images; of these, dedicated allocations, and images over the
+// same storage as an older live image (another shape or format of one texture's memory); residency images' bound tiles (vks_stats) and zero-shared allocations are counted apart
+static void img_classes(char *o, size_t n) {
+    enum { RT, GPU, ASTC, BCN, UNC, SPD, NCLS };
+    static const char *const name[NCLS] = {"targets", "other GPU-written", "ASTC as BC3", "other compressed", "uncompressed", "sparse dense"};
+    uint64_t b[NCLS] = {0}, ded = 0, dup = 0; int c[NCLS] = {0}, nded = 0, ndup = 0;
+    for (int i = 0; i < g_nlive; i++) { const vka_img *im = g_live[i];
+        if (!im->bytes) continue;
+        int k = im->vpool ? SPD : (im->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) && im->gpu_owned ? RT : im->gpu_owned ? GPU
+              : im->f.astc_bw ? ASTC : compressed(&im->f) ? BCN : UNC;
+        b[k] += im->bytes; c[k]++;
+        if (!im->m.blk) { ded += im->bytes; nded++; }
+        int j = im->mem ? memidx_first((uintptr_t)im->mem) : g_nidx;   // (the first image of its storage address is the oldest: memidx keeps creation order)
+        if (j < g_nidx && g_idx[j].lo == (uintptr_t)im->mem && g_idx[j].im != im) { dup += im->bytes; ndup++; } }
+    size_t k = (size_t)snprintf(o, n, "images by class:");
+    for (int i = 0; i < NCLS && k < n; i++) k += (size_t)snprintf(o + k, n - k, " %s %.0f MiB (%d),", name[i], b[i] / 1048576.0, c[i]);
+    if (k < n) snprintf(o + k, n - k, " dedicated %.0f MiB (%d), over another image's storage %.0f MiB (%d)", ded / 1048576.0, nded, dup / 1048576.0, ndup);
+}
 void vka_tex_budget(void) {
     static uint64_t evicted, evicted_bytes;
     if (++g_tick % 4) return;   // (the use read about once a frame)
@@ -1653,10 +1672,12 @@ void vka_tex_budget(void) {
     static uint64_t vram_at; uint64_t vnow = now_ns();
     if (vnow - vram_at >= 10000000000ull) { vram_at = vnow;   // (Lichii, dotfiles-25x.8: every 10 s, what the budget sees against the replay's own memory)
         char h[256], im[256]; void vka_heap_line(char *, size_t); vka_heap_line(h, sizeof h); vka_imem_stats(im, sizeof im);
-        int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
+        char cl[512], sp[256];
+        int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); img_classes(cl, sizeof cl); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
+        vks_stats(sp, sizeof sp);
         int vka_dpool_count(void);
-        VLOG("VRAM: host use %.0f of budget %.0f MiB; driver %s; replay images %.0f MiB (%d), scratch %.0f MiB, %d descriptor pools; %s", have ? usage / 1048576.0 : -1.0, have ? budget / 1048576.0 : -1.0, h,
-             img / 1048576.0, ni, scr / 1048576.0, vka_dpool_count(), im);
+        VLOG("VRAM: host use %.0f of budget %.0f MiB; driver %s; replay images %.0f MiB (%d), scratch %.0f MiB, %d descriptor pools; %s; %s; %s", have ? usage / 1048576.0 : -1.0, have ? budget / 1048576.0 : -1.0, h,
+             img / 1048576.0, ni, scr / 1048576.0, vka_dpool_count(), im, cl, sp);
     }
     if (!have || usage * 100 <= budget * BUDGET_HIGH) return;
     uint64_t want = usage - budget / 100 * BUDGET_LOW, freed = 0;
