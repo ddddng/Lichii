@@ -3,11 +3,14 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
@@ -15,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/query_cache/frame_trace.h"
@@ -88,9 +92,34 @@ public:
 
     void Sync(size_t start, size_t size) {
         const auto& dev = device.GetLogical();
-        const VkResult query_result = dev.GetQueryResults(
-            *query_pool, static_cast<u32>(start), static_cast<u32>(size), sizeof(u64) * size,
-            &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        const auto read = [&] {
+            return dev.GetQueryResults(*query_pool, static_cast<u32>(start),
+                                       static_cast<u32>(size), sizeof(u64) * size,
+                                       &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT);
+        };
+        // Polled instead of VK_QUERY_RESULT_WAIT_BIT: once the host GPU has passed the bank's last
+        // submission, its results are written. If they still aren't, that submission was dropped
+        // (the kernel reset a hung ring and recovered without a device loss), and RADV's wait
+        // would spin for 20 s per query.
+        VkResult query_result = read();
+        std::optional<std::chrono::steady_clock::time_point> passed_at;
+        while (query_result == VK_NOT_READY) {
+            scheduler.GetMasterSemaphore().Refresh();
+            if (!passed_at && scheduler.IsFree(last_used_tick)) {
+                passed_at = std::chrono::steady_clock::now();
+            }
+            if (passed_at &&
+                std::chrono::steady_clock::now() - *passed_at > std::chrono::seconds{1}) {
+                LOG_CRITICAL(Render_Vulkan,
+                             "Occlusion queries {}..{} of bank {} are unavailable 1 s after the "
+                             "GPU passed tick {}: their submission was dropped",
+                             start, start + size, index, last_used_tick);
+                query_result = VK_ERROR_DEVICE_LOST;
+                break;
+            }
+            std::this_thread::yield();
+            query_result = read();
+        }
         switch (query_result) {
         case VK_SUCCESS:
             return;
