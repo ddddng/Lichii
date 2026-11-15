@@ -27,6 +27,7 @@
 #include "hle.h"
 #include "nvn_direct.h"
 #include "nvn_direct_front.h"
+#include "nvn_dirty.h"
 
 enum { PAGE_SHIFT = 12 };
 #define PAGE_SIZE (1ull << PAGE_SHIFT)
@@ -158,6 +159,32 @@ void nvn_dirty_protect(const void* addr, size_t len) {
     pthread_mutex_unlock(&g_mu);
 }
 
+// The page ranges written since the replay last took them (nvn_dirty_take): it re-uploads the
+// images over them instead of checking every live image. Past WLOG_N ranges the log is lost and
+// the taker checks them all (under g_mu).
+enum { WLOG_N = 4096 };
+static nvn_dirty_range g_wlog[WLOG_N];
+static int g_nwlog, g_wlog_lost;
+static void wlog_add(uintptr_t lo, uintptr_t hi) {
+    nvn_dirty_range* last = g_nwlog ? &g_wlog[g_nwlog - 1] : NULL;
+    if (last && lo <= last->hi && hi >= last->lo) {
+        if (lo < last->lo) last->lo = lo;
+        if (hi > last->hi) last->hi = hi;
+        return;
+    }
+    if (g_nwlog == WLOG_N) { g_wlog_lost = 1; return; }
+    g_wlog[g_nwlog++] = (nvn_dirty_range){lo, hi};
+}
+int nvn_dirty_take(nvn_dirty_range* out, int max) {
+    pthread_mutex_lock(&g_mu);
+    const int n = g_wlog_lost || g_nwlog > max ? -1 : g_nwlog;
+    if (n > 0) memcpy(out, g_wlog, (size_t)n * sizeof *out);
+    g_nwlog = 0;
+    g_wlog_lost = 0;
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+
 // A CPU write Lichii saw on guest [address, address + size): new generation, pages disarmed.
 static void written(uintptr_t a, size_t len) {
     if (!len) return;
@@ -169,6 +196,7 @@ static void written(uintptr_t a, size_t len) {
         const uintptr_t p = (a - s->lo) >> PAGE_SHIFT, q = (end - 1 - s->lo) >> PAGE_SHIFT;
         for (uintptr_t i = p; i <= q; i++) atomic_store(&s->gen[i], g);
         arm_pages(s, p, q, 0);
+        wlog_add(s->lo + (p << PAGE_SHIFT), s->lo + ((q + 1) << PAGE_SHIFT));
     }
     pthread_mutex_unlock(&g_mu);
 }

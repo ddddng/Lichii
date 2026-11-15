@@ -154,6 +154,7 @@ typedef struct { uintptr_t lo; uint64_t size; vka_img *im; } memidx_ent;
 enum { MEMIDX_SPAN = 4 << 20 };
 static memidx_ent *g_idx, *g_wide; static int g_nidx, g_idxcap, g_nwide, g_widecap;
 static vka_img **g_meet; static int g_meetcap;   // memidx_meet's result
+static vka_img **g_vimg; static int g_nvimg, g_vimgcap;   // the indexed images of sparse pools (vka_tex_prepare checks them at every CPU write: their physical pages lie elsewhere)
 static int memidx_first(uintptr_t a) { int lo = 0, hi = g_nidx; while (lo < hi) { int m = (lo + hi) / 2; if (g_idx[m].lo < a) lo = m + 1; else hi = m; } return lo; }   // the first entry at or after a
 static void memidx_add(vka_img *im) {
     if (!im->mem) return;
@@ -161,6 +162,7 @@ static void memidx_add(vka_img *im) {
     if (g_nidx == g_idxcap) { g_idxcap = g_idxcap ? 2 * g_idxcap : 1024; g_idx = realloc(g_idx, (size_t)g_idxcap * sizeof *g_idx); }
     int i = memidx_first(e.lo + 1);
     memmove(&g_idx[i + 1], &g_idx[i], (size_t)(g_nidx - i) * sizeof *g_idx); g_idx[i] = e; g_nidx++;
+    if (im->vpool) { if (g_nvimg == g_vimgcap) { g_vimgcap = g_vimgcap ? 2 * g_vimgcap : 64; g_vimg = realloc(g_vimg, (size_t)g_vimgcap * sizeof *g_vimg); } g_vimg[g_nvimg++] = im; }
     if (e.size <= MEMIDX_SPAN) return;
     if (g_nwide == g_widecap) { g_widecap = g_widecap ? 2 * g_widecap : 64; g_wide = realloc(g_wide, (size_t)g_widecap * sizeof *g_wide); }
     g_wide[g_nwide++] = e;
@@ -169,6 +171,7 @@ static void memidx_del(vka_img *im) {
     if (!im->mem) return;
     for (int i = memidx_first((uintptr_t)im->mem); i < g_nidx && g_idx[i].lo == (uintptr_t)im->mem; i++)
         if (g_idx[i].im == im) { memmove(&g_idx[i], &g_idx[i + 1], (size_t)(g_nidx - i - 1) * sizeof *g_idx); g_nidx--; break; }
+    if (im->vpool) for (int i = 0; i < g_nvimg; i++) if (g_vimg[i] == im) { g_vimg[i] = g_vimg[--g_nvimg]; break; }
     if (im->L.size > MEMIDX_SPAN) for (int i = 0; i < g_nwide; i++) if (g_wide[i].im == im) { g_wide[i] = g_wide[--g_nwide]; break; }
 }
 static void meet_add(int n, vka_img *im) { if (n == g_meetcap) { g_meetcap = g_meetcap ? 2 * g_meetcap : 256; g_meet = realloc(g_meet, (size_t)g_meetcap * sizeof *g_meet); } g_meet[n] = im; }
@@ -2177,6 +2180,26 @@ VkSampler vka_samp_default(void) {
     return s;
 }
 
+// Re-uploads im if the CPU wrote its storage since its last upload, or a sparse one if its mappings or pages changed (vka_tex_prepare; caller holds g_tmu and nvn_pool_use)
+static void reup_written(vka_img *im, VkCommandBuffer cb) {
+    if (img_pool_dead(im)) return;
+    if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }   // (GPU-written: binds only)
+    if (im->vtrack && !im->gpu_owned && im->mem) {
+        if (!nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) return;
+        sparse_refresh(im, cb);
+        if (g_reup++ < 8) VLOG("sparse texture serial %llu %ux%u format %#x: its mappings or pages changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format);
+        return;
+    }
+    if (!im->track || im->gpu_owned || !im->mem) return;
+    uint64_t size = im->L.size;
+    size_t lo, hi;
+    if (!nvn_dirty_bounds_since(im->span, im->mem, size, im->stamp, &lo, &hi)) return;
+    tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
+    int rows = VKA_ENV("DM_VK_ROWS", 1);
+    if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) return;
+    upload_tracked(im, &t, cb);
+    if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
+}
 void vka_tex_prepare(VkCommandBuffer cb) {
     bindless_init();
     nvn_pool_use(1);   // the re-uploads below read guest storage: no pool is finalized (and unmapped) under them. Taken before g_tmu, as write_tex does
@@ -2225,25 +2248,13 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     static uint64_t seen, vseen; uint64_t now = nvn_dirty_now(), vnow = nvn_sparse_gen();
     if (now != seen || vnow != vseen) {
         seen = now; vseen = vnow;
-        for (int i = 0; i < g_nlive; i++) {
-            vka_img *im = g_live[i];
-            if (img_pool_dead(im)) continue;
-            if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); continue; }   // (GPU-written: binds only)
-            if (im->vtrack && !im->gpu_owned && im->mem) {
-                if (!nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) continue;
-                sparse_refresh(im, cb);
-                if (g_reup++ < 8) VLOG("sparse texture serial %llu %ux%u format %#x: its mappings or pages changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format);
-                continue;
-            }
-            if (!im->track || im->gpu_owned || !im->mem) continue;
-            uint64_t size = im->L.size;
-            size_t lo, hi;
-            if (!nvn_dirty_bounds_since(im->span, im->mem, size, im->stamp, &lo, &hi)) continue;
-            tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
-            int rows = VKA_ENV("DM_VK_ROWS", 1);
-            if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) continue;
-            upload_tracked(im, &t, cb);
-            if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
+        // Lichii (dotfiles-25x.13): only the images over the pages written since the last check (nvn_dirty_take), and the sparse pools' ones, whose physical pages lie elsewhere;
+        // every live image when the write log was lost
+        static nvn_dirty_range wr[4096]; int nwr = nvn_dirty_take(wr, 4096);
+        if (nwr < 0) for (int i = 0; i < g_nlive; i++) reup_written(g_live[i], cb);
+        else {
+            for (int i = 0; i < g_nvimg; i++) reup_written(g_vimg[i], cb);
+            for (int r = 0; r < nwr; r++) for (int j = 0, nm = memidx_meet(wr[r].lo, wr[r].hi); j < nm; j++) if (!g_meet[j]->vpool) reup_written(g_meet[j], cb);
         }
     }
     nvn_pool_use(0);   // (write_tex takes it again for each ID, after letting g_tmu go: never twice on one thread)

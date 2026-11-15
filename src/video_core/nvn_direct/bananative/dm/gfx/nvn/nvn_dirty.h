@@ -20,3 +20,7 @@ void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // Cumulative
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // Cumulative: this module's mprotect call count, pages covered, time spent
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total); // Currently live slots, slot table high-water mark, total number of registrations
 void nvn_dirty_debug(const void *span, const void *addr, size_t len, uint64_t stamp, char *out, size_t n);   // diagnostics: the range and page states behind a span
+// Lichii (dotfiles-25x.13): the page ranges the CPU wrote since the last call, neighbours merged, into out (one taker: vka_tex_prepare); -1 = more than max or the log
+// overflowed (the taker checks every image)
+typedef struct { uintptr_t lo, hi; } nvn_dirty_range;
+int nvn_dirty_take(nvn_dirty_range *out, int max);
