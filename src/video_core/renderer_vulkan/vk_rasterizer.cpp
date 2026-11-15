@@ -2718,16 +2718,8 @@ void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
 }
 
 bool RasterizerVulkan::Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real) {
-    if ((device_addr & Core::DEVICE_PAGEMASK) > Core::DEVICE_PAGESIZE - sizeof(u32)) {
-        if (device_memory.Read<u32>(device_addr) != value) {
-            return false;
-        }
-        device_memory.Write<u32>(device_addr, real);
-    } else {
-        u8* const word = device_memory.GetPointer<u8>(device_addr);
-        if (word == nullptr || !Tegra::Nx2ListIndirect::LandOwedWord(word, value, real)) {
-            return false;
-        }
+    if (!Tegra::Nx2ListIndirect::LandOwedWord(device_memory, device_addr, value, real)) {
+        return false;
     }
     // The caches learn of it as of the inline upload that wrote the placeholder.
     const std::array<std::pair<DAddr, std::size_t>, 1> written{{{device_addr, sizeof(u32)}}};

@@ -713,6 +713,55 @@ private:
         }
     }
 
+    /// Lands the GPU-written list words owed in [device_addr, +size) in guest memory at once, as
+    /// FlushRegion does (waits for the host GPU), and tells the buffer cache as
+    /// RasterizerVulkan::InvalidateCachedWrites would.
+    void Nx2LandOwed(DAddr device_addr, u64 size) {
+        if constexpr (requires { runtime.Nx2Owes(device_addr, size); }) {
+            runtime.Nx2LandOwed(
+                device_addr, size, Tegra::Nx2ListIndirect::OwedReader::Flush,
+                [this](DAddr word, u32 value, u32 real) {
+                    if (!Tegra::Nx2ListIndirect::LandOwedWord(device_memory, word, value, real)) {
+                        return false;
+                    }
+                    const std::array<std::pair<DAddr, size_t>, 1> written{{{word, sizeof(u32)}}};
+                    ClaimCpuWrites(written);
+                    WriteMemory(word, sizeof(u32), true, true);
+                    return true;
+                });
+        }
+    }
+
+    /// The host GPU writes [device_addr, +size) of `buffer`: an owed list word it covers only in
+    /// part gets its slot word's other bytes in `buffer` first, and the range grows over the
+    /// whole word, so the write's download lands all of it in guest memory.
+    void Nx2WidenOverOwed(Buffer& buffer, DAddr& device_addr, u32& size) {
+        if constexpr (requires { runtime.Nx2OwedSpan(device_addr, u64{size}); buffer.Handle(); }) {
+            const auto owed = runtime.Nx2OwedSpan(device_addr, size);
+            if (!owed) {
+                return;
+            }
+            const auto patch = [&](DAddr begin, DAddr end) {
+                if (begin >= end || !buffer.IsInBounds(begin, end - begin)) {
+                    return false;
+                }
+                const u32 offset = buffer.Offset(begin);
+                const u32 bytes = static_cast<u32>(end - begin);
+                if (!Nx2PatchOwed(begin, bytes, buffer.Handle(), offset,
+                                  Tegra::Nx2ListIndirect::OwedReader::Bind)) {
+                    return false;
+                }
+                buffer.MarkUsage(offset, bytes);
+                return true;
+            };
+            const DAddr end = device_addr + size;
+            const DAddr begin = patch(owed->first, device_addr) ? owed->first : device_addr;
+            const DAddr last = patch(end, owed->second) ? owed->second : end;
+            device_addr = begin;
+            size = static_cast<u32>(last - begin);
+        }
+    }
+
     /// Whether [device_addr, +size) holds GPU-written list words owed over their placeholders.
     [[nodiscard]] bool Nx2Owes(DAddr device_addr, u64 size) const {
         if constexpr (requires { runtime.Nx2Owes(device_addr, size); }) {

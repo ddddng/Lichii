@@ -1454,11 +1454,15 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     if (!source_dirty && !dest_dirty) {
         return false;
     }
+    // GPU-written list words owed in either range land first (Nx2ListIndirect): the guest copy
+    // below would take the source's placeholders, and a word the copy covers in part keeps its
+    // other bytes.
+    Nx2LandOwed(*cpu_src_address, amount);
+    Nx2LandOwed(*cpu_dest_address, amount);
 
     ClearDownload(*cpu_dest_address, amount);
     MarkVertexBuffersStale(*cpu_dest_address, amount);
     NoteUniformWrite(*cpu_dest_address, amount);
-    Nx2ForgetOwed(*cpu_dest_address, amount);
 
     BufferId buffer_a;
     BufferId buffer_b;
@@ -3296,6 +3300,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
             buffer.setWriteTick(runtime.CurrentTick());
         }
     }
+    Nx2WidenOverOwed(slot_buffers[buffer_id], device_addr, size);
     Nx2ForgetOwed(device_addr, size);
     // The downloads already taken over this range hold older bytes: when their fences pop
     // they must not write them over this write's result in guest memory, nor drop the range

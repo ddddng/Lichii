@@ -258,6 +258,22 @@ public:
         }
     }
 
+    /// Lands the owed list words in [device_addr, +size) at once for `reader` (Nx2ListIndirect,
+    /// Nx2ListSlots::LandRange): submits and waits for the host GPU if it has to.
+    template <typename Land>
+    void Nx2LandOwed(DAddr device_addr, u64 size, Tegra::Nx2ListIndirect::OwedReader reader,
+                     Land&& land) {
+        if (nx2_list_slots.HasOwed()) {
+            nx2_list_slots.LandRange(device_addr, size, reader, land);
+        }
+    }
+
+    /// [first word, end of the last) of the owed list words in [device_addr, +size).
+    [[nodiscard]] std::optional<std::pair<DAddr, DAddr>> Nx2OwedSpan(DAddr device_addr,
+                                                                     u64 size) const {
+        return nx2_list_slots.OwedSpan(device_addr, size);
+    }
+
     /// The slots of GPU-written list words (Nx2ListIndirect).
     [[nodiscard]] Nx2ListSlots& Nx2Slots() noexcept {
         return nx2_list_slots;

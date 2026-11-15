@@ -88,6 +88,12 @@ class Nx2ListSlots {
         return owed.Overlaps(device_addr, size);
     }
 
+    /// The back: [first word, end of the last) of the owed words that overlap [device_addr, +size).
+    [[nodiscard]] std::optional<std::pair<DAddr, DAddr>> OwedSpan(DAddr device_addr,
+                                                                  u64 size) const {
+        return owed.Span(device_addr, size);
+    }
+
     /// The back, a host GPU read by `reader` of [device_addr, +size), which `dst` holds at
     /// `offset`, filled already: records copies of the slot words owed there over it. `read`
     /// gives the word guest memory holds at a device address: a word that no longer holds its

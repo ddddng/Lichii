@@ -10,10 +10,13 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "common/atomic_ops.h"
 #include "common/common_types.h"
+#include "core/device_memory_manager.h"
 
 namespace Tegra::Nx2ListIndirect {
 
@@ -53,6 +56,19 @@ class OwedWords {
         std::scoped_lock lock{mutex};
         const auto it = words.lower_bound(address >= 3 ? address - 3 : 0);
         return it != words.end() && it->first < address + size;
+    }
+
+    /// The back: [first word, end of the last) of the words that overlap [address, +size).
+    [[nodiscard]] std::optional<std::pair<DAddr, DAddr>> Span(DAddr address, u64 size) const {
+        if (Empty()) {
+            return std::nullopt;
+        }
+        const auto first = words.lower_bound(address >= 3 ? address - 3 : 0);
+        if (first == words.end() || first->first >= address + size) {
+            return std::nullopt;
+        }
+        const auto last = std::prev(words.lower_bound(address + size));
+        return std::pair{first->first, last->first + 4};
     }
 
     /// The back: `address` holds `value` from `tick` on. The caller took the words there first.
@@ -145,6 +161,20 @@ class OwedWords {
     }
     std::memcpy(word, &real, sizeof(real));
     return true;
+}
+
+/// LandOwedWord at `address` of the device memory `memory`, a word across two pages included.
+template <typename DeviceMemory>
+[[nodiscard]] bool LandOwedWord(DeviceMemory& memory, DAddr address, u32 value, u32 real) {
+    if ((address & Core::DEVICE_PAGEMASK) > Core::DEVICE_PAGESIZE - sizeof(u32)) {
+        if (memory.template Read<u32>(address) != value) {
+            return false;
+        }
+        memory.template Write<u32>(address, real);
+        return true;
+    }
+    u8* const word = memory.template GetPointer<u8>(address);
+    return word != nullptr && LandOwedWord(word, value, real);
 }
 
 } // namespace Tegra::Nx2ListIndirect

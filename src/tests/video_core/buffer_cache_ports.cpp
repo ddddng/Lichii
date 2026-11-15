@@ -9,6 +9,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,7 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_owed_words.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
 namespace {
@@ -265,6 +267,77 @@ struct KeepPolicy : Policy {
 
 using KeepCache = VideoCommon::BufferCache<KeepPolicy>;
 
+struct OwedBuffer : Buffer {
+    using Buffer::Buffer;
+    Buffer* Handle() {
+        return this;
+    }
+};
+
+/// Owed GPU-written list words (Nx2ListIndirect) as BufferCacheRuntime keeps them, each with the
+/// word its slot holds on the host GPU.
+struct OwedRuntime : Runtime {
+    using Word = Tegra::Nx2ListIndirect::OwedWords::Word;
+    using OwedReader = Tegra::Nx2ListIndirect::OwedReader;
+
+    void Owe(DAddr address, u32 placeholder, u32 real) {
+        owed.Note(address, placeholder, 1);
+        reals[address] = real;
+    }
+    bool Nx2Owes(DAddr address, u64 size) const {
+        return owed.Overlaps(address, size);
+    }
+    void Nx2ForgetOwed(DAddr address, u64 size) {
+        std::vector<Word> taken;
+        owed.Take(address, size, taken);
+    }
+    std::optional<std::pair<DAddr, DAddr>> Nx2OwedSpan(DAddr address, u64 size) const {
+        return owed.Span(address, size);
+    }
+    template <typename Read>
+    bool Nx2PatchOwed(DAddr address, u32 size, Buffer* dst, u64 offset, Read&& read, OwedReader) {
+        bool patched = false;
+        std::vector<Word> dropped;
+        owed.ForEach(
+            address, size,
+            [&](const Word& word) {
+                if (read(word.address) != word.value) {
+                    return false;
+                }
+                const DAddr first = (std::max)(word.address, address);
+                const DAddr last = (std::min)(word.address + 4, address + size);
+                if (first < last) {
+                    const u32 real = reals.at(word.address);
+                    std::memcpy(dst->bytes.data() + offset + (first - address),
+                                reinterpret_cast<const u8*>(&real) + (first - word.address),
+                                last - first);
+                    patched = true;
+                }
+                return true;
+            },
+            dropped);
+        return patched;
+    }
+    template <typename Land>
+    void Nx2LandOwed(DAddr address, u64 size, OwedReader, Land&& land) {
+        std::vector<Word> taken;
+        owed.Take(address, size, taken);
+        for (const Word& word : taken) {
+            REQUIRE(land(word.address, word.value, reals.at(word.address)));
+        }
+    }
+
+    Tegra::Nx2ListIndirect::OwedWords owed;
+    std::map<DAddr, u32> reals;
+};
+
+struct OwedPolicy : Policy {
+    using Runtime = ::OwedRuntime;
+    using Buffer = ::OwedBuffer;
+};
+
+using OwedCache = VideoCommon::BufferCache<OwedPolicy>;
+
 } // namespace
 
 namespace VideoCommon {
@@ -321,7 +394,8 @@ struct BufferCacheTestAccess {
         entry.draw_written = true;
         ++entry.writes;
     }
-    static void Download(Cache& cache, std::span<const std::pair<DAddr, u64>> ranges) {
+    template <class C>
+    static void Download(C& cache, std::span<const std::pair<DAddr, u64>> ranges) {
         cache.DownloadRangesMemory(ranges);
     }
     /// A draw or dispatch binds [address, address + size) of buffer `id`: its CPU-modified bytes
@@ -344,6 +418,13 @@ struct BufferCacheTestAccess {
         cache.gpu_memory = &channel.gpu_memory;
         channel.uniform_buffers[0][0] = {.device_addr = address, .size = size, .buffer_id = id};
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
+    }
+    /// Engines (DMACopy) run on `channel`.
+    template <class C>
+    static void UseChannel(C& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
     }
     static void NextFrame(Cache& cache) {
         cache.native_indirect_uniforms_this_frame.clear();
@@ -375,7 +456,8 @@ struct BufferCacheTestAccess {
     static void GpuWrite(KeepCache& cache, BufferId id, DAddr address, u32 size) {
         cache.MarkWrittenBuffer(id, address, size);
     }
-    static void MarkWritten(Cache& cache, BufferId id, DAddr address, u32 size) {
+    template <class C>
+    static void MarkWritten(C& cache, BufferId id, DAddr address, u32 size) {
         cache.MarkWrittenBuffer(id, address, size);
     }
     static size_t ReadDownloads(Cache& cache) {
@@ -1298,6 +1380,72 @@ TEST_CASE("List-slot group counts cannot narrow GPU write tracking",
     auto local_extent = extent;
     local_extent.group_stride = {};
     REQUIRE(Shader::ResolveStorageWriteExtent(local_extent, block, grid) == u64{4});
+}
+
+namespace {
+/// One buffer over device 0x10000-0x20000 (GPU 0x100000), on a channel for engines.
+struct OwedFixture : BasicFixture<OwedRuntime, OwedCache> {
+    OwedFixture() {
+        state.memory_manager = &*memory;
+        state.payload.emplace(system, *memory, state);
+        channel.emplace(state);
+        Access::UseChannel(*cache, *channel);
+        id = Access::Add(*cache, 0x10000, 0x10000);
+    }
+    /// An inline upload wrote `placeholder` at `address`, guest memory and buffer alike, and the
+    /// slot it names holds `real`.
+    void Owe(DAddr address, u32 placeholder, u32 real) {
+        std::memcpy(bytes + (address - 0x10000), &placeholder, sizeof(placeholder));
+        std::memcpy(Access::Get(*cache, id).bytes.data() + (address - 0x10000), &placeholder,
+                    sizeof(placeholder));
+        runtime.Owe(address, placeholder, real);
+    }
+    u32 Guest(DAddr address) const {
+        u32 word;
+        std::memcpy(&word, bytes + (address - 0x10000), sizeof(word));
+        return word;
+    }
+    u32 Host(DAddr address) {
+        u32 word;
+        std::memcpy(&word, Access::Get(*cache, id).bytes.data() + (address - 0x10000),
+                    sizeof(word));
+        return word;
+    }
+
+    Tegra::Control::ChannelState state{0};
+    std::optional<VideoCommon::BufferCacheChannelInfo> channel;
+    VideoCommon::BufferId id;
+};
+} // Anonymous namespace
+
+TEST_CASE("List words: a DMA copy gets owed words as the host GPU has them",
+          "[video_core][buffer_ports]") {
+    OwedFixture f;
+    constexpr u32 real = 0x12345678;
+    f.Owe(0x10100, 0xf1a90004, real);
+    REQUIRE(f.cache->DMACopy(0x100100, 0x100200, 4));
+    CHECK(f.Guest(0x10200) == real);
+    CHECK(f.Host(0x10200) == real);
+    // A copy over half of an owed word: the other half is its slot word's.
+    f.Owe(0x10300, 0xf1a90005, 0x9abcdef0);
+    REQUIRE(f.cache->DMACopy(0x100100, 0x100300, 2));
+    CHECK(f.Guest(0x10300) == 0x9abc5678);
+    CHECK(f.Host(0x10300) == 0x9abc5678);
+    CHECK_FALSE(f.runtime.Nx2Owes(0x10000, 0x10000));
+}
+
+TEST_CASE("List words: a host GPU write over part of an owed word downloads all of it",
+          "[video_core][buffer_ports]") {
+    OwedFixture f;
+    f.Owe(0x10100, 0xf1a90004, 0x12345678);
+    Access::MarkWritten(*f.cache, f.id, 0x10100, 2);
+    // The shader writes the low half.
+    Access::Get(*f.cache, f.id).bytes[0x100] = 0xaa;
+    Access::Get(*f.cache, f.id).bytes[0x101] = 0xbb;
+    const std::array<std::pair<DAddr, u64>, 1> ranges{{{0x10100, 4}}};
+    Access::Download(*f.cache, ranges);
+    CHECK(f.Guest(0x10100) == 0x1234bbaa);
+    CHECK_FALSE(f.runtime.Nx2Owes(0x10100, 4));
 }
 
 TEST_CASE("Newer bytes that guest memory doesn't hold yet land the read downloads under them first",
