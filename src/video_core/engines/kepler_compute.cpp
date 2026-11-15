@@ -1256,7 +1256,8 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     };
     // The tonemap pass renders B10G11R11; the update's output pass samples that memory through an
     // E5B9G9R9 descriptor (see TryOcarinaUpscale). The copy reads it as the tonemap rendered it.
-    const auto input_format = tonemapped ? tonemapped->format : Texture::TextureFormat{};
+    const Texture::TextureFormat input_format =
+        tonemapped ? tonemapped->format.Value() : Texture::TextureFormat{};
     if (!valid(tonemapped) || !valid(output) ||
         (input_format != Texture::TextureFormat::B10G11R11 &&
          input_format != Texture::TextureFormat::E5B9G9R9) ||
