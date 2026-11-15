@@ -116,6 +116,7 @@ enum { NSLOT = 8, MAXPOOLS = 64 };
 static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp[NSLOT];
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
+static void fsc_reset(void);
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
@@ -123,6 +124,7 @@ void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1);   // live: from this submission
     for (int i = 0; i < g_ndp[g_slot]; i++) vk.vkResetDescriptorPool(V.dev, g_dp[g_slot][i], 0);   // the slot's last submission is done (mtl_sub_begin waited for it)
     g_cur_dp[g_slot] = 0;
+    fsc_reset();   // (Lichii: its sets were the slot's)
     vka_pso_save(0);
     static int ph; VkImageView placeholder(uint8_t dim, int storage);
     if (!V.null_desc && !ph && statics()) {   // no null descriptors: the placeholders are made here, outside any pass (their first use records a clear)
@@ -773,18 +775,63 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     if (g_dwn) { g_pd_delta_w += g_dwn; g_pd_delta_all += g_w.n; return 2; }
     return 0;
 }
+// Lichii (dotfiles-25x.16): the pixel shader's set (VKA_SET_FS) of a draw, allocated from the submission slot's pools and written, or the one an earlier draw of the slot
+// wrote with the same descriptors (draws repeat a material's textures and constants). Its own set lets the fragment shader library depend on that shader only (vka_pso.c)
+enum { FSC = 8192, FSC_PROBE = 16 };
+static struct { uint64_t h; VkDescriptorSetLayout l; uint64_t *w; uint32_t n; VkDescriptorSet set; } g_fsc[FSC];
+static unsigned g_fsc_n; static uint64_t g_fsc_hit, g_fsc_miss;
+static void fsc_reset(void) {
+    if (!g_fsc_n) return;
+    for (unsigned i = 0; i < FSC; i++) free(g_fsc[i].w);
+    memset(g_fsc, 0, sizeof g_fsc); g_fsc_n = 0;
+}
+void vka_fsc_stats(uint64_t *hit, uint64_t *miss) { *hit = g_fsc_hit; *miss = g_fsc_miss; }
+static VkDescriptorSet fs_set_of(VkDescriptorSetLayout l, VkWriteDescriptorSet *w, uint32_t n) {
+    static uint64_t *buf; static size_t cap;
+    size_t need = 1 + 4 * (size_t)n, k = 0; int keyed = 1;
+    if (need > cap) { cap = need * 2; buf = realloc(buf, cap * sizeof *buf); if (!buf) { cap = 0; keyed = 0; } }
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)l;
+    for (uint32_t i = 0; keyed && i < n; i++) {
+        if (w[i].descriptorCount != 1) { keyed = 0; break; }
+        uint64_t a = (uint64_t)w[i].dstBinding | (uint64_t)w[i].dstArrayElement << 16 | (uint64_t)w[i].descriptorType << 32, b = 0, c = 0, e = 0;
+        if (w[i].pBufferInfo) { b = (uint64_t)w[i].pBufferInfo->buffer; c = w[i].pBufferInfo->offset; e = w[i].pBufferInfo->range; }
+        else if (w[i].pImageInfo) { b = (uint64_t)w[i].pImageInfo->sampler; c = (uint64_t)w[i].pImageInfo->imageView; e = w[i].pImageInfo->imageLayout; }
+        else if (w[i].pTexelBufferView) b = (uint64_t)*w[i].pTexelBufferView;
+        buf[k++] = a; buf[k++] = b; buf[k++] = c; buf[k++] = e;
+        for (int q = 0; q < 4; q++) { h ^= buf[k - 4 + q]; h *= 0x100000001b3ull; h ^= h >> 29; }
+    }
+    unsigned slot = 0;
+    if (keyed) for (unsigned p = 0; p < FSC_PROBE; p++) {
+        slot = (unsigned)(h + p) & (FSC - 1);
+        if (!g_fsc[slot].set) break;
+        if (g_fsc[slot].h == h && g_fsc[slot].l == l && g_fsc[slot].n == n && !memcmp(g_fsc[slot].w, buf, k * sizeof *buf)) { g_fsc_hit++; return g_fsc[slot].set; }
+        slot = FSC;   // (full probe: not kept)
+    }
+    g_fsc_miss++;
+    VkDescriptorSet set = set_alloc(l); if (!set) return VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < n; i++) w[i].dstSet = set;
+    if (n) vk.vkUpdateDescriptorSets(V.dev, n, w, 0, NULL);
+    if (keyed && slot < FSC && !g_fsc[slot].set && 4 * (g_fsc_n + 1) <= 3 * FSC) {
+        uint64_t *c = malloc((k ? k : 1) * sizeof *c);
+        if (c) { memcpy(c, buf, k * sizeof *c); g_fsc[slot] = (typeof(g_fsc[0])){h, l, c, n, set}; g_fsc_n++; }
+    }
+    return set;
+}
+// One stage's descriptor writes, appended to g_w. 0 = the draw cannot run (logged)
+static int stage_bind(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], int st, c0_at *c0, int *any_pool) {
+    vka_shader *s = sh[st]; if (!s) return 1;
+    if (st == 1 && d->rast_discard) return 1;   // no fragments: its stage's records are not read (the layout keeps them unwritten: partially bound is not needed for push descriptors)
+    int n = g_wk.n[st];
+    if (n < 0) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 16) VRED("shader %016llx: %s; skipped", (unsigned long long)s->key, g_wk.why[st]); return 0; }
+    *any_pool |= g_wk.pool[st];
+    return stage_writes(d, st, s, g_wk.r[st], n, g_wk.pool[st], st == 5 ? c0 : NULL);
+}
 static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0) {
     g_w.n = 0;
     int any_pool = 0;
+    const int fs_own = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && lay->set_fs;   // (Lichii: the pixel shader's writes go to its own set, after the others)
     uint64_t t1_ = g_prof ? cntvct() : 0;
-    for (int st = 0; st < VKA_NSTAGE; st++) {
-        vka_shader *s = sh[st]; if (!s) continue;
-        if (st == 1 && d->rast_discard) continue;   // no fragments: its stage's records are not read (the layout keeps them unwritten: partially bound is not needed for push descriptors)
-        int n = g_wk.n[st];
-        if (n < 0) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 16) VRED("shader %016llx: %s; skipped", (unsigned long long)s->key, g_wk.why[st]); return 0; }
-        any_pool |= g_wk.pool[st];
-        if (!stage_writes(d, st, s, g_wk.r[st], n, g_wk.pool[st], st == 5 ? c0 : NULL)) return 0;
-    }
+    for (int st = 0; st < VKA_NSTAGE; st++) if (!(fs_own && st == 1) && !stage_bind(d, sh, st, c0, &any_pool)) return 0;
     if (g_prof) g_ps[1] += cntvct() - t1_;
     if (sh[2] && sh[2]->gs_fx > 0 && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {   // the claim words, zeroed (vka_spv_gs_claim); bound also when the draw takes no claim (the layout has them)
         if (g_w.n == 512) { VRED_ONCE("more than 512 descriptors in one draw"); return 0; }
@@ -795,16 +842,25 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         g_w.bi[k] = (VkDescriptorBufferInfo){cs.buf, cs.off, n};
         g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = VKA_GS_CLAIM_BINDING, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
     }
+    const uint32_t npre = g_w.n;
+    if (fs_own && !stage_bind(d, sh, 1, c0, &any_pool)) return 0;
+    const uint32_t nall = g_w.n;
+    g_w.n = npre;   // set 0: the writes before the pixel shader's
     uint64_t t2_ = g_prof ? cntvct() : 0;
     if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
                      if (ps == 0) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_w.n, g_w.w);
                      else if (ps == 2) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_dwn, g_dw); }
-    else {
+    else if (lay->set0) {
         g_pd[bp == VK_PIPELINE_BIND_POINT_COMPUTE].n = 0;   // set 0 bound as a set: the last push is no longer what the draws see
         VkDescriptorSet set = set_alloc(lay->set0); if (!set) return 0;
         for (uint32_t i = 0; i < g_w.n; i++) g_w.w[i].dstSet = set;
         if (g_w.n) vk.vkUpdateDescriptorSets(V.dev, g_w.n, g_w.w, 0, NULL);
         vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 0, 1, &set, 0, NULL);
+    }
+    g_w.n = nall;
+    if (fs_own) {
+        VkDescriptorSet fs = fs_set_of(lay->set_fs, g_w.w + npre, nall - npre); if (!fs) return 0;
+        vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, VKA_SET_FS, 1, &fs, 0, NULL);
     }
     if (g_prof) g_ps[2] += cntvct() - t2_;
     if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }

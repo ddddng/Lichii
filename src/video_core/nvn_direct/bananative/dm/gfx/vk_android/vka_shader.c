@@ -199,10 +199,13 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
                                                             stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
     free(*w); *w = o; *nb = on * 4;
 }
+// Lichii (dotfiles-25x.16): a pixel shader's set-0 resources in their own set (VKA_SET_FS), in every module made of it
+static void fs_set(const dmsh_vk_entry *e, uint32_t *w, size_t nb) { if (e->stage == DMSH_VK_STAGE_FS) vka_spv_set_remap(w, nb / 4, DMSH_VK_SET_DRAW, VKA_SET_FS); }
 static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
     size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);
     if (!w) { *why = err; return VK_NULL_HANDLE; }
     if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, e->stage, &w, &nb);
+    fs_set(e, w, nb);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
     free(w);
@@ -285,6 +288,7 @@ VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t sm
     size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
     if (w && (s->e->flags & DMSH_VK_F_SUBGROUP)) single_lane(s->key, s->e->stage, &w, &nb);
     size_t on = 0; uint32_t *o = w ? vka_spv_fout_retype(w, nb / 4, umask, smask, &on, err, sizeof err) : NULL;
+    if (o) fs_set(s->e, o, on * 4);
     if (o) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
              VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; } else own = 1; }
     free(w); free(o);

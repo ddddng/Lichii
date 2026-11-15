@@ -489,3 +489,19 @@ fail:
     return NULL;
 #undef FAIL
 }
+
+// Lichii (dotfiles-25x.16): a pixel shader's per-draw resources moved from set 0 to a set of their own (vka.h VKA_SET_FS), so a fragment shader library depends on its own
+// shader only (vka_pso.c layout_slow). The OpDecorate DescriptorSet operands are rewritten in place; the module's other words, its bindings among them, stay as they are
+int vka_spv_set_remap(uint32_t *w, size_t nw, uint32_t from, uint32_t to) {
+    enum { DecDescriptorSet = 34 };
+    if (nw < 5 || w[0] != 0x07230203) return 0;
+    int n = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || i + wc > nw) break;
+        if (op == OpFunction) break;   // (decorations come before the first function)
+        if (op == OpDecorate && wc == 4 && w[i + 2] == DecDescriptorSet && w[i + 3] == from) { w[i + 3] = to; n++; }
+        i += wc;
+    }
+    return n;
+}

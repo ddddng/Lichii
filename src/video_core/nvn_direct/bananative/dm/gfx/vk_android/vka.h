@@ -366,6 +366,7 @@ vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of k
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
+#define VKA_SET_FS 2   // Lichii (dotfiles-25x.16): a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
@@ -384,7 +385,11 @@ typedef struct {   // what a graphics pipeline is made from beyond its shaders a
     struct { uint32_t fmt, offset; uint8_t binding, used, pad[2]; } va[32];   // by location
     struct { uint32_t stride, divisor; uint8_t used, pad[3]; } vb[33];         // by binding (stream; 32 = the zero buffer of inputs no attribute feeds)
 } vka_gkey;
-typedef struct { VkPipelineLayout layout; VkDescriptorSetLayout set0; int push; uint32_t ndesc; } vka_layout;
+typedef struct {
+    VkPipelineLayout layout; VkDescriptorSetLayout set0; int push; uint32_t ndesc;
+    // Lichii (dotfiles-25x.16), graphics: the pixel shader's own set (VKA_SET_FS, allocated), and the independent-sets layouts its stage libraries are made with
+    VkDescriptorSetLayout set_fs; uint32_t ndesc_fs; VkPipelineLayout pre_layout, fs_layout;
+} vka_layout;
 int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out);   // the set-0 layout of these stages' records with the pools' set 1
 VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k);
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay);

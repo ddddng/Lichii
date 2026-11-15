@@ -48,6 +48,7 @@ uint64_t vka_present_reserve(void) {
 
 void vka_perf_frame(double period_s);
 void mtl_create_ns(uint64_t* lib_ns, uint64_t* pso_ns); // vka_pso.c
+void vka_fsc_stats(uint64_t* hit, uint64_t* miss); // vka_draw.c
 // Pipeline creation on the frame path (dotfiles-25x.16: the replay thread's compiles, links and
 // cache lookups, vka_pso.c g_create_ns) between two presents, when it is over a 60 Hz frame: the
 // stalls a cold pipeline cache costs, frame by frame (the first 300), and every 1800 presents a sum.
@@ -64,9 +65,12 @@ static void frame_path_creation(uint64_t tk) {
         over_ns += d;
         if (logged++ < 300) VLOG("present %llu: frame-path pipeline creation %.1f ms", (unsigned long long)tk, d / 1e6);
     }
-    if (tk % 1800 == 0)
-        VLOG("presents up to %llu: %llu frames with over 16.7 ms of frame-path pipeline creation (%llu over 50 ms), %.1f s in them", (unsigned long long)tk,
-             (unsigned long long)over16, (unsigned long long)over50, over_ns / 1e9);
+    if (tk % 1800 == 0) {
+        uint64_t hit, miss;
+        vka_fsc_stats(&hit, &miss);
+        VLOG("presents up to %llu: %llu frames with over 16.7 ms of frame-path pipeline creation (%llu over 50 ms), %.1f s in them; pixel shader sets %llu reused, %llu written",
+             (unsigned long long)tk, (unsigned long long)over16, (unsigned long long)over50, over_ns / 1e9, (unsigned long long)hit, (unsigned long long)miss);
+    }
 }
 void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int crop[4]) {
     vka_perf_frame(period_s);
