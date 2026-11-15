@@ -48,7 +48,7 @@
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds) \
-    X(vkGetMemoryHostPointerPropertiesEXT)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
+    X(vkGetMemoryHostPointerPropertiesEXT) X(vkGetMemoryFdPropertiesKHR)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
     X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */
 #define VKA_DECL(f) PFN_##f f;
 typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS(VKA_DECL) VKA_INSTANCE_FNS(VKA_DECL) VKA_DEVICE_FNS(VKA_DECL) } vka_fns;
@@ -87,6 +87,9 @@ typedef struct {
     // Lichii: memory pools are guest memory imported with VK_EXT_external_memory_host (vka_mem.c import_seg), not placed maps; host_import_types: the memory types an
     // import may take (vkGetMemoryHostPointerPropertiesEXT of a guest page), placed_align then the import alignment (minImportedHostPointerAlignment)
     int host_import; uint32_t host_import_types;
+    // Lichii: udmabuf: the driver refuses host-pointer imports of Lichii's shared memfd memory (amdgpu, dotfiles-25x.21), so the pools are udmabufs of the memfd's pages
+    // (udmabuf_fd: /dev/udmabuf) imported with VK_EXT_external_memory_dma_buf, at most udmabuf_max bytes each (udmabuf's size_limit_mb) (vka_mem.c vka_mem_import_choose)
+    int udmabuf, udmabuf_fd; VkDeviceSize udmabuf_max;
     void *perf_hint;                                // vkQueueSetPerfHintQCOM (VK_QCOM_queue_perf_hint), NULL without it: vka_gpu_floor
     // The draw path's device facts: push descriptors (and how many a set may hold), vertex input dynamic state, robustness2's null descriptors, 8-bit indices,
     // instance-rate divisors, logic operations, dual-source blending, geometry and tessellation stages, depth clamp, fill mode lines, wide lines
@@ -120,6 +123,7 @@ const char *vka_driver_tag(void);
 int vka_init(void);   // 1 = the device is up (idempotent, any thread); 0 = no Vulkan: every op logs and does nothing
 int vka_ok(void);
 uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid);
+void vka_mem_import_choose(int dmabuf);   // Lichii: with host_import, whether pools are host-pointer imports or udmabufs (vka_mem.c); dmabuf: VK_EXT_external_memory_dma_buf is there
 VkResult vka_submit_q(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages,
                       uint32_t nsig, const VkSemaphore *sig_sems, const uint64_t *sig_vals);   // on queue q, with extra timeline signals; vka_submit = queue 0
 uint64_t vka_up_last(void);   // the upload timeline's last batch value (a submission on another queue waits for it)

@@ -26,17 +26,20 @@
 #include "nvn_direct_front.h"
 #include "../../../../nvn_direct.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <linux/udmabuf.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
 
-typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; void *view; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias); view: Lichii's import view (import_seg)
+typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; void *view; int import; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias); view: Lichii's import view (import_seg; NULL for a udmabuf); import: Lichii's import of guest memory
 // Lichii: the table is keyed by the game's addresses (nvn_direct_guest_of), not by the host pointers the front end passes: GPU addresses the game wrote into its own data
 // (shader-loaded pointers through raw global memory's table, c0's storage table) are guest addresses, and look the same memory up without a translation. Every entry
 // point takes either and keys it (key); a virtual pool's own range (outside the arena) keeps its host address
@@ -390,36 +393,106 @@ static void prefault(uintptr_t lo, uintptr_t hi) {
 // Where a placement's time goes (logged every 256 placements): buffer and allocation, the protections read, the copy, the maps, the prefault, the protections put back
 static uint64_t g_ph[6], g_ph_n;
 static __thread uint64_t t_place_bytes, t_pend_ns;
-// Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host. The import is made of a view of its
-// own (nvn_direct_map_view: the same pages mapped once more, read-write), never of the fastmem arena: the arena's pages may be write-protected by Lichii's tracking or not
-// mapped, and on NVIDIA's driver one refused import makes every later one fail (dotfiles-25x.1). The pages stay the guest's: CPU writes through the arena and GPU writes
-// through the import meet in the same memory, nothing is copied or swapped. An import pins its pages: it is given back before the guest unmaps them (vka_mem_release)
+// Lichii (dotfiles-25x.21): how pools are imported, chosen once at device creation. A host-pointer import of shared memfd memory, as Lichii's guest memory is, works on
+// NVIDIA's driver. amdgpu refuses it: libdrm asks the kernel for userptr of anonymous memory only (AMDGPU_GEM_USERPTR_ANONONLY), and RADV reports the kernel's -EPERM as
+// VK_ERROR_INVALID_EXTERNAL_HANDLE (measured on the Steam Deck: anonymous memory imports, a MAP_SHARED or MAP_PRIVATE memfd mapping or shared anonymous memory does not).
+// There the pools are udmabufs of the memfd's own pages imported with VK_EXT_external_memory_dma_buf: still the guest's pages, coherent both ways (measured there).
+// The probe imports a page of a shared memfd mapping: on RADV a refused import leaves later ones working (measured); NVIDIA's would not (dotfiles-25x.1), but it imports it
+void vka_mem_import_choose(int dmabuf) {
+    const size_t n = 65536; VkResult r = VK_ERROR_UNKNOWN;
+    int fd = memfd_create("vka-import-probe", MFD_CLOEXEC);
+    void *p = fd >= 0 && !ftruncate(fd, n) ? mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (p != MAP_FAILED) {
+        VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        uint32_t t = vk.vkGetMemoryHostPointerPropertiesEXT(V.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, p, &hp) ? UINT32_MAX : vka_mem_type(hp.memoryTypeBits, 0, 0);
+        VkImportMemoryHostPointerInfoEXT ih = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = p};
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ih, .allocationSize = n, .memoryTypeIndex = t};
+        VkDeviceMemory m = VK_NULL_HANDLE;
+        r = t == UINT32_MAX ? VK_ERROR_FEATURE_NOT_PRESENT : vk.vkAllocateMemory(V.dev, &ai, NULL, &m);
+        if (!r) vk.vkFreeMemory(V.dev, m, NULL);
+        munmap(p, n);
+    }
+    if (fd >= 0) close(fd);
+    if (!r) return;
+    int x = dmabuf && vk.vkGetMemoryFdPropertiesKHR, u = x ? open("/dev/udmabuf", O_RDWR | O_CLOEXEC) : -1, err = errno;
+    if (u < 0) {
+        VRED("pool memory: the driver refuses host-pointer imports of shared memory (%d), and %s%s: the GPU sees no memory pool", r,
+             x ? "/dev/udmabuf: " : "no VK_EXT_external_memory_dma_buf for udmabufs", x ? strerror(err) : "");
+        V.host_import = 0;
+        return;
+    }
+    long mb = 64;   // (the kernel's default)
+    FILE *f = fopen("/sys/module/udmabuf/parameters/size_limit_mb", "r");
+    if (f) { if (fscanf(f, "%ld", &mb) != 1 || mb <= 0) mb = 64; fclose(f); }
+    V.udmabuf = 1; V.udmabuf_fd = u; V.udmabuf_max = (VkDeviceSize)mb << 20;
+    VLOG("pool memory: the driver refuses host-pointer imports of shared memory (%d): pools are imported as udmabufs of the guest memory's pages, %ld MiB at most each", r, mb);
+}
+
+// Lichii: a udmabuf of the memfd pages behind guest [lo, lo + n): one item a run of pages that follow each other in the file. -1 (logged) when a page has no file
+// behind it (the guest has not mapped it) or udmabuf refuses (more runs than its list_limit). Caller holds g_pl (the list is reused)
+static int udmabuf_of(uintptr_t lo, VkDeviceSize n) {
+    static struct udmabuf_create_list *l; static uint32_t cap;
+    uint32_t cnt = 0;
+    for (VkDeviceSize o = 0; o < n; o += 4096) {
+        uint64_t off; int fd = nvn_direct_backing_file(lo + o, &off);
+        if (fd < 0) { VRED("pool memory %#lx+%#llx: guest page %#lx has no memory file behind it: no udmabuf", (unsigned long)lo, (unsigned long long)n, (unsigned long)(lo + o)); return -1; }
+        struct udmabuf_create_item *e = cnt ? &l->list[cnt - 1] : NULL;
+        if (e && e->memfd == (uint32_t)fd && e->offset + e->size == off) { e->size += 4096; continue; }
+        if (cnt == cap) { cap = cap ? 2 * cap : 256; l = realloc(l, sizeof *l + cap * sizeof *l->list); }
+        l->list[cnt++] = (struct udmabuf_create_item){.memfd = (uint32_t)fd, .offset = off, .size = 4096};
+    }
+    l->flags = UDMABUF_FLAGS_CLOEXEC; l->count = cnt;
+    int d = ioctl(V.udmabuf_fd, UDMABUF_CREATE_LIST, l);
+    if (d < 0) VRED("pool memory %#lx+%#llx: udmabuf of %u runs of guest memory: %s", (unsigned long)lo, (unsigned long long)n, cnt, strerror(errno));
+    return d;
+}
+
+// Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host or, where the driver refuses
+// that (V.udmabuf), as a udmabuf of the same pages with VK_EXT_external_memory_dma_buf. A host-pointer import is made of a view of its own (nvn_direct_map_view: the same
+// pages mapped once more, read-write), never of the fastmem arena: the arena's pages may be write-protected by Lichii's tracking or not mapped, and on NVIDIA's driver one
+// refused import makes every later one fail (dotfiles-25x.1). The pages stay the guest's: CPU writes through the arena and GPU writes through the import meet in the same
+// memory, nothing is copied or swapped. An import pins its pages: it is given back before the guest unmaps them (vka_mem_release)
 static uint64_t g_imp_n, g_imp_unmapped;
 static int import_seg(uintptr_t lo, uintptr_t hi) {
     VkDeviceSize n = hi - lo; uint64_t p0 = mono_ns(), unmapped = 0; VkResult r;
-    void *view = nvn_direct_map_view(lo, n, &unmapped);
-    if (!view) { VRED("pool memory %#lx+%#llx: no view of its pages to import", (unsigned long)lo, (unsigned long long)n); return 0; }
-    if (!V.host_import_types) {
-        VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-        if (!vk.vkGetMemoryHostPointerPropertiesEXT(V.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, view, &hp)) V.host_import_types = hp.memoryTypeBits;
+    if (V.udmabuf && n > V.udmabuf_max) return 0;   // (cover places it in pieces of udmabuf_max)
+    void *view = NULL; int dfd = -1; uint32_t types = V.host_import_types;
+    VkExternalMemoryHandleTypeFlagBits ht = V.udmabuf ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT : VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    if (V.udmabuf) {
+        if ((dfd = udmabuf_of(lo, n)) < 0) return 0;
+        VkMemoryFdPropertiesKHR fp = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+        types = vk.vkGetMemoryFdPropertiesKHR(V.dev, ht, dfd, &fp) ? 0 : fp.memoryTypeBits;
+    } else {
+        if (!(view = nvn_direct_map_view(lo, n, &unmapped))) { VRED("pool memory %#lx+%#llx: no view of its pages to import", (unsigned long)lo, (unsigned long long)n); return 0; }
+        if (!V.host_import_types) {
+            VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+            if (!vk.vkGetMemoryHostPointerPropertiesEXT(V.dev, ht, view, &hp)) V.host_import_types = hp.memoryTypeBits;
+        }
+        types = V.host_import_types;
     }
-    seg_t s = {lo, hi, .refs = 1, .view = view};
-    VkExternalMemoryBufferCreateInfo eb = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
-    if (!(s.buf = seg_buffer(n, &eb))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); munmap(view, n); return 0; }
+    seg_t s = {lo, hi, .refs = 1, .view = view, .import = 1};
+    VkExternalMemoryBufferCreateInfo eb = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = ht};
+    if (!(s.buf = seg_buffer(n, &eb))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); goto fail; }
     VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
-    uint32_t bits = mr.memoryTypeBits & V.host_import_types, t = vka_mem_type(bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    uint32_t bits = mr.memoryTypeBits & types, t = vka_mem_type(bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
     if (t == UINT32_MAX) t = vka_mem_type(bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0);
     if (t == UINT32_MAX || mr.size > n) {
-        VRED("pool memory %#lx+%#llx: no import (buffer types %#x, host pointer types %#x, %llu bytes wanted)", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits, V.host_import_types, (unsigned long long)mr.size);
-        vk.vkDestroyBuffer(V.dev, s.buf, NULL); munmap(view, n); return 0;
+        VRED("pool memory %#lx+%#llx: no import (buffer types %#x, %s types %#x, %llu bytes wanted)", (unsigned long)lo, (unsigned long long)n, mr.memoryTypeBits,
+             V.udmabuf ? "udmabuf" : "host pointer", types, (unsigned long long)mr.size);
+        goto fail;
     }
     VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
-    VkImportMemoryHostPointerInfoEXT ih = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, .pNext = V.bda ? &af : NULL, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = view};
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ih, .allocationSize = n, .memoryTypeIndex = t};
-    if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &s.mem)) || (r = vk.vkBindBufferMemory(V.dev, s.buf, s.mem, 0))) {
+    VkImportMemoryHostPointerInfoEXT ih = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, .pNext = V.bda ? &af : NULL, .handleType = ht, .pHostPointer = view};
+    VkImportMemoryFdInfoKHR fi = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, .pNext = V.bda ? &af : NULL, .handleType = ht, .fd = dfd};
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = V.udmabuf ? (void *)&fi : (void *)&ih, .allocationSize = n, .memoryTypeIndex = t};
+    if ((r = vk.vkAllocateMemory(V.dev, &ai, NULL, &s.mem))) {
         VRED("pool memory %#lx+%#llx: import %d (%.2f GiB imported so far)", (unsigned long)lo, (unsigned long long)n, r, g_placed_bytes / 1073741824.0);
-        if (s.mem) vk.vkFreeMemory(V.dev, s.mem, NULL);
-        vk.vkDestroyBuffer(V.dev, s.buf, NULL); munmap(view, n); return 0;
+        s.mem = VK_NULL_HANDLE; goto fail;
+    }
+    dfd = -1;   // (the memory owns it now)
+    if ((r = vk.vkBindBufferMemory(V.dev, s.buf, s.mem, 0))) {
+        VRED("pool memory %#lx+%#llx: binding the import %d", (unsigned long)lo, (unsigned long long)n, r);
+        goto fail;
     }
     if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = s.buf}; s.bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
     if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
@@ -428,10 +501,16 @@ static int import_seg(uintptr_t lo, uintptr_t hi) {
     if (!lock_whole()) pthread_rwlock_unlock(&g_rw);
     g_ph[0] += mono_ns() - p0; g_imp_unmapped += unmapped;
     if (++g_imp_n <= 4 || !(g_imp_n & 255) || unmapped)
-        VLOG("pool memory %#lx+%#llx imported (type %u, %.1f ms%s%.0f KiB of it not mapped by the guest); %llu imports, %.2f GiB, %.0f ms in all", (unsigned long)lo, (unsigned long long)n, t,
-             (mono_ns() - p0) / 1e6, unmapped ? ", " : "; ", unmapped / 1024.0, (unsigned long long)g_imp_n, g_placed_bytes / 1073741824.0, g_ph[0] / 1e6);
+        VLOG("pool memory %#lx+%#llx imported (%s, type %u, %.1f ms%s%.0f KiB of it not mapped by the guest); %llu imports, %.2f GiB, %.0f ms in all", (unsigned long)lo, (unsigned long long)n,
+             V.udmabuf ? "udmabuf" : "host pointer", t, (mono_ns() - p0) / 1e6, unmapped ? ", " : "; ", unmapped / 1024.0, (unsigned long long)g_imp_n, g_placed_bytes / 1073741824.0, g_ph[0] / 1e6);
     vka_mem_grew(n);
     return 1;
+fail:
+    if (s.mem) vk.vkFreeMemory(V.dev, s.mem, NULL);
+    if (s.buf) vk.vkDestroyBuffer(V.dev, s.buf, NULL);
+    if (view) munmap(view, n);
+    if (dfd >= 0) close(dfd);
+    return 0;
 }   // this thread's bytes placed and time in pend_wait (mtl_pool_add's attribution: other threads place while it waits)
 static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     if (V.host_import) return import_seg(lo, hi);
@@ -551,7 +630,7 @@ static void alias_drop_buf(VkBuffer buf);   // (Virtual pools below)
 typedef struct { VkBuffer buf; VkDeviceMemory mem; void *view; size_t n; } import_free;
 static void import_free_run(void *arg) {
     import_free *f = arg;
-    if (!vka_hung()) { vk.vkDestroyBuffer(V.dev, f->buf, NULL); vk.vkFreeMemory(V.dev, f->mem, NULL); munmap(f->view, f->n); }
+    if (!vka_hung()) { vk.vkDestroyBuffer(V.dev, f->buf, NULL); vk.vkFreeMemory(V.dev, f->mem, NULL); if (f->view) munmap(f->view, f->n); }
     free(f);
 }
 static void unplace(const seg_t *sp) {
@@ -560,7 +639,7 @@ static void unplace(const seg_t *sp) {
     // Lichii (dotfiles-25x.4): an import keeps the guest's pages where they are (its view is a mapping of its own), so it is freed once the GPU is past the fence, without
     // the caller waiting: with the NVN queues as Vulkan queues the last fence may be a queue's submission that waits for an event the game signals only after it gave the
     // pool back (Mario Kart World at a course's load: a stall until the host let the wait through)
-    if (s.view && !vka_hung() && !vka_wait_done(fence, 0)) {
+    if (s.import && !vka_hung() && !vka_wait_done(fence, 0)) {
         alias_drop_buf(s.buf);
         import_free *f = malloc(sizeof *f); *f = (import_free){s.buf, s.mem, s.view, n};
         vka_after(fence, import_free_run, f);
@@ -568,9 +647,9 @@ static void unplace(const seg_t *sp) {
     }
     int waited = vka_wait_done(fence, vka_hang_ns()) && !vka_hung();
     alias_drop_buf(s.buf);
-    if (s.view) {   // Lichii: an import (import_seg): nothing to copy back, the pages are the guest's; its view goes with the memory (kept, as the memory, while the GPU may use it)
+    if (s.import) {   // Lichii: an import (import_seg): nothing to copy back, the pages are the guest's; its view goes with the memory (kept, as the memory, while the GPU may use it)
         seg_free(&s, waited, fence);
-        if (waited) munmap(s.view, n);
+        if (waited && s.view) munmap(s.view, n);
         static int nlog; if (nlog++ < 4) VLOG("pool memory %#lx+%#zx: import given back (%.2f GiB imported)", (unsigned long)s.lo, n, vka_mem_placed_bytes(NULL) / 1073741824.0);
         return;
     }
@@ -646,8 +725,9 @@ static int cover(uintptr_t lo, uintptr_t hi, seglist *l) {
             ok = 0; a = e; continue;
         }
         uintptr_t piece = V.max_alloc ? (uintptr_t)V.max_alloc & ~(pg_align() - 1) : 0;
+        if (V.udmabuf && (!piece || V.udmabuf_max < piece)) piece = (uintptr_t)V.udmabuf_max & ~(pg_align() - 1);   // (Lichii: one udmabuf holds at most that)
         if (piece && e - a > piece) {   // larger than one allocation can be: pieces of maxMemoryAllocationSize (a lookup answers within one piece)
-            VLOG("pool memory %#lx+%#lx is larger than one allocation: placed in pieces of %lu MiB", (unsigned long)a, (unsigned long)(e - a), (unsigned long)(piece >> 20));
+            VLOG("pool memory %#lx+%#lx is larger than one allocation (or udmabuf): placed in pieces of %lu MiB", (unsigned long)a, (unsigned long)(e - a), (unsigned long)(piece >> 20));
             for (uintptr_t b = a; b < e; b += piece) ok &= place_ref(b, b + piece < e ? b + piece : e, NULL, l);
             a = e; continue;
         }

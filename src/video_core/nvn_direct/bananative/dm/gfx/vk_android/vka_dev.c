@@ -116,6 +116,7 @@ static int init_once(void) {
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
     int x_host = has_ext(de, nde, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);   // Lichii: memory pools are imported guest memory (vka_mem.c import_seg)
+    int x_dmabuf = has_ext(de, nde, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) && has_ext(de, nde, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);   // Lichii: or as udmabufs of it (vka_mem_import_choose)
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
     free(de);
 
@@ -194,6 +195,7 @@ static int init_once(void) {
     // Lichii: without placed maps (a desktop driver) the pools are guest memory imported as host allocations, at the import alignment
     V.host_import = !V.placed && x_host && vk.vkGetMemoryHostPointerPropertiesEXT && pemh.minImportedHostPointerAlignment;
     if (V.host_import) V.placed_align = pemh.minImportedHostPointerAlignment > 4096 ? pemh.minImportedHostPointerAlignment : 4096;
+    if (V.host_import) vka_mem_import_choose(x_dmabuf);
     V.max_push = V.push_desc ? ppd.maxPushDescriptors : 0;
     if (V.mesh && !vk.vkCmdDrawMeshTasksEXT) V.mesh = V.task = 0;
     V.draw_indirect_count = f12.drawIndirectCount && vk.vkCmdDrawIndirectCount && vk.vkCmdDrawIndexedIndirectCount;

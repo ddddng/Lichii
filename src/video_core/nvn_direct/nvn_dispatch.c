@@ -52,6 +52,13 @@ void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped) {
 void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed) {
     if (g_memory.track_pages) g_memory.track_pages(g_memory.context, address, size, armed);
 }
+int nvn_direct_backing_file(uint64_t address, uint64_t* offset) {
+    if (g_memory.backing_fd < 0 || !g_memory.backing) return -1;
+    const uint8_t* const backing = g_memory.backing(g_memory.context, address);
+    if (!backing) return -1;
+    *offset = (uint64_t)(backing - g_memory.backing_base);
+    return g_memory.backing_fd;
+}
 void* nvn_direct_writable(uint64_t host) {
     const uint64_t guest = guest_addr(host);
     if (guest >= g_guest_size || !g_memory.backing) return (void*)(uintptr_t)host_addr(host);
