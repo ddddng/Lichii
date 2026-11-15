@@ -339,6 +339,8 @@ void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
 void vka_ctl_shot_done(VkFence fence);
 
 VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // texture ID id as a view of shape dim (DMSH_VK_DIM_*); VK_NULL_HANDLE = none fits
+int vka_tex_lazy_pending(void);   // Lichii: texture IDs whose images wait for their first use (vka_tex.c tex_lazy)
+void vka_tex_lazy_make(VkCommandBuffer cb);   // their images made now, for a shader that reads the texture pool by index (outside a render pass)
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
 void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // the open pass's attachments and their levels (n 0: none), for vka_tex_id_view
 int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set)
