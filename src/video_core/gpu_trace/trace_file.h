@@ -26,6 +26,8 @@ inline constexpr std::array<char, 8> Magic{'L', 'X', 'G', 'T', 'R', 'A', 'C', 'E
 /// dma_registers, inline_to_memory_registers) in place of the DMA semaphore's three words, and the
 /// QMD states no longer hold their descriptors.
 inline constexpr u32 FormatVersion = 2;
+/// The oldest format Reader reads (StateAccess::Restore takes its state records as they were).
+inline constexpr u32 OldestFormatVersion = 1;
 inline constexpr u64 PageBits = 12;
 inline constexpr u64 PageSize = u64{1} << PageBits;
 
@@ -255,12 +257,18 @@ public:
     /// The next record, or nullopt at the end of the stream or on a read error (see Error).
     [[nodiscard]] std::optional<Record> Next();
 
+    /// The file's format version (OldestFormatVersion to FormatVersion).
+    [[nodiscard]] u32 Version() const {
+        return version;
+    }
+
 private:
     bool Fill(void* out, size_t size);
 
     struct Impl;
     std::unique_ptr<Impl> impl;
     std::string error;
+    u32 version = FormatVersion;
 };
 
 /// Whether a record's payload is large enough for its fixed part.
