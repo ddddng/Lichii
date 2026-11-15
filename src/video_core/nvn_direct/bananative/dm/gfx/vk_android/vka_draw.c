@@ -1437,7 +1437,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         vk.vkCmdDrawIndexed(g_cb, nout, inst, 0, di ? di->base_vertex : 0, binst);
     } else if (dw) {
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
-                   VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's");
+                   if (vka_rc_mode() != 1) VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's (library shaders; recompiled ones read the draw's: vk_nvn_direct_shaders.cpp)");
                    VkBuffer cb_; VkDeviceSize co_;
                    if (mdi_gpu && vka_addr(ind, (uint64_t)(dw->mdi_max - 1) * (uint32_t)dw->mdi_stride + 16, NULL, NULL, NULL) && vka_addr(mdi, 4, &cb_, &co_, NULL) && !(co_ & 3) && dw->mdi_stride >= 16 && !(dw->mdi_stride & 3))
                        vk.vkCmdDrawIndirectCount(g_cb, b, o, cb_, co_, (uint32_t)dw->mdi_max, (uint32_t)dw->mdi_stride);

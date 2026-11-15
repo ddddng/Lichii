@@ -287,10 +287,27 @@ public:
     }
 
     bool HasHLEMacroState() const override {
-        return false;
+        return true;
     }
 
-    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32, u32) override {
+    // The draw's base instance, which GLSLC adds to Maxwell's instance ID from the driver's c[0]
+    // (dmsh_abi.h DMSH_C0_BASE_INSTANCE), read as the BaseInstance the Vulkan draw passes. The
+    // replay fills c[0] when it records a draw, so an indirect draw's c[0] held the record's 0
+    // instead of the first instance the GPU wrote into its arguments: Mario Kart World's culled
+    // instanced draws (trees, bushes) took other instances' data and came and went from frame to
+    // frame (dotfiles-25x.17). A direct draw passes the same value as its first instance.
+    // Lab: EDEN_NX2_NVN_DRAW_BASE_INSTANCE=0 reads c[0]'s word as before (with a DM_TEMP of its own:
+    // the recompiled shaders' cache does not tell the two apart).
+    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override {
+        constexpr u32 base_instance_offset = 0x644;
+        static const bool on = [] {
+            const char* value = std::getenv("EDEN_NX2_NVN_DRAW_BASE_INSTANCE");
+            return value == nullptr || std::atoi(value) != 0;
+        }();
+        if (on && bank == 0 && offset == base_instance_offset &&
+            (stage == Shader::Stage::VertexA || stage == Shader::Stage::VertexB)) {
+            return Shader::ReplaceConstant::BaseInstance;
+        }
         return std::nullopt;
     }
 
