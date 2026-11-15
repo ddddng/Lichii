@@ -146,6 +146,39 @@ static uint64_t g_img_bytes;
 static uint64_t g_tick;   // the VRAM budget's clock (vka_tex_budget): one tick a submission
 static int g_zwant;   // (under g_tmu) img_create_ may make a zero-shared image: vka_tex_get's new image whose content is ST_ZERO ("Zero-shared images" below)
 
+// Lichii (dotfiles-25x.13): the live images with storage by its address, so the lookups by storage (a new texture's image of the same storage and shape, vka_tex_get; a GPU
+// image over it, gpu_image_over; the images under a done GPU write, vka_tex_prepare) find them without a pass over every live image (about 36,000 in Mario Kart World's race:
+// those passes and a sort per submission were ~250 ms/s of the replay thread). Images of the same storage keep their creation order. A range query scans the sorted array
+// back MEMIDX_SPAN from the range's start; images larger than that are also in g_wide, checked whole. Caller holds g_tmu
+typedef struct { uintptr_t lo; uint64_t size; vka_img *im; } memidx_ent;
+enum { MEMIDX_SPAN = 4 << 20 };
+static memidx_ent *g_idx, *g_wide; static int g_nidx, g_idxcap, g_nwide, g_widecap;
+static vka_img **g_meet; static int g_meetcap;   // memidx_meet's result
+static int memidx_first(uintptr_t a) { int lo = 0, hi = g_nidx; while (lo < hi) { int m = (lo + hi) / 2; if (g_idx[m].lo < a) lo = m + 1; else hi = m; } return lo; }   // the first entry at or after a
+static void memidx_add(vka_img *im) {
+    if (!im->mem) return;
+    memidx_ent e = {(uintptr_t)im->mem, im->L.size, im};
+    if (g_nidx == g_idxcap) { g_idxcap = g_idxcap ? 2 * g_idxcap : 1024; g_idx = realloc(g_idx, (size_t)g_idxcap * sizeof *g_idx); }
+    int i = memidx_first(e.lo + 1);
+    memmove(&g_idx[i + 1], &g_idx[i], (size_t)(g_nidx - i) * sizeof *g_idx); g_idx[i] = e; g_nidx++;
+    if (e.size <= MEMIDX_SPAN) return;
+    if (g_nwide == g_widecap) { g_widecap = g_widecap ? 2 * g_widecap : 64; g_wide = realloc(g_wide, (size_t)g_widecap * sizeof *g_wide); }
+    g_wide[g_nwide++] = e;
+}
+static void memidx_del(vka_img *im) {
+    if (!im->mem) return;
+    for (int i = memidx_first((uintptr_t)im->mem); i < g_nidx && g_idx[i].lo == (uintptr_t)im->mem; i++)
+        if (g_idx[i].im == im) { memmove(&g_idx[i], &g_idx[i + 1], (size_t)(g_nidx - i - 1) * sizeof *g_idx); g_nidx--; break; }
+    if (im->L.size > MEMIDX_SPAN) for (int i = 0; i < g_nwide; i++) if (g_wide[i].im == im) { g_wide[i] = g_wide[--g_nwide]; break; }
+}
+static void meet_add(int n, vka_img *im) { if (n == g_meetcap) { g_meetcap = g_meetcap ? 2 * g_meetcap : 256; g_meet = realloc(g_meet, (size_t)g_meetcap * sizeof *g_meet); } g_meet[n] = im; }
+static int memidx_meet(uintptr_t lo, uintptr_t hi) {   // the live images whose storage meets [lo, hi), into g_meet: how many
+    int n = 0;
+    for (int j = memidx_first(hi) - 1; j >= 0 && g_idx[j].lo + MEMIDX_SPAN > lo; j--) if (g_idx[j].size <= MEMIDX_SPAN && g_idx[j].lo + g_idx[j].size > lo) meet_add(n++, g_idx[j].im);
+    for (int j = 0; j < g_nwide; j++) if (g_wide[j].lo < hi && g_wide[j].lo + g_wide[j].size > lo) meet_add(n++, g_wide[j].im);
+    return n;
+}
+
 // The images' memory for the stats line: all of it, and the part whose content the GPU wrote (render targets, copy and storage destinations); the rest was filled from the
 // texture's storage in guest memory, which stays in its memory pool, so those bytes are held twice
 uint64_t vka_tex_mem_nolock(int *n) { if (n) *n = g_nlive; return g_img_bytes + vka_imem_zbytes_nolock(); }   // (zero-shared allocations counted once each)
@@ -216,7 +249,7 @@ static vka_img *g_big[64]; static int g_nbig;   // large images (DM_VK_BIGIMG_MB
 static void unref_locked(vka_img *im) {
     atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
     if (--im->refs) return;
-    for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; break; }
+    for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; memidx_del(im); break; }
     for (int i = 0; i < g_nbig; i++) if (g_big[i] == im) { g_big[i] = g_big[--g_nbig]; break; }
     g_img_bytes -= im->bytes;
     vka_after(vka_fence_last(), img_destroy, im);
@@ -610,7 +643,7 @@ static int mem_any_mapped(const uint8_t *c, const tex_t *t) {
 static _Thread_local int g_first_sampled;
 static int img_pool_dead(vka_img *im);
 static int gpu_image_over(const uint8_t *mem) {   // caller holds g_tmu; images of finalized pools do not count (a new pool may lie at the same address)
-    for (int i = 0; i < g_nlive; i++) if (g_live[i]->mem == mem && g_live[i]->gpu_owned && !img_pool_dead(g_live[i])) return 1;
+    for (int i = memidx_first((uintptr_t)mem); i < g_nidx && g_idx[i].lo == (uintptr_t)mem; i++) if (g_idx[i].im->gpu_owned && !img_pool_dead(g_idx[i].im)) return 1;
     return 0;
 }
 static int nvn2_sampled_content(const tex_t *t, const vka_fmt *f, unsigned pf, int sampled) {
@@ -696,7 +729,6 @@ int vka_tex_gml_take(VkDescriptorBufferInfo *bi) {   // 0 = no log free (the cal
     VRED_ONCE("more than %d raw global memory write logs in flight: stores of later draws are not followed into textures", GML_N);
     return 0;
 }
-static int img_by_mem(const void *a, const void *b) { uintptr_t x = (uintptr_t)(*(vka_img *const *)a)->mem, y = (uintptr_t)(*(vka_img *const *)b)->mem; return x < y ? -1 : x > y; }
 static void gml_poll(void) {   // caller holds g_tmu
     uint64_t done = vka_done();
     for (int i = 0; i < GML_N; i++) {
@@ -1360,8 +1392,9 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     vka_fmt f; vka_img *im = NULL; int throttle = 0;
     if (vka_fmt_of(t->d.format, &f)) {
         // (not an image whose pool was finalized: a new pool over the same memory has new content. Shared with a texture of another live pool, the image follows the newest one's)
-        for (int i = 0; i < g_nlive && !im; i++) if (t->mem && same_shape(g_live[i], t, &f, 1) && !img_pool_dead(g_live[i]) && !(g_live[i]->base && sparse_gpu(t, &f))) {   // (drawn into at level 0)
-            im = g_live[i]; im->refs++;
+        for (int i = t->mem ? memidx_first((uintptr_t)t->mem) : g_nidx; i < g_nidx && g_idx[i].lo == (uintptr_t)t->mem && !im; i++) { vka_img *o = g_idx[i].im;
+            if (!same_shape(o, t, &f, 1) || img_pool_dead(o) || (o->base && sparse_gpu(t, &f))) continue;   // (drawn into at level 0)
+            im = o; im->refs++;
             if (t->pool && im->pool != t->pool) { uint64_t fin = nvn_pool_fin(), g = nvn_pool_live(t->pool, NULL, NULL); if (g) { im->pool = t->pool; im->pfin = fin; im->pgen = g; } } }
         if (im) big_share(im, t);   // (another texture object of the same storage and shape: DM_VK_BIGIMG_MB diagnostic)
         uint32_t vmin = 0, base = sparse_sampled(t, &f) ? sparse_base(t->pool, t->mem, &t->d, &t->L, &vmin) : 0;
@@ -1370,7 +1403,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         if (im && !im->inited) {
             im->vmin = vmin;
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
-            g_live[g_nlive++] = im;
+            g_live[g_nlive++] = im; memidx_add(im);
             big_note(im, t);
             alias_note(im, t);
             // Its first content through the upload batch when cb is the replay's (vka_dev.c "Upload batches"): staging that retires on the batch's own completion
@@ -2169,22 +2202,14 @@ void vka_tex_prepare(VkCommandBuffer cb) {
         if (nprep % 600 == 0) VLOG("NaN scan: GPU writes into guest memory done so far: %llu copies, %llu fills, %llu inline updates, %llu stores / texture → buffer copies (%llu pages from raw global memory logs, %llu logs full, %llu without a log); textures re-uploaded after them %llu", (unsigned long long)kinds[0], (unsigned long long)kinds[1], (unsigned long long)kinds[2], (unsigned long long)kinds[3], (unsigned long long)g_gml_pages, (unsigned long long)g_gml_full, (unsigned long long)g_gml_none, (unsigned long long)g_gw_late); }
     (void)ntake;
     if (g_ngw) {
-        // The images whose content comes from their storage, by start address, searched for each done write (hundreds a frame, thousands of images)
-        static vka_img **by; static int bycap; int nby = 0; uint64_t maxsz = 0, done = vka_done(); int k = 0, any = 0;
-        for (int i = 0; i < g_ngw && !any; i++) any = g_gw[i].fence && g_gw[i].fence <= done;
-        if (any) {
-            if (bycap < g_nlive) { bycap = g_nlive + 256; by = realloc(by, (size_t)bycap * sizeof *by); }
-            for (int j = 0; j < g_nlive; j++) { vka_img *im = g_live[j]; if (im->from_mem && !im->gpu_owned && im->mem && !im->vpool && !img_pool_dead(im)) { by[nby++] = im; if (im->L.size > maxsz) maxsz = im->L.size; } }
-            qsort(by, (size_t)nby, sizeof *by, img_by_mem);
-        }
+        // The images whose content comes from their storage, found by address for each done write (hundreds a frame, thousands of images: memidx_meet)
+        uint64_t done = vka_done(); int k = 0;
         for (int i = 0; i < g_ngw; i++) {
             gw_t *w = &g_gw[i];
             if (!w->fence || w->fence > done) { g_gw[k++] = *w; continue; }
-            int lo = 0, hi = nby;   // the first image starting at or after the write's end
-            while (lo < hi) { int m = (lo + hi) / 2; if ((uint64_t)(uintptr_t)by[m]->mem < w->hi) lo = m + 1; else hi = m; }
-            for (int j = lo - 1; j >= 0 && (uint64_t)(uintptr_t)by[j]->mem + maxsz > w->lo; j--) {
-                vka_img *im = by[j]; uint64_t a = (uint64_t)(uintptr_t)im->mem;
-                if (w->lo >= a + im->L.size || im->gw_seen >= w->seq || im->gpu_owned) continue;
+            for (int j = 0, nm = memidx_meet((uintptr_t)w->lo, (uintptr_t)w->hi); j < nm; j++) {
+                vka_img *im = g_meet[j];
+                if (!im->from_mem || im->gpu_owned || im->vpool || img_pool_dead(im) || im->gw_seen >= w->seq) continue;
                 tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
                 if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
                 g_gw_late++; if (g_gw_late <= 8 || !(g_gw_late & (g_gw_late - 1))) VLOG("textures re-uploaded after a GPU write into their storage: %llu (uploads that applied pending GPU writes: %llu; pages raw global memory stores wrote: %llu)", (unsigned long long)g_gw_late, (unsigned long long)g_gw_over, (unsigned long long)g_gml_pages);
