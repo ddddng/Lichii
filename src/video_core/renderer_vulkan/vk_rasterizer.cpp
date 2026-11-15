@@ -3628,6 +3628,17 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     }
 }
 
+void RasterizerVulkan::VisitTexturesForTrace(std::span<const u32> tic_indices, bool depth_compare) {
+    std::vector<VideoCommon::ImageViewInOut> views;
+    views.reserve(tic_indices.size());
+    for (const u32 index : tic_indices) {
+        views.push_back({.index = index, .depth_compare = depth_compare});
+    }
+    std::scoped_lock lock{texture_cache.mutex};
+    texture_cache.SynchronizeDescriptors(false);
+    texture_cache.FillImageViews(views, false);
+}
+
 void RasterizerVulkan::TickFrame() {
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {

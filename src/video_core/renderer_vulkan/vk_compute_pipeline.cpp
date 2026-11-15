@@ -514,7 +514,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                 info, desc.handle_program, gpu_memory, cbuf_address,
                 device.GetStorageBufferAlignment(), desc.count, [&](u32, u32 raw) {
                     const auto handle{TexturePair(raw, via_header_index)};
-                    views.push_back({handle.first});
+                    views.push_back({.index = handle.first, .depth_compare = desc.is_depth});
                     if (handle.second != last_sampler_index) {
                         sampler = texture_cache.GetSamplerId(handle.second, true);
                         last_sampler_index = handle.second;

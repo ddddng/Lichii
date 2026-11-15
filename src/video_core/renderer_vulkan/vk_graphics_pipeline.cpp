@@ -918,7 +918,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                         device.GetStorageBufferAlignment(), desc.count, [&](u32 element, u32 raw) {
                             note_computed(desc, element, raw);
                             const auto handle{TexturePair(raw, via_header_index)};
-                            views.push_back({handle.first});
+                            views.push_back({.index = handle.first, .depth_compare = desc.is_depth});
                             if (handle.second != last_sampler_index) {
                                 sampler = texture_cache.GetSamplerId(handle.second, false);
                                 last_sampler_index = handle.second;

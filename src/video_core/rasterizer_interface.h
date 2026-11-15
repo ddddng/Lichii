@@ -257,6 +257,9 @@ public:
     /// Notify rasterizer that a frame is about to finish
     virtual void TickFrame() = 0;
 
+    /// Synthetic GPU traces: resolves these graphics TIC indices as one handle table's elements.
+    virtual void VisitTexturesForTrace(std::span<const u32> tic_indices, bool depth_compare) {}
+
     virtual bool AccelerateConditionalRendering() {
         return false;
     }

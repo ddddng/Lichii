@@ -486,6 +486,7 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 ///   eden-cli --replay <trace> --out <dir> [--frames N] [--device N]
 ///                     [--record <trace> --record-from <present> --record-presents N]
 ///   eden-cli --gpu-trace-sample <trace>: writes the synthetic trace.
+///   eden-cli --gpu-trace-churn <trace> <pattern> [frames]: writes a texture cache churn trace.
 static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
     namespace GpuTrace = VideoCommon::GpuTrace;
     if (std::string_view{argv[1]} == "--gpu-trace-sample") {
@@ -494,6 +495,15 @@ static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
             return false;
         }
         return GpuTrace::WriteSampleTrace(Common::FS::ToU8String(argv[2]));
+    }
+    if (std::string_view{argv[1]} == "--gpu-trace-churn") {
+        if (argc < 4 || !GpuTrace::IsChurnPattern(argv[3])) {
+            fmt::print(stderr, "usage: --gpu-trace-churn <trace> <steady|resize|resize-unique|"
+                               "color-resize-unique|formats|drift|heap|heap-drift|table> [frames]\n");
+            return false;
+        }
+        const u32 frames = argc > 4 ? static_cast<u32>(std::strtoul(argv[4], nullptr, 10)) : 240;
+        return GpuTrace::WriteChurnTrace(Common::FS::ToU8String(argv[2]), argv[3], frames);
     }
     GpuTrace::ReplayOptions options;
     for (int i = 2; i < argc; ++i) {
@@ -576,7 +586,8 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         return BuildWarm(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
     if (argc > 1 && (std::string_view{argv[1]} == "--replay" ||
-                     std::string_view{argv[1]} == "--gpu-trace-sample")) {
+                     std::string_view{argv[1]} == "--gpu-trace-sample" ||
+                     std::string_view{argv[1]} == "--gpu-trace-churn")) {
         return ReplayGpuTrace(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 

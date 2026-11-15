@@ -659,6 +659,19 @@ bool Replayer::Stream(std::string& error) {
                 return false;
             }
             break;
+        case RecordType::TextureVisit: {
+            if (!HasPayload(*record, sizeof(u32))) {
+                error = "short texture visit record";
+                return false;
+            }
+            std::vector<u32> values(record->payload.size() / sizeof(u32));
+            std::memcpy(values.data(), record->payload.data(), values.size() * sizeof(u32));
+            gpu.RunInOrder([this, values = std::move(values)] {
+                system.GPU().Renderer().ReadRasterizer()->VisitTexturesForTrace(
+                    std::span{values}.subspan(1), (values[0] & 1) != 0);
+            });
+            break;
+        }
         case RecordType::Present:
             if (!Present(*record, error)) {
                 return false;

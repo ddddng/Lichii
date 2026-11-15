@@ -69,6 +69,8 @@ struct ImageViewInOut {
     u32 index{};
     bool blacklist{};
     ImageViewId id{};
+    /// A handle table element sampled with depth comparison.
+    bool depth_compare{};
 };
 
 /// A texture handle word a draw read, and where.
@@ -510,7 +512,7 @@ private:
     void RunGarbageCollector(bool out_of_memory);
 
     /// Find or create an image view in the guest descriptor table
-    ImageViewId VisitImageView(u32 index, bool compute);
+    ImageViewId VisitImageView(u32 index, bool compute, bool depth_compare = false);
 
     /// Find or create a framebuffer with the given render target parameters
     FramebufferId GetFramebufferId(const RenderTargets& key);

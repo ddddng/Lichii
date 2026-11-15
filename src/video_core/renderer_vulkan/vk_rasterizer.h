@@ -147,6 +147,7 @@ public:
     void TiledCacheBarrier() override;
     void FlushCommands() override;
     void TickFrame() override;
+    void VisitTexturesForTrace(std::span<const u32> tic_indices, bool depth_compare) override;
     bool AccelerateConditionalRendering() override;
     bool HasDrawTransformFeedback() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,

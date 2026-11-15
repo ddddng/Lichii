@@ -800,6 +800,24 @@ void TextureCache<P>::TickFrame() {
         uploaded_ranges.clear();
     }
 
+    static const bool tc_trace_frames = [] {
+        const char* const v = std::getenv("EDEN_NX2_TC_TRACE");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (tc_trace_frames) {
+        size_t images{};
+        size_t gpu_written{};
+        u64 gpu_written_bytes{};
+        for (const auto [image_id, image] : slot_images) {
+            ++images;
+            if (True(image->flags & ImageFlagBits::GpuModified)) {
+                ++gpu_written;
+                gpu_written_bytes += GetScaledImageSizeBytes(*image);
+            }
+        }
+        LOG_WARNING(HW_GPU, "TCTRACE frame={} images={} gpu_written={} gpu_written_kib={}",
+                    frame_tick, images, gpu_written, gpu_written_bytes >> 10);
+    }
     runtime.TickFrame();
     ++frame_tick;
 
@@ -872,7 +890,7 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
             // that view may have gone with them.
             view.id = previous != nullptr && previous->index == view.index && !has_deleted_images
                           ? previous->id
-                          : VisitImageView(view.index, compute);
+                          : VisitImageView(view.index, compute, view.depth_compare);
             previous = &view;
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
@@ -1352,7 +1370,7 @@ typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
 }
 
 template <class P>
-ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
+ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute, bool depth_compare) {
     auto& table = compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
     index = Tegra::Texture::TextureHeaderIndex(index, table.current_limit,
                                                gpu_memory->UsesNativeTiling());
@@ -1361,6 +1379,21 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         return NULL_IMAGE_VIEW_ID;
     }
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
+    // EGLA-211 experiment (LICHII_TABLE_DEPTH_FILTER=1): a depth-compare table element whose
+    // descriptor is a colour format gets the null view the pipeline would bind for it anyway
+    // (IsUncomparable), without making its image.
+    static const bool depth_filter = [] {
+        const char* const value = std::getenv("LICHII_TABLE_DEPTH_FILTER");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (depth_filter && depth_compare && IsValidEntry(*gpu_memory, descriptor) &&
+        VideoCore::Surface::GetFormatType(PixelFormatFromTIC(descriptor)) ==
+            VideoCore::Surface::SurfaceType::ColorTexture) {
+        if (is_new) {
+            table.Forget(index);
+        }
+        return NULL_IMAGE_VIEW_ID;
+    }
     if (is_new) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);

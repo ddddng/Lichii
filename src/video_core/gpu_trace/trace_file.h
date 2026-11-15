@@ -66,6 +66,10 @@ enum class RecordType : u32 {
     Resume = 14,
     /// Empty payload: the last record.
     End = 15,
+    /// Synthetic traces only: u32 flags (bit 0: the elements are depth-compare samples) and the
+    /// TIC indices of one handle table, which the replay resolves as a draw resolves a table's
+    /// elements (TextureCache::FillImageViews).
+    TextureVisit = 16,
 };
 
 struct RecordHeader {

@@ -31,6 +31,11 @@ public:
         return ret;
     }
 
+    /// The next read of this entry reports it new.
+    void Forget(u32 index) noexcept {
+        read_descriptors[index / 64] &= ~(1ULL << (index % 64));
+    }
+
     void Invalidate() noexcept {
         // Cleared on the next read: the texture cache invalidates every channel's tables for
         // each image it deletes, dozens of times a frame while its collector runs.
