@@ -1263,8 +1263,8 @@ bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
     if (Nx2ListIndirect::Stats::Enabled()) {
         Nx2ListIndirect::Stats::MaybeLog();
     }
-    if (!Nx2ListIndirect::g_enabled || rasterizer == nullptr || command_resume_offset != 0 ||
-        !split.Active() || !split.FrontMacros()) {
+    if (rasterizer == nullptr || command_resume_offset != 0 || !split.Active() ||
+        !split.FrontMacros()) {
         Nx2ListIndirect::Stats::NoteKept(Kept::Off);
         return false;
     }

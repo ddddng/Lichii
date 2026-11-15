@@ -58,7 +58,7 @@ inline void ReadSwitch() {
 
 /// Why a GPU-written list took the old path (the front read its words).
 enum class Kept : u32 {
-    Off,       ///< EDEN_NX2_LIST_INDIRECT=0, the split without macros on its front, no slots
+    Off,       ///< The split without macros on its front, or no slots
     NotCall,   ///< Not all the parameters of a compute macro call (3D lists, commands, ...)
     Placement, ///< Not contiguous in mapped device memory, or an unmap still queued
     NoSlot,    ///< Every slot held

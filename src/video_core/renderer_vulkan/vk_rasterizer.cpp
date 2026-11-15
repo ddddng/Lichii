@@ -2682,7 +2682,7 @@ bool RasterizerVulkan::Nx2ListSlotsSupported() const {
                     "Nx2 list indirect off: the device dispatches at most {}x{}x{} groups",
                     max_dim[0], max_dim[1], max_dim[2]);
     }
-    return Tegra::Nx2ListIndirect::g_enabled && fits;
+    return fits;
 }
 
 std::optional<u32> RasterizerVulkan::Nx2AcquireListSlot() {

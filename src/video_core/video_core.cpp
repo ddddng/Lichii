@@ -70,7 +70,6 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     VideoCommon::BackX::ReadSwitch();
     VideoCommon::Nx2DrainCheck::ReadSwitch();
     Core::GPUDirtyMemoryManager::count_collects = VideoCommon::BackX::g_verify;
-    Tegra::Nx2ListIndirect::ReadSwitch();
     Tegra::Nx2ListIndirect::Stats::ReadSwitch();
 
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();

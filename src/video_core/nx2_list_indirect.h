@@ -19,8 +19,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/macro_turing.h"
 
-// GPU-written command lists whose words the host GPU takes over (EDEN_NX2_LIST_INDIRECT, on
-// unless =0). Ocarina of Time's compute culling writes the group counts of a later dispatch as
+// GPU-written command lists whose words the host GPU takes over. Ocarina of Time's compute culling writes the group counts of a later dispatch as
 // the parameters of a macro call (compute method 0xe74): the split GPU thread's front had to
 // wait for that work to run on the host GPU and its copy to come back before it could parse
 // them (~145 ms of every second). The macros only move those words: 0xe74 stores them in the
@@ -38,20 +37,6 @@
 //   slot, and patches the uploaded words into the constant buffers compute dispatches bind
 //   (the "owed" words), from the slot.
 namespace Tegra::Nx2ListIndirect {
-
-[[nodiscard]] inline bool SwitchSet() {
-    const char* value = std::getenv("EDEN_NX2_LIST_INDIRECT");
-    return value == nullptr || value[0] != '0';
-}
-
-// A plain flag: checked at every GPU-written list.
-inline bool g_enabled = SwitchSet();
-
-/// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
-/// nx2_switches.txt, so a switch set only there takes effect from that point on.
-inline void ReadSwitch() {
-    g_enabled = SwitchSet();
-}
 
 /// Slots the back keeps snapshots of list words in, and the words a slot holds.
 inline constexpr u32 SlotCount = 4096;
