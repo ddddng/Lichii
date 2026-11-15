@@ -49,6 +49,12 @@ if ("riscv" IN_LIST ARCHITECTURE)
     target_link_libraries(dynarmic_tests PRIVATE biscuit::biscuit)
 endif()
 
+if ("arm64" IN_LIST ARCHITECTURE)
+    target_architecture_specific_sources(dynarmic_tests "arm64"
+        A64/shared_fastmem.cpp
+    )
+endif()
+
 if ("x86_64" IN_LIST ARCHITECTURE)
     target_link_libraries(dynarmic_tests PRIVATE xbyak::xbyak)
     target_architecture_specific_sources(dynarmic_tests "x86_64"
