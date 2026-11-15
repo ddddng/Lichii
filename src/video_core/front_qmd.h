@@ -7,6 +7,7 @@
 #include <array>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <span>
 #include <unordered_set>
@@ -16,6 +17,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/native_qmd.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_drain_check.h"
 
 namespace VideoCommon {
 
@@ -72,6 +74,7 @@ public:
     /// The back ran everything sent and runs nothing (the split drained, or it waits for work):
     /// takes over the table `back` shares with the other engines.
     void TakeOver(const Tegra::NativeQmdScheduler& back) {
+        Count(g_acquire_stats.qmd_takeovers);
         scheduler.CopyStates(back);
         synced = true;
         ClearWaiting();
@@ -93,6 +96,7 @@ public:
         synced = false;
         inline_writes_count = 0;
         ClearWaiting();
+        checks.clear();
     }
 
     [[nodiscard]] bool Synced() const {
@@ -147,10 +151,14 @@ public:
                 const Descriptor* inline_qmd) {
         split.NoteCacheWrite(); // The dispatches' shader stores
         const u64 position = split.Position();
+        if (Nx2DrainCheck::g_enabled) {
+            checks.emplace_back(); // This signal's, valued if Attempt values it now
+        }
         if (synced) {
             CatchUp(split, memory);
         }
         if (!synced) {
+            Count(g_acquire_stats.qmd_unvalued);
             return;
         }
         if (!waiting.empty()) {
@@ -161,6 +169,7 @@ public:
         const Outcome outcome =
             Attempt(split, memory, position, address, argument, inline_qmd, false);
         if (outcome.valued) {
+            Count(g_acquire_stats.qmd_valued);
             return;
         }
         if (outcome.retry_after) {
@@ -168,7 +177,28 @@ public:
             Wait(position, memory.Id(), address, argument, inline_qmd);
             return;
         }
-        synced = false;
+        LoseTable(outcome.loss);
+    }
+
+    /// EDEN_NX2_DRAIN_CHECK: what the view read and noted for the signals of the entry just sent,
+    /// and its table if that is the back's as of the entry (Nx2DrainCheck::Check).
+    struct Checks {
+        std::vector<Nx2DrainCheck::QmdSignal> signals;
+        std::shared_ptr<const Tegra::NativeQmdScheduler> table;
+    };
+    [[nodiscard]] std::optional<Checks> TakeChecks() {
+        if (checks.empty()) {
+            return std::nullopt;
+        }
+        Checks taken{std::move(checks), nullptr};
+        checks.clear();
+        if (Current()) {
+            auto table =
+                std::make_shared<Tegra::NativeQmdScheduler>(Tegra::NativeQmdScheduler::OwnTable{});
+            table->CopyStates(scheduler);
+            taken.table = std::move(table);
+        }
+        return taken;
     }
 
 private:
@@ -211,6 +241,7 @@ private:
     struct Outcome {
         bool valued;
         std::optional<u64> retry_after;
+        QmdLoss loss{}; ///< Why, if for good
     };
 
     /// Signals that wait, at most: a back that far behind leaves the view to its next takeover.
@@ -221,10 +252,11 @@ private:
     void Wait(u64 position, const void* memory_id, GPUVAddr address, u32 argument,
               const Descriptor* inline_qmd) {
         if (waiting.size() >= MaxWaiting) {
-            synced = false;
+            LoseTable(QmdLoss::TooMany);
             ClearWaiting();
             return;
         }
+        Count(g_acquire_stats.qmd_waits);
         WaitingSignal& signal = waiting.emplace_back();
         signal.position = position;
         signal.memory = memory_id;
@@ -240,6 +272,12 @@ private:
         waiting.clear();
         late_reads.clear();
         retry_after = 0;
+    }
+
+    /// The view can't read what the back read: it stops valuing until the next takeover.
+    void LoseTable(QmdLoss loss) {
+        synced = false;
+        Count(g_acquire_stats.qmd_losses[static_cast<size_t>(loss)]);
     }
 
     /// Values the waiting signals that read `memory` in order, from the first, as long as the back
@@ -259,10 +297,11 @@ private:
                 return;
             }
             if (!outcome.valued) {
-                synced = false;
+                LoseTable(outcome.loss);
                 ClearWaiting();
                 return;
             }
+            Count(g_acquire_stats.qmd_late);
             waiting.pop_front();
             retry_after = 0;
         }
@@ -279,13 +318,14 @@ private:
         // The back finds the mappings every change sent before the signal made, and none after it.
         const u64 mapping_change = split.LastMappingChange();
         if (mapping_change > position) {
-            return {false, std::nullopt};
+            return {false, std::nullopt, QmdLoss::Mappings};
         }
         if (!split.Ran(mapping_change)) {
             return {false, mapping_change};
         }
         releases.clear();
         attempt_reads.clear();
+        checked_reads.clear();
         std::optional<Outcome> failure;
         const auto read = [&](u64 qmd_address, Descriptor& descriptor) {
             if (!memory.IsMapped(qmd_address, sizeof(descriptor))) {
@@ -300,10 +340,13 @@ private:
             }
             // A release this signal ran before writes into the QMD.
             if (ReleasedInto(memory, qmd_address)) {
-                failure = Outcome{false, std::nullopt};
+                failure = Outcome{false, std::nullopt, QmdLoss::ReleasedInto};
                 return false;
             }
             attempt_reads.push_back(qmd_address);
+            if (Nx2DrainCheck::g_enabled && !late) {
+                checked_reads.push_back({qmd_address, descriptor});
+            }
             return true;
         };
         const auto release = [&](u64 destination, u32 payload, u32 flags) {
@@ -317,7 +360,7 @@ private:
         scheduler.BeginAttempt();
         scheduler.Signal(address, argument, read, release, [](const Descriptor&) { return true; });
         if (!failure && late && ReleasesIntoLateReads(memory)) {
-            failure = Outcome{false, std::nullopt};
+            failure = Outcome{false, std::nullopt, QmdLoss::ReleasedInto};
         }
         if (failure) {
             scheduler.RollbackAttempt();
@@ -334,6 +377,10 @@ private:
                 memory.NoteWriteAt(split, done.address, (done.flags >> 30) == 0 ? 16 : 4, position);
             }
         } else {
+            if (Nx2DrainCheck::g_enabled && !checks.empty()) {
+                checks.back().valued = true;
+                checks.back().reads = std::move(checked_reads);
+            }
             for (const Release& noted : releases) {
                 NoteRelease(split, memory, noted.address, noted.payload, noted.flags);
             }
@@ -414,13 +461,13 @@ private:
                                                         Descriptor& descriptor) const {
         const auto device = memory.Device(qmd_address);
         if (!device || memory.GpuWritten(*device, sizeof(descriptor))) {
-            return Outcome{false, std::nullopt};
+            return Outcome{false, std::nullopt, QmdLoss::Unreadable};
         }
         // The last write sent there, placed or not (the inline write covers the whole QMD).
         const u64 target = memory.WritesTarget(split, qmd_address, sizeof(descriptor));
         if (target > position) {
             // Sent after the signal (it waited): memory may hold it, the back read what was before.
-            return Outcome{false, std::nullopt};
+            return Outcome{false, std::nullopt, QmdLoss::WrittenAfter};
         }
         if (split.Ran(target)) {
             // Read only once Ran saw the back past the write: the back stores its position after
@@ -433,11 +480,13 @@ private:
         if (const InlineWrite* written = QueuedInlineWrite(split, *device);
             written != nullptr && written->position == target) {
             descriptor = written->qmd;
+            Count(g_acquire_stats.qmd_inline_reads);
             return std::nullopt;
         }
         // Inline uploads still queued wrote it last (games rewrite a few words of a QMD between
         // dispatches).
         if (ReadPatched(split, memory, qmd_address, target, descriptor)) {
+            Count(g_acquire_stats.qmd_patched_reads);
             return std::nullopt;
         }
         return Outcome{false, target};
@@ -549,21 +598,27 @@ private:
                 written.overwritten = true;
             }
         }
+        const auto note = [&](u64 word, u32 value, bool known, bool at_least) {
+            split.NoteSemaphoreWrite(word, value, known, at_least);
+            if (Nx2DrainCheck::g_enabled && !checks.empty()) {
+                checks.back().releases.push_back({word, value, known, at_least});
+            }
+        };
         if (reduction) {
             const bool is_signed = ((flags >> 24) & 1) != 0;
             const u32 value =
                 base ? Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload) : 0;
-            split.NoteSemaphoreWrite(*device, value, base.has_value());
+            note(*device, value, base.has_value(), false);
         } else if (four_words) {
             // The payload as 64 bits, a timestamp after it.
-            split.NoteSemaphoreWrite(*device, payload, true);
-            split.NoteSemaphoreWrite(*device + 4, 0, true);
+            note(*device, payload, true, false);
+            note(*device + 4, 0, true, false);
         } else if (maximum) {
             // Whatever the word held, it holds the payload at least.
             const u32 value = base ? (std::max)(*base, payload) : payload;
-            split.NoteSemaphoreWrite(*device, value, true, !base.has_value());
+            note(*device, value, true, !base.has_value());
         } else {
-            split.NoteSemaphoreWrite(*device, payload, true);
+            note(*device, payload, true, false);
         }
     }
 
@@ -599,6 +654,10 @@ private:
     Tegra::NativeQmdScheduler back_table;
     std::vector<Release> releases;
     std::vector<u64> attempt_reads; ///< The QMDs the attempt read
+    /// EDEN_NX2_DRAIN_CHECK: the descriptors the attempt read, and the signals of the entry being
+    /// sent (TakeChecks).
+    std::vector<Nx2DrainCheck::QmdRead> checked_reads;
+    std::vector<Nx2DrainCheck::QmdSignal> checks;
     bool synced{};
     /// Signals that wait to be valued, oldest first; the first may be once the back ran
     /// retry_after. late_reads: the device granules of the QMDs read late since the waiting began.

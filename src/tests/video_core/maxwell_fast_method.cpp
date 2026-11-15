@@ -35,6 +35,7 @@
 #include "video_core/native_qmd.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_async_readback.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_null/null_rasterizer.h"
@@ -1742,6 +1743,14 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     const auto split_owner = std::make_unique<VideoCommon::GpuSplit>();
     VideoCommon::GpuSplit& split = *split_owner;
     Access::Initialize(split, f.system);
+    // The back compares what the front valued with what it ran (EDEN_NX2_DRAIN_CHECK).
+    namespace DrainCheck = VideoCommon::Nx2DrainCheck;
+    DrainCheck::g_enabled = true;
+    const u64 compared = DrainCheck::g_compared;
+    const u64 differences = DrainCheck::g_differences;
+    SCOPE_EXIT {
+        DrainCheck::g_enabled = false;
+    };
     const auto send = [&](u32 method, u32 argument) {
         compute.FrontCallMethod(f.system, split, method, argument, true, nullptr);
     };
@@ -1869,6 +1878,8 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     std::memcpy(pages.backing + (payload_address - MappedPages::gpu_address), &nine, sizeof(nine));
     Access::RunBack(split);
     CHECK(word(0x50) == 9);
+    CHECK(DrainCheck::g_compared > compared);
+    CHECK(DrainCheck::g_differences == differences);
 }
 
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",

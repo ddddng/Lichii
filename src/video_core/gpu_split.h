@@ -56,6 +56,16 @@ enum class DrainSite : u32 {
     Count,
 };
 
+/// Why the front's QMD view lost its table (FrontQmdView), counted with the acquires.
+enum class QmdLoss : u32 {
+    Mappings,     ///< A change of the GPU's mappings may change what the back reads
+    Unreadable,   ///< A QMD on a GPU-written page or without device memory
+    WrittenAfter, ///< A QMD written after the signal that read it waited
+    ReleasedInto, ///< A release of the signal (or of one valued late) writes a QMD read
+    TooMany,      ///< Too many signals waited
+    Count,
+};
+
 /// How semaphore acquires and the polls of suspended ones were decided, counted with
 /// EDEN_NX2_GPU_PROFILE, EDEN_NX2_ACQUIRE_VERIFY, EDEN_NX2_ACQUIRE_STATS or
 /// EDEN_NX2_GUEST_THREAD_STATS and logged every 10 s (GpuSplit::ReportAcquire).
@@ -90,6 +100,14 @@ struct AcquireStats {
     std::atomic<u64> mismatches{}; ///< VERIFY: passed, yet the word after a drain doesn't meet it
     std::atomic<u64> unlanded{};   ///< VERIFY: met by a queued release not in memory after a drain
     std::atomic<u64> late{};       ///< VERIFY: a poll kept waiting, yet a drain meets it
+    std::atomic<u64> qmd_valued{};   ///< QMD signals the front's view valued as it sent them
+    std::atomic<u64> qmd_waits{};    ///< ...that waited for the back, first or behind another
+    std::atomic<u64> qmd_late{};     ///< ...valued late, once the back ran what they waited for
+    std::atomic<u64> qmd_unvalued{}; ///< ...sent while the view had no table
+    std::atomic<u64> qmd_takeovers{}; ///< Times the view took the back's table over
+    std::atomic<u64> qmd_inline_reads{};  ///< Descriptors read from an inline QMD still queued
+    std::atomic<u64> qmd_patched_reads{}; ///< ...from memory with inline uploads still queued
+    std::array<std::atomic<u64>, static_cast<size_t>(QmdLoss::Count)> qmd_losses{};
     /// The front's waits for its back (Drain, WaitFor, a full ring) and their time, by site
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drains{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drain_ns{};

@@ -895,6 +895,25 @@ void GpuSplit::ReportAcquire() {
              "already meets: {} of {}",
              sites.empty() ? "none" : sites, trigger_not_met, trigger_not_met_twice,
              queued_unknown_met, queued_unknown);
+    const u64 qmd_valued = take(stats.qmd_valued);
+    const u64 qmd_waits = take(stats.qmd_waits);
+    const u64 qmd_late = take(stats.qmd_late);
+    const u64 qmd_unvalued = take(stats.qmd_unvalued);
+    const u64 qmd_takeovers = take(stats.qmd_takeovers);
+    const u64 qmd_inline_reads = take(stats.qmd_inline_reads);
+    const u64 qmd_patched_reads = take(stats.qmd_patched_reads);
+    std::array<u64, static_cast<size_t>(QmdLoss::Count)> qmd_losses{};
+    for (size_t loss = 0; loss < qmd_losses.size(); ++loss) {
+        qmd_losses[loss] = take(stats.qmd_losses[loss]);
+    }
+    LOG_INFO(HW_GPU,
+             "QMD view in 10 s: {} signals valued as sent, {} waited ({} valued late), {} sent "
+             "without a table; descriptors from inline QMDs still queued: {}, with uploads still "
+             "queued: {}; {} takeovers; table lost: {} mappings, {} GPU-written or unmapped QMD, "
+             "{} QMD written after the signal, {} release into a QMD read, {} too many waiting",
+             qmd_valued, qmd_waits, qmd_late, qmd_unvalued, qmd_inline_reads, qmd_patched_reads,
+             qmd_takeovers, qmd_losses[0], qmd_losses[1], qmd_losses[2], qmd_losses[3],
+             qmd_losses[4]);
     const u64 mismatches = take(stats.mismatches);
     const u64 unlanded = take(stats.unlanded);
     const u64 late = take(stats.late);
