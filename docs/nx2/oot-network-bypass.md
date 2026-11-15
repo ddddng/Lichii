@@ -45,7 +45,12 @@ samples (cb0+0xc0) and writes the image it would write (cb0+0xd0), so it always 
 frame's tonemap whichever shader drew it. Builds up to 228 instead copied render target 0 of the
 latest draw with one of three known tonemap fragment shaders. Where the game used another tonemap
 shader, that image was no longer drawn, so the 3D froze under a live HUD (#1688). The prepass and
-the network are skipped only while the output pass is being replaced. The replacement requires two
+the network are skipped only while the output pass is being replaced. The update also has output
+programs this does not replace (for example the scaled field upscale `e4cda162ff6009e2`, see
+docs/native-dlss-replacement.md). A frame that ends in one of them would read the skipped
+network's stale result, so a skipped prepass that no replacement followed brings the network back
+from the next frame. The log names the first program after the network the first time that
+happens. The replacement requires two
 B10G11R11 block-linear images, and the input must fit the output dimensions (an exact match on
 1.1.1). If the copy fails, dispatch falls back to the game's shader. The state lives in the
 rasterizer (`OotNetwork::BypassState`) because the network's passes do not all run on the same

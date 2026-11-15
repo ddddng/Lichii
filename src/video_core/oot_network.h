@@ -52,6 +52,10 @@ constexpr u32 OutputImageHandleOffset = 0xd0;
 /// Owned by the rasterizer: the network's passes do not all run on the same compute engine.
 struct BypassState {
     std::atomic<bool> output_replaced{}; ///< the latest output pass was replaced
+    /// The prepass was skipped and no output pass has been replaced since.
+    std::atomic<bool> output_pending{};
+    /// The first native program dispatched after the network, 0 until one is seen.
+    std::atomic<u64> after_network{};
 };
 
 inline bool BypassEnabled(u64 program_id) {

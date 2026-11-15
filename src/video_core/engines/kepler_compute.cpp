@@ -1238,13 +1238,33 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
         return false;
     }
     // The first passes are skipped only while the output pass is being replaced, so a failed
-    // replacement brings the whole network back next frame.
-    if (native_key == PrepassProgramKey || native_key == NetworkProgramKey) {
+    // replacement brings the whole network back next frame. The game can also finish a frame with
+    // an output program this does not replace (#1688), which would read the skipped network's
+    // stale result every frame: a skip that no replacement followed brings the network back too.
+    if (native_key == PrepassProgramKey) {
+        if (bypass->output_pending.exchange(false, std::memory_order_relaxed) &&
+            bypass->output_replaced.exchange(false, std::memory_order_relaxed)) {
+            static bool logged = false;
+            if (!std::exchange(logged, true)) {
+                LOG_INFO(HW_GPU,
+                         "Ocarina of Time: the network's output pass was not replaced; running "
+                         "the network (first program after it: {:016x})",
+                         bypass->after_network.load(std::memory_order_relaxed));
+            }
+        }
+        const bool skip = bypass->output_replaced.load(std::memory_order_relaxed);
+        bypass->output_pending.store(skip, std::memory_order_relaxed);
+        return skip;
+    }
+    if (native_key == NetworkProgramKey) {
+        bypass->after_network.store(0, std::memory_order_relaxed);
         return bypass->output_replaced.load(std::memory_order_relaxed);
     }
     const bool base_output = std::ranges::find(BaseOutputPrograms, native_key,
                                               &BaseOutputProgram::key) != BaseOutputPrograms.end();
     if (native_key != OutputProgramKey && !base_output) {
+        u64 none = 0;
+        bypass->after_network.compare_exchange_strong(none, native_key, std::memory_order_relaxed);
         return false;
     }
     // The base game can run its tonemap at a lower resolution than the output.
@@ -1318,6 +1338,7 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     };
     const bool copied = rasterizer->AccelerateSurfaceCopy(source, destination, config);
     bypass->output_replaced.store(copied, std::memory_order_relaxed);
+    bypass->output_pending.store(false, std::memory_order_relaxed);
     static bool logged = false;
     if (!std::exchange(logged, true)) {
         LOG_INFO(HW_GPU,
