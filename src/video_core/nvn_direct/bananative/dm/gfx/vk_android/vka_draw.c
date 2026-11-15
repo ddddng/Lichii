@@ -457,13 +457,18 @@ static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as th
 }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
+static int g_ubo_snap;   // DM_VK_UBO_SNAPSHOT (lab, dotfiles-25x.15): 1 = a dispatch's uniform buffers, 2 = every draw's too, bound as a copy of the CPU's bytes at recording
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
     if (!size || size > V.ub_range) size = size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range;
     VkBuffer b; VkDeviceSize o;
     uint64_t run = vka_addr_run(addr, size, &b, &o);
-    if (run && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
+    if (run && !g_ubo_snap && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
+    if (run && g_ubo_snap && size > run) size = run;
     vka_span s; if (!vka_scratch(size, V.ub_align, &s)) return 0;
-    if (!cpu_read(addr, s.ptr, size)) { memset(s.ptr, 0, size); VRED_ONCE("uniform buffer at %#llx is not readable: it reads zeros", (unsigned long long)addr); }
+    int vka_tex_gpu_bytes(uint64_t addr, void *out, size_t n);
+    if (g_ubo_snap && run && vka_tex_gpu_bytes(addr, s.ptr, size)) ;   // (the inline updates recorded before it, which the GPU applies first)
+    else if (!cpu_read(addr, s.ptr, size)) { memset(s.ptr, 0, size); VRED_ONCE("uniform buffer at %#llx is not readable: it reads zeros", (unsigned long long)addr); }
+    else if (g_ubo_snap) ;
     else if (run) VRED_ONCE("uniform buffer at %#llx is not %llu-byte aligned: bound as a copy of the CPU's bytes", (unsigned long long)addr, (unsigned long long)V.ub_align);
     else VRED_ONCE("uniform buffer at %#llx is not in placed guest RAM: bound as a copy of the CPU's bytes", (unsigned long long)addr);
     *bi = (VkDescriptorBufferInfo){s.buf, s.off, size}; return 1;
@@ -1201,7 +1206,10 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
     if (vka_nan_on()) vka_nan_draw(mesh ? sh[7]->key : sh[0]->key, fs ? fs->key : 0);
     PT(5);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
+    g_ubo_snap = VKA_ENV("DM_VK_UBO_SNAPSHOT", 0) >= 2;
+    int bound = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL);
+    g_ubo_snap = 0;
+    if (!bound) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     PT(6);
     if (!mesh) vin_bind(d);
 
@@ -1350,7 +1358,10 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     }
     c0_at c0 = {0};
     walk_all(d, sh);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
+    g_ubo_snap = VKA_ENV("DM_VK_UBO_SNAPSHOT", 0) >= 1;
+    int bound = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0);
+    g_ubo_snap = 0;
+    if (!bound) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (dp->ind && c0.buf) {   // the group counts the GPU wrote, into c0's dispatch words before the dispatch reads them (nvn_mtl.m g_c0_dim_buf); NVN2 reads them at c0 + 4 too
         VkBufferCopy c[2] = {{io, c0.off + DMSH_C0_DISPATCH, 12}, {io, c0.off + DMSH_C0_DISPATCH_NVN2, 12}};
         vk.vkCmdCopyBuffer(g_cb, ib, c0.buf, d->b.nvn2 ? 2 : 1, c);
