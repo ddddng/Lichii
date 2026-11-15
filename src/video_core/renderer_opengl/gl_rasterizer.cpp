@@ -47,6 +47,14 @@ using VideoCore::Surface::SurfaceType;
 namespace {
 constexpr size_t NUM_SUPPORTED_VERTEX_ATTRIBUTES = 16;
 
+/// Depth bias, in units of the depth format, that pushes far plane draws past the far value so
+/// that depth clamping puts them exactly on it. A vertex shader that stores one value to position
+/// z and w puts every vertex on the far plane, the usual way to draw a sky. NVIDIA fills such a
+/// triangle with exactly the far value; AMD's rasterizer lands some pixels a step short, so two
+/// sky meshes fight and a dome tested EQUAL or LEQUAL against an earlier one loses in blocks
+/// (Mario Kart 8 Deluxe's Sky-High Sundae, #1905).
+constexpr GLfloat FAR_PLANE_DEPTH_BIAS = 16.0f;
+
 void oglEnable(GLenum cap, bool state) {
     (state ? glEnable : glDisable)(cap);
 }
@@ -245,6 +253,9 @@ void RasterizerOpenGL::PrepareDraw(bool is_indexed, Func&& draw_func) {
     if (!pipeline->Configure(is_indexed))
         return;
 
+    const auto& regs = maxwell3d->regs;
+    SetFarPlaneDraw(pipeline->OnFarPlane() && !regs.polygon_offset_fill_enable &&
+                    !regs.polygon_offset_line_enable && !regs.polygon_offset_point_enable);
     SyncState();
 
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
@@ -358,6 +369,7 @@ void RasterizerOpenGL::DrawTexture() {
     texture_cache.SynchronizeDescriptors(false);
     texture_cache.UpdateRenderTargets(false);
 
+    SetFarPlaneDraw(false);
     SyncState();
 
     const auto& draw_texture_state = maxwell3d->draw_manager.draw_texture_state;
@@ -929,7 +941,18 @@ void RasterizerOpenGL::SyncDepthClamp() {
                                   Maxwell::ViewportClipControl::GeometryClip::FrustumXYZ ||
                               maxwell3d->regs.viewport_clip_control.geometry_clip ==
                                   Maxwell::ViewportClipControl::GeometryClip::FrustumZ};
-    oglEnable(GL_DEPTH_CLAMP, !depth_clamp_disabled);
+    oglEnable(GL_DEPTH_CLAMP, far_plane_draw || !depth_clamp_disabled);
+}
+
+void RasterizerOpenGL::SetFarPlaneDraw(bool far_plane) {
+    auto& flags = maxwell3d->dirty.flags;
+    if (far_plane || far_plane != far_plane_draw) {
+        flags[Dirty::PolygonOffset] = true;
+    }
+    if (far_plane != far_plane_draw) {
+        far_plane_draw = far_plane;
+        flags[Dirty::DepthClampEnabled] = true;
+    }
 }
 
 void RasterizerOpenGL::SyncClipEnabled(u32 clip_mask) {
@@ -1317,6 +1340,16 @@ void RasterizerOpenGL::SyncPolygonOffset() {
     flags[Dirty::PolygonOffset] = false;
 
     const auto& regs = maxwell3d->regs;
+    if (far_plane_draw) {
+        oglEnable(GL_POLYGON_OFFSET_FILL, true);
+        oglEnable(GL_POLYGON_OFFSET_LINE, true);
+        oglEnable(GL_POLYGON_OFFSET_POINT, true);
+        glPolygonOffsetClamp(0.0f,
+                             regs.viewport_transform[0].scale_z < 0.0f ? -FAR_PLANE_DEPTH_BIAS
+                                                                        : FAR_PLANE_DEPTH_BIAS,
+                             0.0f);
+        return;
+    }
     oglEnable(GL_POLYGON_OFFSET_FILL, regs.polygon_offset_fill_enable);
     oglEnable(GL_POLYGON_OFFSET_LINE, regs.polygon_offset_line_enable);
     oglEnable(GL_POLYGON_OFFSET_POINT, regs.polygon_offset_point_enable);
