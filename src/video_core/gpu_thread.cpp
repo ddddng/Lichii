@@ -198,15 +198,18 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                     // The guest may have written pages the caches don't watch since the lists
-                    // before it: uniform keeps end here, in order on the back.
+                    // before it: uniform keeps end here, in order on the back. It writes no guest
+                    // memory.
                     split.Defer([] { VideoCommon::Nx2FastDraw::NoteSync(); },
-                                VideoCommon::GpuSplit::FastDrawNeutral);
+                                VideoCommon::GpuSplit::FastDrawNeutral,
+                                VideoCommon::GpuSplit::Writes::Noted);
                     Profile::Scope scope{Profile::Zone::Push};
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     // TickWork ends fast draw reuse itself when it runs a request.
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); },
-                                VideoCommon::GpuSplit::FastDrawNeutral);
+                                VideoCommon::GpuSplit::FastDrawNeutral,
+                                VideoCommon::GpuSplit::Writes::Caches);
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     if (run->before_later_reads) {
                         // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.
@@ -216,19 +219,22 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         split.DeferFunction(std::move(run->func));
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                    split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
-                        rasterizer_ptr->FlushRegion(addr, size);
-                    });
+                    split.Defer([rasterizer_ptr, addr = flush->addr,
+                                 size = flush->size] { rasterizer_ptr->FlushRegion(addr, size); },
+                                0, VideoCommon::GpuSplit::Writes::Caches);
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                    split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
-                        rasterizer_ptr->OnCacheInvalidation(addr, size);
-                    });
+                    split.Defer(
+                        [rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
+                            rasterizer_ptr->OnCacheInvalidation(addr, size);
+                        },
+                        0, VideoCommon::GpuSplit::Writes::Noted);
                 } else {
                     ASSERT(false);
                 }
-                split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {
-                    SignalCommand(*state_ptr, fence, block);
-                }, VideoCommon::GpuSplit::FastDrawNeutral);
+                split.Defer([state_ptr = &state, fence = next.fence,
+                             block = next.block] { SignalCommand(*state_ptr, fence, block); },
+                            VideoCommon::GpuSplit::FastDrawNeutral,
+                            VideoCommon::GpuSplit::Writes::Noted);
                 split.Publish();
                 last_progress = std::chrono::steady_clock::now();
                 continue;

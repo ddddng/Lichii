@@ -171,7 +171,8 @@ void StateAccess::CaptureChannel(Writer& writer, ChannelState& channel) {
                            : 0;
         }
         bytes.Put(types);
-        bytes.Put(pusher.dma_semaphore);
+        bytes.Put(pusher.dma_registers);
+        bytes.Put(pusher.inline_to_memory_registers);
         bytes.Put(pusher.puller.regs);
         bytes.Put(pusher.puller.bound_engines);
         Emit(writer, StateKind::Pusher, id, bytes);
@@ -231,8 +232,6 @@ void StateAccess::CaptureGlobals(Writer& writer, ChannelState* any_channel,
         Bytes bytes;
         for (const auto& [address, state] : Tegra::NativeQmdScheduler::shared_states) {
             bytes.Put(address);
-            // The descriptor states once kept, as traces store them.
-            bytes.Put(Tegra::NativeQmdScheduler::Descriptor{});
             bytes.Put(state);
         }
         Emit(writer, StateKind::QmdStates, -1, bytes);
@@ -276,8 +275,9 @@ bool StateAccess::Restore(const Record& record, ChannelState* channel, ChannelSt
         u32 increment_once{};
         std::array<u32, 8> types{};
         if (!cursor.Get(pusher.dma_state) || !cursor.Get(increment_once) || !cursor.Get(types) ||
-            !cursor.Get(pusher.dma_semaphore) || !cursor.Get(pusher.puller.regs) ||
-            !cursor.Get(pusher.puller.bound_engines) || !cursor.Done()) {
+            !cursor.Get(pusher.dma_registers) || !cursor.Get(pusher.inline_to_memory_registers) ||
+            !cursor.Get(pusher.puller.regs) || !cursor.Get(pusher.puller.bound_engines) ||
+            !cursor.Done()) {
             return false;
         }
         pusher.dma_increment_once = increment_once != 0;
@@ -371,9 +371,8 @@ bool StateAccess::Restore(const Record& record, ChannelState* channel, ChannelSt
         states.clear();
         while (!cursor.Done()) {
             Tegra::NativeQmdScheduler::Address address{};
-            Tegra::NativeQmdScheduler::Descriptor descriptor{};
             Tegra::NativeQmdScheduler::State state{};
-            if (!cursor.Get(address) || !cursor.Get(descriptor) || !cursor.Get(state)) {
+            if (!cursor.Get(address) || !cursor.Get(state)) {
                 return false;
             }
             states.insert_or_assign(address, state);

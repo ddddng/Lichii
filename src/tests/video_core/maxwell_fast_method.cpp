@@ -1614,14 +1614,102 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     CHECK(engine.regs.reg_array[copy] == 0x88888888);
 }
 
+namespace {
+
+// Two pages of guest memory at gpu_address (device_address) for the tests below.
+struct MappedPages {
+    static constexpr VAddr cpu_address = 0x4000;
+    static constexpr DAddr device_address = 0x10000;
+    static constexpr GPUVAddr gpu_address = 0x100000;
+
+    explicit MappedPages(Fixture& f) : fixture{f}, process{f.system.Kernel()} {
+        auto& table = process.GetPageTable().GetImpl();
+        table.Resize(20, 12);
+        backing = f.physical.GetPointerFromRaw<u8>(0x10000);
+        for (u64 page = 0; page < 2; ++page) {
+            const VAddr address = cpu_address + page * 0x1000;
+            table.entries.GetAndFault(address >> 12)
+                .Store(false, Common::PageType::Memory, 1,
+                       reinterpret_cast<uintptr_t>(backing + page * 0x1000) - address);
+        }
+        process.GetMemory().SetCurrentPageTable(process);
+        asid = f.device_memory.RegisterProcess(&process.GetMemory());
+        f.device_memory.BindInterface(&f.rasterizer);
+        f.device_memory.Map(device_address, cpu_address, 0x2000, asid);
+        f.memory.BindRasterizer(&f.rasterizer);
+        f.memory.Map(gpu_address, device_address, 0x2000, Tegra::PTEKind::PITCH, false);
+        std::memset(backing, 0, 0x2000);
+    }
+    ~MappedPages() {
+        fixture.device_memory.Unmap(device_address, 0x2000);
+        fixture.device_memory.UnregisterProcess(asid);
+        fixture.system.Kernel().UnregisterKernelObject(&process);
+    }
+    MappedPages(const MappedPages&) = delete;
+    MappedPages& operator=(const MappedPages&) = delete;
+
+    Fixture& fixture;
+    Kernel::KProcess process;
+    u8* backing{};
+    Core::Asid asid{};
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Split tells guest memory writes from what only the GPU caches hold",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using Writes = VideoCommon::GpuSplit::Writes;
+    Fixture f;
+    f.system.Initialize();
+    MappedPages pages{f};
+    constexpr GPUVAddr word = MappedPages::gpu_address + 0x40;
+    constexpr GPUVAddr other = MappedPages::gpu_address + 0x140;
+    REQUIRE_FALSE(Access::ShareWriteSlot(MappedPages::device_address + 0x40,
+                                         MappedPages::device_address + 0x140));
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    split.Defer([] {}, 0, Writes::Noted);
+    split.NoteWrite(f.memory, word, 4);
+    const u64 noted = Access::End(split);
+    // Shader stores: a read of the caches waits for them, a read of guest memory only for the
+    // writes noted there.
+    split.Defer([] {}, 0, Writes::Caches);
+    CHECK(Access::WritesTarget(split, f.memory, other, 4) == Access::End(split));
+    CHECK(split.MemoryWritesTarget(f.memory, word, 4) == noted);
+    CHECK(split.MemoryWritesTarget(f.memory, other, 4) == 0);
+    CHECK(split.LastUnplacedWrite() == 0);
+    // Placed late at an earlier position, a write never lowers what its granule waits for.
+    split.Defer([] {}, 0, Writes::Noted);
+    split.NoteWrite(f.memory, word, 4);
+    const u64 rewritten = Access::End(split);
+    split.NoteWriteAt(f.memory, word, 4, noted);
+    CHECK(split.MemoryWritesTarget(f.memory, word, 4) == rewritten);
+    // Work nobody noted the writes of writes guest memory anywhere.
+    split.Defer([] {});
+    CHECK(split.LastUnplacedWrite() == Access::End(split));
+    CHECK(split.MemoryWritesTarget(f.memory, other, 4) == Access::End(split));
+    // A maximum's lower bound.
+    split.NoteSemaphoreWrite(MappedPages::device_address + 0x40, 5, true, true);
+    const auto queued = split.QueuedSemaphoreWriteAt(MappedPages::device_address + 0x40);
+    REQUIRE(queued.has_value());
+    CHECK(queued->known);
+    CHECK(queued->at_least);
+    CHECK(queued->payload == 5);
+}
+
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
     {
         // Changed state writes in a row are one entry: the writes, their dirty flags and the
         // last one that ends fast draw reuse.
-        Fixture f;
-        VideoCommon::GpuSplit split;
+        // On the heap: fixtures and splits are large, and this test has two and three of them
+        // (Windows gives a thread 1 MiB of stack).
+        const auto fixture = std::make_unique<Fixture>();
+        Fixture& f = *fixture;
+        const auto split_owner = std::make_unique<VideoCommon::GpuSplit>();
+        VideoCommon::GpuSplit& split = *split_owner;
         Access::Initialize(split, f.system);
         auto& engine = f.fast;
         const u32 first = f.state_methods[10];
@@ -1650,7 +1738,8 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
     // as its own entry, each with its back: registers, shadow RAM, dirty
     // flags, draws and fast draw breaks agree. Macro 0 sends its three parameters to state
     // registers; instance loops leave deferred draws for state writes to issue.
-    Fixture f;
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
     const std::array<u32, 3> macro_registers{f.state_methods[30], f.state_methods[31],
                                              f.state_methods[200]};
     std::vector<u32> code;
@@ -1659,15 +1748,16 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
           FifoInstruction(macro_registers[2], true), Encode(Mme{})}) {
         code.insert(code.end(), instruction.begin(), instruction.end());
     }
-    std::array<VideoCommon::GpuSplit, 2> splits;
+    const std::array<std::unique_ptr<VideoCommon::GpuSplit>, 2> splits{
+        std::make_unique<VideoCommon::GpuSplit>(), std::make_unique<VideoCommon::GpuSplit>()};
     std::array<Maxwell3D*, 2> engines{&f.fast, &f.slow};
     for (size_t i = 0; i < 2; ++i) {
-        Access::Start(splits[i], f.system);
+        Access::Start(*splits[i], f.system);
         engines[i]->SetNativeTuringMacroMode(true);
     }
     SCOPE_EXIT {
-        for (auto& split : splits) {
-            split.Stop();
+        for (const auto& split : splits) {
+            split->Stop();
         }
     };
     struct Step {
@@ -1683,7 +1773,7 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
         u32 last_break;
     };
     const auto run = [&](size_t i, const std::vector<Step>& steps) {
-        auto& split = splits[i];
+        auto& split = *splits[i];
         auto& engine = *engines[i];
         const u64 serial = VideoCommon::Nx2FastDraw::Serial();
         for (const Step& step : steps) {
@@ -1788,9 +1878,12 @@ TEST_CASE("Unsplit draw reuse requires the sole GPU scheduler owner",
 TEST_CASE("Draw reuse remains eligible on the actual split worker",
           "[video_core][fast_draw][unsplit_fast_draw]") {
     using Access = VideoCommon::GpuSplitTestAccess;
-    Fixture f;
+    // On the heap: a fixture and a split don't fit Windows' 1 MiB of stack together.
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
     f.system.Initialize();
-    VideoCommon::GpuSplit split;
+    const auto split_owner = std::make_unique<VideoCommon::GpuSplit>();
+    VideoCommon::GpuSplit& split = *split_owner;
     bool on_back{};
     bool allowed{};
     Access::Start(split, f.system);

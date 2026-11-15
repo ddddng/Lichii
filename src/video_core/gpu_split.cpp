@@ -210,8 +210,11 @@ void GpuSplit::Stop() {
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
+    last_unplaced_write = 0;
+    last_mapping_change = 0;
     last_noted_write = 0;
-    write_positions.fill(0);
+    write_sets.fill({});
+    coarse_sets.fill({});
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -326,7 +329,7 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least) {
     if (semaphore_writes.size() >= semaphore_writes_limit) {
         // The words of releases the back ran hold their values in memory.
         const u64 done = consumed.load(std::memory_order_acquire);
@@ -335,7 +338,7 @@ void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
         semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
     }
     semaphore_writes.insert_or_assign(device_address & ~u64{3},
-                                      SemaphoreWrite{write_position, payload, known});
+                                      SemaphoreWrite{write_position, payload, known, at_least});
 }
 
 std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
@@ -345,7 +348,8 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
         it->second.position <= consumed.load(std::memory_order_acquire)) {
         return std::nullopt;
     }
-    return QueuedSemaphoreWrite{it->second.payload, it->second.known};
+    return QueuedSemaphoreWrite{it->second.payload, it->second.known, it->second.at_least,
+                                it->second.position};
 }
 
 namespace {
@@ -369,20 +373,72 @@ void ForEachDeviceRange(const Tegra::MemoryManager& memory, GPUVAddr address, u6
 } // Anonymous namespace
 
 void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) {
-    if (size > MaxNotedBytes || address + size < address) {
-        NoteAnyWrite();
-        return;
-    }
-    ForEachDeviceRange(memory, address, size,
-                       [this](DAddr device, u64 bytes) { NoteDeviceWrite(device, bytes); });
+    NoteWriteAt(memory, address, size, write_position);
 }
 
-void GpuSplit::NoteDeviceWrite(DAddr address, u64 size) {
+void GpuSplit::NoteWriteAt(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size,
+                           u64 position) {
+    if (size == 0) {
+        return;
+    }
+    if (size > MaxCoarseNotedBytes || address + size < address) {
+        NoteUnplacedWrite();
+        return;
+    }
+    if (size > MaxNotedBytes) {
+        ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
+            NoteCoarseDeviceWriteAt(device, bytes, position);
+        });
+        return;
+    }
+    ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
+        NoteDeviceWriteAt(device, bytes, position);
+    });
+}
+
+void GpuSplit::NoteSetWrite(WriteSet& set, u64 granule, u64 position) {
+    const u32 tag = static_cast<u32>(granule);
+    size_t oldest = 0;
+    for (size_t way = 0; way < WriteWays; ++way) {
+        if (set.granules[way] == tag) {
+            set.positions[way] = std::max(set.positions[way], position);
+            return;
+        }
+        if (set.positions[way] < set.positions[oldest]) {
+            oldest = way;
+        }
+    }
+    // The granule's earlier writes, if any, are among the evicted ones.
+    const u64 granule_before = set.evicted;
+    set.evicted = std::max(set.evicted, set.positions[oldest]);
+    set.granules[oldest] = tag;
+    set.positions[oldest] = std::max(position, granule_before);
+}
+
+u64 GpuSplit::SetTarget(const WriteSet& set, u64 granule) {
+    const u32 tag = static_cast<u32>(granule);
+    for (size_t way = 0; way < WriteWays; ++way) {
+        if (set.granules[way] == tag) {
+            return set.positions[way];
+        }
+    }
+    return set.evicted;
+}
+
+void GpuSplit::NoteDeviceWriteAt(DAddr address, u64 size, u64 position) {
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
-        write_positions[WriteSlot(granule)] = write_position;
+        NoteSetWrite(write_sets[WriteSlot(granule)], granule, position);
     }
-    last_noted_write = write_position;
+    last_noted_write = std::max(last_noted_write, position);
+}
+
+void GpuSplit::NoteCoarseDeviceWriteAt(DAddr address, u64 size, u64 position) {
+    const u64 last = (address + size - 1) >> CoarseGranuleBits;
+    for (u64 granule = address >> CoarseGranuleBits; granule <= last; ++granule) {
+        NoteSetWrite(coarse_sets[CoarseSlot(granule)], granule, position);
+    }
+    last_noted_write = std::max(last_noted_write, position);
 }
 
 u64 GpuSplit::WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) const {
@@ -396,11 +452,28 @@ u64 GpuSplit::WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
     return target;
 }
 
+u64 GpuSplit::MemoryWritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
+                                 u64 size) const {
+    u64 target = last_unplaced_write;
+    if (size > MaxNotedBytes || address + size < address) {
+        target = std::max(target, last_noted_write);
+    } else {
+        ForEachDeviceRange(memory, address, size, [this, &target](DAddr device, u64 bytes) {
+            target = std::max(target, DeviceWritesTarget(device, bytes));
+        });
+    }
+    return std::min(target, write_position);
+}
+
 u64 GpuSplit::DeviceWritesTarget(DAddr address, u64 size) const {
     u64 target = 0;
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
-        target = std::max(target, write_positions[WriteSlot(granule)]);
+        target = std::max(target, SetTarget(write_sets[WriteSlot(granule)], granule));
+    }
+    const u64 last_coarse = (address + size - 1) >> CoarseGranuleBits;
+    for (u64 granule = address >> CoarseGranuleBits; granule <= last_coarse; ++granule) {
+        target = std::max(target, SetTarget(coarse_sets[CoarseSlot(granule)], granule));
     }
     return target;
 }
@@ -469,7 +542,10 @@ void GpuSplit::FlushStateSlow() {
     std::memcpy(entry + 1 + StateFlagWords, state_writes.data(), size_t{count} * sizeof(u64));
     Commit(size);
     if (state_anywhere) {
-        NoteAnyWrite();
+        // A deferred draw the block may issue writes guest memory through the GPU caches only,
+        // as FrontNoteWrites notes a draw: macro DMA reads wait for it (WritesTarget), reads that
+        // bypass the caches and the mappings don't.
+        NoteCacheWrite();
     }
     state_breaks = false;
     state_anywhere = false;
@@ -508,17 +584,17 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         amount -= piece;
         methods_pending -= piece;
     }
-    if (writes == Writes::Anywhere) {
-        NoteAnyWrite();
-    }
+    NoteWrites(writes);
 }
 
-void GpuSplit::DeferFunction(std::function<void()>&& func) {
+void GpuSplit::DeferFunction(std::function<void()>&& func, Writes writes) {
     auto* const heap = new std::function<void()>(std::move(func));
-    Defer([heap] {
-        (*heap)();
-        delete heap;
-    });
+    Defer(
+        [heap] {
+            (*heap)();
+            delete heap;
+        },
+        0, writes);
 }
 
 size_t GpuSplit::Execute(const u64* entry, size_t words) {
