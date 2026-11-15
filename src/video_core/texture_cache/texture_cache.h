@@ -592,7 +592,7 @@ void TextureCache<P>::TickFrame() {
                                 ? 0
                                 : (std::min)(retention_limit,
                                              critical_memory +
-                                                 (std::strtoull(retention_test, nullptr, 10) << 20));
+                                                 (static_cast<u64>(std::strtoull(retention_test, nullptr, 10)) << 20));
                     }
                     u64 other_memory = 0;
                     if constexpr (requires { runtime.GetDeviceHeapMemoryBudget(); }) {
