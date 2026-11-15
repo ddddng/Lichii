@@ -542,8 +542,15 @@ bool DmaPusher::Step() {
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
-            VideoCommon::GpuSplit::Get().WaitForSyncedWriters();
+        // Safe reads wait for all of the work before that wait, draws included: a queued draw may
+        // write the list's page for the first time.
+        if (auto& split = VideoCommon::GpuSplit::Get();
+            split.Active() && (safe_reads || !gpu_written)) {
+            if (safe_reads) {
+                split.WaitForSync();
+            } else {
+                split.WaitForSyncedWriters();
+            }
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
@@ -1186,6 +1193,10 @@ bool DmaPusher::FlushCachedCommands(GPUVAddr address, size_t size, bool live) {
     if (rasterizer == nullptr) {
         return false;
     }
+    // The back registers images and reports as it runs: look once the work the GPU fetches this
+    // list after (everything before the last host-level wait) has run.
+    auto& split = VideoCommon::GpuSplit::Get();
+    split.WaitForSync();
     bool cached = false;
     for (GPUVAddr chunk = address; chunk < address + size && !cached;) {
         const GPUVAddr chunk_end = (std::min)(address + size, (chunk & ~GPUVAddr{0xfff}) + 0x1000);
@@ -1197,7 +1208,7 @@ bool DmaPusher::FlushCachedCommands(GPUVAddr address, size_t size, bool live) {
         return false;
     }
     bool image_written = false;
-    VideoCommon::GpuSplit::Get().Run(
+    split.Run(
         [memory = &memory_manager, address, size, live, image_written = &image_written] {
             using VideoCommon::CacheType;
             *image_written = memory->IsMemoryDirty(address, size, CacheType::TextureCache);

@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <exception>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "tests/core/system_test_context.h"
@@ -14,6 +18,7 @@
 #include "video_core/dma_pusher.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace {
@@ -128,4 +133,47 @@ TEST_CASE("Safe command list reads on the split flush what the texture and query
     REQUIRE_FALSE(pusher.FlushCachedCommands(0x102f00, 0x100, true));
     REQUIRE(rasterizer.flushes.size() == 3);
     REQUIRE(rasterizer.flushes[2] == std::pair{DAddr{0x12f00}, texture_and_queries});
+}
+
+TEST_CASE("Safe command list reads on the split see an image the back registers before the sync",
+          "[video_core][dma_pusher][safe_command_reads]") {
+    auto& split = VideoCommon::GpuSplit::Get();
+    REQUIRE_FALSE(split.Active());
+    ScopedSystemTestContext context;
+    Core::System system;
+    system.Initialize();
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    CacheRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    memory.BindRasterizer(&rasterizer);
+    memory.Map(0x100000, 0x10000, 0x4000, Tegra::PTEKind::PITCH, false);
+    Tegra::Control::ChannelState channel{0};
+    Tegra::DmaPusher pusher{system, memory, channel};
+    pusher.BindRasterizer(&rasterizer);
+
+    const bool ampere = Tegra::g_nx2_ampere.exchange(true);
+    const auto backend = Settings::values.renderer_backend.GetValue();
+    Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Vulkan);
+    split.MaybeStart(system);
+    SCOPE_EXIT {
+        split.Stop();
+        Settings::values.renderer_backend.SetValue(backend);
+        Tegra::g_nx2_ampere.store(ampere);
+    };
+    REQUIRE(split.Active());
+
+    // A draw still queued on the back makes the list's first image and writes it, then the GP
+    // entry's sync bit orders the fetch after it.
+    split.Defer([rasterizer = &rasterizer] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        rasterizer->image_begin = 0x11000;
+        rasterizer->image_end = 0x12000;
+        rasterizer->image_written = true;
+    });
+    split.NoteSync();
+    REQUIRE(pusher.FlushCachedCommands(0x101000, 0x100, false));
+    REQUIRE(rasterizer.flushes.size() == 1);
+    REQUIRE(rasterizer.flushes[0] ==
+            std::pair{DAddr{0x11000}, CacheType::TextureCache | CacheType::QueryCache});
 }
