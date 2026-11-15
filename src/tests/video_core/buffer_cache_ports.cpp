@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <thread>
 #include <vector>
@@ -24,7 +25,9 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
 #include "tests/core/system_test_context.h"
+#include "shader_recompiler/storage_write_extent.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/compute_write_grid.h"
 #include "video_core/buffer_cache/indirect_buffer.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/control/channel_state.h"
@@ -1248,6 +1251,53 @@ TEST_CASE("Indirect dispatch arguments remain GPU modified across a neighboring 
     REQUIRE(arguments->bytes[arguments->Offset(0x10080)] == 0x42);
     f.cache->DownloadMemory(0x10040, 12);
     REQUIRE(f.bytes[0x40] == 0x73);
+}
+
+namespace {
+struct GridDimension {
+    u32 value;
+    u32 Value() const {
+        return value;
+    }
+};
+struct GridEngine {
+    struct {
+        GridDimension grid_dim_x, grid_dim_y, grid_dim_z;
+    } launch_description;
+    bool indirect{};
+    bool slot{};
+    std::optional<GPUVAddr> GetIndirectComputeAddress() const {
+        return indirect ? std::optional<GPUVAddr>{0x1000} : std::nullopt;
+    }
+    std::optional<u32> GetIndirectListSlot() const {
+        return slot ? std::optional<u32>{1} : std::nullopt;
+    }
+};
+} // Anonymous namespace
+
+TEST_CASE("List-slot group counts cannot narrow GPU write tracking",
+          "[video_core][buffer_ports]") {
+    GridEngine engine{{{1}, {20}, {1}}, false, false};
+    const Shader::StorageWriteExtent extent{
+        .bounded = true, .const_end = 4, .group_stride = {0, 4, 0}};
+    const std::array<u32, 3> block{1, 1, 1};
+    auto grid = VideoCommon::ComputeWriteGrid(engine);
+    REQUIRE(grid.has_value());
+    REQUIRE((*grid)[1] == 20);
+    REQUIRE(Shader::ResolveStorageWriteExtent(extent, block, grid) == u64{80});
+    engine.indirect = true;
+    REQUIRE_FALSE(VideoCommon::ComputeWriteGrid(engine));
+    engine.indirect = false;
+    engine.slot = true;
+    // Slot 1's placeholders: y is 5 after the QMD's low 16 bits, while the real GPU-written y
+    // can be 20. Taking 5 as the grid would mark too little of this 80-byte output.
+    engine.launch_description = {{0xf1a90004}, {5}, {6}};
+    grid = VideoCommon::ComputeWriteGrid(engine);
+    REQUIRE_FALSE(grid);
+    REQUIRE_FALSE(Shader::ResolveStorageWriteExtent(extent, block, grid));
+    auto local_extent = extent;
+    local_extent.group_stride = {};
+    REQUIRE(Shader::ResolveStorageWriteExtent(local_extent, block, grid) == u64{4});
 }
 
 TEST_CASE("Newer bytes that guest memory doesn't hold yet land the read downloads under them first",
