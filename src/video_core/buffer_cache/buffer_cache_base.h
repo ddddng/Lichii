@@ -49,6 +49,7 @@
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_owed_words.h"
 #include "video_core/rasterizer_download_area.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -678,7 +679,48 @@ private:
 
     void TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept;
 
-    bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
+    /// Uploads the CPU-modified bytes of [device_addr, +size) into `buffer` for `reader`, and the
+    /// GPU-written list words owed there over their placeholders (Nx2ListIndirect). Whether
+    /// nothing had to be uploaded.
+    bool SynchronizeBuffer(
+        Buffer& buffer, DAddr device_addr, u32 size,
+        Tegra::Nx2ListIndirect::OwedReader reader = Tegra::Nx2ListIndirect::OwedReader::Bind);
+
+    bool UploadModifiedMemory(Buffer& buffer, DAddr device_addr, u32 size);
+
+    /// The host GPU reads [device_addr, +size) for `reader` from `handle` at `offset`, filled
+    /// already: copies the GPU-written list words owed there over their placeholders. Whether it
+    /// copied any.
+    template <typename Handle>
+    bool Nx2PatchOwed(DAddr device_addr, u32 size, Handle handle, u64 offset,
+                      Tegra::Nx2ListIndirect::OwedReader reader) {
+        if constexpr (requires { runtime.Nx2Owes(device_addr, u64{size}); }) {
+            return runtime.Nx2PatchOwed(
+                device_addr, size, handle, offset,
+                [this](DAddr word) {
+                    return device_memory.template Read<u32>(word);
+                },
+                reader);
+        } else {
+            return false;
+        }
+    }
+
+    /// The host GPU wrote [device_addr, +size): the list words owed there are owed no more.
+    void Nx2ForgetOwed(DAddr device_addr, u64 size) {
+        if constexpr (requires { runtime.Nx2Owes(device_addr, size); }) {
+            runtime.Nx2ForgetOwed(device_addr, size);
+        }
+    }
+
+    /// Whether [device_addr, +size) holds GPU-written list words owed over their placeholders.
+    [[nodiscard]] bool Nx2Owes(DAddr device_addr, u64 size) const {
+        if constexpr (requires { runtime.Nx2Owes(device_addr, size); }) {
+            return runtime.Nx2Owes(device_addr, size);
+        } else {
+            return false;
+        }
+    }
 
     /// SynchronizeBuffer for vertex buffer slots 0-31 and the index buffer (slot 32).
     void SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAddr device_addr, u32 size);

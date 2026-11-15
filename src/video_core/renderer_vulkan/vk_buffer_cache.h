@@ -236,14 +236,25 @@ public:
         return last_stream_uniform;
     }
 
-    /// GPU-written list words the host GPU took over (Nx2ListIndirect), owed in a compute
-    /// dispatch's constant buffer [device_addr, +size) that `buffer` holds at `offset`, filled
-    /// already: the slot words go over the placeholders. `read(device)`: guest memory's word.
+    /// GPU-written list words the host GPU took over (Nx2ListIndirect), owed in [device_addr,
+    /// +size), which `reader` reads from `buffer` at `offset`, filled already: the slot words go
+    /// over the placeholders. `read(device)`: guest memory's word. Whether any went over them.
     template <typename Read>
-    void Nx2PatchComputeUniform(DAddr device_addr, u32 size, VkBuffer buffer, u64 offset,
-                                Read&& read) {
+    bool Nx2PatchOwed(DAddr device_addr, u32 size, VkBuffer buffer, u64 offset, Read&& read,
+                      Tegra::Nx2ListIndirect::OwedReader reader) {
+        return nx2_list_slots.HasOwed() &&
+               nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
+    }
+
+    /// Whether [device_addr, +size) holds owed list words (Nx2ListIndirect).
+    [[nodiscard]] bool Nx2Owes(DAddr device_addr, u64 size) const {
+        return nx2_list_slots.Owes(device_addr, size);
+    }
+
+    /// The host GPU wrote [device_addr, +size): the owed list words there are owed no more.
+    void Nx2ForgetOwed(DAddr device_addr, u64 size) {
         if (nx2_list_slots.HasOwed()) {
-            nx2_list_slots.PatchUniform(device_addr, size, buffer, offset, read);
+            nx2_list_slots.Forget(device_addr, size);
         }
     }
 

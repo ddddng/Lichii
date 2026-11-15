@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <span>
@@ -16,6 +17,7 @@
 #include "common/common_types.h"
 #include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_list_indirect_stats.h"
+#include "video_core/nx2_owed_words.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -32,8 +34,11 @@ class Scheduler;
 /// dispatches bind as constant buffer data holds them.
 ///
 /// The words the front's inline uploads put placeholders in are owed words: while one holds its
-/// placeholder in guest memory, a compute dispatch that binds it as constant buffer data gets the
-/// slot word there (PatchUniform, recorded after the binding filled its buffer).
+/// placeholder in guest memory, a host GPU read of it from the buffer cache or a uniform stream
+/// gets the slot word copied over it (Patch, recorded after the read's bytes were filled in). The
+/// slot word lands in guest memory once the host GPU ran the work before the upload (LandDone),
+/// or at once for a reader that flushes or a guest CPU read (LandRange). No page is marked
+/// GPU-modified for them, so uniform binds of their pages keep streaming guest memory.
 class Nx2ListSlots {
   public:
     static constexpr u32 SlotCount = Tegra::Nx2ListIndirect::SlotCount;
@@ -68,61 +73,105 @@ class Nx2ListSlots {
     void Snapshot(VkBuffer src, u64 src_offset, u32 count, u32 slot);
 
     /// The back: the word at `device_addr` was just written `value` (a placeholder) by an inline
-    /// upload; `guest_word` is what guest memory holds there now.
-    void NoteOwed(DAddr device_addr, u32 value, u32 guest_word);
+    /// upload; `guest_word` is what guest memory holds there now. Whether it is owed now.
+    bool NoteOwed(DAddr device_addr, u32 value, u32 guest_word);
 
     /// The back: an inline QMD with grid words x, y, z was just written at `device_addr`.
     void NoteInlineQmdGrid(DAddr device_addr, u32 x, u32 y, u32 z);
 
     [[nodiscard]] bool HasOwed() const {
-        return !owed.empty();
+        return !owed.Empty();
     }
 
-    /// The back, binding a compute dispatch's constant buffer [device_addr, +size) at `offset`
-    /// of `dst`, filled already: records copies of the slot words owed there over it. `read`
+    /// Any thread: whether [device_addr, +size) holds an owed word.
+    [[nodiscard]] bool Owes(DAddr device_addr, u64 size) const {
+        return owed.Overlaps(device_addr, size);
+    }
+
+    /// The back, a host GPU read by `reader` of [device_addr, +size), which `dst` holds at
+    /// `offset`, filled already: records copies of the slot words owed there over it. `read`
     /// gives the word guest memory holds at a device address: a word that no longer holds its
-    /// placeholder is no longer owed.
+    /// placeholder is no longer owed. Whether it copied any.
     template <typename Read>
-    void PatchUniform(DAddr device_addr, u32 size, VkBuffer dst, u64 offset, Read&& read) {
-        if (dst == VK_NULL_HANDLE || size == 0) {
-            return;
+    bool Patch(DAddr device_addr, u32 size, VkBuffer dst, u64 offset, Read&& read,
+               Tegra::Nx2ListIndirect::OwedReader reader) {
+        if (dst == VK_NULL_HANDLE || size == 0 || owed.Empty()) {
+            return false;
         }
         copies.clear();
         patch_words.clear();
+        taken.clear();
         const DAddr end = device_addr + size;
-        for (auto it = owed.lower_bound(device_addr >= 3 ? device_addr - 3 : 0);
-             it != owed.end() && it->first < end;) {
-            const DAddr word = it->first;
-            const u32 value = it->second;
-            if (read(word) != value) {
-                Tegra::Nx2ListIndirect::Stats::Count(
-                    Tegra::Nx2ListIndirect::Stats::Get().owed_dropped);
-                Release(Tegra::Nx2ListIndirect::PlaceholderSlot(value));
-                it = owed.erase(it);
-                continue;
-            }
-            const DAddr first = (std::max)(word, device_addr);
-            const DAddr last = (std::min)(word + 4, end);
-            if (first < last) {
-                const VkDeviceSize source =
-                    VkDeviceSize{Tegra::Nx2ListIndirect::PlaceholderSlot(value)} * SlotBytes +
-                    VkDeviceSize{Tegra::Nx2ListIndirect::PlaceholderWord(value)} * 4 +
-                    (first - word);
-                copies.push_back(
-                    VkBufferCopy{source, offset + (first - device_addr), last - first});
-                patch_words.push_back({value, static_cast<u32>(first - word)});
-            }
-            ++it;
+        owed.ForEach(
+            device_addr, size,
+            [&](const Tegra::Nx2ListIndirect::OwedWords::Word& word) {
+                if (read(word.address) != word.value) {
+                    return false;
+                }
+                const DAddr first = (std::max)(word.address, device_addr);
+                const DAddr last = (std::min)(word.address + 4, end);
+                if (first < last) {
+                    const VkDeviceSize source =
+                        VkDeviceSize{Tegra::Nx2ListIndirect::PlaceholderSlot(word.value)} *
+                            SlotBytes +
+                        VkDeviceSize{Tegra::Nx2ListIndirect::PlaceholderWord(word.value)} * 4 +
+                        (first - word.address);
+                    copies.push_back(
+                        VkBufferCopy{source, offset + (first - device_addr), last - first});
+                    patch_words.push_back({word.value, static_cast<u32>(first - word.address)});
+                }
+                return true;
+            },
+            taken);
+        for (const auto& word : taken) {
+            Tegra::Nx2ListIndirect::Stats::Count(Tegra::Nx2ListIndirect::Stats::Get().owed_dropped);
+            Release(Tegra::Nx2ListIndirect::PlaceholderSlot(word.value));
         }
-        if (!copies.empty()) {
+        if (copies.empty()) {
+            return false;
+        }
+        Tegra::Nx2ListIndirect::Stats::CountOwedRead(reader, copies.size());
+        if (reader == Tegra::Nx2ListIndirect::OwedReader::ComputeUniform) {
             ++patched_binds;
             Tegra::Nx2ListIndirect::Stats::Count(
                 Tegra::Nx2ListIndirect::Stats::Get().patched_binds);
-            RecordCopies(*buffer, dst, copies);
-            if (Tegra::Nx2ListIndirect::Stats::g_check) {
-                CheckPatch(dst);
-            }
         }
+        RecordCopies(*buffer, dst, copies);
+        if (Tegra::Nx2ListIndirect::Stats::g_check) {
+            CheckPatch(dst);
+        }
+        return true;
+    }
+
+    /// The back: the host GPU wrote [device_addr, +size) (a shader, a copy or a clear), newer
+    /// than the owed words there, which are owed no more.
+    void Forget(DAddr device_addr, u64 size);
+
+    /// The back, between commands: lands the owed words whose snapshot the host GPU ran.
+    /// `land(device_addr, placeholder, word)` writes the word over the placeholder in guest memory
+    /// and tells the caches, unless something wrote it since (false).
+    template <typename Land>
+    void LandDone(Land&& land) {
+        if (owed.Empty()) {
+            return;
+        }
+        TakeDone();
+        LandTaken(land, false);
+    }
+
+    /// The back, between commands: lands the owed words in [device_addr, +size) at once, for a
+    /// reader that does not read through Patch (waits for the host GPU).
+    template <typename Land>
+    void LandRange(DAddr device_addr, u64 size, Tegra::Nx2ListIndirect::OwedReader reader,
+                   Land&& land) {
+        taken.clear();
+        owed.Take(device_addr, size, taken);
+        if (taken.empty()) {
+            return;
+        }
+        Tegra::Nx2ListIndirect::Stats::CountOwedRead(reader, taken.size());
+        WaitForTaken();
+        LandTaken(land, true);
     }
 
     /// The buffer and offset of `slot`'s VkDispatchIndirectCommand.
@@ -161,6 +210,45 @@ class Nx2ListSlots {
     /// Records a barrier that makes transfer writes visible to the host, after a fence wait.
     void RecordHostBarrier();
 
+    /// Takes the owed words whose tick the host GPU ran into `taken`.
+    void TakeDone();
+    /// Waits for the host GPU to run the ticks of `taken`.
+    void WaitForTaken();
+
+    /// Lands `taken`, whose ticks the host GPU ran, from the slot words' host copies (landing).
+    template <typename Land>
+    void LandTaken(Land& land, bool on_demand) {
+        if (taken.empty()) {
+            return;
+        }
+        landing.Invalidate();
+        const std::span<const u8> words = std::as_const(landing).Mapped();
+        auto& stats = Tegra::Nx2ListIndirect::Stats::Get();
+        for (const auto& word : std::exchange(taken, {})) {
+            const u32 slot = Tegra::Nx2ListIndirect::PlaceholderSlot(word.value);
+            const u32 index = Tegra::Nx2ListIndirect::PlaceholderWord(word.value);
+            u32 real;
+            std::memcpy(&real, words.data() + slot * SlotWordBytes + index * 4, sizeof(real));
+            if (land(word.address, word.value, real)) {
+                Tegra::Nx2ListIndirect::Stats::Count(on_demand ? stats.landed_on_demand
+                                                               : stats.landed);
+                if (Tegra::Nx2ListIndirect::Stats::g_check && index < check_counts[slot]) {
+                    Tegra::Nx2ListIndirect::Stats::NoteCompared(
+                        Tegra::Nx2ListIndirect::Stats::Check::Land, slot,
+                        Bytes(std::span{&real, 1}), Bytes(std::span{&check_words[slot][index], 1}));
+                }
+            } else {
+                Tegra::Nx2ListIndirect::Stats::Count(stats.owed_dropped);
+            }
+            Release(slot);
+        }
+    }
+
+    template <typename T, size_t Extent>
+    [[nodiscard]] static std::span<const u8> Bytes(std::span<T, Extent> words) {
+        return {reinterpret_cast<const u8*>(words.data()), words.size_bytes()};
+    }
+
     // EDEN_NX2_LIST_INDIRECT_CHECK: copies of what the host GPU used, compared with what
     // the old path would have used once it ran them.
     struct CheckEntry {
@@ -187,11 +275,13 @@ class Nx2ListSlots {
     Scheduler& scheduler;
     vk::Buffer buffer;
     vk::Buffer readback; ///< Read's, host-visible
+    vk::Buffer landing;  ///< The owed slot words, host-visible: SlotWordBytes a slot
     std::array<std::atomic<u32>, SlotCount> holds{};
     u32 next{};                                              ///< Where Acquire looks first
-    std::map<DAddr, u32> owed;                               ///< By device address (the back's)
+    Tegra::Nx2ListIndirect::OwedWords owed;
     std::unordered_map<DAddr, std::array<u32, 3>> qmd_slots; ///< By QMD device address
     std::vector<VkBufferCopy> copies;
+    std::vector<Tegra::Nx2ListIndirect::OwedWords::Word> taken;
     u64 patched_binds{};
     // EDEN_NX2_LIST_INDIRECT_CHECK.
     std::vector<PatchWord> patch_words;

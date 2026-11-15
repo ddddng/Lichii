@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <tuple>
 #include <set>
 #include <span>
@@ -2708,8 +2709,30 @@ void RasterizerVulkan::Nx2SnapshotListWords(DAddr device_addr, u32 count, u32 sl
 }
 
 void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
-    buffer_cache_runtime.Nx2Slots().NoteOwed(device_addr, value,
-                                             device_memory.Read<u32>(device_addr));
+    auto& slots = buffer_cache_runtime.Nx2Slots();
+    slots.LandDone(std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
+    if (slots.NoteOwed(device_addr, value, device_memory.Read<u32>(device_addr))) {
+        // A guest CPU read of the word before it lands takes the trap, and GetFlushArea lands it.
+        device_memory.ArmReadTraps(device_addr, sizeof(u32));
+    }
+}
+
+bool RasterizerVulkan::Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real) {
+    if ((device_addr & Core::DEVICE_PAGEMASK) > Core::DEVICE_PAGESIZE - sizeof(u32)) {
+        if (device_memory.Read<u32>(device_addr) != value) {
+            return false;
+        }
+        device_memory.Write<u32>(device_addr, real);
+    } else {
+        u8* const word = device_memory.GetPointer<u8>(device_addr);
+        if (word == nullptr || !Tegra::Nx2ListIndirect::LandOwedWord(word, value, real)) {
+            return false;
+        }
+    }
+    // The caches learn of it as of the inline upload that wrote the placeholder.
+    const std::array<std::pair<DAddr, std::size_t>, 1> written{{{device_addr, sizeof(u32)}}};
+    InvalidateCachedWrites(written, false);
+    return true;
 }
 
 void RasterizerVulkan::Nx2NoteInlineQmdGrid(DAddr device_addr, u32 x, u32 y, u32 z) {
@@ -2733,6 +2756,13 @@ void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pa
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0) {
         return;
+    }
+    if (True(which & VideoCommon::CacheType::BufferCache) &&
+        VideoCommon::GpuSplit::OwnsScheduler()) {
+        // A reader that flushes first gets the GPU-written list words owed there (Nx2ListIndirect).
+        buffer_cache_runtime.Nx2Slots().LandRange(
+            addr, size, Tegra::Nx2ListIndirect::OwedReader::Flush,
+            std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     }
     if (True(which & (VideoCommon::CacheType::TextureCache | VideoCommon::CacheType::BufferCache))) {
         // CPU writes into GPU-written memory are only collected when they happen. Apply them
@@ -2759,7 +2789,11 @@ void RasterizerVulkan::FlushRegionForRead(DAddr addr, u64 size) {
         return;
     }
     // As FlushRegion, but the buffer cache doesn't wait for the host GPU here (Scheduler::Finish,
-    // with its lock held): the reading thread does, in FinishRead.
+    // with its lock held): the reading thread does, in FinishRead. GPU-written list words owed
+    // there land at once (Nx2ListIndirect, GetFlushArea), which waits here.
+    buffer_cache_runtime.Nx2Slots().LandRange(
+        addr, size, Tegra::Nx2ListIndirect::OwedReader::CpuRead,
+        std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     gpu.InvalidateGPUCache();
     {
         std::scoped_lock lock{texture_cache.mutex};
@@ -2792,6 +2826,11 @@ void RasterizerVulkan::FinishReport(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    // GPU-written list words owed there land in guest memory at the flush (Nx2ListIndirect).
+    if (True(which & VideoCommon::CacheType::BufferCache) &&
+        buffer_cache_runtime.Nx2Slots().Owes(addr, size)) {
+        return true;
+    }
     // The split's front asks this before each macro DMA read, and the back holds the buffer
     // cache's lock through each draw: pages the GPU never wrote need no look under it.
     if (True(which & VideoCommon::CacheType::BufferCache) &&
@@ -2825,6 +2864,20 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
     // each draw. Pages no image was ever registered on, and Switch 2 pages the GPU never wrote,
     // get the clean area the caches would return without a look under their locks (after
     // Stephen Jayakar's EDEN_NX2_READ_FASTPATH, eb3553bcb8).
+    const VideoCore::RasterizerDownloadArea owed_area{
+        .start_address = Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
+        .end_address = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE),
+        .preemtive = false,
+    };
+    // GPU-written list words owed on these pages land in guest memory first (FlushRegionForRead):
+    // the core keeps the area it gets, so later reads in it would not ask again.
+    if (buffer_cache_runtime.Nx2Slots().Owes(owed_area.start_address,
+                                             owed_area.end_address - owed_area.start_address)) {
+        std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.ForgetReadTraps(owed_area.start_address,
+                                     owed_area.end_address - owed_area.start_address);
+        return owed_area;
+    }
     std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     if (texture_cache.page_filter.Any(addr, size)) {
         std::scoped_lock lock{texture_cache.mutex};
@@ -3723,6 +3776,8 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    buffer_cache_runtime.Nx2Slots().LandDone(
+        std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(*capture));

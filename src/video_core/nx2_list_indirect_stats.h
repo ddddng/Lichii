@@ -18,6 +18,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "video_core/nx2_list_indirect.h"
+#include "video_core/nx2_owed_words.h"
 #include "video_core/nx2_profile.h"
 
 // What Nx2ListIndirect did, logged every 10 s by the front with EDEN_NX2_GPU_PROFILE or
@@ -27,14 +28,16 @@
 // - the times it read list words back after all (waits the profile counts as "list copy
 //   writers"), how long it waited, and why;
 // - on the back: snapshots, indirect dispatches, grids read back, owed words and the dispatches
-//   whose constant buffers got them.
+//   whose constant buffers got them, the owed words other readers met (by what read them), and
+//   the owed words landed in guest memory once their tick ran, or at once for a reader.
 // EDEN_NX2_LIST_INDIRECT_CHECK also has the front read every list it takes as before (it waits for
 // the list's writers, as the old path does), and the back compare what the host GPU used, read
 // back, with what the old path would have used: the slot's words with the list's (snapshot), the
 // group counts the dispatch took with the grid the old path dispatches (dispatch), the words
 // copied over a constant buffer's placeholders with the list's (patch), the words read back with
-// the list's (read), and guest memory with the placeholder an inline upload just wrote there
-// (owed: the patch takes over only words guest memory holds). Differences must stay 0; the first
+// the list's (read), guest memory with the placeholder an inline upload just wrote there
+// (owed: the patch takes over only words guest memory holds), and the words landed in guest
+// memory with the list's (land). Differences must stay 0; the first
 // ones are logged. It counts the dispatches the old path would have skipped (an empty grid: the
 // indirect one dispatches no groups) and widths over 31 bits (the old path drops the top bit),
 // which differ only on the CPU.
@@ -76,9 +79,9 @@ inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> rea
 };
 
 /// The back's comparisons (EDEN_NX2_LIST_INDIRECT_CHECK).
-enum class Check : u32 { Snapshot, Dispatch, Patch, Read, Owed, Count };
+enum class Check : u32 { Snapshot, Dispatch, Patch, Read, Owed, Land, Count };
 inline constexpr std::array<const char*, static_cast<size_t>(Check::Count)> check_names{
-    "snapshot", "dispatch", "patch", "read", "owed"};
+    "snapshot", "dispatch", "patch", "read", "owed", "land"};
 
 struct Counters {
     // The front's.
@@ -95,7 +98,12 @@ struct Counters {
     std::atomic<u64> grids_read{}; ///< Grids of several slots' words, read back to dispatch
     std::atomic<u64> owed{};
     std::atomic<u64> owed_dropped{}; ///< Owed words guest memory no longer held
+    std::atomic<u64> owed_forgotten{}; ///< Owed words the host GPU wrote over
     std::atomic<u64> patched_binds{};
+    /// Owed words a reader met before they landed: patched, or landed at once for it.
+    std::array<std::atomic<u64>, static_cast<size_t>(OwedReader::Count)> owed_reads{};
+    std::atomic<u64> landed{};           ///< Owed words landed once their tick ran
+    std::atomic<u64> landed_on_demand{}; ///< Owed words landed at once, for a reader
     std::array<std::atomic<u64>, static_cast<size_t>(Check::Count)> compared{};
     std::array<std::atomic<u64>, static_cast<size_t>(Check::Count)> differ{};
     std::atomic<u64> unchecked{}; ///< Comparisons dropped: the check buffer was full
@@ -154,6 +162,11 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
     }
 }
 
+/// Any thread: `reader` met `words` owed words.
+inline void CountOwedRead(OwedReader reader, u64 words = 1) {
+    Count(Get().owed_reads[static_cast<size_t>(reader)], words);
+}
+
 /// The back: a comparison of `check` for `slot`, the bytes the host GPU used (`got`) against the
 /// ones the old path would have (`expected`).
 inline void NoteCompared(Check check, u32 slot, std::span<const u8> got,
@@ -204,16 +217,23 @@ inline void MaybeLog() {
     const auto take = [](std::atomic<u64>& counter) {
         return counter.exchange(0, std::memory_order_relaxed);
     };
+    std::string owed_readers;
+    for (size_t i = 0; i < counters.owed_reads.size(); ++i) {
+        owed_readers += fmt::format("{}{} {}", owed_readers.empty() ? "" : ", ",
+                                    owed_reader_names[i], take(counters.owed_reads[i]));
+    }
     LOG_INFO(HW_GPU,
              "list indirect {:.1f}s: GPU-written lists taken without waiting {} ({} words): {} | "
              "read as before {}: {} | list words read back {} times ({} slots, {:.1f} ms), all "
              "of them after: {} | back: snapshots {}, indirect dispatches {}, grids read back {}, "
-             "owed words {} ({} overwritten), dispatches given owed words {}",
+             "owed words {} ({} overwritten, {} written by the host GPU), dispatches given owed "
+             "words {}, landed {} at their tick and {} at once | owed words met by {}",
              seconds, taken, taken_words, by_method.empty() ? "-" : by_method, kept, why_kept,
              counters.reads, counters.slots_read, static_cast<double>(counters.read_ns) / 1e6,
              why_read, take(counters.snapshots), take(counters.slot_dispatches),
              take(counters.grids_read), take(counters.owed), take(counters.owed_dropped),
-             take(counters.patched_binds));
+             take(counters.owed_forgotten), take(counters.patched_binds), take(counters.landed),
+             take(counters.landed_on_demand), owed_readers);
     if (g_check) {
         std::string checks;
         for (size_t i = 0; i < counters.compared.size(); ++i) {

@@ -13,14 +13,6 @@ namespace Vulkan {
 
 namespace Stats = Tegra::Nx2ListIndirect::Stats;
 
-namespace {
-/// The bytes of `words`.
-template <typename T, size_t Extent>
-[[nodiscard]] std::span<const u8> Bytes(std::span<T, Extent> words) {
-    return {reinterpret_cast<const u8*>(words.data()), words.size_bytes()};
-}
-} // Anonymous namespace
-
 void Nx2ListSlots::Release(u32 slot) {
     if (slot >= SlotCount) {
         return;
@@ -51,12 +43,12 @@ void Nx2ListSlots::Snapshot(VkBuffer src, u64 src_offset, u32 count, u32 slot) {
     RecordCopies(src, *buffer, copies);
 }
 
-void Nx2ListSlots::NoteOwed(DAddr device_addr, u32 value, u32 guest_word) {
+bool Nx2ListSlots::NoteOwed(DAddr device_addr, u32 value, u32 guest_word) {
     // The upload wrote over older owed words at these bytes.
-    for (auto it = owed.lower_bound(device_addr >= 3 ? device_addr - 3 : 0);
-         it != owed.end() && it->first < device_addr + 4;) {
-        Release(Tegra::Nx2ListIndirect::PlaceholderSlot(it->second));
-        it = owed.erase(it);
+    taken.clear();
+    owed.Take(device_addr, 4, taken);
+    for (const auto& word : taken) {
+        Release(Tegra::Nx2ListIndirect::PlaceholderSlot(word.value));
     }
     if (Stats::g_check && Tegra::Nx2ListIndirect::IsPlaceholder(value)) {
         // The upload wrote the placeholder at once (a word it did not write is not owed).
@@ -64,11 +56,61 @@ void Nx2ListSlots::NoteOwed(DAddr device_addr, u32 value, u32 guest_word) {
                             Bytes(std::span{&guest_word, 1}), Bytes(std::span{&value, 1}));
     }
     if (guest_word != value || !Tegra::Nx2ListIndirect::IsPlaceholder(value)) {
-        return; // It wrote nothing there
+        return false; // It wrote nothing there
     }
     Stats::Count(Stats::Get().owed);
-    holds[Tegra::Nx2ListIndirect::PlaceholderSlot(value)].fetch_add(1, std::memory_order_acq_rel);
-    owed.emplace(device_addr, value);
+    const u32 slot = Tegra::Nx2ListIndirect::PlaceholderSlot(value);
+    const u32 word = Tegra::Nx2ListIndirect::PlaceholderWord(value);
+    holds[slot].fetch_add(1, std::memory_order_acq_rel);
+    // The slot word's host copy, which LandTaken reads once this tick ran. The slot stays held
+    // while the word is owed, so no later snapshot changes it before then.
+    Prepare();
+    if (!landing) {
+        landing = memory_allocator.CreateBuffer(
+            VkBufferCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .size = VkDeviceSize{SlotCount} * SlotWordBytes,
+                .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            },
+            MemoryUsage::Download);
+    }
+    const VkBufferCopy copy{VkDeviceSize{slot} * SlotBytes + VkDeviceSize{word} * 4,
+                            VkDeviceSize{slot} * SlotWordBytes + VkDeviceSize{word} * 4, 4};
+    RecordCopies(*buffer, *landing, std::span{&copy, 1});
+    RecordHostBarrier();
+    owed.Note(device_addr, value, scheduler.CurrentTick());
+    return true;
+}
+
+void Nx2ListSlots::TakeDone() {
+    taken.clear();
+    owed.TakeDone(
+        [this](u64 tick) {
+            return scheduler.IsFree(tick);
+        },
+        taken);
+}
+
+void Nx2ListSlots::WaitForTaken() {
+    u64 tick = 0;
+    for (const auto& word : taken) {
+        tick = (std::max)(tick, word.tick);
+    }
+    scheduler.Wait(tick);
+}
+
+void Nx2ListSlots::Forget(DAddr device_addr, u64 size) {
+    taken.clear();
+    owed.Take(device_addr, size, taken);
+    for (const auto& word : taken) {
+        Stats::Count(Stats::Get().owed_forgotten);
+        Release(Tegra::Nx2ListIndirect::PlaceholderSlot(word.value));
+    }
 }
 
 void Nx2ListSlots::NoteInlineQmdGrid(DAddr device_addr, u32 x, u32 y, u32 z) {

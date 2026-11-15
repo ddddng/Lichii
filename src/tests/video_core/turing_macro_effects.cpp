@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <initializer_list>
 #include <optional>
 #include <random>
@@ -14,6 +15,7 @@
 #include "video_core/macro_turing.h"
 #include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_list_macro_trace.h"
+#include "video_core/nx2_owed_words.h"
 
 namespace {
 
@@ -482,4 +484,82 @@ TEST_CASE("List words: a call that computes with a held one runs on the words th
     CHECK(slots_read == 1);
     CHECK(data_ram[a] == 9U);
     CHECK(released == std::vector<u32>{slot});
+}
+
+TEST_CASE("List words: an owed word lands once its tick ran, unless something wrote it since",
+          "[video_core][macro]") {
+    using Words = std::vector<List::OwedWords::Word>;
+    List::OwedWords owed;
+    const u32 x = List::Placeholder(3, 0);
+    const u32 y = List::Placeholder(3, 1);
+    owed.Note(0x1004, x, 5);
+    owed.Note(0x1008, y, 6);
+    // Any thread sees every byte of an owed word, and nothing next to it.
+    CHECK_FALSE(owed.Overlaps(0x1000, 4));
+    CHECK(owed.Overlaps(0x1007, 1));
+    CHECK(owed.Overlaps(0x1000, 0x1000));
+    CHECK_FALSE(owed.Overlaps(0x100c, 4));
+
+    Words taken;
+    owed.TakeDone([](u64 tick) { return tick <= 5; }, taken);
+    REQUIRE(taken.size() == 1);
+    CHECK(taken[0].address == 0x1004);
+    CHECK_FALSE(owed.Overlaps(0x1004, 4));
+    CHECK(owed.Overlaps(0x1008, 4));
+
+    // Guest memory: the placeholder becomes the word; a word written since stays as written,
+    // aligned (atomic) or not.
+    alignas(4) std::array<u8, 12> memory{};
+    std::memcpy(memory.data(), &x, 4);
+    REQUIRE(List::LandOwedWord(memory.data(), x, 42));
+    u32 word;
+    std::memcpy(&word, memory.data(), 4);
+    CHECK(word == 42);
+    CHECK_FALSE(List::LandOwedWord(memory.data(), x, 43));
+    std::memcpy(memory.data() + 5, &y, 4);
+    REQUIRE(List::LandOwedWord(memory.data() + 5, y, 7));
+    std::memcpy(&word, memory.data() + 5, 4);
+    CHECK(word == 7);
+}
+
+TEST_CASE("List words: a word owed no more is not landed or patched", "[video_core][macro]") {
+    using Words = std::vector<List::OwedWords::Word>;
+    List::OwedWords owed;
+    const u32 first = List::Placeholder(1, 0);
+    const u32 second = List::Placeholder(2, 0);
+    // The next upload there: the older word is taken, and its note never lands over the new one.
+    owed.Note(0x2000, first, 1);
+    Words taken;
+    owed.Take(0x2000, 4, taken);
+    REQUIRE(taken.size() == 1);
+    owed.Note(0x2000, second, 9);
+    taken.clear();
+    owed.TakeDone([](u64 tick) { return tick <= 1; }, taken);
+    CHECK(taken.empty());
+    CHECK(owed.Overlaps(0x2000, 4));
+
+    // A reader finds guest memory changed there (a CPU or inline write): the word is dropped.
+    owed.Note(0x2010, first, 9);
+    Words dropped;
+    std::vector<DAddr> kept;
+    owed.ForEach(
+        0x2000, 0x20,
+        [&](const List::OwedWords::Word& owed_word) {
+            if (owed_word.address == 0x2010) {
+                return false;
+            }
+            kept.push_back(owed_word.address);
+            return true;
+        },
+        dropped);
+    CHECK(kept == std::vector<DAddr>{0x2000});
+    REQUIRE(dropped.size() == 1);
+    CHECK(dropped[0].value == first);
+    CHECK_FALSE(owed.Overlaps(0x2010, 4));
+
+    // The host GPU wrote over it (a shader, copy or clear).
+    taken.clear();
+    owed.Take(0x2002, 1, taken);
+    REQUIRE(taken.size() == 1);
+    CHECK(owed.Empty());
 }
