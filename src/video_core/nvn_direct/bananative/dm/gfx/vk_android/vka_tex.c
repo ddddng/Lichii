@@ -433,6 +433,10 @@ static uint32_t sparse_base(const void *pool, const uint8_t *mem, const nvn_texd
     if (vmin) *vmin = r < n ? r : n - 1;
     return b;
 }
+// Lichii (dotfiles-25x.22): where the views of im start, from sparse_base's vmin. A residency image's unbound tiles are non-resident, so with Lichii's recompiler, which keeps
+// TEX's level-of-detail clamp (SPIR-V MinLod) and residency predicate (OpImageSparse*), the views take every level, as NVN's do: the game's own clamp keeps its samples on
+// the mapped tiles, and up close it samples its finest levels. The library's shaders (EDEN_NX2_NVN_RECOMPILE=0 / 2) and dense images keep views from the wholly mapped levels
+static uint32_t view_vmin(const vka_img *im, uint32_t vmin) { return im->rs && vka_rc_mode() == 1 ? 0 : vmin; }
 // A sparse residency image (vka_sparse.c) instead of a dense one: a sampled sparse pool texture, 2D or 2D array, single-sampled, with NVN tiled levels from base on, whose dense
 // image from base would take DM_VK_SPARSE_RES_MB (default 32) or more; or a GPU-written one (sparse_gpu) from level 0. Smaller ones stay dense (the tiles' bookkeeping and binds cost more than they save)
 static int res_candidate(const tex_t *t, const vka_fmt *f, uint32_t base) {
@@ -473,6 +477,9 @@ static vka_img *img_create(const tex_t *t, const vka_fmt *f, uint32_t base) {
 }
 static vka_img *img_create_t(const tex_t *t, const vka_fmt *f, uint32_t base) {
     uint32_t b = base; uint64_t need = 0; int wlast = 0;   // (the address space the last finer level asked for and did not get: once that much is free, a finer start is tried again, sparse_refresh)
+    // Lichii (dotfiles-25x.22): a sampled one's residency image starts at level 0 whatever is mapped now (only bound tiles take memory): a later mapping of a finer level binds
+    // its tiles instead of making the image again (img_rebase), which loses what copies wrote into it
+    if (base && sparse_sampled(t, f) && res_candidate(t, f, 0)) b = 0;
     for (; res_candidate(t, f, b); b++) {
         int why = 0; vka_img *im = img_create_(t, f, b, 1, &why, &need); wlast = why;
         if (im) {
@@ -1047,6 +1054,9 @@ static void upload_astc_gpu(vka_img *im, const tex_t *t, VkCommandBuffer cb, uin
 // A sparse ASTC texture on a device without ASTC (vka_astc_transcode): each changed level and layer gathered whole from the page table (unmapped pages as zero texels),
 // deswizzled into ASTC blocks, transcoded and copied. Whole subresources, not bands: a band of ASTC block rows is not a band of BC3 block rows. Mario Kart World's
 // 8192x8192x68 ASTC arrays are dense images from level 2 here (no residency image: sparse_new), so a level is at most 2048x2048. Not for residency images
+// Lichii (dotfiles-25x.25, diagnostic): sparse ASTC textures' levels x layers with data uploaded, [0] opaque [1] with alpha; texture copies into them by source image: [0] BC1,
+// [1] BC3 whose storage scans opaque now, [2] BC3 with alpha or unscanned (the VRAM line)
+static uint64_t g_arr_sub[2], g_arr_src[3];
 static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, uint64_t stamp, int all, int bind_only) {
     const nvn_texdesc *d = &im->d; const vka_fmt *f = &im->f; uint64_t mem = (uint64_t)(uintptr_t)im->mem;
     if (bind_only) return;
@@ -1059,6 +1069,7 @@ static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, ui
                 if (!len || (!all && !nvn_sparse_since(im->vpool, mem + off, len, gen, stamp))) continue;
                 vka_span sp; if (!vka_scratch(len, 256, &sp)) { ub = VK_NULL_HANDLE; break; }
                 nvn_sparse_copy(im->vpool, sp.ptr, mem + off, len);
+                if (mem_any(sp.ptr, len)) g_arr_sub[!vka_astc_opaque(sp.ptr, len)]++;   // (Lichii, dotfiles-25x.25: the arrays' content, opaque or not; unmapped pages read as zero blocks, opaque)
                 astc_zero_blocks(sp.ptr, len);   // (unmapped pages: zero texels, not ASTC's error colour)
                 if (!astc_gpu_level(&ub, im, i, lv, ly, sp.buf, sp.off, len)) ub = VK_NULL_HANDLE;
             }
@@ -1228,6 +1239,7 @@ static int img_rebase(vka_img *im, uint32_t base, VkCommandBuffer cb) {
 // A sparse texture whose pages or mappings changed: its finest mapped level moved finer, or two or more levels coarser, → made again; else the changed parts uploaded
 static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
     uint32_t vmin, b = sparse_base(im->vpool, im->mem, &im->d, &im->L, &vmin);
+    vmin = view_vmin(im, vmin);
     if (b < im->bfloor && vks_va_free() < im->bneed) b = im->bfloor;   // (levels left out for the sparse address space; tried again once what the finer level asked for is free: a
                                                                           // rebase counts the old image's address space until it goes, vka_after, and a finer start must fit beside the current image)
     if (im->dcap && !im->rs) { uint32_t bd = dense_floor(&im->d, &im->L, b); if (bd > b) b = bd; }   // (a dense image under DM_VK_SPARSE_DENSE_MB: no rebase to a start the cap moves back)
@@ -1236,7 +1248,7 @@ static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
         im->vmin = vmin; redirty_ids(im);
     }
     // A new image (rebase): its barrier and its whole upload in the upload batch when cb is the replay's (nothing recorded before reads the new image)
-    if (im->d.target != NVN_TEXTURE_TARGET_3D && (b < im->base || b >= im->base + 2)) {
+    if (im->d.target != NVN_TEXTURE_TARGET_3D && !(im->rs && !im->base) && (b < im->base || b >= im->base + 2)) {   // (a residency image from level 0: tiles bound, never made again)
         VkCommandBuffer ucb = cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE;
         int made = img_rebase(im, b, ucb ? ucb : cb);
         if (made) upload_sparse(im, ucb ? ucb : cb, 1);
@@ -1398,6 +1410,74 @@ static void alias_check(vka_img *im) {
              (unsigned long long)im->L.size, (unsigned long long)o->serial, o->w, o->h, o->depth, o->layers, o->levels, o->d.format, o->d.target, (const void *)o->mem, (unsigned long long)o->L.size);
     }
 }
+// ---------- BC1 for opaque ASTC (Lichii, dotfiles-25x.25) ----------
+// An ASTC texture decoded on the GPU whose storage holds data and only opaque blocks when its image is made gets a BC1 image instead of BC3: half the memory, as Lichii's
+// texture cache decides it (ASTC::IsOpaque over a storage of at most 64 MiB, all of it mapped). Copies between images of one ASTC format need one BC block size on both sides
+// (vkCmdCopyImage; a BC1 image beside a BC3 one was 'needs a draw' and skipped, 393d656f4e), so the block size is decided per copy group:
+//   - a texture over storage that an ASTC image already has takes that image's format;
+//   - storage seen in a texture copy between ASTC textures keeps the block size the copy settled on (g_acopy) when its image is made again;
+//   - in a copy between a BC1 and a BC3 image, the side the GPU wrote (or a sparse array, the copy destination) keeps its format and the other side's image is made again
+//     in it from its storage (astc_reformat); when neither can change, the copy is skipped (logged);
+//   - sparse ASTC textures (Mario Kart World's 8192x8192x68 arrays, filled only by texture copies: their storage holds no data, tex-nat-0) are BC1 with
+//     DM_VK_ASTC_BC1_SPARSE (default 1). Their copy sources follow them: every one seen in MKW's race scans opaque (1858 copies, none with alpha); a source with alpha
+//     made BC1 for such a copy loses its alpha (counted, logged).
+// Open: a CPU write that brings alpha into a BC1 texture's storage loses it (the format is decided once, as in the texture cache). DM_VK_ASTC_BC1=0 / EDEN_NX2_ASTC_BC1=0: BC3 only
+typedef struct { uintptr_t a; uint8_t bpb; } acopy_ent;
+static acopy_ent *g_acopy; static size_t g_acopycap, g_acopyn;   // storage of ASTC textures seen in a texture copy, and the block size it settled on (open addressing; under g_tmu)
+static uint64_t g_bc1_n[6];   // ASTC images made BC1; kept BC3: alpha or unscanned; by their copy group; made again for a copy; sparse made BC1; sources with alpha made BC1
+static acopy_ent *acopy_get(uintptr_t a) {
+    if (!g_acopycap || !a) return NULL;
+    for (size_t i = (size_t)((a >> 8) * 0x9E3779B97F4A7C15ull >> 20) & (g_acopycap - 1);; i = (i + 1) & (g_acopycap - 1)) { if (g_acopy[i].a == a) return &g_acopy[i]; if (!g_acopy[i].a) return NULL; }
+}
+static void acopy_set(uintptr_t a, uint8_t bpb) {
+    acopy_ent *e = acopy_get(a);
+    if (!a || e) { if (e) e->bpb = bpb; return; }
+    if ((g_acopyn + 1) * 2 > g_acopycap) {
+        acopy_ent *o = g_acopy; size_t oc = g_acopycap; g_acopycap = oc ? oc * 2 : 1024; g_acopy = calloc(g_acopycap, sizeof *g_acopy); g_acopyn = 0;
+        if (!g_acopy) { g_acopy = o; g_acopycap = oc; return; }
+        for (size_t i = 0; i < oc; i++) if (o[i].a) acopy_set(o[i].a, o[i].bpb);
+        free(o);
+    }
+    for (size_t i = (size_t)((a >> 8) * 0x9E3779B97F4A7C15ull >> 20) & (g_acopycap - 1);; i = (i + 1) & (g_acopycap - 1)) if (!g_acopy[i].a) { g_acopy[i].a = a; g_acopy[i].bpb = bpb; g_acopyn++; return; }
+}
+static void bc1_fmt(vka_fmt *f) { f->vk = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; f->view = f->srgb ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK : VK_FORMAT_BC1_RGBA_UNORM_BLOCK; f->bpb = 8; }
+static int astc_storage_opaque(const vka_img *im) {   // its storage, scanned as astc_bc1 does (0: alpha, or not scanned)
+    return im->mem && im->L.size && im->L.size <= 64u << 20 && !im->vpool && !dm_guest_unmapped((uintptr_t)im->mem, im->L.size) && vka_astc_opaque(im->mem, (size_t)im->L.size);
+}
+static void astc_bc1(const tex_t *t, vka_fmt *f) {   // caller holds g_tmu
+    static int on = -1, sparse = -1; if (on < 0) { on = VKA_ENV("DM_VK_ASTC_BC1", 1) != 0; sparse = VKA_ENV("DM_VK_ASTC_BC1_SPARSE", 1) != 0; }
+    if (!on || !f->astc_bw || !vka_astc_gpu_on() || !t->mem) return;
+    for (int i = memidx_first((uintptr_t)t->mem); i < g_nidx && g_idx[i].lo == (uintptr_t)t->mem; i++) {
+        const vka_img *o = g_idx[i].im; if (!o->f.astc_bw || img_pool_dead(g_idx[i].im)) continue;
+        if (o->f.bpb == 8) bc1_fmt(f);
+        return;
+    }
+    const acopy_ent *e = acopy_get((uintptr_t)t->mem);
+    if (e) { g_bc1_n[2]++; if (e->bpb == 8) bc1_fmt(f); return; }
+    int sp = 0;
+    if (t->pool && nvn_pool_live(t->pool, NULL, &sp) && sp) { if (sparse) { g_bc1_n[4]++; bc1_fmt(f); } else g_bc1_n[1]++; return; }
+    if (!t->L.size || t->L.size > 64u << 20 || !t->pool || dm_guest_unmapped((uintptr_t)t->mem, t->L.size)
+        || !mem_any(t->mem, t->L.size) || !vka_astc_opaque(t->mem, (size_t)t->L.size)) { g_bc1_n[1]++; return; }
+    g_bc1_n[0]++; bc1_fmt(f);
+}
+static int astc_reformat(vka_img *im, uint8_t bpb, VkCommandBuffer cb);
+// A texture copy between ASTC textures (vka_exec.c copy_t2t): the two take one block size, kept for their storage from now on. 1: they do
+int vka_tex_astc_copy(vka_img *s, vka_img *d, VkCommandBuffer cb) {
+    pthread_mutex_lock(&g_tmu);
+    if (d->vpool) g_arr_src[s->f.bpb == 8 ? 0 : astc_storage_opaque(s) ? 1 : 2]++;
+    uint8_t bpb = d->f.bpb; int ok = 1;
+    if (s->f.bpb != d->f.bpb) {
+        int dfix = d->gpu_owned || d->vpool || d->holds, sfix = s->gpu_owned || s->vpool || s->holds;   // (sides whose image cannot be made again from storage)
+        bpb = dfix ? d->f.bpb : sfix ? s->f.bpb : 16;
+        if (bpb == 8) { vka_img *o = s->f.bpb == 16 ? s : d; if (!astc_storage_opaque(o) && g_bc1_n[5]++ < 8)
+            VRED("ASTC texture serial %llu %ux%u format %#x: made BC1 for a texture copy with a BC1 image (serial %llu), its storage does not scan opaque: alpha lost", (unsigned long long)o->serial, o->w, o->h,
+                 o->d.format, (unsigned long long)(o == s ? d : s)->serial); }
+        ok = (s->f.bpb == bpb || astc_reformat(s, bpb, cb)) && (d->f.bpb == bpb || astc_reformat(d, bpb, cb));
+    }
+    acopy_set((uintptr_t)s->mem, bpb); acopy_set((uintptr_t)d->mem, bpb);
+    pthread_mutex_unlock(&g_tmu);
+    return ok;
+}
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (!t || !t->serial || !vka_ok()) return NULL;
     pthread_mutex_lock(&g_tmu);
@@ -1405,6 +1485,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (e) { vka_img *im = e->im; if (im) im->used = g_tick; pthread_mutex_unlock(&g_tmu); return im; }
     vka_fmt f; vka_img *im = NULL; int throttle = 0;
     if (vka_fmt_of(t->d.format, &f)) {
+        astc_bc1(t, &f);
         // (not an image whose pool was finalized: a new pool over the same memory has new content. Shared with a texture of another live pool, the image follows the newest one's)
         for (int i = t->mem ? memidx_first((uintptr_t)t->mem) : g_nidx; i < g_nidx && g_idx[i].lo == (uintptr_t)t->mem && !im; i++) { vka_img *o = g_idx[i].im;
             if (!same_shape(o, t, &f, 1) || img_pool_dead(o) || (o->base && sparse_gpu(t, &f))) continue;   // (drawn into at level 0)
@@ -1415,7 +1496,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         int mode = 0;
         if (!im) { mode = first_mode(t, &f, cpuw_take(t->serial, 0)); g_zwant = mode == ST_ZERO; im = img_create(t, &f, base); g_zwant = 0; }
         if (im && !im->inited) {
-            im->vmin = vmin;
+            im->vmin = view_vmin(im, vmin);
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
             g_live[g_nlive++] = im; memidx_add(im);
             big_note(im, t);
@@ -1655,6 +1736,28 @@ enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
 static int budget_uncompressed(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_BUDGET_UNCOMPRESSED", 1) != 0; return v; }
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
 static void blocks_compact(void);
+// Lichii (dotfiles-25x.25): the live images' memory by class, for the VRAM line (caller holds g_tmu): render targets (attachment use, GPU-written), other GPU-written
+// images, ASTC decoded to BC3, other compressed, uncompressed copies of their storage, sparse textures' dense images; of these, dedicated allocations, and images over the
+// same storage as an older live image (another shape or format of one texture's memory); residency images' bound tiles (vks_stats) and zero-shared allocations are counted apart
+static void img_classes(char *o, size_t n) {
+    enum { RT, GPU, ASTC, ASTC1, BCN, UNC, SPD, NCLS };
+    static const char *const name[NCLS] = {"targets", "other GPU-written", "ASTC as BC3", "ASTC as BC1", "other compressed", "uncompressed", "sparse dense"};
+    uint64_t b[NCLS] = {0}, ded = 0, dup = 0; int c[NCLS] = {0}, nded = 0, ndup = 0;
+    for (int i = 0; i < g_nlive; i++) { const vka_img *im = g_live[i];
+        if (!im->bytes) continue;
+        int k = im->vpool ? SPD : (im->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) && im->gpu_owned ? RT : im->gpu_owned ? GPU
+              : im->f.astc_bw ? (im->f.bpb == 8 ? ASTC1 : ASTC) : compressed(&im->f) ? BCN : UNC;
+        b[k] += im->bytes; c[k]++;
+        if (!im->m.blk) { ded += im->bytes; nded++; }
+        int j = im->mem ? memidx_first((uintptr_t)im->mem) : g_nidx;   // (the first image of its storage address is the oldest: memidx keeps creation order)
+        if (j < g_nidx && g_idx[j].lo == (uintptr_t)im->mem && g_idx[j].im != im) { dup += im->bytes; ndup++; } }
+    size_t k = (size_t)snprintf(o, n, "images by class:");
+    for (int i = 0; i < NCLS && k < n; i++) k += (size_t)snprintf(o + k, n - k, " %s %.0f MiB (%d),", name[i], b[i] / 1048576.0, c[i]);
+    if (k < n) k += (size_t)snprintf(o + k, n - k, " dedicated %.0f MiB (%d), over another image's storage %.0f MiB (%d)", ded / 1048576.0, nded, dup / 1048576.0, ndup);
+    if (k < n) snprintf(o + k, n - k, "; ASTC images made BC1 %llu, BC3 for alpha or unscanned %llu, by their copy group %llu, made again for a copy %llu, sparse made BC1 %llu, sources with alpha made BC1 %llu; sparse ASTC levels x layers opaque %llu, with alpha %llu; copies into them from BC1 %llu, BC3 opaque %llu, BC3 alpha %llu", (unsigned long long)g_bc1_n[0],
+                        (unsigned long long)g_bc1_n[1], (unsigned long long)g_bc1_n[2], (unsigned long long)g_bc1_n[3], (unsigned long long)g_bc1_n[4], (unsigned long long)g_bc1_n[5], (unsigned long long)g_arr_sub[0], (unsigned long long)g_arr_sub[1],
+                        (unsigned long long)g_arr_src[0], (unsigned long long)g_arr_src[1], (unsigned long long)g_arr_src[2]);
+}
 void vka_tex_budget(void) {
     static uint64_t evicted, evicted_bytes;
     if (++g_tick % 4) return;   // (the use read about once a frame)
@@ -1664,10 +1767,12 @@ void vka_tex_budget(void) {
     static uint64_t vram_at; uint64_t vnow = now_ns();
     if (vnow - vram_at >= 10000000000ull) { vram_at = vnow;   // (Lichii, dotfiles-25x.8: every 10 s, what the budget sees against the replay's own memory)
         char h[256], im[256]; void vka_heap_line(char *, size_t); vka_heap_line(h, sizeof h); vka_imem_stats(im, sizeof im);
-        int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
+        char cl[1024], sp[256];
+        int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); img_classes(cl, sizeof cl); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
+        vks_stats(sp, sizeof sp);
         int vka_dpool_count(void);
-        VLOG("VRAM: host use %.0f of budget %.0f MiB; driver %s; replay images %.0f MiB (%d), scratch %.0f MiB, %d descriptor pools; %s", have ? usage / 1048576.0 : -1.0, have ? budget / 1048576.0 : -1.0, h,
-             img / 1048576.0, ni, scr / 1048576.0, vka_dpool_count(), im);
+        VLOG("VRAM: host use %.0f of budget %.0f MiB; driver %s; replay images %.0f MiB (%d), scratch %.0f MiB, %d descriptor pools; %s; %s; %s", have ? usage / 1048576.0 : -1.0, have ? budget / 1048576.0 : -1.0, h,
+             img / 1048576.0, ni, scr / 1048576.0, vka_dpool_count(), im, cl, sp);
     }
     if (!have || usage * 100 <= budget * BUDGET_HIGH) return;
     uint64_t want = usage - budget / 100 * BUDGET_LOW, freed = 0;
@@ -1911,6 +2016,7 @@ void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n) { g_nf
 static VkImageView view_of(const treg_ent *e, vka_img *im, int vt_want, int storage) {
     vka_fmt f; const view_t *v = e->has_v ? &e->v : NULL;
     if (!vka_fmt_of(v && v->set_format ? v->format : e->t.d.format, &f)) f = im->f;
+    if (f.astc_bw && im->f.astc_bw) { f.vk = im->f.vk; f.view = f.srgb ? srgb_twin(im->f.vk) : im->f.vk; f.bpb = im->f.bpb; }   // (BC1 or BC3, as the image was made: astc_bc1)
     uint32_t tl = im->base + im->levels, l0 = v && v->set_levels ? v->base_level : 0, nl = v && v->set_levels && v->nlevels ? v->nlevels : tl > l0 ? tl - l0 : 1;
     if (im->vtrack && !storage && l0 < im->vmin) { uint32_t cut = im->vmin - l0; nl = nl > cut ? nl - cut : 1; l0 = im->vmin; }   // a sparse texture: from its wholly mapped levels
     if (l0 < im->base) { uint32_t cut = im->base - l0; nl = nl > cut ? nl - cut : 1; l0 = 0; } else l0 -= im->base;   // texture levels → the image's (a sparse texture's left-out levels)
@@ -2218,7 +2324,9 @@ VkSampler vka_samp_default(void) {
 // Re-uploads im if the CPU wrote its storage since its last upload, or a sparse one if its mappings or pages changed (vka_tex_prepare; caller holds g_tmu and nvn_pool_use)
 static void reup_written(vka_img *im, VkCommandBuffer cb) {
     if (img_pool_dead(im)) return;
-    if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }   // (GPU-written: binds only)
+    // (GPU-written: binds only. Lichii, dotfiles-25x.22: a sampled one's residency image too once the GPU wrote it (copies into MKW's 68-layer arrays): its content is the
+    // GPU's from then on, but the tiles the game maps later still need memory before the copies that fill them)
+    if ((im->vbind || (im->rs && im->vtrack && im->gpu_owned)) && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }
     if (im->vtrack && !im->gpu_owned && im->mem) {
         if (!nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) return;
         sparse_refresh(im, cb);
@@ -2234,6 +2342,40 @@ static void reup_written(vka_img *im, VkCommandBuffer cb) {
     if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) return;
     upload_tracked(im, &t, cb);
     if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
+}
+// A BC1 image of an ASTC texture made again as BC3 and filled from its storage (vka_tex_astc_copy; caller holds g_tmu), as img_rebase swaps a sparse texture's image: the old
+// image goes when the GPU is done with it, and the texture IDs that name it are written again. 0: it keeps BC1 (the GPU wrote it, a holder has it, or no image was made)
+static int astc_reformat(vka_img *im, uint8_t bpb, VkCommandBuffer cb) {
+    if (!im->f.astc_bw) return 0;
+    if (im->f.bpb == bpb) return 1;
+    if (im->gpu_owned || im->holds || im->rs || im->vpool || img_pool_dead(im)) {
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("ASTC texture serial %llu %ux%u format %#x: its BC%d image is in a copy with a BC%d one and is not made again (%s): the copy is skipped",
+                                                                (unsigned long long)im->serial, im->w, im->h, im->d.format, im->f.bpb == 8 ? 1 : 3, bpb == 8 ? 1 : 3, im->gpu_owned ? "the GPU wrote it" : "held or sparse");
+        return 0;
+    }
+    tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem; t.pool = (pool_t *)im->pool;
+    vka_fmt f; if (!vka_fmt_of(im->d.format, &f)) return 0;
+    if (bpb == 8) bc1_fmt(&f);
+    vka_img *n = img_create(&t, &f, im->base);
+    if (!n) return 0;
+    vka_img *old = calloc(1, sizeof *old);
+    if (!old) { g_img_bytes -= n->bytes; img_destroy(n); return 0; }
+    old->img = im->img; old->m = im->m; old->views = im->views;
+    uint64_t ob = im->bytes;
+    g_img_bytes -= im->bytes;
+    im->img = n->img; im->m = n->m; im->views = NULL; im->usage = n->usage; im->bytes = n->bytes; im->f = n->f; im->alt = n->alt; im->nx = n->nx; memcpy(im->xfmt, n->xfmt, sizeof im->xfmt);
+    free(n);
+    vka_after(vka_fence_last(), img_destroy, old);
+    VkCommandBuffer ucb = cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE, ub = ucb ? ucb : cb;
+    vka_img_barrier(ub, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    nvn_tex_layout(&t.d, &t.L);
+    if (im->track) upload_tracked(im, &t, ub); else upload_fill(im, &t, ub);
+    if ((ub = vka_up_cur(ub))) vka_barrier(ub);
+    if (ucb) vka_up_end();
+    unsigned nid = redirty_ids(im);
+    if (g_bc1_n[3]++ < 16) VLOG("ASTC texture serial %llu %ux%u format %#x: made again as BC%d for a texture copy (%.1f -> %.1f MiB, %u texture IDs written again)",
+                                (unsigned long long)im->serial, im->w, im->h, im->d.format, bpb == 8 ? 1 : 3, ob / 1048576.0, im->bytes / 1048576.0, nid);
+    return 1;
 }
 void vka_tex_prepare(VkCommandBuffer cb) {
     bindless_init();

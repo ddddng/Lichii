@@ -198,7 +198,7 @@ uint64_t vka_tex_mem_nolock(int *n);
 
 // Sparse residency images (vka_sparse.c): memory only behind the 64 KB tiles a sparse pool's texture has mapped
 typedef struct vks_img vks_img;
-int vks_on(void);                                   // the device can (V.sparse_res) and DM_VK_SPARSE_RES is not 0
+int vks_on(void);                                   // the device can (V.sparse_res), on NVIDIA by default (DM_VK_SPARSE_RES=0/1 overrides)
 int vks_va_take(uint64_t bytes);                    // sparse address space for an image of that virtual size: 1 = taken
 void vks_va_give(uint64_t bytes);
 uint64_t vks_va_free(void);                         // sparse address space free now (a texture left at a coarser level tries a finer one once more is free than when it failed)
@@ -231,7 +231,7 @@ typedef struct {
     uint8_t kind;          // 0 float / unorm / snorm, 1 uint, 2 sint, 3 depth, 4 stencil, 5 depth-stencil
     uint8_t srgb;          // stored as UNORM, cleared with an sRGB-encoded colour
     uint8_t bpb, bw, bh;
-    uint8_t astc_bw, astc_bh;   // an ASTC texture on a device without ASTC: the storage's block size; the image is BC3 filled by vka_astc_transcode (0: not such a texture)
+    uint8_t astc_bw, astc_bh;   // an ASTC texture on a device without ASTC: the storage's block size; the image is BC3 (Lichii: BC1 when opaque and never in a texture copy, vka_tex.c astc_bc1) filled on the GPU or by vka_astc_transcode (0: not such a texture)
 } vka_fmt;
 int vka_fmt_of(int nvn_format, vka_fmt *f);         // 0 = no Vulkan format (logged once per format)
 // ASTC blocks (w x h x depth texels, bw x bh blocks, rows of blocks packed) transcoded to BC3 (rows of 4x4 blocks packed, 16 bytes each) on the CPU, for a device without
@@ -243,6 +243,7 @@ void vka_upload_hook(const tex_t *t, uint32_t lv, uint32_t ly, uint8_t *lin, siz
 int vka_upload_claim(const tex_t *t) __attribute__((weak));   // 1 = the host fills this texture (vka_upload_hook): uploaded from storage even where it would start cleared
 int vka_astc_transcode(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t depth, uint32_t bw, uint32_t bh, uint8_t *bc3) __attribute__((weak));
 int vka_astc_gpu_on(void);   // the host decodes ASTC on the GPU (Lichii: nvn_direct_device.astc_to_bc; vka_astc_gpu records one level, vka_dev.c)
+int vka_astc_opaque(const void *blocks, size_t n);   // the ASTC blocks decode without alpha (Lichii: nvn_direct_device.astc_opaque; 0 without the host's check)
 int vka_mem_budget(uint64_t *usage, uint64_t *budget);   // the host's device-local memory use and budget (vka_dev.c; 0 = none given)
 void vka_tex_budget(void);   // images let go of when the device-local use nears the budget (vka_tex.c; the replay thread, between submissions)
 // An image's memory (vka_imgmem.c): space in a shared block (blk, at off, units of 256 bytes) or a dedicated allocation (blk NULL, off 0); size = its memory requirements' size
@@ -302,6 +303,7 @@ static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->ba
 // The layers a render target view of level lv can name: a 3D texture's slices at that level (drawn into through 2D / 2D-array views, VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT), else the array layers
 static inline uint32_t vka_img_slices(const vka_img *im, uint32_t lv) { return im->d.target == NVN_TEXTURE_TARGET_3D ? (im->depth >> lv ? im->depth >> lv : 1) : im->layers; }
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's image, made (and filled from guest memory, or cleared) on first use in cb; NULL = no image
+int vka_tex_astc_copy(vka_img *src, vka_img *dst, VkCommandBuffer cb);   // Lichii: a texture copy between ASTC textures keeps one BC block size on both sides (vka_tex.c); 0 = skip it
 uint64_t vka_tex_mem(int *n, uint64_t *gpu_written);   // bytes of image memory now: n images, of which gpu_written bytes the GPU wrote (the rest copies pool storage)
 void vka_tex_alias_stats(char *b, size_t n);        // image bytes by content (cleared, filled once, tracked) and how many of them could live on their pool storage
 vka_img *vka_tex_acquire(uint64_t serial);          // a reference that keeps the image alive (the present thread), dropped with vka_tex_drop

@@ -687,12 +687,18 @@ static VkImageAspectFlags copy_aspect(const vka_img *im, const char *what) {
 }
 // Buffer ↔ texture: c->src is the buffer's guest address. Rows are SetCopyRowStride bytes apart (tightly packed without it), layers / slices SetCopyImageStride
 static void cp_note(const vka_img *d, unsigned lv_tex, int dropped);
+static uint64_t g_cp_astc_raw;   // (Lichii: buffer copies of ASTC textures, copy_bt)
 static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
     if (!im) return;
     if (to_tex) vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = copy_aspect(im, to_tex ? "buffer → texture copy" : "texture → buffer copy"); if (!asp) return;
+    // Lichii (dotfiles-25x.25): an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
+    // size; counted, not yet decoded
+    if (im->f.astc_bw && ++g_cp_astc_raw && (g_cp_astc_raw <= 8 || !(g_cp_astc_raw & (g_cp_astc_raw - 1)))) { VRED("%s of ASTC texture serial %llu %ux%u layers %u format %#x (image VkFormat %d) level %u region %dx%d: ASTC blocks copied as BC blocks (%llu so far)",
+                                                                              to_tex ? "buffer → texture copy" : "texture → buffer copy", (unsigned long long)im->serial, im->d.width, im->d.height, im->layers, im->d.format, im->f.vk,
+                                                                              c->has_view && c->view.set_levels ? c->view.base_level : 0, c->r.width, c->r.height, (unsigned long long)g_cp_astc_raw); }
     if (im->samples > 1) { VRED_ONCE("buffer copy of a multisampled texture"); return; }
     const vka_fmt *f = &im->f;
     unsigned lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, l0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
@@ -747,6 +753,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
     vka_tex_own(d, g_cb);
+    if (s->f.astc_bw && d->f.astc_bw && !vka_tex_astc_copy(s, d, g_cb)) return;   // (Lichii, dotfiles-25x.25: one BC block size on both sides, BC1 for opaque ASTC)
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     { unsigned dlt = dl; int ok = vka_img_lv(d, &dl); cp_note(d, dlt, !ok); if (!ok) return; }

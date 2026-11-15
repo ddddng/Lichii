@@ -45,6 +45,10 @@ public:
     /// nvn_direct_device::astc_flush.
     static void Flush(void* context, VkCommandBuffer cmdbuf);
 
+    /// nvn_direct_device::astc_opaque: ASTC::IsOpaque, as the texture cache's BC1 choice
+    /// (EDEN_NX2_ASTC_BC1=0 keeps every image BC3).
+    static int IsOpaque(const void* blocks, size_t size);
+
 private:
     static constexpr u32 TileWidth = 2048;
     static constexpr u32 TileHeight = 2048;

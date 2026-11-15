@@ -132,6 +132,9 @@ typedef struct nvn_direct_device {
     /// it before it ends an upload batch. NULL: nothing is left pending.
     void (*astc_flush)(void* context, VkCommandBuffer cmdbuf);
     void* astc_context;
+    /// Whether ASTC blocks decode without alpha (Lichii's ASTC::IsOpaque): the image of such a
+    /// texture may be BC1 instead of BC3, half the memory (dotfiles-25x.25). NULL: always BC3.
+    int (*astc_opaque)(const void* blocks, size_t size);
     /// The process's device-local memory use and the budget it should stay within (Lichii's
     /// Device::GetDeviceMemoryUsage / GetDeviceMemoryBudget, EDEN_NX2_VRAM_LIMIT_MIB included):
     /// the replay lets go of images it can make again when the use nears the budget. NULL or a

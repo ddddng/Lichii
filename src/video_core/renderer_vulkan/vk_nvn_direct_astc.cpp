@@ -13,9 +13,11 @@
 #include "video_core/host_shaders/bc_encoder_comp_spv.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include <cstdlib>
+#include <span>
 #include <string>
 
 #include "video_core/renderer_vulkan/vk_nvn_direct_astc.h"
+#include "video_core/textures/astc.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
@@ -363,6 +365,17 @@ void NvnDirectAstc::FlushSmall(VkCommandBuffer raw_cmdbuf) {
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     pending.clear();
+}
+
+int NvnDirectAstc::IsOpaque(const void* blocks, size_t size) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_ASTC_BC1");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled && Tegra::Texture::ASTC::IsOpaque(
+                          std::span<const u8>{static_cast<const u8*>(blocks), size})
+               ? 1
+               : 0;
 }
 
 bool NvnDirectAstc::MakeTileResources() {
