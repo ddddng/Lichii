@@ -47,8 +47,8 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
 
 The passes are recognised by native program key (`FindOcarinaUpscalePass` in
 `src/video_core/ocarina_upscale.h`), which lowering changes leave alone. Passes no capture has
-shown the native program of yet are matched by shader hash, and stop matching when the lowering
-of their program changes.
+shown the native program of yet (`ef542df87cacfe9e`, `4c1ae2fe58f30a97`, `c033c3ddc9f0897b`) are
+matched by shader hash, and stop matching when the lowering of their program changes.
 
 - Max Resolution add-on off: the 3/4-scale pass (native program `6f9367bd41dc0b58`, shader
   `e40f5efb5480e692`; also shader `ef542df87cacfe9e`, same contract) is replaced and FSR/DLSS

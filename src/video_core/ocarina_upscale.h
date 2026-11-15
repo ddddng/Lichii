@@ -33,14 +33,15 @@ constexpr OcarinaUpscalePass FindOcarinaUpscalePass(u64 native_key, u64 shader_h
     case 0x6f9367bd41dc0b58ULL: // shader e40f5efb5480e692
         return ThreeQuarter;
     case 0xda6df3e54c716df2ULL: // shader 6bd913e1f34e83eb
+    case 0xe4cda162ff6009e2ULL: // shader 9302bc0d6d1d9bc1, a scaled scene in the field (#903)
         return Pass1440p;
     }
-    // No capture of these programs has their native key yet.
+    // No capture of these programs has their native key yet. None of them ran in a v131072
+    // session on RADV, handheld with and without Max Resolution, into the Deku Tree.
     switch (shader_hash) {
     case 0xef542df87cacfe9eULL:
         return ThreeQuarter;
-    case 0x4c1ae2fe58f30a97ULL: // scaled by the DLSS render scale, menus (#903)
-    case 0x9302bc0d6d1d9bc1ULL: // the same in the field
+    case 0x4c1ae2fe58f30a97ULL: // a scaled scene in menus (#903)
         return Pass1440p;
     case 0xc033c3ddc9f0897bULL:
         return FullSize;
