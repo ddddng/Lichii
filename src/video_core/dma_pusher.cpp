@@ -566,8 +566,10 @@ bool DmaPusher::Step() {
             gpu_written,
             use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
                                                      header.size * sizeof(u32)));
-        if (safe_reads && VideoCommon::GpuSplit::Get().Active() &&
-            FlushCachedCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32), !submitted)) {
+        const bool caches_flushed =
+            safe_reads && VideoCommon::GpuSplit::Get().Active() &&
+            FlushCachedCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32), !submitted);
+        if (caches_flushed) {
             submitted = false;
         }
         // An entry parsed from memory instead of its submit-time copy is the way a command
@@ -647,9 +649,10 @@ bool DmaPusher::Step() {
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (bool pending = false;
-                   ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
-                                          &pending) ||
-                   pending) {
+                   !caches_flushed &&
+                   (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
+                                           &pending) ||
+                    pending)) {
             if (pending) {
                 // Parsed again once the GPU copied the list; other channels run meanwhile.
                 if (ListTrace::g_enabled && list_trace_wait_start == 0) {
@@ -670,7 +673,10 @@ bool DmaPusher::Step() {
                 end_list_trace();
             }
         } else {
+            // After an image write FlushCachedCommands wrote every cache out: a buffer cache list
+            // copy would be older than the image's words.
             const bool flushed =
+                !caches_flushed &&
                 FlushGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::UnsafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
@@ -1212,7 +1218,9 @@ bool DmaPusher::FlushCachedCommands(GPUVAddr address, size_t size, bool live) {
         [memory = &memory_manager, address, size, live, image_written = &image_written] {
             using VideoCommon::CacheType;
             *image_written = memory->IsMemoryDirty(address, size, CacheType::TextureCache);
-            if (*image_written || live) {
+            if (*image_written) {
+                memory->FlushRegion(address, size, CacheType::All);
+            } else if (live) {
                 memory->FlushRegion(address, size, CacheType::TextureCache | CacheType::QueryCache);
             }
         },
