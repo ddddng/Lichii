@@ -39,7 +39,8 @@
 #include <unistd.h>
 #include <time.h>
 
-typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; void *view; int import; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias); view: Lichii's import view (import_seg; NULL for a udmabuf); import: Lichii's import of guest memory
+struct pack;
+typedef struct { uintptr_t lo, hi; VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; int refs; VkDeviceSize boff; void *view; int import; struct pack *pack; } seg_t;   // boff: where lo is in buf (0, but for a virtual pool's alias: mtl_pool_alias, and a packed import); view: Lichii's import view (import_seg; NULL for a udmabuf); import: Lichii's import of guest memory; pack: the udmabuf pack it lies in (Packs below)
 // Lichii: the table is keyed by the game's addresses (nvn_direct_guest_of), not by the host pointers the front end passes: GPU addresses the game wrote into its own data
 // (shader-loaded pointers through raw global memory's table, c0's storage table) are guest addresses, and look the same memory up without a translation. Every entry
 // point takes either and keys it (key); a virtual pool's own range (outside the arena) keeps its host address
@@ -398,6 +399,7 @@ static __thread uint64_t t_place_bytes, t_pend_ns;
 // VK_ERROR_INVALID_EXTERNAL_HANDLE (measured on the Steam Deck: anonymous memory imports, a MAP_SHARED or MAP_PRIVATE memfd mapping or shared anonymous memory does not).
 // There the pools are udmabufs of the memfd's own pages imported with VK_EXT_external_memory_dma_buf: still the guest's pages, coherent both ways (measured there).
 // The probe imports a page of a shared memfd mapping: on RADV a refused import leaves later ones working (measured); NVIDIA's would not (dotfiles-25x.1), but it imports it
+static struct udmabuf_create_list *g_ul; static uint32_t g_ulcap, g_ul_max = 1024;   // g_ul_max: udmabuf's list_limit
 void vka_mem_import_choose(int dmabuf) {
     const size_t n = 65536; VkResult r = VK_ERROR_UNKNOWN;
     int fd = memfd_create("vka-import-probe", MFD_CLOEXEC);
@@ -425,27 +427,32 @@ void vka_mem_import_choose(int dmabuf) {
     FILE *f = fopen("/sys/module/udmabuf/parameters/size_limit_mb", "r");
     if (f) { if (fscanf(f, "%ld", &mb) != 1 || mb <= 0) mb = 64; fclose(f); }
     V.udmabuf = 1; V.udmabuf_fd = u; V.udmabuf_max = (VkDeviceSize)mb << 20;
-    VLOG("pool memory: the driver refuses host-pointer imports of shared memory (%d): pools are imported as udmabufs of the guest memory's pages, %ld MiB at most each", r, mb);
+    long ll = 0; f = fopen("/sys/module/udmabuf/parameters/list_limit", "r");
+    if (f) { if (fscanf(f, "%ld", &ll) == 1 && ll > 0) g_ul_max = (uint32_t)ll; fclose(f); }
+    VLOG("pool memory: the driver refuses host-pointer imports of shared memory (%d): pools are imported as udmabufs of the guest memory's pages, %ld MiB and %u runs at most each", r, mb, g_ul_max);
 }
 
 // Lichii: a udmabuf of the memfd pages behind guest [lo, lo + n): one item a run of pages that follow each other in the file. -1 (logged) when a page has no file
-// behind it (the guest has not mapped it) or udmabuf refuses (more runs than its list_limit). Caller holds g_pl (the list is reused)
-static int udmabuf_of(uintptr_t lo, VkDeviceSize n) {
-    static struct udmabuf_create_list *l; static uint32_t cap;
-    uint32_t cnt = 0;
+// behind it (the guest has not mapped it) or udmabuf refuses (more runs than its list_limit). Caller holds g_pl (the list g_ul is reused)
+// The runs behind guest [lo, lo + n) appended to g_ul after its first *cnt items (the first one continuing the last item where the file does). 0 (logged) when a page has no file behind it
+static int ul_add(uint32_t *cnt, uintptr_t lo, VkDeviceSize n) {
     for (VkDeviceSize o = 0; o < n; o += 4096) {
         uint64_t off; int fd = nvn_direct_backing_file(lo + o, &off);
-        if (fd < 0) { VRED("pool memory %#lx+%#llx: guest page %#lx has no memory file behind it: no udmabuf", (unsigned long)lo, (unsigned long long)n, (unsigned long)(lo + o)); return -1; }
-        struct udmabuf_create_item *e = cnt ? &l->list[cnt - 1] : NULL;
+        if (fd < 0) { VRED("pool memory %#lx+%#llx: guest page %#lx has no memory file behind it: no udmabuf", (unsigned long)lo, (unsigned long long)n, (unsigned long)(lo + o)); return 0; }
+        struct udmabuf_create_item *e = *cnt ? &g_ul->list[*cnt - 1] : NULL;
         if (e && e->memfd == (uint32_t)fd && e->offset + e->size == off) { e->size += 4096; continue; }
-        if (cnt == cap) { cap = cap ? 2 * cap : 256; l = realloc(l, sizeof *l + cap * sizeof *l->list); }
-        l->list[cnt++] = (struct udmabuf_create_item){.memfd = (uint32_t)fd, .offset = off, .size = 4096};
+        if (*cnt == g_ulcap) { g_ulcap = g_ulcap ? 2 * g_ulcap : 256; g_ul = realloc(g_ul, sizeof *g_ul + g_ulcap * sizeof *g_ul->list); }
+        g_ul->list[(*cnt)++] = (struct udmabuf_create_item){.memfd = (uint32_t)fd, .offset = off, .size = 4096};
     }
-    l->flags = UDMABUF_FLAGS_CLOEXEC; l->count = cnt;
-    int d = ioctl(V.udmabuf_fd, UDMABUF_CREATE_LIST, l);
+    return 1;
+}
+static int ul_create(uint32_t cnt, uintptr_t lo, VkDeviceSize n) {   // the udmabuf of g_ul's first cnt items, or -1 (logged)
+    g_ul->flags = UDMABUF_FLAGS_CLOEXEC; g_ul->count = cnt;
+    int d = ioctl(V.udmabuf_fd, UDMABUF_CREATE_LIST, g_ul);
     if (d < 0) VRED("pool memory %#lx+%#llx: udmabuf of %u runs of guest memory: %s", (unsigned long)lo, (unsigned long long)n, cnt, strerror(errno));
     return d;
 }
+static int udmabuf_of(uintptr_t lo, VkDeviceSize n) { uint32_t cnt = 0; return ul_add(&cnt, lo, n) ? ul_create(cnt, lo, n) : -1; }
 
 // Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host or, where the driver refuses
 // that (V.udmabuf), as a udmabuf of the same pages with VK_EXT_external_memory_dma_buf. A host-pointer import is made of a view of its own (nvn_direct_map_view: the same
@@ -453,6 +460,7 @@ static int udmabuf_of(uintptr_t lo, VkDeviceSize n) {
 // refused import makes every later one fail (dotfiles-25x.1). The pages stay the guest's: CPU writes through the arena and GPU writes through the import meet in the same
 // memory, nothing is copied or swapped. An import pins its pages: it is given back before the guest unmaps them (vka_mem_release)
 static uint64_t g_imp_n, g_imp_unmapped;
+static void pack_maybe(void);   // (Packs below)
 static int import_seg(uintptr_t lo, uintptr_t hi) {
     VkDeviceSize n = hi - lo; uint64_t p0 = mono_ns(), unmapped = 0; VkResult r;
     if (V.udmabuf && n > V.udmabuf_max) return 0;   // (cover places it in pieces of udmabuf_max)
@@ -504,6 +512,7 @@ static int import_seg(uintptr_t lo, uintptr_t hi) {
         VLOG("pool memory %#lx+%#llx imported (%s, type %u, %.1f ms%s%.0f KiB of it not mapped by the guest); %llu imports, %.2f GiB, %.0f ms in all", (unsigned long)lo, (unsigned long long)n,
              V.udmabuf ? "udmabuf" : "host pointer", t, (mono_ns() - p0) / 1e6, unmapped ? ", " : "; ", unmapped / 1024.0, (unsigned long long)g_imp_n, g_placed_bytes / 1073741824.0, g_ph[0] / 1e6);
     vka_mem_grew(n);
+    pack_maybe();
     return 1;
 fail:
     if (s.mem) vk.vkFreeMemory(V.dev, s.mem, NULL);
@@ -625,7 +634,7 @@ static void seg_free(const seg_t *s, int waited, uint64_t fence) {
     static _Atomic int nk; if (atomic_fetch_add(&nk, 1) < 8) VRED("giving back pool memory %#lx+%#zx: the GPU is not known to be done with it (fence %llu%s): its Vulkan memory is kept, not freed",
                                                                (unsigned long)s->lo, (size_t)(s->hi - s->lo), (unsigned long long)fence, vka_hung() ? ", GPU hang" : " not reached in the hang time");
 }
-static void alias_drop_buf(VkBuffer buf);   // (Virtual pools below)
+static void alias_drop_buf(VkBuffer buf, VkDeviceSize lo, VkDeviceSize hi);   // (Virtual pools below)
 // Lichii: an import's buffer, memory and view, freed by the completion thread once the GPU is past the fence (unplace)
 typedef struct { VkBuffer buf; VkDeviceMemory mem; void *view; size_t n; } import_free;
 static void import_free_run(void *arg) {
@@ -633,20 +642,149 @@ static void import_free_run(void *arg) {
     if (!vka_hung()) { vk.vkDestroyBuffer(V.dev, f->buf, NULL); vk.vkFreeMemory(V.dev, f->mem, NULL); if (f->view) munmap(f->view, f->n); }
     free(f);
 }
+static void import_free_after(uint64_t fence, VkBuffer buf, VkDeviceMemory mem, void *view, size_t n) {
+    import_free *f = malloc(sizeof *f); *f = (import_free){buf, mem, view, n};
+    vka_after(fence, import_free_run, f);
+}
+
+// ---------- Packs (Lichii, dotfiles-25x.27) ----------
+// amdgpu: every import is a BO in RADV's global BO list (its own allocations are VM_ALWAYS_VALID and are not), and that list goes with every vkQueueSubmit, where the
+// kernel locks, validates and fences each BO. Measured on the Steam Deck (RADV 26.2.6, .pi/o72-replay/spike-import/deck_bo_submit_test.c): a submission takes 0.02 ms
+// with no imports, 1.9 ms with 1,000 and 17 ms with 5,000, all of it kernel time; Mario Kart World's race holds ~4,800 pool imports (most of 16-500 KiB), and the replay,
+// its uploads and Lichii's presenter paid that on every submission (~80 % of the replay thread's time, 6 fps).
+// So small imports are packed: one udmabuf lists the memfd runs of many segments one after the other (at most udmabuf_max bytes and list_limit runs), is imported once,
+// and each segment names the pack's buffer at its offset (boff, bda). The pages stay the guest's, so a segment reads and writes the same memory through its own import
+// or through the pack, and the swap is a table edit; a segment's old import is freed once the GPU is past the last fence reserved (as unplace does). A pack lives while
+// a segment lies in it: a segment given back leaves its pages pinned in the pack (dead bytes) until the pack goes. A round (pack_maybe, after an import) packs the
+// single imports of at most PACK_SEG_MAX together with the segments of loose packs (under half of udmabuf_max, or under half live), so packs grow and the dead get
+// dropped; it runs once PACK_SOLO single imports are waiting or PACK_DEAD more bytes died since the last round. DM_VK_PACK=0: every import stays its own
+typedef struct pack { VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; VkDeviceSize size, live; int members; } pack_t;
+enum { PACK_SOLO = 64 };
+static const VkDeviceSize PACK_DEAD = 64ull << 20;
+static pthread_mutex_t g_packmu = PTHREAD_MUTEX_INITIALIZER;   // packs' members, live and dead bytes (segments are given back without g_pl: unplace)
+static VkDeviceSize g_pack_dead, g_pack_dead_round; static int g_npack; static uint64_t g_pack_rounds;   // (under g_packmu; g_pack_dead_round: dead bytes after the last round)
+static VkDeviceSize pack_seg_max(void) { return V.udmabuf_max / 4; }
+static int pack_loose(const pack_t *p) { return p->size < V.udmabuf_max / 2 || p->live * 2 < p->size; }   // (caller holds g_packmu)
+static int pack_cand(const seg_t *s) {   // (caller holds g_packmu)
+    return s->mem && s->import && s->hi - s->lo <= pack_seg_max() && (!s->pack || pack_loose(s->pack));
+}
+// A segment of n bytes leaves pack p; 1 = it was the last: p is out of the counts, for pack_free. Caller holds g_packmu
+static int pack_leave(pack_t *p, VkDeviceSize n) {
+    p->live -= n; g_pack_dead += n;
+    if (--p->members) return 0;
+    g_pack_dead -= p->size; g_npack--;
+    return 1;
+}
+static void pack_free(pack_t *p, uint64_t fence) { import_free_after(fence, p->buf, p->mem, NULL, 0); free(p); }   // its memory once the GPU is past fence
+// A pack of the segments at g_sg[idx[0..n)] (their runs are g_ul's first cnt items, size bytes in all): imported, and the segments moved into it. Caller holds g_pl
+static int pack_make(const int *idx, int n, uint32_t cnt, VkDeviceSize size) {
+    int fd = ul_create(cnt, g_sg[idx[0]].lo, size); if (fd < 0) return 0;
+    const VkExternalMemoryHandleTypeFlagBits ht = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    pack_t *p = calloc(1, sizeof *p); p->size = size;
+    VkMemoryFdPropertiesKHR fp = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+    uint32_t types = vk.vkGetMemoryFdPropertiesKHR(V.dev, ht, fd, &fp) ? 0 : fp.memoryTypeBits;
+    VkExternalMemoryBufferCreateInfo eb = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = ht};
+    VkMemoryRequirements mr = {0}; uint32_t t = UINT32_MAX;
+    if ((p->buf = seg_buffer(size, &eb))) {
+        vk.vkGetBufferMemoryRequirements(V.dev, p->buf, &mr);
+        t = vka_mem_type(mr.memoryTypeBits & types, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+        if (t == UINT32_MAX) t = vka_mem_type(mr.memoryTypeBits & types, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0);
+    }
+    VkMemoryAllocateFlagsInfo af = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkImportMemoryFdInfoKHR fi = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, .pNext = V.bda ? &af : NULL, .handleType = ht, .fd = fd};
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fi, .allocationSize = size, .memoryTypeIndex = t};
+    VkResult r = !p->buf || t == UINT32_MAX || mr.size > size ? VK_ERROR_FEATURE_NOT_PRESENT : vk.vkAllocateMemory(V.dev, &ai, NULL, &p->mem);
+    if (!r) { fd = -1; r = vk.vkBindBufferMemory(V.dev, p->buf, p->mem, 0); }
+    if (r) {
+        static _Atomic int nr; if (atomic_fetch_add(&nr, 1) < 4) VRED("pool memory: a pack of %d imports (%.1f MiB, %u runs) could not be imported (%d): they stay as they are", n, size / 1048576.0, cnt, r);
+        if (p->mem) vk.vkFreeMemory(V.dev, p->mem, NULL);
+        if (p->buf) vk.vkDestroyBuffer(V.dev, p->buf, NULL);
+        if (fd >= 0) close(fd);
+        free(p); return 0;
+    }
+    if (V.bda) { VkBufferDeviceAddressInfo bai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = p->buf}; p->bda = vk.vkGetBufferDeviceAddress(V.dev, &bai); }
+    typedef struct { VkBuffer buf; VkDeviceSize lo, hi, to; } moved;   // a segment's old place [lo, hi) in buf, now at to in the pack
+    moved *mv = malloc((size_t)n * sizeof *mv);
+    import_free *solo = malloc((size_t)n * sizeof *solo); int nsolo = 0;
+    pack_t **gone = malloc((size_t)n * sizeof *gone); int ngone = 0;
+    if (!lock_whole()) pthread_rwlock_wrlock(&g_rw);
+    pthread_mutex_lock(&g_packmu);
+    VkDeviceSize at = 0;
+    for (int i = 0; i < n; i++) {
+        seg_t *s = &g_sg[idx[i]], o = *s; VkDeviceSize k = s->hi - s->lo;
+        mv[i] = (moved){o.buf, o.boff, o.boff + k, at};
+        s->mem = p->mem; s->buf = p->buf; s->boff = at; s->bda = p->bda ? p->bda + at : 0; s->pack = p;
+        p->members++; p->live += k; at += k;
+        if (!o.pack) solo[nsolo++] = (import_free){o.buf, o.mem, NULL, 0};
+        else if (pack_leave(o.pack, k)) gone[ngone++] = o.pack;
+    }
+    for (int j = 0; j < g_nsg; j++) {   // aliases (virtual pools) naming a moved segment's memory: the pack's
+        seg_t *a = &g_sg[j]; if (a->mem) continue;
+        for (int i = 0; i < n; i++) if (a->buf == mv[i].buf && a->boff >= mv[i].lo && a->boff < mv[i].hi) {
+            a->buf = p->buf; a->boff = mv[i].to + (a->boff - mv[i].lo); if (a->bda) a->bda = p->bda + a->boff; break; }
+    }
+    g_npack++;
+    pthread_mutex_unlock(&g_packmu);
+    atomic_fetch_add(&g_sg_gen, 1);
+    if (!lock_whole()) pthread_rwlock_unlock(&g_rw);
+    // The old imports: freed once the GPU is past every submission reserved so far (one being recorded may hold a lookup made before the edit)
+    uint64_t fence = vka_fence_last();
+    for (int i = 0; i < nsolo; i++) import_free_after(fence, solo[i].buf, solo[i].mem, NULL, 0);
+    for (int i = 0; i < ngone; i++) pack_free(gone[i], fence);
+    free(solo); free(gone); free(mv);
+    return 1;
+}
+// After an import (caller holds g_pl): a round of packing when enough single imports wait or enough bytes in packs are dead
+static void pack_maybe(void) {
+    if (!V.udmabuf || !VKA_ENV("DM_VK_PACK", 1)) return;
+    pthread_mutex_lock(&g_packmu);
+    int nsolo = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack && g_sg[i].hi - g_sg[i].lo <= pack_seg_max()) nsolo++;
+    int go = nsolo >= PACK_SOLO || g_pack_dead >= g_pack_dead_round + PACK_DEAD;
+    int *idx = go ? malloc((size_t)g_nsg * sizeof *idx) : NULL, nc = 0;
+    if (idx) for (int i = 0; i < g_nsg; i++) if (pack_cand(&g_sg[i])) idx[nc++] = i;   // (the table changes only under g_pl, which the caller holds: the indices stay valid)
+    pthread_mutex_unlock(&g_packmu);
+    if (!go) return;
+    uint64_t t0 = mono_ns(); int made = 0, packed = 0; VkDeviceSize bytes = 0;
+    for (int a = 0; a < nc;) {   // in address order, as many as one udmabuf holds
+        uint32_t cnt = 0; VkDeviceSize size = 0; int b = a, m = a;   // idx[a..m): this pack's (idx[m..b) skipped: a page with no file behind it)
+        while (b < nc) {
+            const seg_t *s = &g_sg[idx[b]]; VkDeviceSize k = s->hi - s->lo;
+            if (size + k > V.udmabuf_max) break;
+            uint32_t c0 = cnt; uint64_t last = cnt ? g_ul->list[cnt - 1].size : 0;
+            int ok = ul_add(&cnt, s->lo, k);
+            if (!ok || cnt > g_ul_max) { cnt = c0; if (cnt) g_ul->list[cnt - 1].size = last; if (ok) break; b++; continue; }
+            size += k; idx[m++] = idx[b++];
+        }
+        if (m - a >= 2 && pack_make(idx + a, m - a, cnt, size)) { made++; packed += m - a; bytes += size; }
+        a = b > a ? b : a + 1;
+    }
+    free(idx);
+    pthread_mutex_lock(&g_packmu); uint64_t rounds = ++g_pack_rounds; int np = g_npack; VkDeviceSize dead = g_pack_dead_round = g_pack_dead; pthread_mutex_unlock(&g_packmu);
+    int nimp = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack) nimp++;
+    if (rounds <= 8 || !(rounds & 63))
+        VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports (DM_VK_PACK)",
+             (unsigned long long)rounds, packed, nsolo, made, bytes / 1048576.0, (mono_ns() - t0) / 1e6, np, dead / 1048576.0, nimp);
+}
 static void unplace(const seg_t *sp) {
     seg_t s = *sp; size_t n = s.hi - s.lo;
     uint64_t fence = vka_fence_last();
     // Lichii (dotfiles-25x.4): an import keeps the guest's pages where they are (its view is a mapping of its own), so it is freed once the GPU is past the fence, without
     // the caller waiting: with the NVN queues as Vulkan queues the last fence may be a queue's submission that waits for an event the game signals only after it gave the
     // pool back (Mario Kart World at a course's load: a stall until the host let the wait through)
+    if (s.pack) {   // Lichii: a packed import (Packs above): it leaves its pack, which goes with its last segment
+        alias_drop_buf(s.buf, s.boff, s.boff + n);
+        pthread_mutex_lock(&g_packmu); int last = pack_leave(s.pack, n); pthread_mutex_unlock(&g_packmu);
+        if (last) pack_free(s.pack, fence);
+        return;
+    }
     if (s.import && !vka_hung() && !vka_wait_done(fence, 0)) {
-        alias_drop_buf(s.buf);
+        alias_drop_buf(s.buf, 0, n);
         import_free *f = malloc(sizeof *f); *f = (import_free){s.buf, s.mem, s.view, n};
         vka_after(fence, import_free_run, f);
         return;
     }
     int waited = vka_wait_done(fence, vka_hang_ns()) && !vka_hung();
-    alias_drop_buf(s.buf);
+    alias_drop_buf(s.buf, 0, n);
     if (s.import) {   // Lichii: an import (import_seg): nothing to copy back, the pages are the guest's; its view goes with the memory (kept, as the memory, while the GPU may use it)
         seg_free(&s, waited, fence);
         if (waited && s.view) munmap(s.view, n);
@@ -857,9 +995,9 @@ static void alias_cut(uintptr_t lo, uintptr_t hi) {   // caller holds g_pl and g
         i = -1;   // (the table moved)
     }
 }
-static void alias_drop_buf(VkBuffer buf) {   // the physical segment over buf is going: its aliases with it
+static void alias_drop_buf(VkBuffer buf, VkDeviceSize lo, VkDeviceSize hi) {   // the physical segment over [lo, hi) of buf is going: its aliases with it
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
-    for (int i = 0; i < g_nsg; i++) if (!g_sg[i].mem && g_sg[i].buf == buf) { memmove(&g_sg[i], &g_sg[i + 1], (size_t)(g_nsg - i - 1) * sizeof *g_sg); g_nsg--; i--; atomic_fetch_add(&g_sg_gen, 1); }
+    for (int i = 0; i < g_nsg; i++) if (!g_sg[i].mem && g_sg[i].buf == buf && g_sg[i].boff >= lo && g_sg[i].boff < hi) { memmove(&g_sg[i], &g_sg[i + 1], (size_t)(g_nsg - i - 1) * sizeof *g_sg); g_nsg--; i--; atomic_fetch_add(&g_sg_gen, 1); }
     pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_pl);
 }
 void mtl_pool_alias(const void *va, uint64_t n, const void *phys) {
