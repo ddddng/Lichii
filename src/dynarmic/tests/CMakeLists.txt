@@ -51,6 +51,7 @@ endif()
 
 if ("arm64" IN_LIST ARCHITECTURE)
     target_architecture_specific_sources(dynarmic_tests "arm64"
+        A64/cache_clear_rsb.cpp
         A64/shared_fastmem.cpp
     )
 endif()
