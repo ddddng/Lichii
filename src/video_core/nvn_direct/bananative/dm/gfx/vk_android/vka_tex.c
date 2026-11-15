@@ -1635,10 +1635,13 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
 
 // VRAM budget (dotfiles-25x.8): when the process's device-local use passes BUDGET_HIGH % of the host's budget, compressed images no draw or copy took for BUDGET_IDLE ticks
 // (a tick a submission: ~2 s) go, oldest first, until the use is down to BUDGET_LOW %. Only compressed ones: their content is always their texture's storage (no render
-// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Not one held outside the recording
+// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Lichii (dotfiles-25x.21): also
+// uncompressed ones the GPU never wrote (gpu_owned), whose content is their storage as well: on the Steam Deck the idle compressed ones were not enough to stay under the
+// budget (DM_VK_BUDGET_UNCOMPRESSED=0: compressed ones only, as before). Not one held outside the recording
 // thread, waiting for a copy back, zero-shared, sparse or of a finalized pool, and only ones with an allocation of their own (4 MiB and up, vka_imgmem.c), whose memory
 // goes back to the driver with them (an image in a shared block may leave the block allocated). Without a budget all images stay (Mario Kart World's race peaked at 12.9 GB under a 10 GB cap)
 enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
+static int budget_uncompressed(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_BUDGET_UNCOMPRESSED", 1) != 0; return v; }
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
 static void blocks_compact(void);
 void vka_tex_budget(void) {
@@ -1660,9 +1663,12 @@ void vka_tex_budget(void) {
     pthread_mutex_lock(&g_tmu);
     vka_img **c = malloc((size_t)(g_nlive ? g_nlive : 1) * sizeof *c); int nc = 0;
     for (int i = 0; c && i < g_nlive; i++) { vka_img *im = g_live[i];
-        if (compressed(&im->f) && !im->m.blk && im->m.dm && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick) c[nc++] = im; }
+        if ((compressed(&im->f) || budget_uncompressed()) && !im->m.blk && im->m.dm && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick) c[nc++] = im; }
     qsort(c, (size_t)nc, sizeof *c, budget_cmp);
     int n = 0;
+    { uint64_t f = 0; int m = 0; while (m < nc && f < want) f += c[m++]->bytes;   // Lichii: the pool slots that name the images going are written again (null until their next use)
+      for (int id = 1; m && id < g_ntreg; id++) { smap_ent *e = g_treg[id].t.serial ? map_get(g_treg[id].t.serial) : NULL;
+          for (int k = 0; e && e->im && k < m; k++) if (e->im == c[k]) { dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id); break; } } }
     for (int k = 0; k < nc && freed < want; k++) { vka_img *im = c[k]; uint64_t bytes = im->bytes;
         int refs = im->refs;   // (the serials' references: none held outside; the last unref may destroy it at once)
         for (size_t i = 0; i < g_mapcap && refs; i++) if (g_map[i].im == im && g_map[i].serial && g_map[i].serial != ~0ull) { map_del(g_map[i].serial); refs--; unref_locked(im); }
@@ -1671,7 +1677,7 @@ void vka_tex_budget(void) {
     pthread_mutex_unlock(&g_tmu);
     evicted += (uint64_t)n; evicted_bytes += freed;
     static _Atomic int nlog; if (n && atomic_fetch_add(&nlog, 1) < 16)
-        VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle compressed images let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
+        VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle images the GPU never wrote let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
              budget / 1048576.0, n, freed / 1048576.0, (unsigned long long)evicted, evicted_bytes / 1048576.0);
 }
 
@@ -1780,6 +1786,12 @@ static uint32_t g_ntex_slots, g_nsamp_slots, g_nimg_slots;
 typedef struct { samp_par p; VkSampler s; } samp_ent; static samp_ent *g_samp; static int g_nsamp;
 static VkSampler *g_sres; static int g_nsres;   // the sampler of each registered ID, found once per registration (sampler_of searches every distinct sampler)
 static VkImageView g_null_view;
+// Lichii (dotfiles-25x.21): a texture ID registered in the pool table gets its image at its first use by a draw (id_view), not at the next submission: Mario Kart World
+// registers ~33,000 textures before its title, 5.7 GiB of images, and on the Steam Deck (1 GiB VRAM + 8 GiB GTT) a command submission then ran out of memory. Until
+// its first use the ID's slot holds the null view. A draw or dispatch with a shader that reads the texture pool itself (any index: vka_draw.c any_pool) makes every
+// pending one first (vka_tex_lazy_make). DM_VK_TEX_LAZY=0: every ID's image at the next submission, as before
+static int *g_tlazy, g_ntl, g_tlcap; static uint8_t *g_tlflag; static int g_tl_pending; static uint64_t g_tl_deferred, g_tl_first_use, g_tl_pool_made;
+static int tex_lazy(void) { static int v = -1; if (v < 0) { v = VKA_ENV("DM_VK_TEX_LAZY", 1) != 0; VLOG("texture pool IDs: %s", v ? "images made at their first use (DM_VK_TEX_LAZY=0: at registration)" : "images made at registration (DM_VK_TEX_LAZY=0)"); } return v; }
 
 static void bindless_init(void) {
     static int done; if (done) return; done = 1;
@@ -1965,8 +1977,15 @@ static int treg_dead(int id, const treg_ent *e) {
     if (dead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("texture ID %d (serial %llu, storage %p): its pool %p was finalized after the registration: null view", id, (unsigned long long)e->t.serial, (void *)e->t.mem, (const void *)e->t.pool); }
     return dead;
 }
-static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii) {   // caller holds g_tmu; it is let go while the image is made
+static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii, int make) {   // caller holds g_tmu; it is let go while the image is made
     treg_ent ent = g_treg[id], *e = &ent;
+    if (!make && tex_lazy() && !map_get(e->t.serial)) {   // (no image yet: made at its first use)
+        if (!g_tlflag || !g_tlflag[id]) { dirty(&g_tlazy, &g_ntl, &g_tlcap, &g_tlflag, 1 << 20, id); g_tl_pending++; g_tl_deferred++; }
+        *ii = (VkDescriptorImageInfo){VK_NULL_HANDLE, g_null_view, VK_IMAGE_LAYOUT_GENERAL};
+        *w = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = e->img ? 2 : 0, .dstArrayElement = (uint32_t)id, .descriptorCount = 1,
+                                    .descriptorType = e->img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = ii};
+        return;
+    }
     if (e->img && VKA_ENV("DM_VK_IMG_UPGRADE", 1)) e->t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // an image registration is image intent (nvn_mtl.m image_prepare), with or without the texture's IMAGE flag
     pthread_mutex_unlock(&g_tmu);
     nvn_pool_use(1);
@@ -2057,6 +2076,11 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     pthread_mutex_unlock(&g_tmu);
     nvn_pool_use(1); g_first_sampled = !storage; vka_img *im = treg_dead(id, &e) ? NULL : vka_tex_get(&e.t, cb); g_first_sampled = 0; nvn_pool_use(0);
     if (!im) return VK_NULL_HANDLE;
+    if (g_tlflag && g_tlflag[id]) {   // (made at its first use: its slot in the pool table is written at the next submission)
+        pthread_mutex_lock(&g_tmu);
+        if (g_tlflag[id]) { g_tlflag[id] = 0; g_tl_pending--; g_tl_first_use++; dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id); }
+        pthread_mutex_unlock(&g_tmu);
+    }
     if (!storage && im->nali) { pthread_mutex_lock(&g_tmu); alias_check(im); pthread_mutex_unlock(&g_tmu); }
     int vt = dim_view_type(dim);
     if (vt < 0) return VK_NULL_HANDLE;
@@ -2259,11 +2283,12 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     }
     nvn_pool_use(0);   // (write_tex takes it again for each ID, after letting g_tmu go: never twice on one thread)
     if (!g_set) { g_ntd = g_nsd = 0; if (g_tdflag) memset(g_tdflag, 0, 1 << 20); if (g_sdflag) memset(g_sdflag, 0, 4096 * 4); pthread_mutex_unlock(&g_tmu); return; }
+    if (g_ntl > 2 * g_tl_pending + 1024) { int k = 0; for (int i = 0; i < g_ntl; i++) if (g_tlflag[g_tlazy[i]]) g_tlazy[k++] = g_tlazy[i]; g_ntl = k; }   // (IDs made since: out of the waiting list)
     enum { BATCH = 64 }; VkWriteDescriptorSet w[BATCH]; VkDescriptorImageInfo ii[BATCH]; int nw = 0;
     for (int k = 0; k < g_ntd; k++) {
         int id = g_tdirty[k]; g_tdflag[id] = 0;
         if (id >= (int)(g_treg[id].img ? g_nimg_slots : g_ntex_slots)) { VRED_ONCE("texture ID %d beyond the table", id); continue; }
-        write_tex(id, cb, &w[nw], &ii[nw]);
+        write_tex(id, cb, &w[nw], &ii[nw], 0);
         if (w[nw].pImageInfo->imageView) nw++;
         if (nw == BATCH) { vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL); nw = 0; }
     }
@@ -2279,6 +2304,31 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     g_nsd = 0;
     if (nw) vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL);
     pthread_mutex_unlock(&g_tmu);
+}
+
+int vka_tex_lazy_pending(void) { return g_tl_pending > 0; }
+// Every texture ID whose image waits for its first use made now, its slot written at once (update after bind): a shader that reads the pool by any index is about to run.
+// Outside a render pass (the uploads)
+void vka_tex_lazy_make(VkCommandBuffer cb) {
+    enum { BATCH = 64 }; VkWriteDescriptorSet w[BATCH]; VkDescriptorImageInfo ii[BATCH]; int nw = 0, made = 0;
+    pthread_mutex_lock(&g_tmu);
+    for (int k = 0; k < g_ntl; k++) {
+        int id = g_tlazy[k];
+        if (!g_tlflag[id]) continue;
+        g_tlflag[id] = 0; g_tl_pending--;
+        if (!g_treg[id].t.serial || id >= (int)(g_treg[id].img ? g_nimg_slots : g_ntex_slots)) continue;
+        write_tex(id, cb, &w[nw], &ii[nw], 1); made++;
+        if (w[nw].pImageInfo->imageView) nw++;
+        if (nw == BATCH) { vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL); nw = 0; }
+    }
+    g_ntl = 0;
+    if (nw) vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL);
+    g_tl_pool_made += (uint64_t)made;
+    uint64_t deferred = g_tl_deferred, first = g_tl_first_use, pool = g_tl_pool_made;
+    pthread_mutex_unlock(&g_tmu);
+    static _Atomic int nlog; if (made && atomic_fetch_add(&nlog, 1) < 8)
+        VLOG("texture pool IDs: %d images made for a shader that reads the pool by index (so far: %llu IDs waited for their first use, %llu made at a draw's use, %llu for pool-reading shaders)",
+             made, (unsigned long long)deferred, (unsigned long long)first, (unsigned long long)pool);
 }
 
 // ---------- The frame capture (vka_capture.c, DM_NVN_CAPTURE) and its replayer (vka_replay.c) ----------

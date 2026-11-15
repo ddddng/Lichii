@@ -88,6 +88,10 @@ public:
         return backing_base;
     }
 
+    /// The file behind the backing memory, -1 when there is none (Linux: the memfd; the backing
+    /// byte at p is its offset p - BackingBasePointer()).
+    [[nodiscard]] int BackingFd() const noexcept;
+
     [[nodiscard]] u8* VirtualBasePointer() noexcept {
         return virtual_base;
     }

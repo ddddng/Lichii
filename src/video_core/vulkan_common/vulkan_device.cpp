@@ -967,6 +967,13 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         if (supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
         }
+        // Pools as udmabufs of guest memory where host-pointer imports of it are refused
+        // (amdgpu, dotfiles-25x.21: vka_mem.c vka_mem_import_choose)
+        if (supported_extensions.contains(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+            supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+            loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        }
         // EDEN_NX2_NVN_CHECKPOINTS=1 (lab, dotfiles-25x.15): a checkpoint before each of the
         // replay's draws and dispatches, logged at a GPU hang (vka_draw.c vka_checkpoint_report).
         if (const char* checkpoints = std::getenv("EDEN_NX2_NVN_CHECKPOINTS");

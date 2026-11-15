@@ -23,6 +23,10 @@ uint64_t nvn_direct_host_of(uint64_t guest);
 /// nvn_direct_memory's map_view and track_pages (nvn_direct.h).
 void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped);
 void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed);
+/// The file holding the backing memory of the guest page at address (nvn_direct_memory's
+/// backing_fd) and the page's offset in it (*offset); -1 when there is no file or the guest has
+/// not mapped the page.
+int nvn_direct_backing_file(uint64_t address, uint64_t* offset);
 /// Where the host writes a value into guest memory at host (an arena pointer or the game's
 /// address): its backing memory, which write tracking never protects. Anything else (a host
 /// segment): unchanged. The value must not cross a page.

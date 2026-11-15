@@ -577,6 +577,11 @@ static int shm_open_anon(int flags, mode_t mode) {
 
 class HostMemory::Impl {
 public:
+    /// The memfd behind the backing memory, -1 when there is none
+    int BackingFd() const noexcept {
+        return fd;
+    }
+
     explicit Impl(size_t backing_size_, size_t virtual_size_)
         : backing_size{backing_size_}
         , virtual_size{virtual_size_}
@@ -637,6 +642,10 @@ public:
         if (fd >= 0) {
             unlink(template_path);
         }
+#elif defined(MFD_ALLOW_SEALING)
+        // Sealable: sealed against shrinking below, because udmabuf takes only such memfds (the
+        // NVN direct renderer's pool imports on amdgpu, vka_mem.c import_seg)
+        fd = memfd_create("HostMemory", MFD_ALLOW_SEALING);
 #else
         fd = memfd_create("HostMemory", 0);
 #endif
@@ -652,6 +661,11 @@ public:
                 LOG_WARNING(Common_Memory, "ftruncate: {} (likely out-of-emory)", strerror(errno));
                 use_anon = true;
             }
+#if defined(__linux__) && defined(F_SEAL_SHRINK)
+            if (!use_anon && fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
+                LOG_WARNING(Common_Memory, "F_SEAL_SHRINK: {}", strerror(errno));
+            }
+#endif
         }
         if (use_anon) {
             LOG_WARNING(Common_Memory, "Using private mappings instead of shared ones");
@@ -1051,6 +1065,14 @@ void HostMemory::Swap(HostMemory& other) noexcept {
     std::swap(granules, other.granules);
     std::swap(num_granules, other.num_granules);
     std::swap(fallback_buffer, other.fallback_buffer);
+}
+
+int HostMemory::BackingFd() const noexcept {
+#if defined(__linux__)
+    return impl ? impl->BackingFd() : -1;
+#else
+    return -1;
+#endif
 }
 
 namespace {

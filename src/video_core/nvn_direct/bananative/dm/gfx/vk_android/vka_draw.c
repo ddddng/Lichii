@@ -943,6 +943,7 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, VKA_SET_FS, 1, &fs, 0, NULL);
     }
     if (g_prof) g_ps[2] += cntvct() - t2_;
+    if (any_pool && bp == VK_PIPELINE_BIND_POINT_COMPUTE && vka_tex_lazy_pending()) vka_tex_lazy_make(g_cb);   // (Lichii: as make_images does for draws; no pass is open)
     if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
     return 1;
 }
@@ -957,6 +958,7 @@ static int make_images(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], in
             any = 1; if (dry) return 1;
             vka_tex_id_view(r[i].tid, g_cb, r[i].dim, r[i].what == VKA_R_IMG, NULL);
         }
+        if (g_wk.pool[st] && vka_tex_lazy_pending()) { any = 1; if (dry) return 1; vka_tex_lazy_make(g_cb); }   // (Lichii: the pool read by index: every ID's image first)
     }
     return any;
 }

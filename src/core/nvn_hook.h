@@ -79,7 +79,7 @@ namespace Core::NvnHook {
 void StopDirect();
 
 /// Finds the NVN driver's exports in the application's modules (after they are loaded).
-void Install(Kernel::KProcess& process);
+void Install(Core::System& system, Kernel::KProcess& process);
 
 /// UserConfig::block_entry_hook (null when the hook is off).
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc);

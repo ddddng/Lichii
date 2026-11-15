@@ -169,6 +169,11 @@ typedef struct nvn_direct_memory {
     /// guest has not mapped it.
     void* (*backing)(void* context, uint64_t address);
     void* context;
+    /// The file behind the backing memory (Lichii's memfd), -1 when there is none, and the
+    /// backing view's base: the backing byte at p is the file's byte p - backing_base. Pools are
+    /// imported as udmabufs of it where the driver refuses host-pointer imports of it (amdgpu).
+    int backing_fd;
+    const uint8_t* backing_base;
 } nvn_direct_memory;
 
 /// Takes the front end's slot table (the names of upstream's names.txt, in its order), the

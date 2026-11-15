@@ -21,6 +21,7 @@
 
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/device_memory.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
@@ -158,6 +159,8 @@ struct State {
     u64 presents{};                                         ///< direct mode's presents so far
 
     Kernel::KProcess* process{};
+    /// Lichii's guest memory (its memfd and backing view, for the replay's pool imports)
+    const Common::HostMemory* host_memory{};
     u64 synthetic_base{};
     /// nvnBootstrapLoader, every module's export: LM3 (Switch 1) exports it from a subsdk
     /// (nnSdkEn) and from nnSdk (dotfiles-1gi).
@@ -641,7 +644,9 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
             const nvn_direct_memory views{.map_view = MapPoolView,
                                           .track_pages = TrackPages,
                                           .backing = Backing,
-                                          .context = &state};
+                                          .context = &state,
+                                          .backing_fd = state.host_memory->BackingFd(),
+                                          .backing_base = state.host_memory->BackingBasePointer()};
             nvn_direct_init(page_table.GetImpl().fastmem_arena,
                             u64{1} << page_table.GetAddressSpaceWidth(), &views);
             state.direct_ready = true;
@@ -702,7 +707,7 @@ void StopDirect() {
 #endif
 }
 
-void Install(Kernel::KProcess& process) {
+void Install(Core::System& system, Kernel::KProcess& process) {
     State* const state_pointer = Get();
     if (state_pointer == nullptr) {
         return;
@@ -751,6 +756,7 @@ void Install(Kernel::KProcess& process) {
         address = end;
     }
     state.process = &process;
+    state.host_memory = &system.DeviceMemory().buffer;
 #ifdef LICHII_NVN_DIRECT
     // One launch per process: the direct renderer's state lives as long as the process does.
     state.direct = EnvIsOne("EDEN_NX2_NVN_DIRECT") && !state.bootstrap_entries.empty();
