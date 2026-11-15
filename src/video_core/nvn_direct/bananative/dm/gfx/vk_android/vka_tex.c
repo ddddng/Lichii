@@ -1566,11 +1566,21 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
 // goes back to the driver with them (an image in a shared block may leave the block allocated). Without a budget all images stay (Mario Kart World's race peaked at 12.9 GB under a 10 GB cap)
 enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
+static void blocks_compact(void);
 void vka_tex_budget(void) {
     static uint64_t evicted, evicted_bytes;
     if (++g_tick % 4) return;   // (the use read about once a frame)
     uint64_t usage, budget;
-    if (!vka_mem_budget(&usage, &budget) || usage * 100 <= budget * BUDGET_HIGH) return;
+    int have = vka_mem_budget(&usage, &budget);
+    if (g_tick % 64 == 0) blocks_compact();
+    if (g_tick % 2000 == 0) {   // (Lichii, dotfiles-25x.8: what the budget sees against the replay's own memory)
+        char h[256], im[256]; void vka_heap_line(char *, size_t); vka_heap_line(h, sizeof h); vka_imem_stats(im, sizeof im);
+        int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
+        int vka_dpool_count(void);
+        VLOG("VRAM: host use %.0f of budget %.0f MiB; driver %s; replay images %.0f MiB (%d), scratch %.0f MiB, %d descriptor pools; %s", have ? usage / 1048576.0 : -1.0, have ? budget / 1048576.0 : -1.0, h,
+             img / 1048576.0, ni, scr / 1048576.0, vka_dpool_count(), im);
+    }
+    if (!have || usage * 100 <= budget * BUDGET_HIGH) return;
     uint64_t want = usage - budget / 100 * BUDGET_LOW, freed = 0;
     pthread_mutex_lock(&g_tmu);
     vka_img **c = malloc((size_t)(g_nlive ? g_nlive : 1) * sizeof *c); int nc = 0;
@@ -1588,6 +1598,31 @@ void vka_tex_budget(void) {
     static _Atomic int nlog; if (n && atomic_fetch_add(&nlog, 1) < 16)
         VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle compressed images let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
              budget / 1048576.0, n, freed / 1048576.0, (unsigned long long)evicted, evicted_bytes / 1048576.0);
+}
+
+// Lichii (dotfiles-25x.8): image blocks emptied by the textures the game let go of (a course load left 1.2 GiB free in 55 blocks of 64 MiB: ux-vram-1) stay allocated while
+// any image remains in them. When their free space passes COMPACT_MB and a quarter of the blocks, idle compressed images (as the budget takes them) in the emptiest blocks
+// are let go of, so those blocks empty and go back to the driver; their textures are made again in other blocks at their next use. DM_VK_COMPACT=0: off
+enum { COMPACT_MB = 256 };
+static int compact_cmp(const void *a, const void *b) { double x = vka_imem_block_use((*(vka_img *const *)a)->m.blk), y = vka_imem_block_use((*(vka_img *const *)b)->m.blk); return x < y ? -1 : x > y; }
+static void blocks_compact(void) {
+    static int on = -1; if (on < 0) on = VKA_ENV("DM_VK_COMPACT", 1) != 0;
+    uint64_t total, waste = on ? vka_imem_block_free(&total) : 0;
+    if (waste < (uint64_t)COMPACT_MB << 20 || waste * 4 < total) return;
+    pthread_mutex_lock(&g_tmu);
+    vka_img **c = malloc((size_t)(g_nlive ? g_nlive : 1) * sizeof *c); int nc = 0;
+    for (int i = 0; c && i < g_nlive; i++) { vka_img *im = g_live[i];
+        if (compressed(&im->f) && im->m.blk && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick
+            && vka_imem_block_use(im->m.blk) < 0.5) c[nc++] = im; }
+    qsort(c, (size_t)nc, sizeof *c, compact_cmp);
+    uint64_t freed = 0; int n = 0;
+    for (int k = 0; k < nc && freed < waste / 2; k++) { vka_img *im = c[k]; uint64_t bytes = im->bytes; int refs = im->refs;
+        for (size_t i = 0; i < g_mapcap && refs; i++) if (g_map[i].im == im && g_map[i].serial && g_map[i].serial != ~0ull) { map_del(g_map[i].serial); refs--; unref_locked(im); }
+        freed += bytes; n++; }
+    free(c);
+    pthread_mutex_unlock(&g_tmu);
+    static _Atomic int nlog; if (n && atomic_fetch_add(&nlog, 1) < 16)
+        VLOG("image blocks: %.0f of %.0f MiB free: %d idle compressed images of the emptiest blocks let go of (%.0f MiB), made again at their next use", waste / 1048576.0, total / 1048576.0, n, freed / 1048576.0);
 }
 
 void mtl_tex_init(const tex_t *t) { (void)t; }

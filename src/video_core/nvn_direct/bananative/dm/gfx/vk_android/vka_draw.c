@@ -170,6 +170,7 @@ void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
         for (size_t i = 0; i < sizeof dims; i++) for (int c = 0; c < 3; c++) placeholder(dims[i] | (c == 1 ? DMSH_VK_DIM_SINT : c == 2 ? DMSH_VK_DIM_UINT : 0), 0);
     }
 }
+int vka_dpool_count(void) { int n = 0; for (int i = 0; i < NSLOT; i++) n += g_ndp[i]; return n; }   // (Lichii: the VRAM line)
 static VkDescriptorSet set_alloc(VkDescriptorSetLayout l) {
     for (;;) {
         int i = g_cur_dp[g_slot];

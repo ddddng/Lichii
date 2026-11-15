@@ -635,6 +635,16 @@ void vka_pipeline_notify(int built) {   // (Lichii: nvn_direct_device.pipeline_b
     void (*fn)(void *) = built ? g_adopt.pipeline_built : g_adopt.pipeline_building;
     if (fn) fn(g_adopt.pipeline_context);
 }
+// Lichii (dotfiles-25x.8): the driver's own use and budget per heap (VK_EXT_memory_budget), MiB, for the VRAM line
+void vka_heap_line(char *o, size_t n) {
+    static PFN_vkGetPhysicalDeviceMemoryProperties2 get; if (!get && g_adopt.get_instance_proc_addr) get = (PFN_vkGetPhysicalDeviceMemoryProperties2)g_adopt.get_instance_proc_addr(g_adopt.instance, "vkGetPhysicalDeviceMemoryProperties2");
+    if (!n) return; o[0] = 0; if (!get) return;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT}; VkPhysicalDeviceMemoryProperties2 p = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &b};
+    get(V.pd, &p); size_t k = 0;
+    for (uint32_t i = 0; i < p.memoryProperties.memoryHeapCount && k < n; i++)
+        k += (size_t)snprintf(o + k, n - k, "%sheap %u%s %.0f / %.0f", i ? ", " : "", i, (p.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " (device)" : "",
+                              b.heapUsage[i] / 1048576.0, b.heapBudget[i] / 1048576.0);
+}
 int vka_mem_budget(uint64_t *usage, uint64_t *budget) {   // the host's device-local use and budget (Lichii: nvn_direct_device.memory_usage / memory_budget); 0 = no budget
     if (!g_adopt.memory_budget || !g_adopt.memory_usage || !(*budget = g_adopt.memory_budget(g_adopt.memory_context))) return 0;
     *usage = g_adopt.memory_usage(g_adopt.memory_context); return 1;
