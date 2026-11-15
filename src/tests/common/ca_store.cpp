@@ -17,7 +17,7 @@ namespace {
 
 class ScopedEnv {
 public:
-    ScopedEnv(const char* name, const char* value) : name{name} {
+    ScopedEnv(const char* env_name, const char* value) : name{env_name} {
         if (const char* old = std::getenv(name)) {
             previous = old;
         }
