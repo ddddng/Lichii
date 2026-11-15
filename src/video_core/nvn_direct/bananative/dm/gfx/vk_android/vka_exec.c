@@ -25,7 +25,7 @@ static int g_chunk_draws = -1, g_nx; static uint64_t g_chunk_d0;   // chunk(): d
 static VkCommandPool g_pool;
 static VkCommandBuffer g_cb;   // the submission being recorded (NULL without a device)
 VkCommandBuffer vka_rp_cb(void) { return g_cb; }
-typedef struct { int kind; uint32_t mode, v, type; uint64_t addr; } pop;   // kind 1 event, 2 counter report
+typedef struct { int kind; uint32_t mode, v, type; uint64_t addr; } pop;   // kind 1 event, 2 counter report, 3 frame span, 4 the submission's frame (DM_VK_TS_LOG)
 static pop *g_post; static int g_npost, g_postcap;
 static uint64_t g_frame, g_stat_ops, g_stat_draws, g_stat_skipped;
 static int g_origin_ll = 1, g_queue_origin_ll = 1, g_depth_zero;
@@ -94,13 +94,39 @@ uint64_t guest_ns(void);
 // timestamp where it is recorded (TOP_OF_PIPE for TIMESTAMP_TOP, else BOTTOM_OF_PIPE), and once the submission is done each report gets the completion time less the GPU time
 // from it to the submission's last report, so two reports of one submission bracket the GPU work between them (a game's dynamic resolution and frame pacing read that).
 // Without it every report of a submission reads the same time (the completion)
+// Lichii (dotfiles-25x.26, lab): DM_NVN_GPU_TS=gpu: each report reads its own GPU timestamp, on the guest clock: the device's ticks in ns plus an offset calibrated
+// against CLOCK_MONOTONIC (VK_KHR/EXT_calibrated_timestamps, once a second; without it the smallest completion-time-less-GPU-time seen lately), never later than the
+// completion and never before an earlier report. Not the default: Mario Kart World puts its ~13 timestamp reports a frame in one submission, so with one time a
+// submission it reads a GPU time of 0 and keeps 1080p at a 1-vblank interval; with the GPU's own times (frame span p50 10.4, p90 14.3, p99 22.7 ms: GPU work plus the
+// GPU's waits for the replay's recording) it lowered its render resolution (1248x700 passes) and presented 16% of frames at 2 vblanks (nd26g-1: 22.1 ms against 17.1).
+// The reports stay in 614.4 MHz ticks (nvn_timestamp.h): the game reads them through nvnDeviceGetTimestampInNanoseconds (~8 calls a frame), which turns them back into ns
 enum { SEGQ = 128 };   // queries per submission slot
 static VkQueryPool g_sqp; static int g_sq_n, g_sq_base, g_seg = -1;
 static PFN_vkGetQueryPoolResults g_sq_get; static double g_sq_ns;
 static int seg_ts(void) {
-    if (g_seg < 0) { const char *e = getenv("DM_NVN_GPU_TS"); g_seg = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT;
-                     VLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", g_seg ? "GPU time of their place in the submission" : "one time for the whole submission"); }
+    if (g_seg < 0) { const char *e = getenv("DM_NVN_GPU_TS"); g_seg = e && *e ? (!strcmp(e, "gpu") ? 2 : !strcmp(e, "segment")) : DM_GAME_GPU_TS_SEGMENT;
+                     VLOG("counter timestamps: %s (DM_NVN_GPU_TS=gpu / segment / submission)", g_seg == 2 ? "each report's GPU time on the guest clock" : g_seg ? "GPU time of their place in the submission" : "one time for the whole submission"); }
     return g_seg;
+}
+// Lab: DM_VK_TS_LOG=1, a line per frame: its timestamp reports' span as written and as the GPU timed it, and every 600 frames the calls that read them
+static int ts_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_LOG"); v = e && atoi(e) > 0; } return v; }
+extern uint64_t g_t0_ns;   // nvn_direct_host.c: guest_ns() = CLOCK_MONOTONIC - g_t0_ns
+static int64_t gpu_offset(uint64_t g, uint64_t tmax) {   // (completion thread) guest ns of GPU tick 0
+    static PFN_vkGetCalibratedTimestampsKHR cal; static int state; static int64_t off; static uint64_t at; static int have;
+    if (!state) {
+        cal = (PFN_vkGetCalibratedTimestampsKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetCalibratedTimestampsKHR");
+        if (!cal) cal = (PFN_vkGetCalibratedTimestampsKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetCalibratedTimestampsEXT");
+        state = cal ? 1 : -1;
+        VLOG("counter timestamps: GPU clock %s", cal ? "calibrated against CLOCK_MONOTONIC (calibrated timestamps)" : "placed by the completion times (no calibrated timestamps)");
+    }
+    if (state == 1 && (!have || g - at > 1000000000ull)) {
+        VkCalibratedTimestampInfoKHR ci[2] = {{VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, NULL, VK_TIME_DOMAIN_DEVICE_KHR}, {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, NULL, VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR}};
+        uint64_t ts[2] = {0, 0}, dev = 0;
+        if (!cal(V.dev, 2, ci, ts, &dev)) { off = (int64_t)(ts[1] - g_t0_ns) - (int64_t)((double)ts[0] * g_sq_ns); at = g; have = 1; }
+        else { state = -1; VRED("counter timestamps: vkGetCalibratedTimestamps refused: placed by the completion times"); }
+    }
+    if (state != 1) { int64_t o = (int64_t)g - (int64_t)((double)tmax * g_sq_ns); if (!have || o < off || g - at > 2000000000ull) { off = o; at = g; have = 1; } }
+    return off;
 }
 static void post_run(void *ops_, int n) {   // the completion thread, in submission order, before the fence reads as done
     pop *ops = ops_;
@@ -111,6 +137,9 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
         uint64_t t = 0; if (g_sq_get(V.dev, g_sqp, ops[i].v - 1, 1, 8, &t, 8, VK_QUERY_RESULT_64_BIT) || !t) { ops[i].v = 0; continue; }
         if (nq < SEGQ) { gq[nq++] = t; if (t > tmax) tmax = t; } else ops[i].v = 0;
     }
+    int64_t off = g_seg == 2 && nq ? gpu_offset(g, tmax) : 0;
+    static uint64_t last_ts;   // (gpu) the latest report written: reports stay in submission order
+    static uint64_t lf = ~0ull, f_n, f_wmin, f_wmax, f_gmin, f_gmax; uint64_t frame = ~0ull;   // DM_VK_TS_LOG: the frame being summed
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) for (int i = 0; i < n; i++) if (ops[i].kind == 2 && ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP) {
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
     for (int i = 0, q = 0; i < n; i++) {
@@ -120,14 +149,33 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             if (atomic_load(&g_fstart_f[k]) == f) { uint64_t t0 = atomic_load(&g_fstart[k]), t1 = now_ns(); if (t1 > t0) vka_floor_span(f, t1 - t0); }
             continue;
         }
-        if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last
-            uint64_t back = (uint64_t)((double)(tmax - gq[q++]) * g_sq_ns); uint64_t tk = nvn_timestamp_from_ns(g > back ? g - back : 0), tt = ops[i].type;
+        if (ops[i].kind == 4) {   // (DM_VK_TS_LOG) the submission's frame: the frame before it is summed up
+            frame = ops[i].addr;
+            if (frame != lf && lf != ~0ull && f_n) VLOG("ts frame %llu: %llu reports, written span %.3f ms, GPU span %.3f ms, last at %.3f s", (unsigned long long)lf, (unsigned long long)f_n,
+                                                         (f_wmax - f_wmin) / 1e6, f_gmax > f_gmin ? (f_gmax - f_gmin) / 1e6 : 0.0, f_wmax / 1e9);
+            if (frame != lf) { lf = frame; f_n = 0; }
+            if (frame % 600 == 0 && !f_n) { uint64_t nvn_direct_calls(const char *); VLOG("ts calls so far: GetTimestampInNanoseconds %llu, GetCurrentTimestampInNanoseconds %llu, ReportCounter %llu, CommandBufferWaitSync %llu, QueueWaitSync %llu",
+                (unsigned long long)nvn_direct_calls("nvnDeviceGetTimestampInNanoseconds"), (unsigned long long)nvn_direct_calls("nvnDeviceGetCurrentTimestampInNanoseconds"),
+                (unsigned long long)nvn_direct_calls("nvnCommandBufferReportCounter"), (unsigned long long)nvn_direct_calls("nvnCommandBufferWaitSync"), (unsigned long long)nvn_direct_calls("nvnQueueWaitSync")); }
+            continue;
+        }
+        if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last (gpu: its own GPU time)
+            uint64_t gns = (uint64_t)((double)gq[q] * g_sq_ns), back = (uint64_t)((double)(tmax - gq[q]) * g_sq_ns), ns; q++;
+            if (g_seg == 2) { int64_t x = (int64_t)gns + off; ns = x < 0 ? 0 : (uint64_t)x; if (ns > g) ns = g; if (ns < last_ts) ns = last_ts; last_ts = ns; }
+            else ns = g > back ? g - back : 0;
+            if (frame != ~0ull && (ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP || ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
+                uint64_t w = g_seg ? ns : g;
+                if (!f_n || w < f_wmin) f_wmin = w; if (!f_n || w > f_wmax) f_wmax = w; if (!f_n || gns < f_gmin) f_gmin = gns; if (!f_n || gns > f_gmax) f_gmax = gns; f_n++;
+            }
+            if (!g_seg) goto plain;   // (DM_VK_TS_LOG with one time a submission: the query only for the log)
+            uint64_t tk = nvn_timestamp_from_ns(ns), tt = ops[i].type;
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
             if (ops[i].mode) { memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8); continue; }   // (Lichii: its counter written at replay, rc_counter)
             memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
-        else {
+        else plain: {
+            if (g > last_ts) last_ts = g;
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
             if (ops[i].mode) memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8);   // (Lichii: its counter written at replay, rc_counter)
@@ -235,6 +283,7 @@ void vka_rp_sub_begin(void) {
     vka_perf_thread(0); vka_ctl_sub();
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
+    if (ts_log()) { uint64_t vka_present_filled(void); post((pop){4, 0, 0, 0, vka_present_filled()}); }   // (the frame: presents filled before this submission, nvn_present.c)
     if (!vka_init()) return;
     vka_tex_budget();
     memset(&g_psy, 0, sizeof g_psy); g_qi = queue_of(S.serial);
@@ -260,7 +309,7 @@ void vka_rp_sub_begin(void) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ;
-        if (seg_ts() && !g_sqp) {
+        if ((seg_ts() || ts_log()) && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
             if (qf.create(V.dev, &ci, NULL, &g_sqp)) { g_sqp = VK_NULL_HANDLE; g_seg = 0; VRED("segment timestamps: no query pool: one time for the whole submission"); }
             g_sq_get = qf.get; g_sq_ns = g_ts_ns;

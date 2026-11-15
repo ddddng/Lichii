@@ -88,6 +88,7 @@ static void frame_path_creation(uint64_t tk) {
         { uint64_t stale, dr, kp; vka_tex_stale_stats(&stale); vka_copy_drop_stats(&dr, &kp); VLOG("stale alias reads so far: %llu; copies into left-out levels dropped %llu, into kept levels of such textures %llu", (unsigned long long)stale, (unsigned long long)dr, (unsigned long long)kp); }
     }
 }
+uint64_t vka_present_filled(void) { return g_filled; }   // (the replay thread, which fills them: DM_VK_TS_LOG's frame number)
 void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int crop[4]) {
     vka_perf_frame(period_s);
     frame_path_creation(tk);

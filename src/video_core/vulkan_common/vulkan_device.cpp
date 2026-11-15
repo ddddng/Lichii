@@ -974,6 +974,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             loaded_extensions.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
             loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
         }
+        // Counter timestamps on the guest clock (dotfiles-25x.26: vka_exec.c gpu_offset)
+        if (supported_extensions.contains(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        } else if (supported_extensions.contains(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        }
         // EDEN_NX2_NVN_CHECKPOINTS=1 (lab, dotfiles-25x.15): a checkpoint before each of the
         // replay's draws and dispatches, logged at a GPU hang (vka_draw.c vka_checkpoint_report).
         if (const char* checkpoints = std::getenv("EDEN_NX2_NVN_CHECKPOINTS");
