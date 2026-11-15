@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
 #include "bananative/dm/host/plat/plat.h"
@@ -282,7 +283,7 @@ static vka_shlib* rc_lib(uint64_t key, int vks, uint16_t flags, const nvn_direct
 
 // ---------- Translation ----------
 typedef struct { vka_shader* sh; int st, gl_depth; uint32_t prim; } rc_shader;   // prim: a mesh shader's generic outputs written per primitive
-static _Atomic unsigned g_made, g_failed, g_unplaced;
+static _Atomic unsigned g_made, g_failed, g_unplaced, g_cached;
 static int rc_vks(int st) { return vka_vk_stage(st); }
 static unsigned rc_first_binding(int vks) { int r = vks == DMSH_VK_STAGE_CS || vks == DMSH_VK_STAGE_MS ? DMSH_VK_STAGE_VS : vks == DMSH_VK_STAGE_TS ? DMSH_VK_STAGE_TCS : vks; return (unsigned)r * DMSH_VK_STAGE_BINDINGS; }
 // A stage translated with draw d's state: 1 with *o filled (given back with vka_shader_translated_free), *vin_types the vertex inputs' types
@@ -320,7 +321,71 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const uint8_t*
     return b;
 }
 
-// EDEN_NX2_NVN_RECOMPILE_DUMP=<dir> (lab): every module as <key>[-p<per-primitive inputs>].spv, for spirv-val
+// ---------- Translations kept across runs ----------
+// $DM_TEMP/vk_recompiled.bin (EDEN_NX2_NVN_RECOMPILE_CACHE=0: none): each translation as it was first made, by shader key (and per-primitive
+// inputs), so the next run takes it as it is rather than translating again with that run's first draw's state, whose SPIR-V may differ
+// (another texture bound when a slot's type is read) and miss the pipeline cache. Tied to this executable (size and modification time).
+// Records: magic, size of the rest, slot, gl_depth, per-primitive outputs, vertex input types, the nvn_direct_shader fields, descriptors, SPIR-V
+#define RC_FILE_MAGIC 0x3143524cu   // "LRC1"
+#define RC_REC_MAGIC 0x5243524cu    // "LRCR"
+typedef struct { uint32_t magic, size; uint64_t slot; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, desc_count, spirv_words; } rc_rec;
+static rc_map g_disk;      // slot -> rc_rec + its descriptors and SPIR-V (malloc'd, kept)
+static FILE* g_disk_f; static int g_disk_state;   // 0 not opened, 1 open, -1 none
+static void disk_open(void) {
+    if (g_disk_state) return;
+    g_disk_state = -1;
+    const char *t = getenv("DM_TEMP"), *e = getenv("EDEN_NX2_NVN_RECOMPILE_CACHE");
+    if (!t || !*t || (e && !strcmp(e, "0"))) return;
+    struct stat st; uint64_t stamp[2] = {0, 0};
+    if (!stat("/proc/self/exe", &st)) { stamp[0] = (uint64_t)st.st_size; stamp[1] = (uint64_t)st.st_mtime; }
+    char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
+    FILE* f = fopen(path, "rb"); unsigned n = 0;
+    if (f) {
+        uint32_t magic = 0; uint64_t had[2] = {0, 0};
+        if (fread(&magic, 4, 1, f) == 1 && magic == RC_FILE_MAGIC && fread(had, 8, 2, f) == 2 && had[0] == stamp[0] && had[1] == stamp[1]) {
+            rc_rec r;
+            while (fread(&r, sizeof r, 1, f) == 1 && r.magic == RC_REC_MAGIC) {
+                size_t rest = (size_t)r.desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r.spirv_words * 4;
+                if (r.size != sizeof r + rest) break;
+                uint8_t* m = malloc(sizeof r + rest); if (!m) break;
+                memcpy(m, &r, sizeof r);
+                if (fread(m + sizeof r, 1, rest, f) != rest) { free(m); break; }
+                rc_put(&g_disk, r.slot, m); n++;
+            }
+        } else n = ~0u;
+        fclose(f);
+    }
+    if (n == ~0u || !f) {   // none yet, or another executable's: started again
+        g_disk_f = fopen(path, "wb");
+        if (g_disk_f) { uint32_t magic = RC_FILE_MAGIC; fwrite(&magic, 4, 1, g_disk_f); fwrite(stamp, 8, 2, g_disk_f); fflush(g_disk_f); }
+        n = 0;
+    } else g_disk_f = fopen(path, "ab");
+    if (!g_disk_f) { VRED("recompiler: %s not writable: translations are not kept", path); return; }
+    g_disk_state = 1;
+    VLOG("recompiler: %u translations read from %s", n, path);
+}
+// A kept translation as an nvn_direct_shader (its arrays point into the record: not to be freed)
+static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, int* gl_depth, uint32_t* prim) {
+    pthread_mutex_lock(&g_mu); disk_open(); rc_ent* e = rc_find(&g_disk, slot); uint8_t* m = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    if (!m) return 0;
+    const rc_rec* r = (const rc_rec*)m;
+    memset(o, 0, sizeof *o);
+    o->descs = (nvn_direct_shader_desc*)(m + sizeof *r); o->desc_count = r->desc_count;
+    o->spirv = (uint32_t*)(m + sizeof *r + (size_t)r->desc_count * sizeof(nvn_direct_shader_desc)); o->spirv_words = r->spirv_words;
+    memcpy(o->local, r->local, sizeof o->local); o->shared = r->shared; o->input_mask = r->input_mask; o->output_mask = r->output_mask; o->ssbo_align = r->ssbo_align;
+    o->per_primitive_outputs = r->prim;
+    *vin_types = r->vin_types; *gl_depth = r->gl_depth; *prim = r->prim;
+    return 1;
+}
+static void disk_put(uint64_t slot, const nvn_direct_shader* o, uint64_t vin_types, int gl_depth) {
+    rc_rec r = {RC_REC_MAGIC, 0, slot, gl_depth, o->per_primitive_outputs, vin_types, {o->local[0], o->local[1], o->local[2]}, o->shared, o->input_mask, o->output_mask, o->ssbo_align,
+                o->desc_count, (uint32_t)o->spirv_words};
+    r.size = (uint32_t)(sizeof r + (size_t)o->desc_count * sizeof *o->descs + o->spirv_words * 4);
+    pthread_mutex_lock(&g_mu); disk_open();
+    if (g_disk_f) { fwrite(&r, sizeof r, 1, g_disk_f); fwrite(o->descs, sizeof *o->descs, o->desc_count, g_disk_f); fwrite(o->spirv, 4, o->spirv_words, g_disk_f); fflush(g_disk_f); }
+    pthread_mutex_unlock(&g_mu);
+}
+// EDEN_NX2_NVN_RECOMPILE_DUMP=<dir> (lab): every module translated in this run (not those kept from earlier runs) as <key>[-p<per-primitive inputs>].spv, for spirv-val
 static void dump_spirv(uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o) {
     static const char* dir; static int init;
     if (!init) { dir = getenv("EDEN_NX2_NVN_RECOMPILE_DUMP"); init = 1; }
@@ -337,7 +402,7 @@ uint32_t vka_rc_prim(uint64_t key) {
     pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_sh, rc_key(key)); rc_shader* r = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
     return r ? r->prim : 0;
 }
-// The recompiled shader of program p's stage i (key), translated at its first use with the draw's state; *st its
+// The recompiled shader of program p's stage i (key), translated at its first use with the draw's state (or as an earlier run kept it); *st its
 // NVN stage (-1: no control section kept for the key). prim_inputs: a pixel shader's generic inputs its program's mesh shader writes per primitive
 // (PerPrimitiveEXT, flag DMSH_VK_F_MESH_PRIM: a shader of its own, valid only in a mesh pipeline). NULL: not translated or refused (logged once)
 vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t prim_inputs, int* st) {
@@ -354,9 +419,14 @@ vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t pr
     r = calloc(1, sizeof *r); r->st = control[0x56]; *st = r->st;
     nvn_direct_shader o; uint64_t vin_types = 0; char why[300] = "";
     uint64_t t0 = now_ns();
-    if (rc_translate(p, i, control, g_draw, prim_inputs, &o, &vin_types, &r->gl_depth, why, sizeof why)) {
+    int kept = disk_get(slot, &o, &vin_types, &r->gl_depth, &r->prim), ok = kept;
+    if (!kept && (ok = rc_translate(p, i, control, g_draw, prim_inputs, &o, &vin_types, &r->gl_depth, why, sizeof why))) {
         r->prim = o.per_primitive_outputs;
+        disk_put(slot, &o, vin_types, r->gl_depth);
         dump_spirv(key, prim_inputs, &o);
+    }
+    if (ok) {
+        if (kept) g_cached++;
         dmsh_vk_bind* b = rc_binds(&o, r->st, control, why, sizeof why);
         if (*why) g_unplaced++;   // a record the replay cannot fill: the shader is refused (vka_shader.c refusal) after this line
         uint32_t a = rd32(control, 0x40), c1e = rd32(control, 0x44);
@@ -365,7 +435,7 @@ vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t pr
         char err[200] = "";
         uint16_t flags = (r->st == 1 && prim_inputs) || (r->st == 7 && r->prim) ? DMSH_VK_F_MESH_PRIM : 0;
         vka_shlib* L = b ? rc_lib(key, rc_vks(r->st), flags, &o, b, o.desc_count, c1_len ? code + a : NULL, c1_len, vin_types, err, sizeof err) : NULL;
-        vka_shader_translated_free(&o);
+        if (!kept) vka_shader_translated_free(&o);
         free(b);
         if (L) {
             r->sh = vka_shader_make(L, key);
@@ -379,8 +449,8 @@ vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t pr
     uint64_t ms = (now_ns() - t0) / 1000000;
     unsigned made = g_made, total = made + g_failed;
     if (ms >= 50 || total <= 3 || total % 256 == 0)
-        VLOG("recompiler: %016llx (NVN stage %d) in %llu ms; %u made, %u not translated, %u with bindings the replay cannot fill", (unsigned long long)key, r->st,
-             (unsigned long long)ms, made, (unsigned)g_failed, (unsigned)g_unplaced);
+        VLOG("recompiler: %016llx (NVN stage %d) in %llu ms; %u made (%u kept from earlier runs), %u not translated, %u with bindings the replay cannot fill", (unsigned long long)key, r->st,
+             (unsigned long long)ms, made, (unsigned)g_cached, (unsigned)g_failed, (unsigned)g_unplaced);
     pthread_mutex_lock(&g_mu); rc_put(&g_sh, slot, r); pthread_mutex_unlock(&g_mu);
     return r->sh;
 }
