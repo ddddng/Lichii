@@ -8,6 +8,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
 #include <thread>
@@ -25,10 +26,14 @@
 #include "core/memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
+#include "video_core/macro.h"
 #include "video_core/memory_manager.h"
+#include "video_core/native_qmd.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
@@ -115,6 +120,17 @@ struct GpuSplitTestAccess {
     static bool ShareWriteSlot(DAddr a, DAddr b) {
         return GpuSplit::WriteSlot(a >> GpuSplit::WriteGranuleBits) ==
                GpuSplit::WriteSlot(b >> GpuSplit::WriteGranuleBits);
+    }
+
+    /// Runs what was sent and not run yet on the calling thread, as the back does.
+    static void RunBack(GpuSplit& split) {
+        GpuSplit::on_back_thread = true;
+        u64 position = split.consumed.load();
+        while (position < split.write_position) {
+            position = Execute(split, position, split.write_position);
+        }
+        split.consumed.store(position);
+        GpuSplit::on_back_thread = false;
     }
 };
 
@@ -1696,6 +1712,163 @@ TEST_CASE("Split tells guest memory writes from what only the GPU caches hold",
     CHECK(queued->known);
     CHECK(queued->at_least);
     CHECK(queued->payload == 5);
+}
+
+TEST_CASE("Split front values the releases of the QMD launches it sends as the back runs them",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using Descriptor = Tegra::NativeQmdScheduler::Descriptor;
+    using Writes = VideoCommon::GpuSplit::Writes;
+    constexpr u32 Enable = 1U << 23;
+    constexpr u32 OneWord = 1U << 30;
+    constexpr u32 Maximum = 1U << 19;
+    constexpr u32 Reduction = 1U << 26; // ADD
+    constexpr GPUVAddr qmds = MappedPages::gpu_address;
+    constexpr GPUVAddr words = MappedPages::gpu_address + 0x1000;
+    constexpr DAddr word_devices = MappedPages::device_address + 0x1000;
+    // On the heap: the fixture, the engine and the split are large (Windows gives a thread 1 MiB
+    // of stack).
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
+    f.system.Initialize();
+    Tegra::Nx2ClearGpuWrittenPages();
+    MappedPages pages{f};
+    const auto compute_owner = std::make_unique<Tegra::Engines::KeplerCompute>(f.memory);
+    Tegra::Engines::KeplerCompute& compute = *compute_owner;
+    Tegra::MacroEngine macros{true};
+    std::array<u32, 128> positions{};
+    compute.SetNativeMacroMode(&macros, positions);
+    compute.BindRasterizer(&f.rasterizer);
+    const auto split_owner = std::make_unique<VideoCommon::GpuSplit>();
+    VideoCommon::GpuSplit& split = *split_owner;
+    Access::Initialize(split, f.system);
+    const auto send = [&](u32 method, u32 argument) {
+        compute.FrontCallMethod(f.system, split, method, argument, true, nullptr);
+    };
+    const auto make_qmd = [](u32 dependencies, u32 word_offset, u32 flags, u32 payload) {
+        Descriptor qmd{};
+        qmd[18] = 0x30;
+        qmd[4] = dependencies << 14;
+        qmd[24] = static_cast<u32>(words) + word_offset;
+        qmd[25] = flags;
+        qmd[26] = payload;
+        return qmd;
+    };
+    // An inline QMD, in memory already (the null rasterizer's inline writes write nothing): its
+    // words but the last, then, after the back ran them when `caught_up`, the last.
+    const auto inline_qmd = [&](GPUVAddr address, const Descriptor& qmd, bool caught_up) {
+        std::memcpy(pages.backing + (address - MappedPages::gpu_address), qmd.data(), sizeof(qmd));
+        send(0xc6, static_cast<u32>((address >> 8) >> 32));
+        send(0xc7, static_cast<u32>(address >> 8));
+        for (u32 i = 0; i < 63; ++i) {
+            send(0xc8 + i, qmd[i]);
+        }
+        if (caught_up) {
+            Access::RunBack(split);
+        }
+        send(0x107, qmd[63]);
+    };
+    const auto word = [&](u32 offset) { return f.memory.Read<u32>(words + offset); };
+    const auto queued = [&](u32 offset) {
+        return split.QueuedSemaphoreWriteAt(word_devices + offset);
+    };
+
+    // A QMD that runs at once: its release is the front's once its table is the back's, which it
+    // takes over when the back has run everything sent.
+    inline_qmd(qmds, make_qmd(0, 0, Enable | OneWord, 5), true);
+    auto release = queued(0);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK_FALSE(release->at_least);
+    CHECK(release->payload == 5);
+    Access::RunBack(split);
+
+    // One that waits for a dependency runs at the decrement, a maximum with the word in memory.
+    f.memory.Write<u32>(words + 0x10, 9);
+    inline_qmd(qmds + 0x100, make_qmd(1, 0x10, Enable | OneWord | Maximum, 7), false);
+    CHECK_FALSE(queued(0x10).has_value());
+    send(0xad, static_cast<u32>((qmds + 0x100) >> 8));
+    Access::RunBack(split);
+    send(0xb0, 7);
+    release = queued(0x10);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK_FALSE(release->at_least);
+    CHECK(release->payload == 9);
+    Access::RunBack(split);
+    CHECK(word(0x10) == 9);
+
+    // Over a value the front can't tell, a maximum holds its payload at least.
+    split.Defer([] {}, 0, Writes::Noted);
+    split.NoteSemaphoreWrite(word_devices + 0x10, 0, false);
+    inline_qmd(qmds + 0x200, make_qmd(0, 0x10, Enable | OneWord | Maximum, 12), false);
+    release = queued(0x10);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK(release->at_least);
+    CHECK(release->payload == 12);
+    Access::RunBack(split);
+    CHECK(word(0x10) == 12);
+
+    // A reduction over the release before it, still queued.
+    inline_qmd(qmds + 0x300, make_qmd(0, 0x20, Enable | OneWord | Maximum, 4), false);
+    inline_qmd(qmds + 0x400, make_qmd(0, 0x20, Enable | OneWord | Reduction, 3), false);
+    release = queued(0x20);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK_FALSE(release->at_least);
+    CHECK(release->payload == 7);
+    Access::RunBack(split);
+    CHECK(word(0x20) == 7);
+
+    // Work that may write guest memory anywhere and change the mappings, still queued: the front
+    // can't tell what the back reads yet, the launch waits for it.
+    split.Defer([] {});
+    inline_qmd(qmds + 0x500, make_qmd(0, 0x30, Enable | OneWord, 1), false);
+    CHECK_FALSE(queued(0x30).has_value());
+    Access::RunBack(split);
+    // The back ran everything: the front takes its table over, the waiting launch with it.
+    inline_qmd(qmds + 0x600, make_qmd(0, 0x30, Enable | OneWord, 2), true);
+    release = queued(0x30);
+    REQUIRE(release.has_value());
+    CHECK(release->payload == 2);
+    Access::RunBack(split);
+
+    // A write to a waiting QMD still queued when its decrement is sent: the launch waits, not
+    // valued then.
+    inline_qmd(qmds + 0x700, make_qmd(1, 0x40, Enable | OneWord | Maximum, 3), false);
+    Access::RunBack(split);
+    split.Defer([] {}, 0, Writes::Noted);
+    split.NoteWrite(f.memory, qmds + 0x700 + 26 * sizeof(u32), sizeof(u32));
+    send(0xad, static_cast<u32>((qmds + 0x700) >> 8));
+    send(0xb0, 7);
+    CHECK_FALSE(queued(0x40).has_value());
+    Access::RunBack(split);
+    CHECK(word(0x40) == 3);
+
+    // An inline upload still queued that rewrites a waiting QMD's release payload: the front
+    // reads the QMD from memory with the upload's words over it.
+    constexpr GPUVAddr patched = qmds + 0x800;
+    inline_qmd(patched, make_qmd(1, 0x50, Enable | OneWord | Maximum, 1), false);
+    Access::RunBack(split);
+    constexpr GPUVAddr payload_address = patched + 26 * sizeof(u32);
+    send(0x60, sizeof(u32));
+    send(0x61, 1);
+    send(0x62, static_cast<u32>(payload_address >> 32));
+    send(0x63, static_cast<u32>(payload_address));
+    send(0x6c, 1); // Linear
+    send(0x6d, 9);
+    send(0xad, static_cast<u32>(patched >> 8));
+    send(0xb0, 7);
+    release = queued(0x50);
+    REQUIRE(release.has_value());
+    CHECK(release->known);
+    CHECK(release->payload == 9);
+    // The back's upload (the null rasterizer's inline writes write nothing).
+    const u32 nine = 9;
+    std::memcpy(pages.backing + (payload_address - MappedPages::gpu_address), &nine, sizeof(nine));
+    Access::RunBack(split);
+    CHECK(word(0x50) == 9);
 }
 
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",

@@ -19,6 +19,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
+#include "video_core/front_qmd.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/gpu_thread.h"
@@ -108,6 +109,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     Profile::Scope scope{Profile::Zone::ResumePending};
                     resumed = scheduler.ResumePending(system.GPU());
                 }
+                if (split.Active()) {
+                    VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+                }
                 const bool popped = state.queue.TryPop(next);
                 if (popped) {
                     BackIdleTrace::SetFrontState(FrontState::Parse);
@@ -189,6 +193,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     submit ? submit->channel : -1, std::holds_alternative<GPUTickCommand>(next.data));
             }
             if (split.Active()) {
+                VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();

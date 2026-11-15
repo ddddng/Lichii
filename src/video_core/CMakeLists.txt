@@ -102,6 +102,7 @@ add_library(video_core STATIC
     macro_turing.h
     fence_manager.h
     frame_gen_choice.h
+    front_qmd.h
     gpu.cpp
     gpu.h
     gpu_timestamp.h
