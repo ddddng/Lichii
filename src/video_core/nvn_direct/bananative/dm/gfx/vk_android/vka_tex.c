@@ -967,6 +967,7 @@ static int astc_gpu_level(VkCommandBuffer *ub, vka_img *im, uint32_t i, uint32_t
     uint32_t w = im->w >> i ? im->w >> i : 1, h = im->h >> i ? im->h >> i : 1, gobs = nvn_tex_level_gobs(&im->d, lv), row = (w + im->f.astc_bw - 1) / im->f.astc_bw * 16;
     if (gobs * 64 < row) gobs = (row + 63) / 64;
     nvn_direct_astc_level l = {b, o, n, w, h, im->f.astc_bw, im->f.astc_bh, gobs, th, nvn_gob_switch2, im->img, i, ly, im->f.bpb == 16};
+    vka_up_decoded();   // (Lichii: a batch goes to the queue after DM_VK_ASTC_PER_BATCH of them, vka_dev.c)
     if (!vka_astc_gpu(*ub, &l)) { VRED_ONCE("texture serial %llu format %#x %ux%u level %u: ASTC not decoded on the GPU", (unsigned long long)im->serial, im->d.format, w, h, lv); return 0; }
     *ub = vka_up_point(*ub);
     return *ub != VK_NULL_HANDLE;

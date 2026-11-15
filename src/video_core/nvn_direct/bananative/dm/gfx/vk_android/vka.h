@@ -144,6 +144,7 @@ void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int cr
 uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_hang_ns(void);                         // how long a fence may make no progress before it is a hang (DM_VK_HANG_S, default 6 s)
 int vka_hung(void);
+void vka_up_decoded(void);                          // vka_dev.c (Lichii): an ASTC decode went into the open upload batch
 int vka_queue_idle(void);                           // vkQueueWaitIdle bounded by the hang time (0 = not idle: hung or timed out)                                 // 1 = a GPU hang was declared (vka_dev.c): nothing more is submitted, waits return at once
 void vka_fence_post(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // effects run by the completion thread when fence completes
 uint64_t vka_done(void);

@@ -631,16 +631,24 @@ VkCommandBuffer vka_up_cur(VkCommandBuffer cb) {   // the open batch when cb was
     if (g_ui >= 0) return g_ub[g_ui].cb;
     VkCommandBuffer n = vka_up_begin(); return n ? n : up_fallback();
 }
+// Lichii (dotfiles-25x.8): an upload batch also goes to the queue after DM_VK_ASTC_PER_BATCH ASTC decodes (default 256; 0 = by staging bytes only). With batches of
+// thousands of small decodes (Mario Kart World's boot: a decode, an encode and a copy per mip level, most of them tiny) the NVIDIA driver kept ~2.9 GiB of video memory
+// outside every memory heap (NVML counts it, VK_EXT_memory_budget does not), and it stayed: 32 or 256 decodes a batch keep it near 0 at the same boot time (ux-gP*);
+// a submission per level does too but boots half as fast. Lichii's own texture cache runs the same shaders in small submissions and kept ~0.3 GiB
+static unsigned g_up_decodes;   // ASTC decodes recorded into the open upload batch (vka_up_decoded)
+void vka_up_decoded(void) { g_up_decodes++; }
 VkCommandBuffer vka_up_point(VkCommandBuffer cb) {
     if (g_ui < 0 || cb != g_ub[g_ui].cb) return cb;
     pthread_mutex_lock(&g_smu); VkDeviceSize n = g_ubytes; pthread_mutex_unlock(&g_smu);
     double mb = VKA_ENVF("DM_VK_UPLOAD_BATCH_MB", 64.0);
-    if ((double)n < mb * 1048576.0) return cb;
+    int per = VKA_ENV("DM_VK_ASTC_PER_BATCH", 256);
+    if ((double)n < mb * 1048576.0 && !(per > 0 && g_up_decodes >= (unsigned)per)) return cb;
     vka_up_flush();
     VkCommandBuffer nb = vka_up_begin(); return nb ? nb : up_fallback();
 }
 void vka_up_flush(void) {
     if (g_ui < 0) return;
+    g_up_decodes = 0;
     unsigned k = (unsigned)g_ui; g_ui = -1;
     VkCommandBuffer cb = g_ub[k].cb;
     vka_barrier(cb);   // everything the batch wrote, for every later submission on the queue
