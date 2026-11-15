@@ -33,6 +33,11 @@ inline SampledDescriptorLimits CoreSampledDescriptorLimits(const VkPhysicalDevic
     };
 }
 
+/// Descriptor pools grow without a bound (DescriptorPool keeps every pool), so update-after-bind
+/// pools are taken only where their total budget is no tighter than memory. MoltenVK reports 2^30,
+/// its value for an undefined limit.
+constexpr u32 UNBOUNDED_UPDATE_AFTER_BIND_DESCRIPTORS = 1U << 30;
+
 /// The limits of descriptor sets from update-after-bind pools, when they allow more samplers a
 /// stage than the core limits and at least as many descriptors of each type the pipelines bind.
 /// MoltenVK, which puts such sets in Metal argument buffers, raises only these over Metal's 16
@@ -57,6 +62,7 @@ inline std::optional<SampledDescriptorLimits> UpdateAfterBindSampledDescriptorLi
         {uab.maxDescriptorSetUpdateAfterBindStorageImages, core.maxDescriptorSetStorageImages},
     }};
     if (uab.maxPerStageDescriptorUpdateAfterBindSamplers <= core.maxPerStageDescriptorSamplers ||
+        uab.maxUpdateAfterBindDescriptorsInAllPools < UNBOUNDED_UPDATE_AFTER_BIND_DESCRIPTORS ||
         !std::ranges::all_of(limits, [](const auto& limit) { return limit.first >= limit.second; })) {
         return std::nullopt;
     }

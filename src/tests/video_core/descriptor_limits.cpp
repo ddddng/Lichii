@@ -27,6 +27,7 @@ VkPhysicalDeviceLimits MoltenVkLimits() {
 
 VkPhysicalDeviceDescriptorIndexingProperties ArgumentBufferLimits() {
     VkPhysicalDeviceDescriptorIndexingProperties uab{};
+    uab.maxUpdateAfterBindDescriptorsInAllPools = 1U << 30;
     uab.maxPerStageDescriptorUpdateAfterBindSamplers = 1024;
     uab.maxPerStageDescriptorUpdateAfterBindUniformBuffers = 1000000;
     uab.maxPerStageDescriptorUpdateAfterBindStorageBuffers = 1000000;
@@ -87,6 +88,11 @@ TEST_CASE("Update-after-bind limits are used only when they are larger for every
     // More samplers but fewer storage buffers: the pipelines' buffers could stop fitting.
     uab = ArgumentBufferLimits();
     uab.maxPerStageDescriptorUpdateAfterBindStorageBuffers = 8;
+    CHECK_FALSE(Vulkan::UpdateAfterBindSampledDescriptorLimits(core, uab));
+
+    // A total budget the kept pools could run out of (the spec's minimum).
+    uab = ArgumentBufferLimits();
+    uab.maxUpdateAfterBindDescriptorsInAllPools = 500000;
     CHECK_FALSE(Vulkan::UpdateAfterBindSampledDescriptorLimits(core, uab));
 }
 
