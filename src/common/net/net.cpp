@@ -226,8 +226,8 @@ RequestResult Fetch(const std::string& url, const std::string& path) {
         httplib::Result result = client->send(request);
 
         if (!result) {
-            LOG_ERROR(Common, "GET to {}{} failed: {} (TLS error {:#x})", url, path,
-                      httplib::to_string(result.error()), result.ssl_backend_error());
+            LOG_ERROR(Common, "GET to {}{} failed: {}", url, path,
+                      httplib::to_string(result.error()));
             return {};
         }
 
