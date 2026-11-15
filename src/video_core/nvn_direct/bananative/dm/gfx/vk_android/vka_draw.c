@@ -649,6 +649,7 @@ typedef struct { VkWriteDescriptorSet w[512]; VkDescriptorBufferInfo bi[512]; Vk
 static writes_t g_w;
 static vka_res g_res[512];   // the NaN scan's own walk (DM_VK_NANSCAN_FS)
 // One stage's results as descriptor writes. 0 = the draw cannot run (logged)
+static unsigned g_null_tex;   // DM_VK_SKIP_MODE: stages (bits) whose textures read as unbound in this draw (vka_draw)
 static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const vka_res *r, int n, int pool, c0_at *c0) {
     for (int i = 0; i < n; i++) {
         if (g_w.n == 512) { VRED_ONCE("more than 512 descriptors in one draw"); return 0; }
@@ -690,7 +691,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; uint64_t ti_ = g_prof ? cntvct() : 0;
             VkImageView v = VK_NULL_HANDLE; VkSampler s = VK_NULL_HANDLE; VkImageLayout lay = VK_IMAGE_LAYOUT_GENERAL;
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
-                int tid = r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG ? r[i].tid : 0;
+                int tid = (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) && !(g_null_tex >> st & 1) ? r[i].tid : 0;
                 if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay);
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
                 // It reads as unbound, zeros, as nvn_mtl.m's zero 3D / zero cube fallback does; noted once. Other mismatches are reported
@@ -1194,12 +1195,17 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (d->tf_on) VRED_ONCE("transform feedback is not on Vulkan yet: the draw is drawn without capture");
     }
     // DM_VK_SKIP_SHADERS=<key>[,<key>...] (lab, dotfiles-25x.15): draws with any of these shaders are skipped and counted (each skip logged up to 64 times), to test
-    // whether a draw is what hangs the GPU
+    // whether a draw is what hangs the GPU. DM_VK_SKIP_MODE (bits) instead keeps the draw with part of it left out: 1 = its vertex shader's textures read as unbound,
+    // 2 = its pixel shader's, 4 = recorded with everything but the draw call itself
+    g_null_tex = 0; int no_call = 0;
     { static uint64_t keys[8]; static int nk = -1;
       if (nk < 0) { nk = 0; const char *e = getenv("DM_VK_SKIP_SHADERS"); while (e && *e && nk < 8) { char *x; keys[nk++] = strtoull(e, &x, 16); e = *x == ',' ? x + 1 : NULL; } }
       for (int k = 0; k < nk; k++) for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && sh[st]->key == keys[k]) {
-          static _Atomic int n; uint64_t vka_frame(void); if (atomic_fetch_add(&n, 1) < 64) VRED("DM_VK_SKIP_SHADERS: draw with shader %016llx skipped (frame %llu)", (unsigned long long)keys[k], (unsigned long long)vka_frame());
-          g_skipped++; return; } }
+          int mode = (int)VKA_ENV("DM_VK_SKIP_MODE", 0);
+          static _Atomic int n; uint64_t vka_frame(void); if (atomic_fetch_add(&n, 1) < 64) VRED("DM_VK_SKIP_SHADERS: draw with shader %016llx %s (mode %d, frame %llu)", (unsigned long long)keys[k], mode ? "changed" : "skipped", mode, (unsigned long long)vka_frame());
+          if (!mode) { g_skipped++; return; }
+          g_null_tex = (mode & 1 ? 1u << 0 : 0) | (mode & 2 ? 1u << 1 : 0); no_call = (mode & 4) != 0;
+          k = nk; break; } }
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)
@@ -1378,6 +1384,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
 
     PT(7);
     checkpoint(sh, 0, dw ? dw->count : di->count, dw ? dw->instances : di->instances, ind, mdi, d, dw ? dw->prim : di->prim, dw ? dw->first : 0, di ? di->base_vertex : 0);
+    if (no_call) { g_null_tex = 0; g_draws++; return; }
     // The draw
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
     if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
