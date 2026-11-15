@@ -433,6 +433,10 @@ static uint32_t sparse_base(const void *pool, const uint8_t *mem, const nvn_texd
     if (vmin) *vmin = r < n ? r : n - 1;
     return b;
 }
+// Lichii (dotfiles-25x.22): where the views of im start, from sparse_base's vmin. A residency image's unbound tiles are non-resident, so with Lichii's recompiler, which keeps
+// TEX's level-of-detail clamp (SPIR-V MinLod) and residency predicate (OpImageSparse*), the views take every level, as NVN's do: the game's own clamp keeps its samples on
+// the mapped tiles, and up close it samples its finest levels. The library's shaders (EDEN_NX2_NVN_RECOMPILE=0 / 2) and dense images keep views from the wholly mapped levels
+static uint32_t view_vmin(const vka_img *im, uint32_t vmin) { return im->rs && vka_rc_mode() == 1 ? 0 : vmin; }
 // A sparse residency image (vka_sparse.c) instead of a dense one: a sampled sparse pool texture, 2D or 2D array, single-sampled, with NVN tiled levels from base on, whose dense
 // image from base would take DM_VK_SPARSE_RES_MB (default 32) or more; or a GPU-written one (sparse_gpu) from level 0. Smaller ones stay dense (the tiles' bookkeeping and binds cost more than they save)
 static int res_candidate(const tex_t *t, const vka_fmt *f, uint32_t base) {
@@ -462,6 +466,9 @@ static uint32_t dense_floor(const nvn_texdesc *d, const nvn_texlayout *L, uint32
 // (bfloor: its finer levels are left out, sampled from the coarser one; a platform limit, logged), down to where it is no candidate any more, then dense from there
 static vka_img *img_create(const tex_t *t, const vka_fmt *f, uint32_t base) {
     uint32_t b = base; uint64_t need = 0; int wlast = 0;   // (the address space the last finer level asked for and did not get: once that much is free, a finer start is tried again, sparse_refresh)
+    // Lichii (dotfiles-25x.22): a sampled one's residency image starts at level 0 whatever is mapped now (only bound tiles take memory): a later mapping of a finer level binds
+    // its tiles instead of making the image again (img_rebase), which loses what copies wrote into it
+    if (base && sparse_sampled(t, f) && res_candidate(t, f, 0)) b = 0;
     for (; res_candidate(t, f, b); b++) {
         int why = 0; vka_img *im = img_create_(t, f, b, 1, &why, &need); wlast = why;
         if (im) {
@@ -1217,6 +1224,7 @@ static int img_rebase(vka_img *im, uint32_t base, VkCommandBuffer cb) {
 // A sparse texture whose pages or mappings changed: its finest mapped level moved finer, or two or more levels coarser, → made again; else the changed parts uploaded
 static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
     uint32_t vmin, b = sparse_base(im->vpool, im->mem, &im->d, &im->L, &vmin);
+    vmin = view_vmin(im, vmin);
     if (b < im->bfloor && vks_va_free() < im->bneed) b = im->bfloor;   // (levels left out for the sparse address space; tried again once what the finer level asked for is free: a
                                                                           // rebase counts the old image's address space until it goes, vka_after, and a finer start must fit beside the current image)
     if (im->dcap && !im->rs) { uint32_t bd = dense_floor(&im->d, &im->L, b); if (bd > b) b = bd; }   // (a dense image under DM_VK_SPARSE_DENSE_MB: no rebase to a start the cap moves back)
@@ -1225,7 +1233,7 @@ static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
         im->vmin = vmin; redirty_ids(im);
     }
     // A new image (rebase): its barrier and its whole upload in the upload batch when cb is the replay's (nothing recorded before reads the new image)
-    if (im->d.target != NVN_TEXTURE_TARGET_3D && (b < im->base || b >= im->base + 2)) {
+    if (im->d.target != NVN_TEXTURE_TARGET_3D && !(im->rs && !im->base) && (b < im->base || b >= im->base + 2)) {   // (a residency image from level 0: tiles bound, never made again)
         VkCommandBuffer ucb = cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE;
         int made = img_rebase(im, b, ucb ? ucb : cb);
         if (made) upload_sparse(im, ucb ? ucb : cb, 1);
@@ -1404,7 +1412,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         int mode = 0;
         if (!im) { mode = first_mode(t, &f, cpuw_take(t->serial, 0)); g_zwant = mode == ST_ZERO; im = img_create(t, &f, base); g_zwant = 0; }
         if (im && !im->inited) {
-            im->vmin = vmin;
+            im->vmin = view_vmin(im, vmin);
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
             g_live[g_nlive++] = im; memidx_add(im);
             big_note(im, t);
@@ -2228,7 +2236,9 @@ VkSampler vka_samp_default(void) {
 // Re-uploads im if the CPU wrote its storage since its last upload, or a sparse one if its mappings or pages changed (vka_tex_prepare; caller holds g_tmu and nvn_pool_use)
 static void reup_written(vka_img *im, VkCommandBuffer cb) {
     if (img_pool_dead(im)) return;
-    if (im->vbind && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }   // (GPU-written: binds only)
+    // (GPU-written: binds only. Lichii, dotfiles-25x.22: a sampled one's residency image too once the GPU wrote it (copies into MKW's 68-layer arrays): its content is the
+    // GPU's from then on, but the tiles the game maps later still need memory before the copies that fill them)
+    if ((im->vbind || (im->rs && im->vtrack && im->gpu_owned)) && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }
     if (im->vtrack && !im->gpu_owned && im->mem) {
         if (!nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) return;
         sparse_refresh(im, cb);

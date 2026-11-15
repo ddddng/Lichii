@@ -198,7 +198,7 @@ uint64_t vka_tex_mem_nolock(int *n);
 
 // Sparse residency images (vka_sparse.c): memory only behind the 64 KB tiles a sparse pool's texture has mapped
 typedef struct vks_img vks_img;
-int vks_on(void);                                   // the device can (V.sparse_res) and DM_VK_SPARSE_RES is not 0
+int vks_on(void);                                   // the device can (V.sparse_res), on NVIDIA by default (DM_VK_SPARSE_RES=0/1 overrides)
 int vks_va_take(uint64_t bytes);                    // sparse address space for an image of that virtual size: 1 = taken
 void vks_va_give(uint64_t bytes);
 uint64_t vks_va_free(void);                         // sparse address space free now (a texture left at a coarser level tries a finer one once more is free than when it failed)
