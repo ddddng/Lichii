@@ -25,9 +25,23 @@ vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 static nvn_direct_device g_adopt; static int g_adopted;
 void vka_qlock(void) { if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); }
 void vka_qunlock(void) { if (g_adopt.queue_unlock) g_adopt.queue_unlock(g_adopt.queue_context); else pthread_mutex_unlock(&V.qmu); }
+// Lab (DM_VK_VRAM_TRACE=1, dotfiles-25x.8): the host's use (NVML) beside the driver's heaps and the replay's imports and images, every second
+uint64_t vka_mem_placed_nolock(void); uint64_t vka_tex_mem_nolock(int *n);
+static void *vram_trace_main(void *a) {
+    (void)a; pthread_setname_np(pthread_self(), "vk-vramtrace");
+    for (;;) { struct timespec ts = {1, 0}; nanosleep(&ts, NULL);
+        char h[256]; vka_heap_line(h, sizeof h); uint64_t u = g_adopt.memory_usage(g_adopt.memory_context); int ni;
+        VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0); }
+    return NULL;
+}
 int nvn_direct_adopt_device(const nvn_direct_device *d) {
     pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
-    return vka_init();
+    char h[256]; uint64_t u = 0, b = 0;
+    if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
+    int ok = vka_init();
+    if (ok && g_adopt.memory_usage && VKA_ENV("DM_VK_VRAM_TRACE", 0)) { pthread_t th; if (!pthread_create(&th, NULL, vram_trace_main, NULL)) pthread_detach(th); }
+    if (ok && g_adopt.memory_usage) { vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); (void)b; VLOG("VRAM after the replay started: host use %.0f MiB; driver %s", u / 1048576.0, h); }
+    return ok;
 }
 
 
@@ -37,6 +51,7 @@ uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropert
     return UINT32_MAX;
 }
 
+int vka_dev_ext(const char *name) { for (uint32_t i = 0; i < g_adopt.extension_count; i++) if (!strcmp(g_adopt.extensions[i], name)) return 1; return 0; }   // (Lichii: the host enabled it)
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 
 static void *completion_main(void *arg);

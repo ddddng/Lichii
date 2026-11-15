@@ -1601,7 +1601,8 @@ void vka_tex_budget(void) {
     uint64_t usage, budget;
     int have = vka_mem_budget(&usage, &budget);
     if (g_tick % 64 == 0) blocks_compact();
-    if (g_tick % 2000 == 0) {   // (Lichii, dotfiles-25x.8: what the budget sees against the replay's own memory)
+    static uint64_t vram_at; uint64_t vnow = now_ns();
+    if (vnow - vram_at >= 10000000000ull) { vram_at = vnow;   // (Lichii, dotfiles-25x.8: every 10 s, what the budget sees against the replay's own memory)
         char h[256], im[256]; void vka_heap_line(char *, size_t); vka_heap_line(h, sizeof h); vka_imem_stats(im, sizeof im);
         int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
         int vka_dpool_count(void);

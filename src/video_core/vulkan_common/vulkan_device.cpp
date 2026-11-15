@@ -1951,8 +1951,9 @@ void Device::RemoveUnsuitableExtensions() {
                                        features.vertex_input_dynamic_state,
                                        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 
-    // VK_KHR_pipeline_executable_properties
-    if (Settings::values.renderer_shader_feedback.GetValue()) {
+    // VK_KHR_pipeline_executable_properties (also for the NVN2 direct renderer's pipeline
+    // statistics, lab: DM_VK_PIPE_STATS=1, dotfiles-25x.8)
+    if (Settings::values.renderer_shader_feedback.GetValue() || std::getenv("DM_VK_PIPE_STATS") != nullptr) {
         extensions.pipeline_executable_properties =
             features.pipeline_executable_properties.pipelineExecutableInfo;
         RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_executable_properties,

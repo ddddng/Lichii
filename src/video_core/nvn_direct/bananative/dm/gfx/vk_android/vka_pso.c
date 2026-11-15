@@ -175,6 +175,7 @@ static VkPipelineCache g_pc; static char g_pc_path[1024], g_pw_path[1100]; stati
 static uint64_t g_ngfx, g_ncs, g_nfail, g_ncs_over, g_create_ns, g_frame_made;   // all pipelines made (frame path, background and prewarm); g_frame_made / g_create_ns: on the frame path only
 static uint64_t g_probe_hit, g_probe_miss, g_probe_miss_ns;          // GPL: the cache-only try before a link (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
 static _Atomic uint64_t g_save_ns_total, g_hy_draws, g_pw_wait_ns;
+static VkPipelineCreateFlags pipe_stats_flag(void); static void pipe_stats(VkPipeline p, const char *what, uint64_t k0, uint64_t k1);
 static void pw_load(void); static void pw_start(void); static int pw_save(void); static void cs_ahead_start(void); static void lib_ahead_start(void);
 static void *saver_main(void *a);
 static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;   // one save at a time (the saver thread, a forced save)
@@ -444,8 +445,10 @@ static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], con
     VkPipeline p = VK_NULL_HANDLE;
     const vka_shader *pre0 = P->mesh ? sh[7] : sh[0];
     int bslot = build_begin("whole graphics pipeline", pre0 ? pre0->key : 0, sh[1] ? sh[1]->key : 0);
+    P->ci.flags |= pipe_stats_flag();
     VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
     build_end(bslot);
+    if (!r) pipe_stats(p, "graphics pipeline", pre0 ? pre0->key : 0, sh[1] ? sh[1]->key : 0);
     P->ci.pNext = fbi.pNext;
     uint64_t dns = now_ns() - t0; double ms_ = dns / 1e6;
     pthread_mutex_lock(&g_mu);
@@ -469,6 +472,51 @@ static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], con
         }
     }
     return p;
+}
+
+// Lichii (dotfiles-25x.8, lab: DM_VK_PIPE_STATS=1, which also has Lichii enable VK_KHR_pipeline_executable_properties): each pipeline is made with its statistics captured,
+// and the statistics whose name speaks of local, spill, scratch or stack memory are kept per pipeline: every new maximum is logged (what may size the driver's local-memory
+// pool, which NVML counts and the memory heaps do not: ~2.9 GiB in Mario Kart World's race), and the first pipeline's statistic names once
+static int pipe_stats_on(void) {
+    static int on = -1;
+    if (on < 0) { on = 0; const char *e = getenv("DM_VK_PIPE_STATS");
+        if (e && atoi(e) == 1) on = vka_dev_ext(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+        if (e && !on) VRED_ONCE("DM_VK_PIPE_STATS=1: VK_KHR_pipeline_executable_properties is not enabled"); }
+    return on;
+}
+static VkPipelineCreateFlags pipe_stats_flag(void) { return pipe_stats_on() ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0; }
+static void pipe_stats(VkPipeline p, const char *what, uint64_t k0, uint64_t k1) {
+    if (!p || !pipe_stats_on()) return;
+    static PFN_vkGetPipelineExecutablePropertiesKHR props; static PFN_vkGetPipelineExecutableStatisticsKHR stats;
+    if (!props) { props = (PFN_vkGetPipelineExecutablePropertiesKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetPipelineExecutablePropertiesKHR");
+                  stats = (PFN_vkGetPipelineExecutableStatisticsKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetPipelineExecutableStatisticsKHR"); }
+    if (!props || !stats) return;
+    VkPipelineInfoKHR pi = {VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = p};
+    uint32_t ne = 0; if (props(V.dev, &pi, &ne, NULL) || !ne) return;
+    if (ne > 8) ne = 8;
+    VkPipelineExecutablePropertiesKHR ep[8]; for (uint32_t i = 0; i < ne; i++) ep[i] = (VkPipelineExecutablePropertiesKHR){VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+    if (props(V.dev, &pi, &ne, ep)) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int named; static struct { char name[64]; uint64_t max; } mx[16]; static int nmx;
+    for (uint32_t e = 0; e < ne; e++) {
+        VkPipelineExecutableInfoKHR ei = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = p, .executableIndex = e};
+        uint32_t ns = 0; if (stats(V.dev, &ei, &ns, NULL) || !ns) continue;
+        if (ns > 32) ns = 32;
+        VkPipelineExecutableStatisticKHR st[32]; for (uint32_t i = 0; i < ns; i++) st[i] = (VkPipelineExecutableStatisticKHR){VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR};
+        if (stats(V.dev, &ei, &ns, st)) continue;
+        pthread_mutex_lock(&mu);
+        if (!named) { named = 1; char b[900]; size_t o = 0; for (uint32_t i = 0; i < ns && o < sizeof b; i++) o += (size_t)snprintf(b + o, sizeof b - o, "%s%s", i ? ", " : "", st[i].name);
+                      VLOG("pipeline statistics (%s): %s", ep[e].name, b); }
+        for (uint32_t i = 0; i < ns; i++) {
+            const char *n = st[i].name;
+            if (!(strcasestr(n, "local") || strcasestr(n, "spill") || strcasestr(n, "scratch") || strcasestr(n, "stack"))) continue;
+            uint64_t v = st[i].format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR ? (uint64_t)st[i].value.f64 : st[i].format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR ? (uint64_t)st[i].value.i64 : st[i].value.u64;
+            int k = 0; while (k < nmx && strcmp(mx[k].name, n)) k++;
+            if (k == nmx && nmx < 16) { snprintf(mx[nmx].name, sizeof mx[nmx].name, "%s", n); mx[nmx++].max = 0; }
+            if (k < nmx && v > mx[k].max) { mx[k].max = v;
+                VLOG("pipeline statistics: new maximum %s = %llu in %s %016llx %016llx (%s)", n, (unsigned long long)v, what, (unsigned long long)k0, (unsigned long long)k1, ep[e].name); }
+        }
+        pthread_mutex_unlock(&mu);
+    }
 }
 
 // ---------- Graphics pipeline libraries (VK_EXT_graphics_pipeline_library, V.gpl) ----------
@@ -515,7 +563,7 @@ static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPip
     if (t_lib_peek) return VK_NULL_HANDLE;   // (Lichii: not made on the frame path, gfx_make)
     int shp = kind == L_PRE || kind == L_PREFS;
     VkGraphicsPipelineLibraryCreateInfoEXT li = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, .pNext = shp && (g_pre_adapt & A_NORI) ? NULL : ci->pNext, .flags = part};
-    ci->pNext = &li; ci->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (g_pre_adapt & A_RETAIN ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0);
+    ci->pNext = &li; ci->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (g_pre_adapt & A_RETAIN ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0) | pipe_stats_flag();
     uint64_t t0 = now_ns();
     int bs = build_begin(g_lib_name[kind], 0, 0);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, shp && (g_pre_adapt & A_NOCACHE) ? VK_NULL_HANDLE : g_pc, 1, ci, NULL, &p);
@@ -528,6 +576,7 @@ static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPip
     km_set(&g_lib[kind], key, h, p ? (void *)p : (void *)(uintptr_t)1);
     pthread_cond_broadcast(&g_lib_cv);
     pthread_mutex_unlock(&g_mu);
+    if (!r) pipe_stats(p, g_lib_name[kind], h, 0);
     if (r) { if (refused) *refused = r; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("graphics pipeline library (%s): %d; the whole pipeline is made instead", g_lib_name[kind], r); }
     else if (ms_ > 50 && !t_ahead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 100) VLOG("graphics pipeline library (%s) took %.0f ms%s", g_lib_name[kind], ms_, t_how); }
     return p;
@@ -665,11 +714,12 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
         VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &P->ri, .pMultisampleState = &P->ms, .pColorBlendState = &P->bs, .pDynamicState = &dy[L_FO]};
         if (!(part[nparts++] = lib_make(L_FO, &key, sizeof key, &ci, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, NULL))) return VK_NULL_HANDLE; }
     VkPipelineLibraryCreateInfoKHR libs = {VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = nparts, .pLibraries = part};
-    VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &libs, .layout = P->ci.layout};   // no LINK_TIME_OPTIMIZATION: the fast link
+    VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &libs, .flags = pipe_stats_flag(), .layout = P->ci.layout};   // no LINK_TIME_OPTIMIZATION: the fast link
     uint64_t t0 = now_ns();
     int bs = build_begin("graphics pipeline (no cache)", 0, 0);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
     build_end(bs);
+    if (!r) pipe_stats(p, "linked graphics pipeline", 0, 0);
     pthread_mutex_lock(&g_mu); g_link_ms += (now_ns() - t0) / 1e6; if (!r) { g_nlinked++; __atomic_store_n(&g_nlinked_pub, g_nlinked, __ATOMIC_RELAXED); } pthread_mutex_unlock(&g_mu);
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("graphics pipeline link: %d; the whole pipeline is made instead", r); return VK_NULL_HANDLE; }
     return p;
@@ -1108,7 +1158,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     if (smax && cs->e->shared > smax && !VKA_ENV("DM_VK_CS_SHARED_OVER", 0)) {
         r = VK_ERROR_FEATURE_NOT_PRESENT; over = 1;
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute program %016llx takes %u bytes of shared memory, the device at most %u: not made, its dispatches are skipped (the first 16 are logged; the count is in the pipeline line)", (unsigned long long)cs->key, cs->e->shared, smax);
-    } else { int bs = build_begin("compute pipeline", cs->key, 0); r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p); build_end(bs); }
+    } else { int bs = build_begin("compute pipeline", cs->key, 0); ci.flags |= pipe_stats_flag(); r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p); build_end(bs); if (!r) pipe_stats(p, "compute pipeline", cs->key, 0); }
     pthread_mutex_lock(&g_mu);
     if (over) { p = VK_NULL_HANDLE; g_ncs_over++; } else if (r) { p = VK_NULL_HANDLE; g_nfail++; } else { g_ncs++; g_made++; if (!prewarm) g_frame_made++; }
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
