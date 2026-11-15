@@ -50,6 +50,7 @@ void vka_perf_frame(double period_s);
 void mtl_create_ns(uint64_t* lib_ns, uint64_t* pso_ns); // vka_pso.c
 void vka_fsc_stats(uint64_t* hit, uint64_t* miss); // vka_draw.c
 void vka_skip_report(void); // vka_draw.c
+void vka_rt_size_report(void); // vka_draw.c
 void vka_tex_stale_stats(uint64_t* reads); // vka_tex.c
 void vka_copy_drop_stats(uint64_t* dropped, uint64_t* kept); // vka_exec.c
 void vka_drawflip_frame(double period_s); // vka_draw.c
@@ -75,6 +76,7 @@ static void frame_path_creation(uint64_t tk) {
         VLOG("presents up to %llu: %llu frames with over 16.7 ms of frame-path pipeline creation (%llu over 50 ms), %.1f s in them; pixel shader sets %llu reused, %llu written",
              (unsigned long long)tk, (unsigned long long)over16, (unsigned long long)over50, over_ns / 1e9, (unsigned long long)hit, (unsigned long long)miss);
         vka_skip_report();
+        vka_rt_size_report();
         { uint64_t stale, dr, kp; vka_tex_stale_stats(&stale); vka_copy_drop_stats(&dr, &kp); VLOG("stale alias reads so far: %llu; copies into left-out levels dropped %llu, into kept levels of such textures %llu", (unsigned long long)stale, (unsigned long long)dr, (unsigned long long)kp); }
     }
 }

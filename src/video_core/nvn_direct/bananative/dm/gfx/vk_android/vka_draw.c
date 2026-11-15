@@ -58,6 +58,31 @@ void vka_skip_report(void) {
         if (d && o < sizeof b - 32) o += (size_t)snprintf(b + o, sizeof b - o, " line %d: %llu", i, (unsigned long long)d); }
     VLOG("draws skipped since the last report: %llu%s", (unsigned long long)all, o ? b : "");
 }
+// Render-target sizes (dotfiles-25x.10: whether a game's dynamic resolution shrinks its scene targets or viewports): passes at least 640 wide by render area, first viewport and whether they
+// have depth, since the last report (every 1800 presents, nvn_present.c)
+enum { NRTS = 64 };
+static struct { uint32_t w, h, vw, vh, depth; uint64_t n; } g_rts[NRTS];
+static uint64_t g_rts_other;
+static void rts_note(uint32_t w, uint32_t h, const vka_dstate *d, int depth) {
+    if (w < 640) return;
+    const uint32_t vw = d->has_vp ? (uint32_t)fabsf(d->vp[0][2]) : 0, vh = d->has_vp ? (uint32_t)fabsf(d->vp[0][3]) : 0;
+    for (int i = 0; i < NRTS; i++) {
+        if (!g_rts[i].n) { g_rts[i].w = w; g_rts[i].h = h; g_rts[i].vw = vw; g_rts[i].vh = vh; g_rts[i].depth = (uint32_t)depth; g_rts[i].n = 1; return; }
+        if (g_rts[i].w == w && g_rts[i].h == h && g_rts[i].vw == vw && g_rts[i].vh == vh && g_rts[i].depth == (uint32_t)depth) { g_rts[i].n++; return; }
+    }
+    g_rts_other++;
+}
+void vka_rt_size_report(void) {
+    char b[700]; size_t o = 0;
+    for (int t = 0; t < 10; t++) {
+        int best = -1; for (int i = 0; i < NRTS; i++) if (g_rts[i].n && (best < 0 || g_rts[i].n > g_rts[best].n)) best = i;
+        if (best < 0) break;
+        if (o < sizeof b) o += (size_t)snprintf(b + o, sizeof b - o, " %ux%u vp %ux%u%s x%llu;", g_rts[best].w, g_rts[best].h, g_rts[best].vw, g_rts[best].vh, g_rts[best].depth ? " +depth" : "", (unsigned long long)g_rts[best].n);
+        g_rts[best].n = 0;
+    }
+    VLOG("render passes >= 640 wide since the last report (area, first viewport):%s others %llu", o ? b : " none;", (unsigned long long)g_rts_other);
+    memset(g_rts, 0, sizeof g_rts); g_rts_other = 0;
+}
 static uint32_t g_claim_words;   // the draw's claim words (an upper bound of its primitives): 0 = its geometry shader takes no claim
 #define SKIP(...) do { g_skipped++, vka_skip_line[__LINE__ & 2047]++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return; } while (0)
 
@@ -324,6 +349,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         if (dp || sp) snprintf(b + bn, bn < sizeof b ? sizeof b - bn : 0, " d:%d%s", R.df ? R.df : R.sf, (dp ? dp : sp)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
         vka_gp_pass(b);
     }
+    rts_note(w, h, d, dp || sp);
     vk.vkCmdBeginRendering(g_cb, &ri);
     R.on = 1; vka_n_rp++; if (g_dyn_filter == 2) vka_dyn_invalidate();   // DM_VK_DYN_FILTER=2: the dynamic state set again at each pass (bisect)
     for (int k = 0; k < nlate; k++) { VkClearAttachment c = {late[k]->asp, late[k]->ci >= 0 ? (uint32_t)late[k]->ci : 0, late[k]->in}; VkClearRect cr = {late[k]->rc, 0, layers}; vk.vkCmdClearAttachments(g_cb, 1, &c, 1, &cr); }
