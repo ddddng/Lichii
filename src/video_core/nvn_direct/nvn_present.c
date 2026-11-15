@@ -75,6 +75,14 @@ static void frame_path_creation(uint64_t tk) {
         vka_fsc_stats(&hit, &miss);
         VLOG("presents up to %llu: %llu frames with over 16.7 ms of frame-path pipeline creation (%llu over 50 ms), %.1f s in them; pixel shader sets %llu reused, %llu written",
              (unsigned long long)tk, (unsigned long long)over16, (unsigned long long)over50, over_ns / 1e9, (unsigned long long)hit, (unsigned long long)miss);
+        {   // (dotfiles-25x.13) what the frame-path creation above is made of: shaders new to DM_TEMP, libraries compiled rather than read from the caches
+            unsigned made, kept;
+            uint64_t slow, ahead;
+            vka_rc_counts(&made, &kept);
+            vka_lib_counts(&slow, &ahead);
+            VLOG("presents up to %llu: %u shaders made (%u translated now, %u kept from earlier runs); %llu graphics pipeline libraries compiled outside the ahead threads (over 20 ms), %llu made ahead",
+                 (unsigned long long)tk, made, made - kept, kept, (unsigned long long)slow, (unsigned long long)ahead);
+        }
         vka_skip_report();
         vka_rt_size_report();
         { uint64_t stale, dr, kp; vka_tex_stale_stats(&stale); vka_copy_drop_stats(&dr, &kp); VLOG("stale alias reads so far: %llu; copies into left-out levels dropped %llu, into kept levels of such textures %llu", (unsigned long long)stale, (unsigned long long)dr, (unsigned long long)kp); }

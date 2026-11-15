@@ -550,11 +550,28 @@ static _Thread_local int t_ahead;   // gpl_link makes only these libraries (1 pr
 static _Thread_local int t_lib_peek;            // lib_make answers from the map only: a library not made yet is not made here (the link fails)
 static _Thread_local const char *t_how = "";    // appended to the build lines of this thread (" (asynchronous)")
 static _Atomic uint64_t g_async_made, g_async_ns, g_async_skips;   // made asynchronously, their time, the draws skipped meanwhile
+// Lichii (dotfiles-25x.13): libraries the ahead threads made (and let go of, DM_VK_LIB_AHEAD_KEEP=0), and the ones other threads compiled (over 20 ms: not a cache hit)
+static _Atomic uint64_t g_lib_ahead_made, g_lib_slow;
+static int lib_ahead_keep(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_LIB_AHEAD_KEEP", 0) != 0; return v; }
+void vka_lib_counts(uint64_t *compiled, uint64_t *ahead) { *compiled = atomic_load(&g_lib_slow); *ahead = atomic_load(&g_lib_ahead_made); }
 static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPipelineCreateInfo *ci, VkGraphicsPipelineLibraryFlagsEXT part, int *refused) {
     uint64_t h = fnv(key, klen, 1469598103934665603ull);
     // Lichii (dotfiles-25x.16): a library being made by another thread (LIB_BUSY: the libraries made ahead, lib_ahead_main) is waited for, not made twice; one that is
     // not there yet is made by this thread, so a frame-path miss takes it before the ahead threads reach it
     pthread_mutex_lock(&g_mu); void *hit = km_get(&g_lib[kind], key, h);
+    if (t_ahead && !lib_ahead_keep()) {   // (only for the driver's caches: made outside the map and destroyed, unless the map has it)
+        pthread_mutex_unlock(&g_mu);
+        if (hit) return VK_NULL_HANDLE;
+        int shp = kind == L_PRE || kind == L_PREFS;   // (the same create info as below: the frame path's later make must hit the caches)
+        VkGraphicsPipelineLibraryCreateInfoEXT li = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, .pNext = shp && (g_pre_adapt & A_NORI) ? NULL : ci->pNext, .flags = part};
+        VkGraphicsPipelineCreateInfo c = *ci; c.pNext = &li;
+        c.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (g_pre_adapt & A_RETAIN ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0) | pipe_stats_flag();
+        int bs = build_begin(g_lib_name[kind], 0, 0);
+        VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, shp && (g_pre_adapt & A_NOCACHE) ? VK_NULL_HANDLE : g_pc, 1, &c, NULL, &p);
+        build_end(bs);
+        if (!r && p) { vk.vkDestroyPipeline(V.dev, p, NULL); atomic_fetch_add(&g_lib_ahead_made, 1); }
+        return VK_NULL_HANDLE;
+    }
     while (hit == LIB_BUSY && !t_lib_peek && !t_ahead) { pthread_cond_wait(&g_lib_cv, &g_mu); hit = km_get(&g_lib[kind], key, h); }
     if (!hit && !t_lib_peek) km_put(&g_lib[kind], key, h, LIB_BUSY);
     pthread_mutex_unlock(&g_mu);
@@ -578,7 +595,9 @@ static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPip
     pthread_mutex_unlock(&g_mu);
     if (!r) pipe_stats(p, g_lib_name[kind], h, 0);
     if (r) { if (refused) *refused = r; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("graphics pipeline library (%s): %d; the whole pipeline is made instead", g_lib_name[kind], r); }
-    else if (ms_ > 50 && !t_ahead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 100) VLOG("graphics pipeline library (%s) took %.0f ms%s", g_lib_name[kind], ms_, t_how); }
+    if (!r && ms_ > 20 && !t_ahead) atomic_fetch_add(&g_lib_slow, 1);
+    if (!r && t_ahead) atomic_fetch_add(&g_lib_ahead_made, 1);
+    if (!r && ms_ > 50 && !t_ahead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 100) VLOG("graphics pipeline library (%s) took %.0f ms%s", g_lib_name[kind], ms_, t_how); }
     return p;
 }
 // Each library names only the dynamic states of its own part (the Adreno 840's driver refused a pre-rasterization library given the whole list, VK_ERROR_UNKNOWN);
@@ -1251,20 +1270,24 @@ static void *lib_ahead_main(void *a) {
         while (f && fgets(line, sizeof line, f)) if (!strncmp(line, "VmRSS:", 6)) rss = atol(line + 6);
         if (f) fclose(f);
         pthread_mutex_lock(&g_mu); uint64_t npre = g_nlib[L_PRE], nfs = g_nlib[L_FS]; pthread_mutex_unlock(&g_mu);
-        VLOG("graphics pipeline libraries made ahead: %u items in %.1f s on %d threads, %.1f s of CPU; %llu pre-rasterization and %llu fragment shader libraries in the process; resident memory %ld MiB",
-             g_la_n, (now_ns() - g_la_t0) / 1e9, g_la_threads, atomic_load(&g_la_cpu_ns) / 1e9, (unsigned long long)npre, (unsigned long long)nfs, rss >> 10);
+        VLOG("graphics pipeline libraries made ahead: %u items in %.1f s on %d threads, %.1f s of CPU, %llu libraries made; %llu pre-rasterization and %llu fragment shader libraries in the process; resident memory %ld MiB",
+             g_la_n, (now_ns() - g_la_t0) / 1e9, g_la_threads, atomic_load(&g_la_cpu_ns) / 1e9, (unsigned long long)atomic_load(&g_lib_ahead_made), (unsigned long long)npre, (unsigned long long)nfs, rss >> 10);
     }
     return NULL;
 }
+// Lichii (dotfiles-25x.13): with the recompiler (vka_rc_mode 1) ON by default (2 threads): the shaders are the kept translations (nvn_recompile.c, the ~1,300 this game
+// has shown in earlier runs, not the 11,800 of the library), made from the file (vka_rc_by_key), and each library is made only to fill the driver's caches and destroyed
+// (DM_VK_LIB_AHEAD_KEEP=1 keeps them in the map): a vertex / pixel shader pair the frame path has not met then compiles neither stage, the libraries it makes hit the
+// pipeline cache and only the fast link is new. The prewarm list's pipelines are made whole by prewarm, so their records are not taken here
 static void lib_ahead_start(void) {
-    int nt = VKA_ENV("DM_VK_LIB_AHEAD", 0);
+    int rc = vka_rc_mode() == 1, nt = VKA_ENV("DM_VK_LIB_AHEAD", rc ? 2 : 0);
     if (nt <= 0 || !gpl_on()) return;
     if (nt > 24) nt = 24;
     uint64_t *vs = NULL, *fs = NULL;
-    unsigned nvs = vka_shlib_stage_keys(DMSH_VK_STAGE_VS, &vs), nfs = vka_shlib_stage_keys(DMSH_VK_STAGE_FS, &fs), nrec = 0;
+    unsigned nvs = rc ? vka_rc_stage_keys(0, &vs) : vka_shlib_stage_keys(DMSH_VK_STAGE_VS, &vs), nfs = rc ? vka_rc_stage_keys(1, &fs) : vka_shlib_stage_keys(DMSH_VK_STAGE_FS, &fs), nrec = 0;
     g_la = malloc(((size_t)2 * g_pw_load_n + nvs + nfs + 1) * sizeof *g_la);
     if (!g_la) { free(vs); free(fs); return; }
-    for (size_t o = 0; g_pw_load && o + sizeof(pwrec) <= g_pw_load_len;) {   // the earlier runs' pipelines first, in their order
+    for (size_t o = 0; !rc && g_pw_load && o + sizeof(pwrec) <= g_pw_load_len;) {   // the earlier runs' pipelines first, in their order
         pwrec r; memcpy(&r, g_pw_load + o, sizeof r);
         if (r.kind == 0 && !r.key[2] && !r.key[3] && !r.key[4]) {   // (a vertex and a pixel shader: the pipelines whose parts are libraries here)
             if (r.key[0]) g_la[g_la_n++] = (ahead_item){r.key[0], 1, (int32_t)o};
@@ -1280,7 +1303,7 @@ static void lib_ahead_start(void) {
     free(vs); free(fs);
     g_la_t0 = now_ns();
     for (int i = 0; i < nt; i++) { pthread_t th; if (!pthread_create(&th, NULL, lib_ahead_main, NULL)) { pthread_detach(th); g_la_threads++; } }
-    VLOG("graphics pipeline libraries: made ahead on %d background threads (DM_VK_LIB_AHEAD=0 off): %u from %u earlier runs' pipelines, then %u vertex and %u pixel shaders of the library",
-         g_la_threads, g_la_n - nvs - nfs, nrec, nvs, nfs);
+    VLOG("graphics pipeline libraries: made ahead on %d background threads (DM_VK_LIB_AHEAD=0 off): %u from %u earlier runs' pipelines, then %u vertex and %u pixel shaders of the %s%s",
+         g_la_threads, g_la_n - nvs - nfs, nrec, nvs, nfs, rc ? "kept translations" : "library", lib_ahead_keep() ? "" : " (destroyed once made: the driver's caches keep them)");
 }
 #endif

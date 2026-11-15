@@ -400,6 +400,9 @@ vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t pr
 int vka_rc_stage(uint64_t key);         // NVN stage of a kept control section, -1 none
 uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic outputs per primitive
 vka_shader *vka_rc_by_key(uint64_t key);
+unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' shader keys of NVN stage st (malloc'd)
+void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs
+void vka_lib_counts(uint64_t *compiled, uint64_t *ahead);   // graphics pipeline libraries compiled outside the ahead threads (over 20 ms), made ahead
 void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
 void vka_rc_cs_c0(const vka_shader *sh, const vka_bstate *s, uint8_t *d);
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)

@@ -357,11 +357,11 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const uint8_t*
 // modification time: every build started it again, so the first run after one translated every shader on the frame path. A record also
 // keeps the shader's NVN2 control section and its own constants (c1, inside the code the key hashes), so a later run makes the shader
 // before the game sets it: the prewarm list's pipelines are made at boot from these (vka_rc_by_key).
-// Records: magic, size of the rest, slot, gl_depth, per-primitive outputs, vertex input types, the nvn_direct_shader fields, c1's size, descriptors, SPIR-V,
-// control section, c1
-#define RC_FILE_MAGIC 0x3243524cu   // "LRC2"
+// Records: magic, size of the rest, slot, the shader key and the pixel shader's per-primitive inputs it was made for, gl_depth, per-primitive outputs,
+// vertex input types, the nvn_direct_shader fields, c1's size, descriptors, SPIR-V, control section, c1
+#define RC_FILE_MAGIC 0x3343524cu   // "LRC3"
 #define RC_REC_MAGIC 0x5243524cu    // "LRCR"
-typedef struct { uint32_t magic, size; uint64_t slot; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, desc_count, spirv_words, c1_len; } rc_rec;
+typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, desc_count, spirv_words, c1_len; } rc_rec;
 static size_t rc_rec_rest(const rc_rec* r) { return (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4 + NVN_DIRECT_NVN2_CONTROL_SIZE + r->c1_len; }
 static rc_map g_disk;      // slot -> rc_rec + its descriptors, SPIR-V, control section and c1 (malloc'd, kept)
 static FILE* g_disk_f; static int g_disk_state;   // 0 not opened, 1 open, -1 none
@@ -412,8 +412,8 @@ static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, in
     *control = (const uint8_t*)(o->spirv + r->spirv_words); *c1 = *control + NVN_DIRECT_NVN2_CONTROL_SIZE; *c1_len = r->c1_len;
     return 1;
 }
-static void disk_put(uint64_t slot, const nvn_direct_shader* o, uint64_t vin_types, int gl_depth, const uint8_t* control, const uint8_t* c1, uint32_t c1_len) {
-    rc_rec r = {RC_REC_MAGIC, 0, slot, gl_depth, o->per_primitive_outputs, vin_types, {o->local[0], o->local[1], o->local[2]}, o->shared, o->input_mask, o->output_mask, o->ssbo_align,
+static void disk_put(uint64_t slot, uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o, uint64_t vin_types, int gl_depth, const uint8_t* control, const uint8_t* c1, uint32_t c1_len) {
+    rc_rec r = {RC_REC_MAGIC, 0, slot, key, prim_inputs, gl_depth, o->per_primitive_outputs, vin_types, {o->local[0], o->local[1], o->local[2]}, o->shared, o->input_mask, o->output_mask, o->ssbo_align,
                 o->desc_count, (uint32_t)o->spirv_words, c1_len};
     r.size = (uint32_t)(sizeof r + rc_rec_rest(&r));
     pthread_mutex_lock(&g_mu); disk_open();
@@ -422,6 +422,20 @@ static void disk_put(uint64_t slot, const nvn_direct_shader* o, uint64_t vin_typ
         fwrite(control, 1, NVN_DIRECT_NVN2_CONTROL_SIZE, g_disk_f); if (c1_len) fwrite(c1, 1, c1_len, g_disk_f); fflush(g_disk_f);
     }
     pthread_mutex_unlock(&g_mu);
+}
+// The kept translations' shader keys of NVN stage st (not the pixel shaders' per-primitive variants, valid only in mesh pipelines), malloc'd into *out: how many
+// (vka_pso.c lib_ahead_start: their stage libraries are made ahead, so a pair the frame path has not met only needs the fast link)
+unsigned vka_rc_stage_keys(int st, uint64_t** out) {
+    pthread_mutex_lock(&g_mu); disk_open();
+    unsigned n = 0; *out = malloc((g_disk.n ? g_disk.n : 1) * sizeof **out);
+    for (size_t i = 0; *out && i < g_disk.cap; i++) {
+        const rc_rec* r = g_disk.e[i].key ? g_disk.e[i].val : NULL;
+        if (!r || r->prim_inputs) continue;
+        const uint8_t* control = (const uint8_t*)r + sizeof *r + (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4;
+        if (control[0x56] == st) (*out)[n++] = r->key;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return n;
 }
 // EDEN_NX2_NVN_RECOMPILE_DUMP=<dir> (lab): every module translated in this run (not those kept from earlier runs) as <key>[-p<per-primitive inputs>].spv, for spirv-val
 static void dump_spirv(uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o) {
@@ -484,7 +498,7 @@ static rc_shader* rc_new(const prog_t* p, unsigned i, uint64_t key, uint64_t slo
         c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(p->sd[i].data) + a; c1_len = a < c1e ? c1e - a : 0;
         if ((ok = rc_translate(p, i, control, g_draw, prim_inputs, &o, &vin_types, &r->gl_depth, why, sizeof why))) {
             r->prim = o.per_primitive_outputs;
-            disk_put(slot, &o, vin_types, r->gl_depth, control, c1, c1_len);
+            disk_put(slot, key, prim_inputs, &o, vin_types, r->gl_depth, control, c1, c1_len);
             dump_spirv(key, prim_inputs, &o);
         }
     }
@@ -549,6 +563,9 @@ vka_shader* vka_rc_by_key(uint64_t key) {
     pthread_mutex_unlock(&g_make_mu);
     return r ? r->sh : NULL;
 }
+
+// Shaders made in this run, and of them the ones an earlier run kept (the rest were translated now: new to this run's DM_TEMP)
+void vka_rc_counts(unsigned* made, unsigned* kept) { *made = g_made; *kept = g_cached; }
 
 // ---------- Mode 2: the library's records against the recompiler's ----------
 // A record as what it reads, without its binding number or descriptor kind spelling: (class, source) strings, sorted
