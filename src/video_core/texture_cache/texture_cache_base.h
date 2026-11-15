@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <utility>
 // TODO: find out which don't require stable iters
@@ -204,6 +205,12 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     /// Why the next DeleteImage happens, for EDEN_NX2_TC_TRACE: the collector (and its mode),
     /// an unmap or a join. Read and reset by DeleteImage.
     const char* trace_delete_reason = "other";
+    bool tc_trace{}; ///< EDEN_NX2_TC_TRACE=1: log every image created and deleted
+    /// What asks for the next image, for EDEN_NX2_TC_TRACE: a colour or depth target, a texture
+    /// or image descriptor, a 2D blit or the temporal upscale. Set by each caller.
+    const char* trace_create_site = "other";
+    /// The overlaps JoinImages found for the image it just made, for EDEN_NX2_TC_TRACE.
+    std::string trace_create_overlaps;
     u64 scale_epoch{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
