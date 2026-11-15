@@ -1066,7 +1066,7 @@ VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; re
 // threads (default 4, nice 10; 0 = off). Its pipeline depends on the program alone (its layout is the program's), so the library's key list is the whole list; the frame
 // path compiled them on a miss (38 over 50 ms, 8.3 s in a cold boot and race: ux-cold-1). A dispatch is not skipped as a draw is (what it writes may be read as
 // indirect arguments): one whose pipeline a thread here is making waits for it (busy_wait), one not reached yet is compiled on the frame path as before
-static uint64_t *g_ca_keys; static unsigned g_ca_n; static _Atomic uint32_t g_ca_next, g_ca_done, g_ca_made; static int g_ca_threads; static uint64_t g_ca_t0;
+static uint64_t *g_ca_keys; static unsigned g_ca_n; static _Atomic uint32_t g_ca_next, g_ca_done, g_ca_made; static int g_ca_threads; static uint64_t g_ca_t0; static _Atomic uint64_t g_ca_cpu_ns;
 static void *cs_ahead_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-csahead");
     setpriority(PRIO_PROCESS, 0, 10);
@@ -1081,9 +1081,10 @@ static void *cs_ahead_main(void *a) {
         vka_pipeline_notify(1);
         setpriority(PRIO_PROCESS, 0, 10);   // back under the game's threads if a waiting frame path raised it (busy_wait)
     }
+    { struct timespec c; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c); atomic_fetch_add(&g_ca_cpu_ns, (uint64_t)c.tv_sec * 1000000000ull + (uint64_t)c.tv_nsec); }
     if (atomic_fetch_add(&g_ca_done, 1) + 1 == (uint32_t)g_ca_threads)
-        VLOG("compute pipelines made ahead: %u of the library's %u compute programs made (the rest there already or refused) in %.1f s on %d threads",
-             (unsigned)atomic_load(&g_ca_made), g_ca_n, (now_ns() - g_ca_t0) / 1e9, g_ca_threads);
+        VLOG("compute pipelines made ahead: %u of the library's %u compute programs made (the rest there already or refused) in %.1f s on %d threads, %.1f s of CPU",
+             (unsigned)atomic_load(&g_ca_made), g_ca_n, (now_ns() - g_ca_t0) / 1e9, g_ca_threads, atomic_load(&g_ca_cpu_ns) / 1e9);
     return NULL;
 }
 static void cs_ahead_start(void) {
