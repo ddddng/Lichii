@@ -151,6 +151,11 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
         // Else a fenced release the back ran whose fence has yet to run decides nothing: memory
         // does, as once it landed.
         if (!split.Ran(queued->position)) {
+            if (queued->known && !queued->at_least) {
+                // The word will hold the value, which falls short. Waiting without a drain never
+                // passes it early; the 1 ms valve drains for writes the front did not note.
+                return AcquireCheck::NotMet;
+            }
             VideoCommon::Count(stats.drain_queued);
             if (VideoCommon::g_acquire_counting && !queued->known) {
                 VideoCommon::Count(stats.queued_unknown);
