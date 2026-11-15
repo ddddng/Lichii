@@ -123,13 +123,15 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
         if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last
             uint64_t back = (uint64_t)((double)(tmax - gq[q++]) * g_sq_ns); uint64_t tk = nvn_timestamp_from_ns(g > back ? g - back : 0), tt = ops[i].type;
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
+            if (ops[i].mode) { memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8); continue; }   // (Lichii: its counter written at replay, rc_counter)
             memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
         else {
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
-            memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec);
+            if (ops[i].mode) memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8);   // (Lichii: its counter written at replay, rc_counter)
+            else memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec);
         }
     }
     free(ops);
@@ -711,6 +713,56 @@ static int rc_known(uint64_t a, uint64_t *v) {   // a counter at a: 0 for a time
     memcpy(v, (const void *)(uintptr_t)a, 8); return 1;
 }
 
+// Lichii (dotfiles-25x.17): the counter reports replayed so far, by address (the replay thread only): the type and the frame of the last report there, so a render
+// condition is decided by what the GPU would hold at that point in the replay, not by what the completion thread happens to have written into memory by then
+enum { RPT = 8192 };
+static struct { uint64_t addr; uint32_t type; uint64_t frame; } g_rpt[RPT];
+static void rpt_note(uint64_t a, uint32_t t) {
+    unsigned h = (unsigned)((a >> 3) * 0x9E3779B1u) & (RPT - 1), victim = h;
+    for (unsigned i = 0; i < 8; i++) { unsigned k = (h + i) & (RPT - 1);
+        if (g_rpt[k].addr == a || !g_rpt[k].addr) { victim = k; break; }
+        if (g_rpt[k].frame < g_rpt[victim].frame) victim = k; }
+    g_rpt[victim].addr = a; g_rpt[victim].type = t; g_rpt[victim].frame = g_frame;
+}
+static int rpt_find(uint64_t a, uint32_t *t, uint64_t *frame) {
+    unsigned h = (unsigned)((a >> 3) * 0x9E3779B1u) & (RPT - 1);
+    for (unsigned i = 0; i < 8; i++) { unsigned k = (h + i) & (RPT - 1); if (g_rpt[k].addr == a) { *t = g_rpt[k].type; *frame = g_rpt[k].frame; return 1; } if (!g_rpt[k].addr) return 0; }
+    return 0;
+}
+// DM_VK_RC_LOG=n (lab; DM_VK_RC_LOG_AFTER=<s> from that many seconds on): the first n render conditions decided, with what each side held; every 10 s the conditions decided, skipped and changed since the last decision
+static struct { uint64_t addr; int skip; } g_rcl[1024];
+static uint64_t g_rc_n, g_rc_skip, g_rc_flip, g_rc_frame0;
+static void rc_note(const p_render_cond *rc, uint64_t x, uint64_t y, int known, int skip) {
+    static int lines = -1; if (lines < 0) lines = VKA_ENV("DM_VK_RC_LOG", 0);
+    g_rc_n++; g_rc_skip += skip;
+    unsigned k = (unsigned)((rc->addr >> 3) * 0x9E3779B1u) & 1023;
+    if (g_rcl[k].addr == rc->addr && g_rcl[k].skip != skip) g_rc_flip++;
+    g_rcl[k].addr = rc->addr; g_rcl[k].skip = skip;
+    static uint64_t after = 1; if (after == 1) after = (uint64_t)VKA_ENV("DM_VK_RC_LOG_AFTER", 0) * 1000000000ull;
+    if (lines > 0 && guest_ns() >= after) { lines--; uint32_t tx = 99, ty = 99; uint64_t fx = 0, fy = 0; int hx = rpt_find(rc->addr, &tx, &fx), hy = rpt_find(rc->addr + 16, &ty, &fy);
+        VLOG("render cond: frame %llu queue %llu mode %u at %#llx: x %llu (last report %s type %u frame %llu), y %llu (last report %s type %u frame %llu), known %d: %s",
+             (unsigned long long)g_frame, (unsigned long long)S.serial, rc->mode, (unsigned long long)nvn_direct_guest_of(rc->addr), (unsigned long long)x, hx ? "yes" : "no", tx, (unsigned long long)fx,
+             (unsigned long long)y, hy ? "yes" : "no", ty, (unsigned long long)fy, known, skip ? "skip" : "draw"); }
+    uint64_t t = now_ns();
+    if (t >= g_rc_frame0 + 10000000000ull) {
+        if (g_rc_frame0) VLOG("render conditions in the last 10 s: %llu decided, %llu skipped, %llu changed since the last decision at the same address",
+                              (unsigned long long)g_rc_n, (unsigned long long)g_rc_skip, (unsigned long long)g_rc_flip);
+        g_rc_frame0 = t; g_rc_n = g_rc_skip = g_rc_flip = 0;
+    }
+}
+// Lichii (dotfiles-25x.17): a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
+// the other counters: 0) is written when the replay reaches the report, in the order the GPU would write it, and the completion thread then writes only the time beside it
+// (returns 1). Written at completion, it landed at a time set by the GPU's progress: Mario Kart World reports a timestamp onto a word its CPU sets to 1 and draws only while
+// the word differs from the next (SetRenderEnableConditional, render if not equal), so whether the completion of an earlier frame's report had overwritten the CPU's newer 1
+// when the replay reached the condition decided whether those draws ran: background objects came and went from frame to frame. DM_VK_RC_REPLAY_WRITE=0: at completion
+static int rc_counter(uint64_t a, uint32_t t) {
+    static int on = -1; if (on < 0) on = VKA_ENV("DM_VK_RC_REPLAY_WRITE", 1) != 0;
+    const int ts = t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
+    if (!on || (ts && !DM_GAME_RENDER_COND)) return 0;   // (a timestamp's counter is the time otherwise: known at completion only)
+    uint64_t v = t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0;
+    memcpy(nvn_direct_writable(a), &v, 8);
+    return 1;
+}
 static void seg_write(const void *a) { struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, w.st, g_sqp, w.q); }
 // ---------- Queues that wait for each other's events ----------
 // NVN queues run side by side and may wait for each other mid-list (CommandBufferWaitEvent): Mario Kart World submits its second graphics queue first, and the two
@@ -892,7 +944,7 @@ static int walk(walk_t *w) {
         case OP_WAIT_EVENT: if (V.multi) { evsem_wait(a); break; }
             if (w->skip) w->skip = 0; else if (interleave_on() && !wait_met(p)) return 1;
             break;
-        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val});
+        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val}); rpt_note(val & ~7ull, 0x100 | (v & 0xff));
             w->p[w->n - 1] = p + h.size;
             if (V.multi) { evsem_signal((volatile uint32_t *)(uintptr_t)val, m, v); ev_set((volatile uint32_t *)(uintptr_t)val, (int)m, v); continue; }   // (the event's semaphore is made at the value before this signal)
             ev_set((volatile uint32_t *)(uintptr_t)val, (int)m, v);
@@ -905,7 +957,8 @@ static int walk(walk_t *w) {
                 struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w = {g_cb, t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q - 1};
                 if (!vka_enc_call(seg_write, &w, sizeof w)) seg_write(&w);
             }
-            post((pop){2, 0, q, (uint32_t)t, ad});
+            post((pop){2, rc_counter(ad, (uint32_t)t), q, (uint32_t)t, ad});
+            rpt_note(ad, (uint32_t)t);
             if ((t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP) && DM_GAME_RENDER_COND && g_nrc_ts < RC_PEND) g_rc_ts[g_nrc_ts++] = ad;
             if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());
@@ -913,10 +966,10 @@ static int walk(walk_t *w) {
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1; s->fenced = 1; break; }   // the fence this submission commits with
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
-            else { uint64_t x, y; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); }
+            else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); rc_note(rc, x, y, known, S.rc_skip); }
             break; }
         case OP_RESET_COUNTER: break;
-        case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
+        case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; if (cb->size <= 64) for (uint64_t o = 0; o < cb->size; o += 8) rpt_note(cb->addr + o, 0x200 | (cb->value & 0xff)); buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
         case OP_COPY_B2B: if (g_cb) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
         case OP_UPDATE_UB: { static uint64_t wa = ~0ull; if (wa == ~0ull) { const char *e = getenv("DM_VK_WATCHADDR"); wa = e ? strtoull(e, NULL, 16) : 0; }
             uint64_t d_, n_; memcpy(&d_, a, 8); memcpy(&n_, (const uint8_t *)a + 8, 8);

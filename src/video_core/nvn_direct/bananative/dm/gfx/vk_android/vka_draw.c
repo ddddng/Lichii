@@ -20,6 +20,44 @@ static VkCommandBuffer g_cb; static unsigned g_slot; static int g_prof, g_dyn_fi
 uint64_t vka_n_rp;   // render passes the draws opened (vka_exec.c replay statistics)
 static uint64_t g_draws, g_skipped, g_dispatches;
 uint64_t vka_skip_line[2048];   // dotfiles-o72.4 harness: skipped draws by the line that skipped them
+// Lichii (dotfiles-25x.17): the draws skipped since the last call, by the vka_draw.c line that skipped them (the replay thread writes, this reads: approximate)
+// Lab (dotfiles-25x.17, DM_VK_DRAWFLIP=1): per presented frame the draws by vertex shader (and whether indirect); a vertex shader drawn a different number of times in
+// one frame than in the frames before and after, which agree, was issued (or not) for one frame only: logged every 600 frames with the commonest such shaders
+enum { DF = 4096 };
+static uint32_t g_df[3][DF], g_dfi[DF]; static uint64_t g_dfk[DF]; static int g_df_on = -1; static uint64_t g_df_frames, g_df_pops, g_df_popk[DF];
+static void drawflip_note(uint64_t vs, int indirect) {
+    if (g_df_on < 0) g_df_on = VKA_ENV("DM_VK_DRAWFLIP", 0) != 0;
+    if (!g_df_on) return;
+    unsigned k = (unsigned)((vs * 0x9E3779B97F4A7C15ull) >> 52) & (DF - 1);
+    g_df[2][k]++; g_dfk[k] = vs; if (indirect) g_dfi[k]++;
+}
+static uint64_t g_df_track[4];
+void vka_drawflip_frame(double period_s) {
+    if (g_df_on <= 0) return;
+    g_df_frames++;
+    { static int lines = -1; if (lines < 0) lines = VKA_ENV("DM_VK_DRAWFLIP_LOG", 0);   // lab: per frame (after DM_VK_RC_LOG_AFTER) its present interval and the draws of the tracked shaders
+      static uint64_t after = 1; if (after == 1) after = (uint64_t)VKA_ENV("DM_VK_RC_LOG_AFTER", 0) * 1000000000ull;
+      if (lines > 0 && g_df_track[0] && guest_ns() >= after) { lines--; unsigned c[4];
+          for (int i = 0; i < 4; i++) c[i] = g_df_track[i] ? g_df[2][(unsigned)((g_df_track[i] * 0x9E3779B97F4A7C15ull) >> 52) & (DF - 1)] : 0;
+          VLOG("drawflip frame %llu: interval %.0f, draws %u %u %u %u", (unsigned long long)g_df_frames, period_s * 60, c[0], c[1], c[2], c[3]); } }
+    if (g_df_frames > 2) for (unsigned k = 0; k < DF; k++) if (g_df[0][k] == g_df[2][k] && g_df[1][k] != g_df[0][k]) { g_df_pops++; g_df_popk[k]++; }
+    memcpy(g_df[0], g_df[1], sizeof g_df[0]); memcpy(g_df[1], g_df[2], sizeof g_df[1]); memset(g_df[2], 0, sizeof g_df[2]);
+    if (g_df_frames % 600 == 0) {
+        char b[600]; size_t o = 0;
+        for (int t = 0; t < 6; t++) { unsigned best = 0; for (unsigned k = 1; k < DF; k++) if (g_df_popk[k] > g_df_popk[best]) best = k;
+            if (!g_df_popk[best]) break;
+            if (t < 4) g_df_track[t] = g_dfk[best];
+            o += (size_t)snprintf(b + o, sizeof b - o, " %016llx x%llu (%u indirect)", (unsigned long long)g_dfk[best], (unsigned long long)g_df_popk[best], g_dfi[best]); g_df_popk[best] = 0; }
+        VLOG("draw flips: %llu one-frame changes of a vertex shader's draw count in the last 600 frames:%s", (unsigned long long)g_df_pops, b);
+        g_df_pops = 0; memset(g_df_popk, 0, sizeof g_df_popk); memset(g_dfi, 0, sizeof g_dfi);
+    }
+}
+void vka_skip_report(void) {
+    static uint64_t last[2048]; char b[512]; size_t o = 0; uint64_t all = 0;
+    for (int i = 0; i < 2048; i++) { uint64_t d = vka_skip_line[i] - last[i]; last[i] += d; all += d;
+        if (d && o < sizeof b - 32) o += (size_t)snprintf(b + o, sizeof b - o, " line %d: %llu", i, (unsigned long long)d); }
+    VLOG("draws skipped since the last report: %llu%s", (unsigned long long)all, o ? b : "");
+}
 static uint32_t g_claim_words;   // the draw's claim words (an upper bound of its primitives): 0 = its geometry shader takes no claim
 #define SKIP(...) do { g_skipped++, vka_skip_line[__LINE__ & 2047]++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return; } while (0)
 
@@ -1176,6 +1214,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!mesh) vin_build(d, sh[0], &k);
     PT(4);
     VkPipeline p = vka_gfx_pipeline(sh, &lay, &k);
+    drawflip_note(sh[7] ? sh[7]->key : sh[0] ? sh[0]->key : 0, dw ? dw->ind != 0 : di->ind != 0);
     if (!p) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
     if (vka_nan_on()) vka_nan_draw(mesh ? sh[7]->key : sh[0]->key, fs ? fs->key : 0);
