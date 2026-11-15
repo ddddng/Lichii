@@ -774,17 +774,23 @@ static void evtr(char k, const evsem *e, uint32_t v, uint64_t t) {
     g_evtr[i].ev = (const void *)e->val; g_evtr[i].v = v; g_evtr[i].t = t; g_evtr[i].last = e->last;
 }
 // The completion thread saw no progress for 2 s (vka_dev.c): the event steps and semaphores are logged once, and every event semaphore below a wait walked for it is
-// signalled by the host up to that wait ([RED]: the wait is let through, so a run goes on instead of ending in a GPU hang; the host signal may break the semaphore's order)
+// signalled by the host up to that wait ([RED]: the wait is let through, so a run goes on instead of ending in a GPU hang; the host signal may break the semaphore's order).
+// Only a wait whose signal no submission walked yet (dotfiles-25x.4): with the signal already handed to a queue the GPU is just not there yet (a long draw, or a hang the
+// let-through cannot help), and a host signal there made the queue's own signal later not greater than the semaphore's value (VUID-VkSubmitInfo-pSignalSemaphores-03242)
 static void evtr_report(void);
 void vka_exec_stall(void) {
     static _Atomic int reported; if (!atomic_exchange(&reported, 1)) evtr_report();
     for (int i = 0; V.multi && i < g_nevs; i++) { evsem *e = &g_evs[i]; uint64_t c = 0, w = e->wmax; vk.vkGetSemaphoreCounterValue(V.dev, e->sem, &c);
         if (c >= w) continue;
+        if (w <= e->last) { VRED("GPU stall: event %p's semaphore at %llu, a wait for %llu walked: its signal (%llu, queue %d) is on the GPU already, not let through", (void *)e->val,
+                                 (unsigned long long)c, (unsigned long long)w, (unsigned long long)e->last, e->last_q); continue; }
         VRED("GPU stall: event %p's semaphore at %llu, a wait for %llu walked (last signal walked %llu on queue %d): let through by a host signal", (void *)e->val,
              (unsigned long long)c, (unsigned long long)w, (unsigned long long)e->last, e->last_q);
         VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = e->sem, .value = w}; vk.vkSignalSemaphore(V.dev, &ss); }
     for (int i = 0; V.multi && i < g_nevs; i++) for (int j = 0; j < g_evs[i].ng; j++) { evgate *g = &g_evs[i].g[j]; uint64_t c = 0; vk.vkGetSemaphoreCounterValue(V.dev, g->sem, &c);
         if (c >= g->val) continue;
+        if (!g->pending) { VRED("GPU stall: event %p's gate for %s %u at %llu, a wait for %llu walked: the signal that meets it is on the GPU already, not let through", (void *)g_evs[i].val,
+                                g->eq ? "==" : ">=", g->w, (unsigned long long)c, (unsigned long long)g->val); continue; }
         VRED("GPU stall: event %p's gate for %s %u at %llu, a wait for %llu walked: let through by a host signal", (void *)g_evs[i].val, g->eq ? "==" : ">=", g->w, (unsigned long long)c, (unsigned long long)g->val);
         VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = g->sem, .value = g->val}; vk.vkSignalSemaphore(V.dev, &ss); }
 }
@@ -916,6 +922,13 @@ static int walk(walk_t *w) {
             else { uint64_t x, y; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); }
             break; }
         case OP_RESET_COUNTER: break;
+        default: break;
+        }
+        switch (h.op) {   // (lab: EDEN_NX2_NVN_CHECKPOINTS, vka_draw.c)
+        case OP_CLEAR_BUF: case OP_COPY_B2B: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_CLEAR_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_BARRIER: vka_checkpoint_op(-1000 - (int)h.op); break;
+        default: break;
+        }
+        switch (h.op) {
         case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
         case OP_COPY_B2B: if (g_cb) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
         case OP_UPDATE_UB: { static uint64_t wa = ~0ull; if (wa == ~0ull) { const char *e = getenv("DM_VK_WATCHADDR"); wa = e ? strtoull(e, NULL, 16) : 0; }
