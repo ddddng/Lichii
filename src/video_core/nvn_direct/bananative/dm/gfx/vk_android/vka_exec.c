@@ -34,6 +34,7 @@ _Atomic int vka_synclog_n;   // DM_VK_SYNCLOG: lines left (mtl_wait)
 static double ms_now(void) { return (now_ns() % 1000000000000ull) / 1e6; }
 #define RC_PEND 64
 static uint64_t g_rc_ts[RC_PEND]; static int g_nrc_ts;   // timestamp reports replayed in this submission (their counter field reads 0 once written)
+static void rct_flush(void);
 
 int vka_origin_ll(void) { return __atomic_load_n(&g_origin_ll, __ATOMIC_RELAXED); }
 int vka_queue_origin_ll(void) { return g_queue_origin_ll; }
@@ -282,6 +283,7 @@ void vka_rp_sub_begin(void) {
     uint64_t t_o72b = now_ns();
     vka_perf_thread(0); vka_ctl_sub();
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
+    rct_flush();
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
     if (ts_log()) { uint64_t vka_present_filled(void); post((pop){4, 0, 0, 0, vka_present_filled()}); }   // (the frame: presents filled before this submission, nvn_present.c)
     if (!vka_init()) return;
@@ -813,6 +815,33 @@ static void rc_note(const p_render_cond *rc, uint64_t x, uint64_t y, int known, 
         g_rc_frame0 = t; g_rc_n = g_rc_skip = g_rc_flip = 0;
     }
 }
+// Lab (dotfiles-25x.17): DM_VK_RC_TRACE_FROM=<present> (+ DM_VK_RC_TRACE_N presents, default 4): every render condition and every report onto a condition's words in
+// that window, by present and queue, with the draws each condition covered (the vertex / fragment programs and the render target of its first draw)
+static struct { int on; uint64_t from, n; uint64_t addr[512]; struct { int open, skip, draws, ncol; uint64_t addr, vs, fs; const void *col, *dep; } c; } g_rct = {-1};
+uint64_t vka_present_filled(void);
+static int rct_on(void) {
+    if (g_rct.on < 0) { g_rct.from = (uint64_t)VKA_ENV("DM_VK_RC_TRACE_FROM", 0); g_rct.n = (uint64_t)VKA_ENV("DM_VK_RC_TRACE_N", 4); g_rct.on = g_rct.from > 0; }
+    if (!g_rct.on) return 0;
+    uint64_t p = vka_present_filled(); return p >= g_rct.from && p < g_rct.from + g_rct.n;
+}
+static int rct_cond_addr(uint64_t a, int add) {
+    unsigned k = (unsigned)((a >> 4) * 0x9E3779B1u) & 511;
+    for (unsigned i = 0; i < 16; i++) { unsigned j = (k + i) & 511; if (g_rct.addr[j] == a) return 1; if (!g_rct.addr[j]) { if (add) g_rct.addr[j] = a; return add; } }
+    return 0;
+}
+static void rct_flush(void) {
+    if (!g_rct.c.open) return;
+    g_rct.c.open = 0;
+    VLOG("rct p %llu q %llu   covered %#llx: %d draws %s, vs %llu fs %llu, rt %d colour %p depth %p", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial,
+         (unsigned long long)nvn_direct_guest_of(g_rct.c.addr), g_rct.c.draws, g_rct.c.skip ? "skipped" : "drawn", (unsigned long long)g_rct.c.vs, (unsigned long long)g_rct.c.fs, g_rct.c.ncol, g_rct.c.col, g_rct.c.dep);
+}
+static void rct_draw(void) {
+    if (!g_rct.c.open) return;
+    if (!g_rct.c.draws++) {
+        g_rct.c.vs = S.d.bst[0] ? S.d.bst[0]->serial : 0; g_rct.c.fs = S.d.bst[1] ? S.d.bst[1]->serial : 0;
+        g_rct.c.ncol = S.has_rt ? S.rt.n : -1; g_rct.c.col = S.has_rt && S.rt.n ? (const void *)S.rt.color[0] : NULL; g_rct.c.dep = S.has_rt ? (const void *)S.rt.depth : NULL;
+    }
+}
 // Lichii (dotfiles-25x.17): a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
 // the other counters: 0) is written when the replay reaches the report, in the order the GPU would write it, and the completion thread then writes only the time beside it
 // (returns 1). Written at completion, it landed at a time set by the GPU's progress: Mario Kart World reports a timestamp onto a word its CPU sets to 1 and draws only while
@@ -1028,6 +1057,11 @@ static int walk(walk_t *w) {
                 struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w = {g_cb, t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q - 1};
                 if (!vka_enc_call(seg_write, &w, sizeof w)) seg_write(&w);
             }
+            if (g_rct.on > 0) { static uint64_t n[33], t0; n[t < 32 ? t : 32]++; uint64_t now = now_ns();   // (DM_VK_RC_TRACE_FROM: also the reports by counter type every 10 s)
+              if (now >= t0 + 10000000000ull) { if (t0) { char b[400]; size_t o = 0; for (int k = 0; k < 33; k++) if (n[k] && o < sizeof b - 24) o += (size_t)snprintf(b + o, sizeof b - o, " type %d: %llu", k, (unsigned long long)n[k]);
+                  VLOG("counter reports in the last 10 s:%s", b); } memset(n, 0, sizeof n); t0 = now; } }
+            if (rct_on() && (rct_cond_addr(ad, 0) || rct_cond_addr(ad - 16, 0))) { uint64_t v = 0; memcpy(&v, (const void *)(uintptr_t)ad, 8);
+                VLOG("rct p %llu q %llu R %#llx type %llu (held %llu)", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial, (unsigned long long)nvn_direct_guest_of(ad), (unsigned long long)t, (unsigned long long)v); }
             post((pop){2, rc_counter(ad, (uint32_t)t), q, (uint32_t)t, ad});
             rpt_note(ad, (uint32_t)t);
             if ((t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP) && DM_GAME_RENDER_COND && g_nrc_ts < RC_PEND) g_rc_ts[g_nrc_ts++] = ad;
@@ -1038,6 +1072,14 @@ static int walk(walk_t *w) {
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
             else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); rc_note(rc, x, y, known, S.rc_skip); }
+            if (g_rct.on) {
+                rct_flush();
+                if (rc->mode < 2) rct_cond_addr(rc->addr, 1);
+                if (rct_on()) { uint64_t x = 0, y = 0; if (rc->addr) { memcpy(&x, (const void *)(uintptr_t)rc->addr, 8); memcpy(&y, (const void *)(uintptr_t)(rc->addr + 16), 8); }
+                    VLOG("rct p %llu q %llu C mode %u %#llx: x %llu y %llu: %s", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial, rc->mode,
+                         (unsigned long long)(rc->addr ? nvn_direct_guest_of(rc->addr) : 0), (unsigned long long)x, (unsigned long long)y, S.rc_skip ? "skip" : "draw");
+                    g_rct.c.open = 1; g_rct.c.skip = S.rc_skip; g_rct.c.draws = 0; g_rct.c.addr = rc->addr; }
+            }
             break; }
         case OP_RESET_COUNTER: break;
         default: break;
@@ -1063,8 +1105,8 @@ static int walk(walk_t *w) {
         case OP_COPY_T2B: if (g_cb) copy_bt(a, 0); break;
         case OP_COPY_T2T: if (g_cb) copy_t2t(a); break;
         case OP_BARRIER: if (g_cb && !bar_kept) vka_barrier(g_cb); break;
-        case OP_DRAW: if (!S.rc_skip && g_cb) { p_draw t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, draw_rec(a, h.size, &t), NULL); } break;
-        case OP_DRAW_IDX: if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
+        case OP_DRAW: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, draw_rec(a, h.size, &t), NULL); } break;
+        case OP_DRAW_IDX: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
         case OP_DISPATCH: if (g_cb) vka_dispatch(&S.d, a); break;
         case OP_DRAW_TEX: not_yet(h.op); break;
         default: break;   // state: taken by vka_state_op above
