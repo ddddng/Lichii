@@ -245,6 +245,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_master_semaphore.h
     renderer_vulkan/vk_nvn_direct_astc.cpp
     renderer_vulkan/vk_nvn_direct_astc.h
+    renderer_vulkan/vk_nvn_direct_shaders.cpp
+    renderer_vulkan/vk_nvn_direct_shaders.h
     renderer_vulkan/vk_pipeline_cache.cpp
     renderer_vulkan/vk_pipeline_cache.h
     renderer_vulkan/vk_pipeline_cache_records.cpp

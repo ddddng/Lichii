@@ -257,7 +257,8 @@ struct NvnDirectMemory {
 /// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
 /// submission of the replay holds the scheduler's submit lock.
 void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
-                    Scheduler& scheduler, NvnDirectAstc* astc, VideoCore::ShaderNotify& shader_notify) {
+                    Scheduler& scheduler, NvnDirectAstc* astc, NvnDirectShaders& shaders,
+                    VideoCore::ShaderNotify& shader_notify) {
     std::vector<const char*> extensions;
     for (const std::string& name : device.GetLoadedExtensions()) {
         extensions.push_back(name.c_str());
@@ -296,6 +297,9 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
             static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderComplete();
         },
         .pipeline_context = &shader_notify,
+        .shader_translate = &NvnDirectShaders::Translate,
+        .shader_free = &NvnDirectShaders::Free,
+        .shader_context = &shaders,
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];
@@ -420,8 +424,11 @@ try
         if (!device.IsOptimalAstcSupported() && device.IsKhrPushDescriptorSupported()) {
             nvn_direct_astc.emplace(device, memory_allocator);
         }
+        const PipelineCache& pipeline_cache = rasterizer.GetPipelineCache();
+        nvn_direct_shaders.emplace(device, pipeline_cache.GetProfile(), pipeline_cache.GetHostInfo());
         AdoptNvnDirect(dld, *instance, device, scheduler,
-                       nvn_direct_astc ? &*nvn_direct_astc : nullptr, gpu_.ShaderNotify());
+                       nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
+                       gpu_.ShaderNotify());
     } else if (device.IsNvnDirect()) {
         LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }

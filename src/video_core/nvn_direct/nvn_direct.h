@@ -42,6 +42,68 @@ typedef struct nvn_direct_astc_level {
     int bc3; ///< BC3 (with alpha), else BC1
 } nvn_direct_astc_level;
 
+/// One NVN2 program stage for Lichii's shader recompiler (dotfiles-25x.11): its code and control
+/// section, and the reads of the draw's state translation makes (constant buffer words, the
+/// texture formats of handles, guest memory).
+typedef struct nvn_direct_shader_source {
+    uint32_t nvn_stage;        ///< 0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute, 6 task, 7 mesh
+    const uint8_t* control;    ///< the NVN2 control section (NVN_DIRECT_NVN2_CONTROL_SIZE bytes)
+    const uint8_t* code;       ///< the code area in host memory
+    uint32_t code_size;        ///< bytes of the code area
+    uint64_t code_address;     ///< the code area's guest address
+    uint32_t first_binding;    ///< set 0 binding of the stage's first descriptor
+    uint8_t vertex_input_types[32]; ///< vertex: generic input types, 0 float, 1 signed, 2 unsigned
+    int convert_depth;         ///< pre-rasterization stages: z from -w..w to 0..w (the GL depth mode)
+    uint32_t per_primitive_inputs; ///< fragment after a mesh program: the generic inputs it writes per primitive
+    void* context;
+    uint32_t (*read_cbuf)(void* context, uint32_t bank, uint32_t offset);
+    /// 1 = the size bytes at guest address were read into out
+    int (*read_memory)(void* context, uint64_t address, void* out, size_t size);
+    /// The texture a handle names: its NVN target and VkFormat; 0 = no texture
+    int (*texture_info)(void* context, uint32_t handle, uint32_t* nvn_target, int32_t* vk_format);
+} nvn_direct_shader_source;
+
+#define NVN_DIRECT_NVN2_CONTROL_SIZE 0xd8
+
+/// What a descriptor of a translated shader reads (Shader::Info's descriptor lists)
+enum {
+    NVN_DIRECT_DESC_CBUF,           ///< constant buffer cbuf_index
+    NVN_DIRECT_DESC_STORAGE,        ///< storage buffer at the address in c[cbuf_index][cbuf_offset]
+    NVN_DIRECT_DESC_TEXTURE_BUFFER, ///< texel buffers and textures: the handle in c[cbuf_index][cbuf_offset]
+    NVN_DIRECT_DESC_IMAGE_BUFFER,
+    NVN_DIRECT_DESC_TEXTURE,
+    NVN_DIRECT_DESC_IMAGE,
+};
+typedef struct nvn_direct_shader_desc {
+    uint8_t kind;              ///< NVN_DIRECT_DESC_*
+    uint8_t vk_type;           ///< VkDescriptorType
+    uint16_t binding;
+    uint32_t count;            ///< descriptors of an array (element k: the handle at cbuf_offset + (k << size_shift))
+    uint32_t cbuf_index, cbuf_offset, shift_left;
+    uint32_t secondary_index, secondary_offset, secondary_shift_left; ///< a separate sampler word (has_secondary)
+    uint32_t size_shift;
+    uint8_t has_secondary;
+    uint8_t texture_type;      ///< Shader::TextureType
+    uint8_t is_depth, is_multisample, is_integer, is_written, is_atomic;
+    /// Not a plain constant buffer word: a handle computed per draw, a pointer read from memory
+    /// (the replay's bindings cannot fill it)
+    uint8_t unsupported;
+} nvn_direct_shader_desc;
+
+/// A translated stage. Everything is allocated by the translator and given back with shader_free.
+typedef struct nvn_direct_shader {
+    uint32_t* spirv;
+    size_t spirv_words;
+    nvn_direct_shader_desc* descs;
+    uint32_t desc_count;
+    uint32_t local[3], shared; ///< compute, task and mesh: the workgroup; compute: shared memory bytes
+    uint32_t input_mask;       ///< vertex: generic inputs read
+    uint32_t output_mask;      ///< fragment: colour outputs written
+    uint32_t per_primitive_outputs; ///< mesh: generic outputs written per primitive
+    uint32_t ssbo_align;       ///< storage buffers are bound at their address rounded down to this
+    char error[256];           ///< why it was not translated
+} nvn_direct_shader;
+
 /// Lichii's Vulkan device as the replay adopts it (vka_dev.c makes none of its own).
 typedef struct nvn_direct_device {
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
@@ -78,6 +140,11 @@ typedef struct nvn_direct_device {
     void (*pipeline_building)(void* context);
     void (*pipeline_built)(void* context);
     void* pipeline_context;
+    /// Translates a program stage with Lichii's shader recompiler (dotfiles-25x.11): 1 = done,
+    /// 0 = not (shader->error says why). NULL: no recompiler.
+    int (*shader_translate)(void* context, const nvn_direct_shader_source* source, nvn_direct_shader* shader);
+    void (*shader_free)(void* context, nvn_direct_shader* shader);
+    void* shader_context;
 } nvn_direct_device;
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.

@@ -18,6 +18,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_nvn_direct_astc.h"
+#include "video_core/renderer_vulkan/vk_nvn_direct_shaders.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -151,6 +152,7 @@ private:
     std::optional<TurboMode> turbo_mode;
 #ifdef LICHII_NVN_DIRECT
     std::optional<NvnDirectAstc> nvn_direct_astc; ///< The replay's ASTC decode (NVN2 direct mode).
+    std::optional<NvnDirectShaders> nvn_direct_shaders; ///< The replay's shader recompiler.
     std::jthread vram_trace; ///< Lab (EDEN_NX2_VRAM_TRACE=1): NVML vs heap usage every second.
 #endif
 
