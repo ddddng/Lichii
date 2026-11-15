@@ -128,6 +128,9 @@ typedef struct nvn_direct_device {
     /// into cmdbuf, the replay's upload batch; 0 when nothing was recorded. NULL: no GPU
     /// decode (ASTC textures then have no image unless the device samples ASTC).
     int (*astc_to_bc)(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
+    /// Records what astc_to_bc left pending in cmdbuf (small levels it batches); the replay calls
+    /// it before it ends an upload batch. NULL: nothing is left pending.
+    void (*astc_flush)(void* context, VkCommandBuffer cmdbuf);
     void* astc_context;
     /// The process's device-local memory use and the budget it should stay within (Lichii's
     /// Device::GetDeviceMemoryUsage / GetDeviceMemoryBudget, EDEN_NX2_VRAM_LIMIT_MIB included):

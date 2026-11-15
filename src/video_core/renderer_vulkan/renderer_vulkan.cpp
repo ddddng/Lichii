@@ -279,6 +279,7 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .queue_unlock = [](void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); },
         .queue_context = &scheduler.submit_mutex,
         .astc_to_bc = astc != nullptr ? &NvnDirectAstc::Record : nullptr,
+        .astc_flush = astc != nullptr ? &NvnDirectAstc::Flush : nullptr,
         .astc_context = astc,
         // NVML's figure when there is one (it counts what the driver keeps for itself), else the
         // heap usage (dotfiles-25x.8).

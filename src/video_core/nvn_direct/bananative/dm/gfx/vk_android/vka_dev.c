@@ -617,7 +617,10 @@ void vka_scratch_retire(uint64_t fence) { retire(0, fence); }
 // When the batches in flight hold more than DM_VK_UPLOAD_INFLIGHT_MB (live, default 256) of staging, the replay thread waits for the oldest. Only a new image is safe here:
 // nothing recorded earlier in the submission reads it (a re-upload of a live image stays in the submission, in order with the draws before it). DM_VK_UPLOAD_BATCH=0 (live)
 // records first contents into the submission, as before
-enum { NUP = 16 };
+// Lichii (dotfiles-25x.13): 128 batch slots (upstream 16). With a batch per DM_VK_ASTC_PER_BATCH decodes, Mario Kart World's race start made 52 batches in one
+// submission (836 images, 196 MB): the replay thread waited 234 ms for slots to come free, the GPU's decodes then ran one after another behind it instead of beside
+// the recording (nd29u-1). The staging they hold stays capped by DM_VK_UPLOAD_INFLIGHT_MB (vka_up_throttle)
+enum { NUP = 128 };
 static struct { VkCommandBuffer cb; uint64_t val; } g_ub[NUP];
 static VkCommandPool g_upool; static uint64_t g_uval; static int g_ui = -1; static unsigned g_unext;   // g_ui: the open batch's slot (-1: none); replay thread only
 static uint64_t g_n_ubatch, g_n_uwait;
@@ -645,7 +648,7 @@ VkCommandBuffer vka_up_begin(void) {
             g_upool = p;
         }
         if (vka_hung()) return VK_NULL_HANDLE;
-        unsigned k = g_unext % NUP;   // (16 slots: the backpressure below keeps them mostly done)
+        unsigned k = g_unext % NUP;   // (the backpressure below keeps them mostly done)
         { uint64_t t0 = now_ns(); int ok = !g_ub[k].val || up_wait(g_ub[k].val); g_uslot_ns += now_ns() - t0; if (!ok) return VK_NULL_HANDLE; }   // (its batch still runs: the caller records into the submission)
         g_unext++;
         vk.vkResetCommandBuffer(g_ub[k].cb, 0);
@@ -662,6 +665,7 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 // ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
+static void astc_gpu_flush(VkCommandBuffer cb) { if (g_adopt.astc_flush) g_adopt.astc_flush(g_adopt.astc_context, cb); }   // (the decodes it batches, before the batch ends)
 // Lichii's shader recompiler (nvn_direct_device.shader_translate, dotfiles-25x.11): a program stage translated, its result given back with vka_shader_translated_free
 int vka_shader_translate(const nvn_direct_shader_source *s, nvn_direct_shader *o) {
     if (g_adopt.shader_translate) return g_adopt.shader_translate(g_adopt.shader_context, s, o);
@@ -714,6 +718,7 @@ void vka_up_flush(void) {
     g_up_decodes = 0;
     unsigned k = (unsigned)g_ui; g_ui = -1;
     VkCommandBuffer cb = g_ub[k].cb;
+    astc_gpu_flush(cb);
     vka_barrier(cb);   // everything the batch wrote, for every later submission on the queue
     VkResult r = vk.vkEndCommandBuffer(cb);
     uint64_t v = ++g_uval;

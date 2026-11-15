@@ -172,7 +172,197 @@ int NvnDirectAstc::Record(void* context, VkCommandBuffer cmdbuf,
                           const nvn_direct_astc_level* level) {
     auto* const self = static_cast<NvnDirectAstc*>(context);
     std::scoped_lock lock{self->mutex};
+    if (self->RecordSmall(cmdbuf, *level)) {
+        return 1;
+    }
     return self->RecordLevel(cmdbuf, *level) ? 1 : 0;
+}
+
+void NvnDirectAstc::Flush(void* context, VkCommandBuffer cmdbuf) {
+    auto* const self = static_cast<NvnDirectAstc*>(context);
+    std::scoped_lock lock{self->mutex};
+    self->FlushSmall(cmdbuf);
+}
+
+bool NvnDirectAstc::MakeSmallResources() {
+    if (small_resources_tried) {
+        return static_cast<bool>(small_blocks);
+    }
+    small_resources_tried = true;
+    small_image = memory_allocator.TryCreateImage({
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = {SmallTile, SmallTile, 1},
+        .mipLevels = 1,
+        .arrayLayers = SmallSlots,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    });
+    if (!small_image) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: no memory for the ASTC small-level slots");
+        return false;
+    }
+    for (u32 slot = 0; slot < SmallSlots; ++slot) {
+        small_views[slot] = device.GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *small_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .components{},
+            .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot, 1},
+        });
+    }
+    small_blocks = memory_allocator.CreateBuffer(
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = VkDeviceSize{SmallTile} * SmallTile * SmallSlots,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        },
+        MemoryUsage::DeviceLocal);
+    return true;
+}
+
+bool NvnDirectAstc::RecordSmall(VkCommandBuffer raw_cmdbuf, const nvn_direct_astc_level& level) {
+    const u32 bw = level.block_width;
+    const u32 bh = level.block_height;
+    const u32 height_log2 = level.block_height_log2;
+    if (bw == 0 || bh == 0 || level.width == 0 || level.height == 0 || level.width > SmallTile ||
+        level.height > SmallTile || GobBlocksX * bw > SmallTile || GobRows * bh > SmallTile ||
+        (level.source_offset % device.GetStorageBufferAlignment()) != 0) {
+        return false;
+    }
+    // One tile from the level's start, as RecordLevel would cut it with SmallTile-sized tiles.
+    const u32 gob_rows_per_block = 1U << height_log2;
+    const u32 gob_columns = Common::DivCeil(Common::DivCeil(level.width, bw), GobBlocksX);
+    const u32 gob_rows = Common::DivCeil(Common::DivCeil(level.height, bh), GobRows);
+    const u32 tile_columns = std::max(1U, SmallTile / (GobBlocksX * bw));
+    const u32 tile_rows = std::max(1U, SmallTile / (GobRows * bh));
+    const u32 first_rows = tile_rows < gob_rows_per_block ? tile_rows
+                                                          : tile_rows / gob_rows_per_block * gob_rows_per_block;
+    if (gob_columns > tile_columns || gob_rows > first_rows || !MakeSmallResources()) {
+        return false;
+    }
+    const vk::CommandBuffer cmdbuf{raw_cmdbuf, device.GetDispatchLoader()};
+    if (!pending.empty() && pending_cmdbuf != raw_cmdbuf) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: {} ASTC levels left pending in an ended upload batch",
+                  pending.size());
+        pending.clear();
+    }
+    if (pending.size() == SmallSlots) {
+        FlushSmall(raw_cmdbuf);
+    }
+    if (!small_image_initialized) {
+        small_image_initialized = true;
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                               VkImageMemoryBarrier{
+                                   .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                   .pNext = nullptr,
+                                   .srcAccessMask = VK_ACCESS_NONE,
+                                   .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                   .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = *small_image,
+                                   .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, SmallSlots},
+                               });
+    }
+    const u32 slot = static_cast<u32>(pending.size());
+    const u32 x_shift = GobShift + height_log2;
+    const TileDescriptors decode_descriptors{
+        .buffer = {level.source, level.source_offset, level.source_size},
+        .image = {VK_NULL_HANDLE, *small_views[slot], VK_IMAGE_LAYOUT_GENERAL},
+    };
+    const AstcPushConstants decode_constants{
+        .blocks_dims = {bw, bh},
+        .layer_stride = 0,
+        .block_size = static_cast<u32>(u64{level.gobs_x} << x_shift),
+        .x_shift = x_shift,
+        .block_height = height_log2,
+        .block_height_mask = gob_rows_per_block - 1,
+        .native_tiling = level.switch2_gobs ? 1U : 0U,
+    };
+    cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *decode_pipeline);
+    cmdbuf.PushDescriptorSetWithTemplateKHR(*decode_template, *decode_layout, 0, &decode_descriptors);
+    cmdbuf.PushConstants(*decode_layout, VK_SHADER_STAGE_COMPUTE_BIT, decode_constants);
+    cmdbuf.Dispatch(Common::DivCeil(Common::DivCeil(level.width, bw), 8U),
+                    Common::DivCeil(Common::DivCeil(level.height, bh), 8U), 1);
+    pending.push_back({slot, level});
+    pending_cmdbuf = raw_cmdbuf;
+    return true;
+}
+
+void NvnDirectAstc::FlushSmall(VkCommandBuffer raw_cmdbuf) {
+    if (pending.empty()) {
+        return;
+    }
+    if (pending_cmdbuf != raw_cmdbuf) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: {} ASTC levels pending in another command buffer",
+                  pending.size());
+        pending.clear();
+        return;
+    }
+    const vk::CommandBuffer cmdbuf{raw_cmdbuf, device.GetDispatchLoader()};
+    MemoryBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    constexpr VkDeviceSize region = VkDeviceSize{SmallTile} * SmallTile;
+    cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *encode_pipeline);
+    for (const PendingSmall& item : pending) {
+        const u32 bc_x = Common::DivCeil(item.level.width, 4U);
+        const u32 bc_y = Common::DivCeil(item.level.height, 4U);
+        const TileDescriptors encode_descriptors{
+            .buffer = {*small_blocks, region * item.slot, region},
+            .image = {VK_NULL_HANDLE, *small_views[item.slot], VK_IMAGE_LAYOUT_GENERAL},
+        };
+        const BcEncoderPushConstants encode_constants{
+            .blocks_x = bc_x,
+            .blocks_y = bc_y,
+            .width = item.level.width,
+            .height = item.level.height,
+            .bc3 = item.level.bc3 ? 1U : 0U,
+            .out_offset = 0,
+        };
+        cmdbuf.PushDescriptorSetWithTemplateKHR(*encode_template, *encode_layout, 0, &encode_descriptors);
+        cmdbuf.PushConstants(*encode_layout, VK_SHADER_STAGE_COMPUTE_BIT, encode_constants);
+        cmdbuf.Dispatch(Common::DivCeil(bc_x, 8U), Common::DivCeil(bc_y, 8U), 1);
+    }
+    MemoryBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    for (const PendingSmall& item : pending) {
+        const u32 bc_x = Common::DivCeil(item.level.width, 4U);
+        const u32 bc_y = Common::DivCeil(item.level.height, 4U);
+        const VkBufferImageCopy copy{
+            .bufferOffset = region * item.slot,
+            .bufferRowLength = bc_x * 4,
+            .bufferImageHeight = bc_y * 4,
+            .imageSubresource{VK_IMAGE_ASPECT_COLOR_BIT, item.level.level, item.level.layer, 1},
+            .imageOffset{0, 0, 0},
+            .imageExtent{item.level.width, item.level.height, 1},
+        };
+        cmdbuf.CopyBufferToImage(*small_blocks, item.level.image, VK_IMAGE_LAYOUT_GENERAL, copy);
+    }
+    // The next round's decodes and encodes reuse the slots.
+    MemoryBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                  VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    pending.clear();
 }
 
 bool NvnDirectAstc::MakeTileResources() {
