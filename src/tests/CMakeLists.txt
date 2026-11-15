@@ -67,9 +67,11 @@ add_executable(tests
     video_core/conditional_barrier.cpp
     video_core/storage_buffer_shared_tracking.cpp
     core/nup_validation.cpp
+    core/npdm_kac.cpp
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/kip_ini.cpp
     core/ncz_cache.cpp
     core/ncz_decompressor.cpp
     core/ncz_io_guards.cpp
@@ -91,6 +93,7 @@ add_executable(tests
     video_core/native_pending_policy.cpp
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
+    video_core/descriptor_limits.cpp
     video_core/unbacked_fallback.cpp
     video_core/eviction_age.cpp
     video_core/host_memory_limit.cpp
