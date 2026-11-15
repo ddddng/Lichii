@@ -52,7 +52,26 @@ add_library(nvn_direct STATIC
     ${BN}/host/plat/plat_android.c
 )
 
+# The recompiler translations' stamp (nvn_recompile.c, recompile_stamp.cmake): the shader
+# recompiler, its NVN2 entry and the code that feeds it
+set(RC_ROOT ${CMAKE_SOURCE_DIR}/src)
+file(GLOB_RECURSE RC_STAMP_SOURCES CONFIGURE_DEPENDS RELATIVE ${RC_ROOT}
+    ${RC_ROOT}/shader_recompiler/*.cpp ${RC_ROOT}/shader_recompiler/*.h ${RC_ROOT}/shader_recompiler/*.inc)
+list(SORT RC_STAMP_SOURCES)
+list(APPEND RC_STAMP_SOURCES video_core/renderer_vulkan/vk_nvn_direct_shaders.cpp video_core/renderer_vulkan/vk_nvn_direct_shaders.h
+    video_core/nvn_direct/nvn_recompile.c video_core/nvn_direct/nvn_direct.h)
+list(JOIN RC_STAMP_SOURCES "\n" RC_STAMP_LIST)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/recompile_stamp_sources.txt CONTENT "${RC_STAMP_LIST}\n")
+list(TRANSFORM RC_STAMP_SOURCES PREPEND ${RC_ROOT}/ OUTPUT_VARIABLE RC_STAMP_DEPENDS)
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/nvn_recompile_stamp.h
+    COMMAND ${CMAKE_COMMAND} -DROOT=${RC_ROOT} -DLIST=${CMAKE_CURRENT_BINARY_DIR}/recompile_stamp_sources.txt
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/nvn_recompile_stamp.h -P ${CMAKE_CURRENT_SOURCE_DIR}/recompile_stamp.cmake
+    DEPENDS ${RC_STAMP_DEPENDS} ${CMAKE_CURRENT_SOURCE_DIR}/recompile_stamp.cmake ${CMAKE_CURRENT_BINARY_DIR}/recompile_stamp_sources.txt
+    COMMENT "NVN direct: recompiler translations' stamp")
+target_sources(nvn_direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/nvn_recompile_stamp.h)
+
 target_include_directories(nvn_direct PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
     bananative/shim
     gen
     .

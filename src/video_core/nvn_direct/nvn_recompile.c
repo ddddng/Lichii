@@ -30,12 +30,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
 #include "bananative/dm/host/plat/plat.h"
 #include "nvn_direct.h"
 #include "nvn_direct_front.h"
+#include "nvn_recompile_stamp.h"
 
 int vka_shader_translate(const nvn_direct_shader_source* s, nvn_direct_shader* o); // vka_dev.c
 void vka_shader_translated_free(nvn_direct_shader* o);
@@ -351,7 +351,10 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const uint8_t*
 // ---------- Translations kept across runs ----------
 // $DM_TEMP/vk_recompiled.bin (EDEN_NX2_NVN_RECOMPILE_CACHE=0: none): each translation as it was first made, by shader key (and per-primitive
 // inputs), so the next run takes it as it is rather than translating again with that run's first draw's state, whose SPIR-V may differ
-// (another texture bound when a slot's type is read) and miss the pipeline cache. Tied to this executable (size and modification time).
+// (another texture bound when a slot's type is read) and miss the pipeline cache.
+// Lichii (dotfiles-25x.13): the file is tied to NVN_RECOMPILE_STAMP, a hash of the sources a translation depends on made at build time
+// (recompile_stamp.cmake), and to the device and driver (the recompiler's profile follows them), no longer to the executable's size and
+// modification time: every build started it again, so the first run after one translated every shader on the frame path.
 // Records: magic, size of the rest, slot, gl_depth, per-primitive outputs, vertex input types, the nvn_direct_shader fields, descriptors, SPIR-V
 #define RC_FILE_MAGIC 0x3143524cu   // "LRC1"
 #define RC_REC_MAGIC 0x5243524cu    // "LRCR"
@@ -363,8 +366,7 @@ static void disk_open(void) {
     g_disk_state = -1;
     const char *t = getenv("DM_TEMP"), *e = getenv("EDEN_NX2_NVN_RECOMPILE_CACHE");
     if (!t || !*t || (e && !strcmp(e, "0"))) return;
-    struct stat st; uint64_t stamp[2] = {0, 0};
-    if (!stat("/proc/self/exe", &st)) { stamp[0] = (uint64_t)st.st_size; stamp[1] = (uint64_t)st.st_mtime; }
+    const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion};
     char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
     FILE* f = fopen(path, "rb"); unsigned n = 0;
     if (f) {
@@ -382,14 +384,15 @@ static void disk_open(void) {
         } else n = ~0u;
         fclose(f);
     }
-    if (n == ~0u || !f) {   // none yet, or another executable's: started again
+    if (n == ~0u || !f) {   // none yet, or another build's translations or device's: started again
         g_disk_f = fopen(path, "wb");
         if (g_disk_f) { uint32_t magic = RC_FILE_MAGIC; fwrite(&magic, 4, 1, g_disk_f); fwrite(stamp, 8, 2, g_disk_f); fflush(g_disk_f); }
+        if (n == ~0u) VLOG("recompiler: %s holds another build's or device's translations: started again", path);
         n = 0;
     } else g_disk_f = fopen(path, "ab");
     if (!g_disk_f) { VRED("recompiler: %s not writable: translations are not kept", path); return; }
     g_disk_state = 1;
-    VLOG("recompiler: %u translations read from %s", n, path);
+    VLOG("recompiler: %u translations read from %s (stamp %016llx)", n, path, (unsigned long long)stamp[0]);
 }
 // A kept translation as an nvn_direct_shader (its arrays point into the record: not to be freed)
 static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, int* gl_depth, uint32_t* prim) {
