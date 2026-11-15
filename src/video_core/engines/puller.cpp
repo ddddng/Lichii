@@ -83,7 +83,8 @@ void ReleaseFences(DmaPusher& dma_pusher) {
 }
 
 // A release was just sent to the back: tell the front what it writes (CheckWithoutDrain).
-void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four_words) {
+void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four_words,
+                 VideoCommon::GpuSplit::Landing landing) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.Active()) {
         return;
@@ -93,10 +94,10 @@ void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four
     if (!device) {
         return;
     }
-    split.NoteSemaphoreWrite(*device, payload, true);
+    split.NoteSemaphoreWrite(*device, payload, true, false, landing);
     if (four_words) {
         // The payload as 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, true);
+        split.NoteSemaphoreWrite(*device + 4, 0, true, false, landing);
     }
 }
 
@@ -142,14 +143,18 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
         if (queued->known && acquire.Matches(queued->payload)) {
             return AcquireCheck::MetByQueued;
         }
-        VideoCommon::Count(stats.drain_queued);
-        if (VideoCommon::g_acquire_counting && !queued->known) {
-            VideoCommon::Count(stats.queued_unknown);
-            if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
-                VideoCommon::Count(stats.queued_unknown_met);
+        // Else a fenced release the back ran whose fence has yet to run decides nothing: memory
+        // does, as once it landed.
+        if (!split.Ran(queued->position)) {
+            VideoCommon::Count(stats.drain_queued);
+            if (VideoCommon::g_acquire_counting && !queued->known) {
+                VideoCommon::Count(stats.queued_unknown);
+                if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
+                    VideoCommon::Count(stats.queued_unknown_met);
+                }
             }
+            return AcquireCheck::Drain;
         }
-        return AcquireCheck::Drain;
     }
     return acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))
                ? AcquireCheck::Met
@@ -426,7 +431,9 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             }
         }, VideoCommon::GpuSplit::Writes::Noted);
         NoteRelease(dma_pusher, sequence_address, payload,
-                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout);
+                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout,
+                    VideoCommon::GpuSplit::ReportLanding(
+                        properties == VideoCommon::QueryPropertiesFlags::IsAFence));
         if (mirror != 0 && VideoCommon::GpuSplit::Get().Active()) {
             VideoCommon::GpuSplit::Get().NoteWrite(
                 dma_pusher.memory_manager, mirror,
@@ -547,7 +554,8 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
         rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
                           VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
     }, VideoCommon::GpuSplit::Writes::Noted);
-    NoteRelease(dma_pusher, sequence_address, payload, false);
+    NoteRelease(dma_pusher, sequence_address, payload, false,
+                VideoCommon::GpuSplit::Landing::Fenced);
 }
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
@@ -579,7 +587,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
             rasterizer->Query(address, VideoCommon::QueryType::Payload,
                               VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
         }, VideoCommon::GpuSplit::Writes::Noted);
-        NoteRelease(dma_pusher, address, payload, false);
+        NoteRelease(dma_pusher, address, payload, false, VideoCommon::GpuSplit::Landing::Fenced);
         return;
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.

@@ -1719,10 +1719,15 @@ void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& 
         return;
     }
     const bool payload = report.query.report == Regs::ReportSemaphore::Report::Payload;
-    split.NoteSemaphoreWrite(*device, report.payload, payload);
+    // A short release is fence-flagged; a counter lands once a fence ran.
+    const bool fence_flagged =
+        operation == Regs::ReportSemaphore::Operation::Release && report.query.short_query != 0;
+    const auto landing = payload ? VideoCommon::GpuSplit::ReportLanding(fence_flagged)
+                                 : VideoCommon::GpuSplit::Landing::Fenced;
+    split.NoteSemaphoreWrite(*device, report.payload, payload, false, landing);
     if (report.query.short_query == 0) {
         // 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, payload);
+        split.NoteSemaphoreWrite(*device + 4, 0, payload, false, landing);
     }
 }
 

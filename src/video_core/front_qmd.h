@@ -598,8 +598,12 @@ private:
                 written.overwritten = true;
             }
         }
+        // Plain and four-word releases are fence-flagged reports; reductions and maxima run in
+        // SignalFence operations (KeplerCompute::ProcessNativeMethod).
+        const auto landing =
+            reduction || maximum ? GpuSplit::FenceLanding() : GpuSplit::Landing::Fenced;
         const auto note = [&](u64 word, u32 value, bool known, bool at_least) {
-            split.NoteSemaphoreWrite(word, value, known, at_least);
+            split.NoteSemaphoreWrite(word, value, known, at_least, landing);
             if (Nx2DrainCheck::g_enabled && !checks.empty()) {
                 checks.back().releases.push_back({word, value, known, at_least});
             }
@@ -651,7 +655,10 @@ private:
         }
         // The last write sent to the word's granule, placed or not.
         const u64 target = memory.WritesTarget(split, address, sizeof(u32));
-        if (const auto queued = split.QueuedSemaphoreWriteAt(device)) {
+        // A fenced release the back ran may not have landed yet, and the back reads memory: from
+        // there, as below.
+        if (const auto queued = split.QueuedSemaphoreWriteAt(device);
+            queued && !(queued->fenced && split.Ran(queued->position))) {
             if (queued->known && queued->position >= target) {
                 return Base{queued->payload, !queued->at_least};
             }

@@ -1947,12 +1947,16 @@ void KeplerCompute::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontSta
     if (!device) {
         return;
     }
-    // A reduction combines the payload with the word's value then.
+    // A reduction combines the payload with the word's value then, in a SignalFence operation.
+    // Else one word is a fence-flagged report.
     const bool reduction = ((control >> 3) & 1) != 0;
-    split.NoteSemaphoreWrite(*device, fs.registers[0x6c2], !reduction);
-    if (!reduction && ((control >> 28) & 1) == 0) {
+    const bool one_word = ((control >> 28) & 1) != 0;
+    const auto landing = reduction ? VideoCommon::GpuSplit::FenceLanding()
+                                   : VideoCommon::GpuSplit::ReportLanding(one_word);
+    split.NoteSemaphoreWrite(*device, fs.registers[0x6c2], !reduction, false, landing);
+    if (!reduction && !one_word) {
         // 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, true);
+        split.NoteSemaphoreWrite(*device + 4, 0, true, false, landing);
     }
 }
 

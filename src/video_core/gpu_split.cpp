@@ -180,9 +180,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                          std::getenv("EDEN_NX2_ACQUIRE_STATS") != nullptr ||
                          std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
     ring = std::make_unique<u64[]>(RingWords);
+    ++starts; // Before the back starts: its holds name entries with it (EntryTag)
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
-    ++starts;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
@@ -207,6 +207,14 @@ void GpuSplit::Stop() {
     last_writer_position = 0;
     last_sync_position = 0;
     synced_writer_position = 0;
+    last_entry_start = 0;
+    back_entry_start = 0;
+    {
+        std::scoped_lock lock{fenced_mutex};
+        fenced_entries.clear();
+        fenced_sealed = 0;
+        fenced_landed.store(0, std::memory_order_release);
+    }
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
@@ -329,27 +337,104 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least) {
+GpuSplit::Landing GpuSplit::ReportLanding(bool fence_flagged) {
+    return fence_flagged || Settings::IsGPULevelHigh() ? Landing::Fenced : Landing::AtRun;
+}
+
+GpuSplit::Landing GpuSplit::FenceLanding() {
+    const bool delayed = Settings::IsGPUFenceBehaviorDefault()
+                             ? Settings::IsGPULevelHigh()
+                             : Settings::IsGPUFenceBehaviorBalanced() ||
+                                   Settings::IsGPUFenceBehaviorAccurate();
+    return delayed ? Landing::Fenced : Landing::AtRun;
+}
+
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least,
+                                  Landing landing) {
     if (semaphore_writes.size() >= semaphore_writes_limit) {
-        // The words of releases the back ran hold their values in memory.
-        const u64 done = consumed.load(std::memory_order_acquire);
-        boost::unordered::erase_if(
-            semaphore_writes, [done](const auto& entry) { return entry.second.position <= done; });
+        // The words of releases in memory hold their values.
+        boost::unordered::erase_if(semaphore_writes,
+                                   [this](const auto& entry) { return InMemory(entry.second); });
         semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
     }
-    semaphore_writes.insert_or_assign(device_address & ~u64{3},
-                                      SemaphoreWrite{write_position, payload, known, at_least});
+    // The release is in the last entry sent, or in an earlier one (a copy engine launch in a long
+    // multi-method run): then it counts as landed later, never too early.
+    SemaphoreWrite write{
+        .position = write_position,
+        .entry = EntryTag(last_entry_start),
+        .payload = payload,
+        .known = known,
+        .at_least = at_least,
+        .fenced = landing == Landing::Fenced,
+    };
+    const u64 word = device_address & ~u64{3};
+    if (const auto it = semaphore_writes.find(word); !write.fenced &&
+                                                     it != semaphore_writes.end() &&
+                                                     it->second.fenced && !InMemory(it->second)) {
+        // A fenced write sent before may land after this one: until it did, the word holds
+        // either.
+        write.entry = it->second.entry;
+        write.known = false;
+        write.at_least = false;
+        write.fenced = true;
+    }
+    semaphore_writes.insert_or_assign(word, write);
 }
 
 std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
     u64 device_address) const {
     const auto it = semaphore_writes.find(device_address & ~u64{3});
-    if (it == semaphore_writes.end() ||
-        it->second.position <= consumed.load(std::memory_order_acquire)) {
+    if (it == semaphore_writes.end() || InMemory(it->second)) {
         return std::nullopt;
     }
     return QueuedSemaphoreWrite{it->second.payload, it->second.known, it->second.at_least,
-                                it->second.position};
+                                it->second.fenced, it->second.position};
+}
+
+GpuSplit::FencedHold GpuSplit::TrackFencedWrite() {
+    if (!on_back_thread) {
+        return {};
+    }
+    std::scoped_lock lock{fenced_mutex};
+    // Never below what the back published as consumed: a hold taken between entries (the idle
+    // hook) holds the entries after it.
+    const u64 tag = std::max(EntryTag(back_entry_start), fenced_sealed);
+    if (fenced_entries.empty() || fenced_entries.back().tag != tag) {
+        fenced_entries.push_back({tag, 0});
+    }
+    ++fenced_entries.back().holds;
+    return FencedHold{this, tag};
+}
+
+void GpuSplit::ReleaseFencedWrite(u64 tag) {
+    std::scoped_lock lock{fenced_mutex};
+    const auto it =
+        std::lower_bound(fenced_entries.begin(), fenced_entries.end(), tag,
+                         [](const HeldEntry& held, u64 value) { return held.tag < value; });
+    // Stop forgot the entries: a hold of an earlier start lands nothing of this one.
+    if (it == fenced_entries.end() || it->tag != tag) {
+        return;
+    }
+    --it->holds;
+    PublishFencedLanded();
+}
+
+void GpuSplit::SealFencedEntries(u64 position) {
+    std::scoped_lock lock{fenced_mutex};
+    fenced_sealed = EntryTag(position);
+    PublishFencedLanded();
+}
+
+void GpuSplit::PublishFencedLanded() {
+    while (!fenced_entries.empty() && fenced_entries.front().holds == 0) {
+        fenced_entries.pop_front();
+    }
+    // Entries retire in order: one whose operations ran waits for those of the entries before
+    // it, even where another fence manager ran them out of order.
+    const u64 landed = fenced_entries.empty()
+                           ? fenced_sealed
+                           : std::min(fenced_sealed, fenced_entries.front().tag);
+    fenced_landed.store(landed, std::memory_order_release);
 }
 
 namespace {
@@ -795,6 +880,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
+            back_entry_start = read_position;
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
             read_position += size != 0 ? size : RingWords - index;
@@ -808,11 +894,13 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if ((read_position - last_store >= 4096 ||
                  read_position >= wait_target.load(std::memory_order_relaxed)) &&
                 read_position != available) {
+                SealFencedEntries(read_position);
                 consumed.store(read_position, std::memory_order_seq_cst);
                 last_store = read_position;
                 NotifyFront();
             }
         }
+        SealFencedEntries(read_position);
         consumed.store(read_position, std::memory_order_seq_cst);
         NotifyFront();
     }
