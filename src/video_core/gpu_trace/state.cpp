@@ -229,8 +229,10 @@ void StateAccess::CaptureGlobals(Writer& writer, ChannelState* any_channel,
     }
     {
         Bytes bytes;
-        for (const auto& [address, state] : Tegra::NativeQmdScheduler::states) {
+        for (const auto& [address, state] : Tegra::NativeQmdScheduler::shared_states) {
             bytes.Put(address);
+            // The descriptor states once kept, as traces store them.
+            bytes.Put(Tegra::NativeQmdScheduler::Descriptor{});
             bytes.Put(state);
         }
         Emit(writer, StateKind::QmdStates, -1, bytes);
@@ -365,12 +367,13 @@ bool StateAccess::Restore(const Record& record, ChannelState* channel, ChannelSt
                cursor.Get(context->compute_positions) && cursor.Done();
     }
     case StateKind::QmdStates: {
-        auto& states = Tegra::NativeQmdScheduler::states;
+        auto& states = Tegra::NativeQmdScheduler::shared_states;
         states.clear();
         while (!cursor.Done()) {
             Tegra::NativeQmdScheduler::Address address{};
+            Tegra::NativeQmdScheduler::Descriptor descriptor{};
             Tegra::NativeQmdScheduler::State state{};
-            if (!cursor.Get(address) || !cursor.Get(state)) {
+            if (!cursor.Get(address) || !cursor.Get(descriptor) || !cursor.Get(state)) {
                 return false;
             }
             states.insert_or_assign(address, state);
