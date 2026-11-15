@@ -1820,14 +1820,20 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     Access::RunBack(split);
     CHECK(word(0x10) == 12);
 
-    // A reduction over the release before it, still queued: a lower bound over one.
+    // A reduction over the release before it, still queued: an unsigned maximum keeps the lower
+    // bound, an ADD (which wraps) does not.
+    constexpr u32 ReduceMax = 2U << 20;
     inline_qmd(qmds + 0x300, make_qmd(0, 0x20, Enable | OneWord | Maximum, 4), false);
-    inline_qmd(qmds + 0x400, make_qmd(0, 0x20, Enable | OneWord | Reduction, 3), false);
+    inline_qmd(qmds + 0x400, make_qmd(0, 0x20, Enable | OneWord | Reduction | ReduceMax, 6), false);
     release = queued(0x20);
     REQUIRE(release.has_value());
     CHECK(release->known);
     CHECK(release->at_least);
-    CHECK(release->payload == 7);
+    CHECK(release->payload == 6);
+    inline_qmd(qmds + 0xb00, make_qmd(0, 0x20, Enable | OneWord | Reduction, 1), false);
+    release = queued(0x20);
+    REQUIRE(release.has_value());
+    CHECK_FALSE(release->known);
     Access::RunBack(split);
     CHECK(word(0x20) == 7);
 
@@ -1881,17 +1887,14 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     CHECK(word(0x50) == 9);
 
     // Over the word in memory, which may be older than the back finds it (a fence-flagged
-    // release lands once the host GPU passed it): an ADD holds its sum at least, an XOR could
-    // hold anything.
+    // release lands once the host GPU passed it): an ADD may wrap and an XOR could hold anything.
     constexpr u32 Xor = 7U << 20;
     f.memory.Write<u32>(words + 0x60, 5);
     f.memory.Write<u32>(words + 0x200, 5);
     inline_qmd(qmds + 0x900, make_qmd(0, 0x60, Enable | OneWord | Reduction, 3), false);
     release = queued(0x60);
     REQUIRE(release.has_value());
-    CHECK(release->known);
-    CHECK(release->at_least);
-    CHECK(release->payload == 8);
+    CHECK_FALSE(release->known);
     inline_qmd(qmds + 0xa00, make_qmd(0, 0x200, Enable | OneWord | Reduction | Xor, 3), false);
     release = queued(0x200);
     REQUIRE(release.has_value());

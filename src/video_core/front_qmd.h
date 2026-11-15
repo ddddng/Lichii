@@ -607,8 +607,8 @@ private:
         if (reduction) {
             const u32 op = (flags >> 20) & 7;
             const bool is_signed = ((flags >> 24) & 1) != 0;
-            // Over a lower bound, only ADD and the unsigned MIN and MAX give one.
-            const bool keeps_bound = op == 0 || (!is_signed && (op == 1 || op == 2));
+            // Over a lower bound, only the unsigned MIN and MAX give one: an ADD wraps.
+            const bool keeps_bound = !is_signed && (op == 1 || op == 2);
             if (base && (base->exact || keeps_bound)) {
                 note(*device, Tegra::ReduceSemaphore(op, is_signed, base->value, payload), true,
                      !base->exact);
