@@ -1315,6 +1315,33 @@ static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int m
     if (cb) vka_barrier(cb);
 }
 
+// Lichii (dotfiles-25x.17): textures of another shape over the same storage have images of their own (same_shape), so what the GPU draws through one is not in the
+// other. alias_note links a new image with the live images over its storage; alias_check, at each sampling of an image, counts the reads after one of those wrote last
+// (its content stale) and logs the first pairs (lab: DM_VK_ALIAS_PROBE=1). Caller holds g_tmu
+static void ali_add(vka_img *a, uint64_t serial) { for (int i = 0; i < a->nali; i++) if (a->ali[i] == serial) return; if (a->nali < 8) a->ali[a->nali++] = serial; }
+static void alias_note(vka_img *im, const tex_t *t) {   // (lab, DM_VK_ALIAS_PROBE=1: a scan of every live image per new one)
+    static int on = -1; if (on < 0) on = VKA_ENV("DM_VK_ALIAS_PROBE", 0) != 0;
+    if (!on || !t->mem || !t->L.size) return;
+    for (int i = 0; i < g_nlive; i++) { vka_img *o = g_live[i];
+        if (o == im || !o->mem || !ranges_meet(o->mem, o->L.size, t->mem, t->L.size)) continue;
+        ali_add(im, o->serial); ali_add(o, im->serial); }
+}
+static uint64_t g_stale_n, g_stale_imgs;
+void vka_tex_stale_stats(uint64_t *reads) { *reads = g_stale_n; }
+static void alias_check(vka_img *im) {
+    for (int i = 0; i < im->nali; i++) {
+        smap_ent *e = map_get(im->ali[i]); vka_img *o = e ? e->im : NULL;
+        if (!o || o == im || o->wseq <= im->wseq) continue;
+        g_stale_n++;
+        static struct { uint64_t a, b; } seen[64]; static int ns; int k = 0;
+        while (k < ns && !(seen[k].a == im->serial && seen[k].b == o->serial)) k++;
+        if (k < ns || ns >= 64) continue;
+        seen[ns].a = im->serial; seen[ns++].b = o->serial;
+        VLOG("stale alias: texture serial %llu %ux%ux%u layers %u levels %u format %#x target %d (%s, storage %p+%#llx) sampled after serial %llu %ux%ux%u layers %u levels %u format %#x target %d wrote its storage (%p+%#llx)",
+             (unsigned long long)im->serial, im->w, im->h, im->depth, im->layers, im->levels, im->d.format, im->d.target, im->gpu_owned ? "GPU-written before" : "from storage", (const void *)im->mem,
+             (unsigned long long)im->L.size, (unsigned long long)o->serial, o->w, o->h, o->depth, o->layers, o->levels, o->d.format, o->d.target, (const void *)o->mem, (unsigned long long)o->L.size);
+    }
+}
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (!t || !t->serial || !vka_ok()) return NULL;
     pthread_mutex_lock(&g_tmu);
@@ -1335,6 +1362,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
             g_live[g_nlive++] = im;
             big_note(im, t);
+            alias_note(im, t);
             // Its first content through the upload batch when cb is the replay's (vka_dev.c "Upload batches"): staging that retires on the batch's own completion
             VkCommandBuffer ucb = cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE;
             img_first_use(im, t, ucb ? ucb : cb, mode);
@@ -1637,6 +1665,7 @@ void mtl_tex_release(tex_t *t) {
 // Linear textures the GPU wrote in this submission. Metal makes a linear texture on the pool buffer, so what the GPU renders there is in guest memory for the CPU to read
 // (agl reads small linear render targets back on the CPU, such as a 1x1 R16F one in Donkey Kong Bananza's level); here the image is copied back into the storage
 static vka_img **g_wb; static int g_nwb, g_wbcap;
+static uint64_t g_wseq;   // (Lichii: the GPU write order, under g_tmu: alias_note / alias_check)
 void vka_img_written_at(vka_img *im, const char *file, int line) {
     if (!im) return;
     pthread_mutex_lock(&g_tmu);
@@ -1647,6 +1676,7 @@ void vka_img_written_at(vka_img *im, const char *file, int line) {
         VLOG("large image serial %llu %ux%u layers %u format %#x (%.1f MiB): first GPU write at frame %llu (%s:%d), sampled by %u draws before, %u other textures over its storage", (unsigned long long)im->serial,
              im->w, im->h, im->layers, im->d.format, im->m.size / 1048576.0, (unsigned long long)vka_frame(), file, line, im->nsamp, im->novl); }
     im->gpu_owned = 1;
+    im->wseq = ++g_wseq;
     if ((im->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && im->mem && !im->wb_pending && im->samples == 1 && im->f.kind < 3 && im->f.bw == 1) {
         if (g_nwb == g_wbcap) { g_wbcap = g_wbcap ? 2 * g_wbcap : 32; g_wb = realloc(g_wb, (size_t)g_wbcap * sizeof *g_wb); }
         im->wb_pending = 1; im->refs++; g_wb[g_nwb++] = im;
@@ -1953,7 +1983,7 @@ VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int sto
     if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
     if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) return id_view(id, cb, dim, storage, NULL);
     vmemo *m = vm_slot(id, dim);
-    if (vm_hit(m, id, dim)) { m->im->used = g_tick; return m->v; }
+    if (vm_hit(m, id, dim)) { m->im->used = g_tick; if (m->im->nali) { pthread_mutex_lock(&g_tmu); alias_check(m->im); pthread_mutex_unlock(&g_tmu); } return m->v; }
     uint32_t gen = atomic_load_explicit(&g_tgen, memory_order_acquire), ver = g_tver ? atomic_load_explicit(&g_tver[id], memory_order_acquire) : 0;
     vka_img *im = NULL; VkImageView v = id_view(id, cb, dim, 0, &im);
     if (v && im && g_tver && !in_fb(im)) *m = (vmemo){id, dim, ver, gen, im, v};
@@ -1980,6 +2010,7 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     pthread_mutex_unlock(&g_tmu);
     nvn_pool_use(1); g_first_sampled = !storage; vka_img *im = treg_dead(id, &e) ? NULL : vka_tex_get(&e.t, cb); g_first_sampled = 0; nvn_pool_use(0);
     if (!im) return VK_NULL_HANDLE;
+    if (!storage && im->nali) { pthread_mutex_lock(&g_tmu); alias_check(im); pthread_mutex_unlock(&g_tmu); }
     int vt = dim_view_type(dim);
     if (vt < 0) return VK_NULL_HANDLE;
     if (((dim & DMSH_VK_DIM_MS) != 0) != (im->samples > 1)) return VK_NULL_HANDLE;

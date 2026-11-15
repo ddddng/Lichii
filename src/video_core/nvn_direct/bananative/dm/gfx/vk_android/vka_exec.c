@@ -623,6 +623,7 @@ static VkImageAspectFlags copy_aspect(const vka_img *im, const char *what) {
     return 0;
 }
 // Buffer ↔ texture: c->src is the buffer's guest address. Rows are SetCopyRowStride bytes apart (tightly packed without it), layers / slices SetCopyImageStride
+static void cp_note(const vka_img *d, unsigned lv_tex, int dropped);
 static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
@@ -632,7 +633,8 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (im->samples > 1) { VRED_ONCE("buffer copy of a multisampled texture"); return; }
     const vka_fmt *f = &im->f;
     unsigned lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, l0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    if (!vka_img_lv(im, &lv) || c->r.width <= 0 || c->r.height <= 0) return;
+    { unsigned lvt = lv; int ok = vka_img_lv(im, &lv); if (to_tex) cp_note(im, lvt, !ok); if (!ok) return; }
+    if (c->r.width <= 0 || c->r.height <= 0) return;
     size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + f->bw - 1) / f->bw) * f->bpb, rows = (size_t)(c->r.height + f->bh - 1) / f->bh;
     size_t img = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;
     int is3d = im->depth > 1 || c->tex->d.target == NVN_TEXTURE_TARGET_3D, nz = c->r.depth > 0 ? c->r.depth : 1;
@@ -666,6 +668,17 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     g_stat_ops++;
     vka_barrier(g_cb);
 }
+// Lichii (dotfiles-25x.17): copies into a texture's levels its image leaves out (a sparse texture made dense from a coarser level, vka_tex.c dense_floor), and into the
+// levels it keeps, by destination, for the line every 1800 presents (lost updates of the 68-layer arrays?)
+static uint64_t g_cp_drop, g_cp_kept_sparse;
+void vka_copy_drop_stats(uint64_t *dropped, uint64_t *kept) { *dropped = g_cp_drop; *kept = g_cp_kept_sparse; }
+static void cp_note(const vka_img *d, unsigned lv_tex, int dropped) {
+    if (!d->base) return;
+    if (!dropped) { g_cp_kept_sparse++; return; }
+    g_cp_drop++;
+    static int n; if (n++ < 16) VLOG("copy into texture serial %llu %ux%u layers %u format %#x level %u: its image starts at level %u, the copy is dropped", (unsigned long long)d->serial,
+                                      d->d.width, d->d.height, d->layers, d->d.format, lv_tex, d->base);
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (!c->src || !c->dst) return;
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
@@ -673,7 +686,8 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_tex_own(d, g_cb);
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
-    if (!vka_img_lv(s, &sl) || !vka_img_lv(d, &dl)) return;
+    { unsigned dlt = dl; int ok = vka_img_lv(d, &dl); cp_note(d, dlt, !ok); if (!ok) return; }
+    if (!vka_img_lv(s, &sl)) return;
     VkImageAspectFlags sa = s->aspect & (s->f.kind >= 3 ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT), da = d->aspect;
     if ((sa == VK_IMAGE_ASPECT_COLOR_BIT) != (da == VK_IMAGE_ASPECT_COLOR_BIT)) { VRED_ONCE("texture copy between a color and a depth texture (formats %#x → %#x)", c->src->d.format, c->dst->d.format); return; }
     sa &= da;

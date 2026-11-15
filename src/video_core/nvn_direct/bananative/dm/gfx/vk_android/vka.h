@@ -286,6 +286,8 @@ typedef struct vka_img {
     // Large images (DM_VK_BIGIMG_MB, vka_tex.c "Large images"): draws that bound it for sampling, other textures found over its storage (the first serials)
     uint32_t nsamp, novl; uint64_t ovl[4];
     uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
+    // Lichii (dotfiles-25x.17): wseq the GPU write order of its last write (0: none); ali the serials of textures of another shape found over its storage (images of their own)
+    uint64_t wseq; uint64_t ali[8]; uint8_t nali;
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
