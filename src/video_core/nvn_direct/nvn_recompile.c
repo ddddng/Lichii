@@ -77,6 +77,7 @@ static rc_map g_sh;       // key -> rc_shader
 static rc_map g_cmp;      // key -> compared (mode 2)
 static uint64_t rc_key(uint64_t k) { return k ? k : 1; }   // (0 marks an empty slot)
 
+static void dump_listed(const prog_t* p, unsigned i, uint64_t key, const uint8_t* control);
 // nvnProgramSetShaders (mtl_prog_prefetch): the NVN2 control sections, while they are valid
 void vka_rc_keep(const prog_t* p) {
     if (!vka_rc_mode()) return;
@@ -85,8 +86,10 @@ void vka_rc_keep(const prog_t* p) {
         if (!nvn2_control(c) || !prog_key(p, i, md)) continue;
         uint64_t key = rc_key(vka_shlib_key(md));
         pthread_mutex_lock(&g_mu);
-        if (!rc_find(&g_ctl, key)) { uint8_t* copy = malloc(NVN_DIRECT_NVN2_CONTROL_SIZE); if (copy) { memcpy(copy, c, NVN_DIRECT_NVN2_CONTROL_SIZE); rc_put(&g_ctl, key, copy); } }
+        uint8_t* copy = NULL;
+        if (!rc_find(&g_ctl, key)) { copy = malloc(NVN_DIRECT_NVN2_CONTROL_SIZE); if (copy) { memcpy(copy, c, NVN_DIRECT_NVN2_CONTROL_SIZE); rc_put(&g_ctl, key, copy); } }
         pthread_mutex_unlock(&g_mu);
+        if (copy) dump_listed(p, i, key, copy);
     }
 }
 static const uint8_t* rc_control(uint64_t key) {
@@ -395,6 +398,22 @@ static void dump_spirv(uint64_t key, uint32_t prim_inputs, const nvn_direct_shad
     else snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)key);
     FILE* f = fopen(path, "wb");
     if (f) { fwrite(o->spirv, 4, o->spirv_words, f); fclose(f); }
+}
+
+// EDEN_NX2_NVN_RECOMPILE_DUMP_KEYS=<key>[,<key>...] (lab, with EDEN_NX2_NVN_RECOMPILE_DUMP): those shaders translated and dumped as <key>-setshaders.spv when the
+// game sets them (no draw's state: constant buffer words read as 0, textures as unbound), whether or not they are ever drawn
+static void dump_listed(const prog_t* p, unsigned i, uint64_t key, const uint8_t* control) {
+    static uint64_t keys[16]; static int nk = -1;
+    if (nk < 0) { nk = 0; const char* e = getenv("EDEN_NX2_NVN_RECOMPILE_DUMP_KEYS"); while (e && *e && nk < 16) { char* x; keys[nk++] = strtoull(e, &x, 16); e = *x == ',' ? x + 1 : NULL; } }
+    const char* dir = getenv("EDEN_NX2_NVN_RECOMPILE_DUMP");
+    int listed = 0; for (int k = 0; k < nk; k++) listed |= keys[k] == (key ? key : 1);
+    if (!listed || !dir || !*dir) return;
+    nvn_direct_shader o; uint64_t vin_types; int gl; char why[300] = "";
+    if (!rc_translate(p, i, control, NULL, 0, &o, &vin_types, &gl, why, sizeof why)) { VRED("recompiler dump %016llx: not translated: %s", (unsigned long long)key, why); return; }
+    char path[1024]; snprintf(path, sizeof path, "%s/%016llx-setshaders.spv", dir, (unsigned long long)key);
+    FILE* f = fopen(path, "wb"); if (f) { fwrite(o.spirv, 4, o.spirv_words, f); fclose(f); }
+    VLOG("recompiler dump: %s (NVN stage %d, %zu words)", path, control[0x56], o.spirv_words);
+    vka_shader_translated_free(&o);
 }
 
 int vka_rc_stage(uint64_t key) { const uint8_t* c = rc_control(key); return c ? c[0x56] : -1; }
