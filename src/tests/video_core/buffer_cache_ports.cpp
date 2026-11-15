@@ -664,7 +664,7 @@ TEST_CASE("Storage binding cache preserves native and table size policies", "[bu
     REQUIRE(f.Bind(false, false, true).size == 1 << 20);
 }
 
-TEST_CASE("NVN graphics descriptors bind their size and stop at a device range gap",
+TEST_CASE("NVN graphics descriptors bind their size, and written ones stop at a device range gap",
           "[buffer_ports]") {
     Fixture f;
     constexpr GPUVAddr base = 0x4000000;
@@ -681,6 +681,7 @@ TEST_CASE("NVN graphics descriptors bind their size and stop at a device range g
     f.Descriptor(base, 0x102edc0);
     f.memory->Map(base + (16 << 20), 0x20000000, 1 << 20, Tegra::PTEKind::PITCH, true);
     REQUIRE(f.Bind(true, true, false, false, true).size == 16 << 20);
+    REQUIRE(f.Bind(false, true, false, false, true).size == 0x102f000);
 }
 
 TEST_CASE("Storage binding cache does not reuse a destroyed address space", "[buffer_ports]") {
