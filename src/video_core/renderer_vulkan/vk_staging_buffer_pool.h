@@ -101,9 +101,8 @@ private:
 
     void ReleaseCache(MemoryUsage usage);
 
-    /// Frees every staging buffer the GPU is done with that was handed out before a tick, of
-    /// every kind (out of memory).
-    void ReleaseIdleBuffers(u64 before_tick);
+    /// Frees every staging buffer the GPU is done with, of every kind (out of memory).
+    void ReleaseIdleBuffers();
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
     size_t Region(size_t iter) const noexcept {
