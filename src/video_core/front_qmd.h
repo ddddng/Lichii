@@ -460,6 +460,8 @@ private:
                                                         GPUVAddr qmd_address, u64 position,
                                                         Descriptor& descriptor) const {
         const auto device = memory.Device(qmd_address);
+        // As for GPU-written command lists and CheckWithoutDrain: a dispatch still queued that is
+        // the first to write this page is not marked yet (nx2.h, g_nx2_gpu_written_pages).
         if (!device || memory.GpuWritten(*device, sizeof(descriptor))) {
             return Outcome{false, std::nullopt, QmdLoss::Unreadable};
         }
