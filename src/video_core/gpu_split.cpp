@@ -354,6 +354,13 @@ GpuSplit::Landing GpuSplit::FenceLanding() {
 
 void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least,
                                   Landing landing) {
+    if (device_address % sizeof(u32) != 0) {
+        // Unaligned, it writes part of two words, neither of which then holds a value it names.
+        const u64 word = device_address & ~u64{3};
+        NoteSemaphoreWrite(word, 0, false, false, landing);
+        NoteSemaphoreWrite(word + sizeof(u32), 0, false, false, landing);
+        return;
+    }
     if (semaphore_writes.size() >= semaphore_writes_limit) {
         // The words of releases in memory hold their values.
         boost::unordered::erase_if(semaphore_writes,

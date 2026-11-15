@@ -1053,6 +1053,15 @@ TEST_CASE("Split remembers the semaphore writes its back has not run yet",
     REQUIRE(queued.has_value());
     REQUIRE_FALSE(queued->known);
     REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x1004).has_value());
+    // Unaligned, a write leaves both words it covers unknown.
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x3001, 8, true);
+    split.Publish();
+    for (const u64 word : {0x3000, 0x3004}) {
+        queued = split.QueuedSemaphoreWriteAt(word);
+        REQUIRE(queued.has_value());
+        REQUIRE_FALSE(queued->known);
+    }
     // The last write sent to a word decides.
     split.Defer([] {});
     split.NoteSemaphoreWrite(0x1000, 9, true);
