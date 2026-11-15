@@ -1599,10 +1599,13 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
 
 // VRAM budget (dotfiles-25x.8): when the process's device-local use passes BUDGET_HIGH % of the host's budget, compressed images no draw or copy took for BUDGET_IDLE ticks
 // (a tick a submission: ~2 s) go, oldest first, until the use is down to BUDGET_LOW %. Only compressed ones: their content is always their texture's storage (no render
-// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Not one held outside the recording
+// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Lichii (dotfiles-25x.21): also
+// uncompressed ones the GPU never wrote (gpu_owned), whose content is their storage as well: on the Steam Deck the idle compressed ones were not enough to stay under the
+// budget (DM_VK_BUDGET_UNCOMPRESSED=0: compressed ones only, as before). Not one held outside the recording
 // thread, waiting for a copy back, zero-shared, sparse or of a finalized pool, and only ones with an allocation of their own (4 MiB and up, vka_imgmem.c), whose memory
 // goes back to the driver with them (an image in a shared block may leave the block allocated). Without a budget all images stay (Mario Kart World's race peaked at 12.9 GB under a 10 GB cap)
 enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
+static int budget_uncompressed(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_BUDGET_UNCOMPRESSED", 1) != 0; return v; }
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
 static void blocks_compact(void);
 void vka_tex_budget(void) {
@@ -1624,9 +1627,12 @@ void vka_tex_budget(void) {
     pthread_mutex_lock(&g_tmu);
     vka_img **c = malloc((size_t)(g_nlive ? g_nlive : 1) * sizeof *c); int nc = 0;
     for (int i = 0; c && i < g_nlive; i++) { vka_img *im = g_live[i];
-        if (compressed(&im->f) && !im->m.blk && im->m.dm && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick) c[nc++] = im; }
+        if ((compressed(&im->f) || budget_uncompressed()) && !im->m.blk && im->m.dm && !im->gpu_owned && !im->holds && !im->wb_pending && !im->m.z && !im->vpool && !im->rs && !im->pdead && im->used + BUDGET_IDLE < g_tick) c[nc++] = im; }
     qsort(c, (size_t)nc, sizeof *c, budget_cmp);
     int n = 0;
+    { uint64_t f = 0; int m = 0; while (m < nc && f < want) f += c[m++]->bytes;   // Lichii: the pool slots that name the images going are written again (null until their next use)
+      for (int id = 1; m && id < g_ntreg; id++) { smap_ent *e = g_treg[id].t.serial ? map_get(g_treg[id].t.serial) : NULL;
+          for (int k = 0; e && e->im && k < m; k++) if (e->im == c[k]) { dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id); break; } } }
     for (int k = 0; k < nc && freed < want; k++) { vka_img *im = c[k]; uint64_t bytes = im->bytes;
         int refs = im->refs;   // (the serials' references: none held outside; the last unref may destroy it at once)
         for (size_t i = 0; i < g_mapcap && refs; i++) if (g_map[i].im == im && g_map[i].serial && g_map[i].serial != ~0ull) { map_del(g_map[i].serial); refs--; unref_locked(im); }
@@ -1635,7 +1641,7 @@ void vka_tex_budget(void) {
     pthread_mutex_unlock(&g_tmu);
     evicted += (uint64_t)n; evicted_bytes += freed;
     static _Atomic int nlog; if (n && atomic_fetch_add(&nlog, 1) < 16)
-        VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle compressed images let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
+        VLOG("VRAM budget: device-local use %.0f of %.0f MiB: %d idle images the GPU never wrote let go of (%.0f MiB; %llu so far, %.0f MiB), made again at their next use", usage / 1048576.0,
              budget / 1048576.0, n, freed / 1048576.0, (unsigned long long)evicted, evicted_bytes / 1048576.0);
 }
 
