@@ -258,15 +258,21 @@ static void *saver_main(void *a) {
     return NULL;
 }
 // From the replay thread at each submission: a save is due DM_VK_PCACHE_SAVE_S seconds (default 20) after the last one when pipelines were made since; it runs on the saver
-// thread. force (the end of the run, the shader library check): now, on the caller's thread
+// thread. force (the end of the run, the shader library check): now, on the caller's thread.
+// Lichii (dotfiles-25x.13): a periodic save only when the frame path made pipelines since the last one. vkGetPipelineCacheData holds the cache while it copies it (~200 MB,
+// ~130 ms on the NVIDIA driver), and a pipeline or library the replay thread makes meanwhile waits for it: the background optimizer's pipelines, which land all through a
+// warm race, set off a save every 20 s and with it a hitch (nd13l-3: the replay stalled 98.68-98.78 s, exactly the copy). Their pipelines and the libraries made ahead
+// reach the file with the next save the frame path's pipelines set off, or at the end of the run (vka_pso_park)
+static uint64_t g_saved_frame_at;
 void vka_pso_save(int force) {
     if (!g_pc || vka_stopping()) return;
     uint64_t t = now_ns();
     if (!force) {
         if (__atomic_load_n(&g_made, __ATOMIC_RELAXED) == g_saved_at) return;
+        uint64_t fm = __atomic_load_n(&g_frame_made, __ATOMIC_RELAXED); if (fm == g_saved_frame_at) return;
         int s = VKA_ENV("DM_VK_PCACHE_SAVE_S", 20); if (s < 1) s = 1;
         if (t - g_save_ns < (uint64_t)s * 1000000000ull) return;
-        g_save_ns = t;
+        g_save_ns = t; g_saved_frame_at = fm;
         if (g_sv_up) { pthread_mutex_lock(&g_sv_mu); g_sv_want = 1; pthread_cond_signal(&g_sv_cv); pthread_mutex_unlock(&g_sv_mu); return; }
     }
     g_save_ns = t;
