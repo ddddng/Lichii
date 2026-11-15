@@ -73,6 +73,10 @@ namespace Core::NvnHook {
 /// (EDEN_NX2_NVN_DIRECT=1, an NVN2 game); read by the Vulkan device, created after Install.
 [[nodiscard]] bool DirectMode();
 
+/// Direct mode's title (0 otherwise): the direct renderer keeps its caches per title
+/// (renderer_vulkan.cpp, DM_TEMP).
+[[nodiscard]] u64 DirectProgramId();
+
 /// Direct mode, the emulator shutting down (dotfiles-25x.18): the game's threads waiting on the
 /// host inside a halted NVN call return, so the kernel can suspend them. Before the cores are
 /// suspended (System::Pause, ShutdownMainProcess). Nothing otherwise.

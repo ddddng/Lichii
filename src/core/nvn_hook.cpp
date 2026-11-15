@@ -133,6 +133,7 @@ constexpr u32 TaskStage = 8; ///< the driver's other special case besides comput
 
 struct State {
     bool direct{}; ///< DirectMode()
+    u64 program_id{}; ///< DirectProgramId()
     bool emitted{};
     bool hle_bind_texture{};
     bool hle_verify{};
@@ -699,6 +700,11 @@ bool DirectMode() {
     return state != nullptr && state->direct;
 }
 
+u64 DirectProgramId() {
+    const State* const state = Get();
+    return state != nullptr && state->direct ? state->program_id : 0;
+}
+
 void StopDirect() {
 #ifdef LICHII_NVN_DIRECT
     if (DirectMode()) {
@@ -760,6 +766,7 @@ void Install(Core::System& system, Kernel::KProcess& process) {
 #ifdef LICHII_NVN_DIRECT
     // One launch per process: the direct renderer's state lives as long as the process does.
     state.direct = EnvIsOne("EDEN_NX2_NVN_DIRECT") && !state.bootstrap_entries.empty();
+    state.program_id = process.GetProgramId();
 #endif
     if (state.direct) {
         InstallDirect(state);

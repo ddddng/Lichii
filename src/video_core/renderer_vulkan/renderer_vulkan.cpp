@@ -24,6 +24,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "core/nvn_hook.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
 #include "video_core/shader_notify.h"
@@ -304,11 +305,17 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];
     }
-    // The replay keeps its pipeline cache and the view formats it learns in DM_TEMP: Lichii's
-    // cache directory unless it is set (lab runs set their own), never the working directory
+    // The replay keeps its pipeline cache, prewarm list, kept translations and the view formats
+    // it learns in DM_TEMP: unless it is set (lab runs set their own), Lichii's cache directory,
+    // one folder per title named as the shader cache's (nvn_direct/<16 hex digits of the program
+    // id>/: dotfiles-25x.13, every title loaded Mario Kart World's), never the working directory
     // or HOME, its fallback.
     if (const char* temp = std::getenv("DM_TEMP"); temp == nullptr || *temp == '\0') {
-        const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nvn_direct";
+        const u64 title = Core::NvnHook::DirectProgramId();
+        auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nvn_direct";
+        if (title != 0) {
+            dir /= fmt::format("{:016x}", title);
+        }
         if (Common::FS::CreateDirs(dir)) {
             setenv("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str(), 0);
         }
