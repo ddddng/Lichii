@@ -23,7 +23,13 @@ vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 // Lichii: the device handed over (nvn_direct_adopt_device), and the lock every submission to its queues holds (Lichii's Scheduler::submit_mutex: Lichii submits to the
 // last of these queues too); V.qmu without one
 static nvn_direct_device g_adopt; static int g_adopted;
-void vka_qlock(void) { if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); }
+// Lichii (lab DM_VK_SLOWSUB_MS, vka_worker.c): waits for the queue lock, staging blocks made and freed and their time, waits for upload batches; cumulative
+static _Atomic uint64_t g_qlock_ns, g_sblk_new_n, g_sblk_new_ns, g_sblk_free_ns;
+static uint64_t g_uwait_ns, g_uslot_ns;   // (g_uslot_ns: the part of the waits for a batch slot to come free)
+void vka_up_work_stats(uint64_t *qlock_ns, uint64_t *sblk_n, uint64_t *sblk_ns, uint64_t *sblk_free_ns, uint64_t *up_wait_ns) {
+    *qlock_ns = atomic_load(&g_qlock_ns); *sblk_n = atomic_load(&g_sblk_new_n); *sblk_ns = atomic_load(&g_sblk_new_ns); *sblk_free_ns = atomic_load(&g_sblk_free_ns); *up_wait_ns = g_uwait_ns; }
+uint64_t vka_up_batches(void);
+void vka_qlock(void) { uint64_t t0 = now_ns(); if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); atomic_fetch_add_explicit(&g_qlock_ns, now_ns() - t0, memory_order_relaxed); }
 void vka_qunlock(void) { if (g_adopt.queue_unlock) g_adopt.queue_unlock(g_adopt.queue_context); else pthread_mutex_unlock(&V.qmu); }
 // Lab (DM_VK_VRAM_TRACE=1, dotfiles-25x.8): the host's use (NVML) beside the driver's heaps and the replay's imports and images, every second
 uint64_t vka_mem_placed_nolock(void); uint64_t vka_tex_mem_nolock(int *n);
@@ -528,7 +534,13 @@ static uint64_t up_done(void) {   // the upload timeline's value (every batch co
     uint64_t v = 0; if (g_utl) vk.vkGetSemaphoreCounterValue(V.dev, g_utl, &v); return v;
 }
 static int sblk_idle(const sblk *b, uint64_t done, uint64_t udone) { return b->fence <= (b->up ? udone : done); }
+static sblk *sblk_new_(VkDeviceSize n);
 static sblk *sblk_new(VkDeviceSize n) {
+    uint64_t t0 = now_ns(); sblk *b = sblk_new_(n);
+    atomic_fetch_add_explicit(&g_sblk_new_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_sblk_new_n, 1, memory_order_relaxed);
+    return b;
+}
+static sblk *sblk_new_(VkDeviceSize n) {
     sblk *b = calloc(1, sizeof *b); b->size = n;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
     if (vk.vkCreateBuffer(V.dev, &bi, NULL, &b->buf)) { free(b); return NULL; }
@@ -556,7 +568,7 @@ void vka_mem_grew(uint64_t bytes) {
 // Kept, every block stayed for the process's life: Mario Kart World 1.8.0's boot uploads (levels of up to 144 MiB, each in a block of its size) left 1.4 GB of scratch
 // before its first frame, and the phone's low-memory killer stopped it
 static void sblk_trim(uint64_t done, uint64_t udone) {
-    VkDeviceSize idle = 0;
+    VkDeviceSize idle = 0; uint64_t t0 = now_ns();
     for (sblk **pp = &g_busy; *pp;) {
         sblk *b = *pp;
         int id = sblk_idle(b, done, udone);
@@ -565,6 +577,7 @@ static void sblk_trim(uint64_t done, uint64_t udone) {
             atomic_fetch_sub(&g_scratch_bytes, b->size); atomic_fetch_sub(&g_scratch_n, 1); free(b);
         } else { if (id) idle += b->size; pp = &b->next; }
     }
+    atomic_fetch_add_explicit(&g_sblk_free_ns, now_ns() - t0, memory_order_relaxed);
 }
 int vka_scratch(VkDeviceSize n, VkDeviceSize align, vka_span *out) {
     if (!align) align = 16;
@@ -607,7 +620,7 @@ void vka_scratch_retire(uint64_t fence) { retire(0, fence); }
 enum { NUP = 16 };
 static struct { VkCommandBuffer cb; uint64_t val; } g_ub[NUP];
 static VkCommandPool g_upool; static uint64_t g_uval; static int g_ui = -1; static unsigned g_unext;   // g_ui: the open batch's slot (-1: none); replay thread only
-static uint64_t g_n_ubatch, g_n_uwait, g_uwait_ns;
+static uint64_t g_n_ubatch, g_n_uwait;
 static int up_wait(uint64_t v) {   // 1 = the upload timeline reached v
     if (up_done() >= v) return 1;
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_utl, .pValues = &v};
@@ -633,7 +646,7 @@ VkCommandBuffer vka_up_begin(void) {
         }
         if (vka_hung()) return VK_NULL_HANDLE;
         unsigned k = g_unext % NUP;   // (16 slots: the backpressure below keeps them mostly done)
-        if (g_ub[k].val && !up_wait(g_ub[k].val)) return VK_NULL_HANDLE;   // (its batch still runs: the caller records into the submission)
+        { uint64_t t0 = now_ns(); int ok = !g_ub[k].val || up_wait(g_ub[k].val); g_uslot_ns += now_ns() - t0; if (!ok) return VK_NULL_HANDLE; }   // (its batch still runs: the caller records into the submission)
         g_unext++;
         vk.vkResetCommandBuffer(g_ub[k].cb, 0);
         VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -735,6 +748,8 @@ void vka_up_throttle(void) {
         if ((double)fl <= cap || oldest == UINT64_MAX || !up_wait(oldest)) break;
     }
 }
+uint64_t vka_up_batches(void) { return g_n_ubatch; }
+uint64_t vka_up_slot_waits(void) { return g_uslot_ns; }
 void vka_up_stats(uint64_t *batches, uint64_t *waits, double *wait_ms) { if (batches) *batches = g_n_ubatch; if (waits) *waits = g_n_uwait; if (wait_ms) *wait_ms = g_uwait_ns / 1e6; }
 #endif
 

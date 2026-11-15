@@ -69,7 +69,10 @@ static void aff_check(void) {
 // Lab (DM_VK_SLOWSUB_MS=n, dotfiles-25x.13): each submission whose replay took over n ms of wall time, with what it spent: its CPU time (the rest it was blocked),
 // and the parts of it that the replay's counters see (images made, uploads, pipelines made on the frame path and waits for prewarm threads, pool placements and
 // give-backs, waits for the memory table and the encoder, tex_prepare, upload flushes, vkQueueSubmit)
-typedef struct { uint64_t v[16]; } slow_snap;
+typedef struct { uint64_t v[23]; } slow_snap;
+uint64_t vka_up_slot_waits(void);
+uint64_t vka_up_batches(void);
+void vka_up_work_stats(uint64_t *qlock_ns, uint64_t *sblk_n, uint64_t *sblk_ns, uint64_t *sblk_free_ns, uint64_t *up_wait_ns);
 extern uint64_t vka_o72_ns[8];
 void vka_tex_work_stats(uint64_t *made, uint64_t *make_ns, uint64_t *up_ns, uint64_t *up_bytes);
 void vka_mem_waits(uint64_t *place_ns, uint64_t *place_bytes, uint64_t *place_n, uint64_t *give_ns, uint64_t *wait_rec_ns, uint64_t *wait_other_ns);
@@ -83,13 +86,15 @@ static void slow_take(slow_snap *s) {
     vka_mem_waits(&s->v[4], &s->v[5], &s->v[6], &s->v[7], &s->v[8], &other);
     vka_pso_waits(&lib, &s->v[9]); mtl_create_ns(&lib, &s->v[10]);
     s->v[11] = vka_enc_waits(); s->v[12] = vka_o72_ns[0]; s->v[13] = vka_o72_ns[2]; s->v[14] = vka_o72_ns[3]; s->v[15] = vka_o72_ns[4];
+    vka_up_work_stats(&s->v[16], &s->v[17], &s->v[18], &s->v[19], &s->v[20]); s->v[21] = vka_up_batches(); s->v[22] = vka_up_slot_waits();
 }
 static void slow_log(uint64_t wall, uint64_t cpu, const slow_snap *a, const slow_snap *b) {
-    uint64_t d[16]; for (int i = 0; i < 16; i++) d[i] = b->v[i] - a->v[i];
+    uint64_t d[23]; for (int i = 0; i < 23; i++) d[i] = b->v[i] - a->v[i];
     VLOG("slow submission at present %llu: %.1f ms (CPU %.1f): %llu images made %.1f ms, uploads %.1f ms (%.1f MB), frame-path pipelines %.1f ms, prewarm waits %.1f ms, "
-         "pool placements %.1f ms (%llu, %.1f MB), give-backs %.1f ms, memory table waits %.1f ms, encoder waits %.1f ms, tex_prepare %.1f ms, upload flushes %.1f ms, submit %.1f ms, sub_begin %.1f ms",
+         "pool placements %.1f ms (%llu, %.1f MB), give-backs %.1f ms, memory table waits %.1f ms, encoder waits %.1f ms, tex_prepare %.1f ms, upload flushes %.1f ms, submit %.1f ms, sub_begin %.1f ms; queue lock waits %.1f ms (any thread), staging blocks made %llu in %.1f ms, freed in %.1f ms, upload batch waits %.1f ms (%.1f of them for a batch slot; %llu batches)",
          (unsigned long long)vka_present_filled(), wall / 1e6, cpu / 1e6, (unsigned long long)d[0], d[1] / 1e6, d[2] / 1e6, d[3] / 1e6, d[10] / 1e6, d[9] / 1e6,
-         d[4] / 1e6, (unsigned long long)d[6], d[5] / 1e6, d[7] / 1e6, d[8] / 1e6, d[11] / 1e6, d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6);
+         d[4] / 1e6, (unsigned long long)d[6], d[5] / 1e6, d[7] / 1e6, d[8] / 1e6, d[11] / 1e6, d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6,
+         d[16] / 1e6, (unsigned long long)d[17], d[18] / 1e6, d[19] / 1e6, d[20] / 1e6, d[22] / 1e6, (unsigned long long)d[21]);
 }
 static void *worker_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-replay");
