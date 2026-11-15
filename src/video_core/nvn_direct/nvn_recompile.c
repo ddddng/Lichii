@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // The replay's shaders from Lichii's recompiler (dotfiles-25x.11), instead of the offline library
-// (vka_shader.c). EDEN_NX2_NVN_RECOMPILE (restart): 0 or unset = the library (the default), 1 =
-// every shader from the recompiler (no library), 2 = the library draws, and each of its shaders is
-// translated too and the two binding lists compared (logged; a lab check of the mapping below).
+// (vka_shader.c). EDEN_NX2_NVN_RECOMPILE (restart): 1 or unset = every shader from the recompiler
+// (the default since dotfiles-25x.15's A/B: no library is loaded), 0 = the library, 2 = the library
+// draws, and each of its shaders is translated too and the two binding lists compared (logged; a
+// lab check of the mapping below).
 //
 // A program stage is translated at its first draw or dispatch, with that draw's state: the
 // recompiler reads constant buffer words (bindless handles, storage buffer pointers), the types
@@ -43,7 +44,7 @@ int vka_rc_mode(void) {
     static int mode = -1;
     if (mode < 0) {
         const char* e = getenv("EDEN_NX2_NVN_RECOMPILE");
-        mode = e && *e ? atoi(e) : 0;
+        mode = e && *e ? atoi(e) : 1;
         if (mode) VLOG("shaders: Lichii's recompiler (EDEN_NX2_NVN_RECOMPILE=%d: %s)", mode, mode == 1 ? "every shader, no library" : "the library draws, both compared");
     }
     return mode;

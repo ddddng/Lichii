@@ -8,7 +8,7 @@
 // Lichii (dotfiles-25x.6, lab only): the library is the file EDEN_NX2_NVN_SHLIB names (else DM_VK_SHLIB, else the pack path above), the offline MKW library of the lab
 // (.pi/o72-replay/mkw-shaders/lib/v-<chain>/dmsh_vk.lib). Its header's game must be this build's profile (game_profile.h: Mario Kart World), so another title gets no
 // library and no draws. A program stage whose key the library lacks is counted and logged with its key (missing_key), its draws skipped. Lichii's own recompiler
-// (dotfiles-25x.11, nvn_recompile.c) takes the library's place with EDEN_NX2_NVN_RECOMPILE=1
+// (dotfiles-25x.11, nvn_recompile.c) takes the library's place unless EDEN_NX2_NVN_RECOMPILE=0
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
