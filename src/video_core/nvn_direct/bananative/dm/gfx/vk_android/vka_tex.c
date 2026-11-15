@@ -460,7 +460,18 @@ static uint32_t dense_floor(const nvn_texdesc *d, const nvn_texlayout *L, uint32
 }
 // The image of texture t from level base: a sparse residency image when it is one (res_candidate). One that does not fit the sparse address space starts at a coarser level
 // (bfloor: its finer levels are left out, sampled from the coarser one; a platform limit, logged), down to where it is no candidate any more, then dense from there
+// Lichii (dotfiles-25x.13, lab DM_VK_SLOWSUB_MS: vka_worker.c): images made and the time it took, uploads' time, cumulative
+static _Atomic uint64_t g_mk_n, g_mk_ns, g_up_all_ns;
+static _Atomic uint64_t g_up_bytes;   // (defined with the uploads below)
+void vka_tex_work_stats(uint64_t *made, uint64_t *make_ns, uint64_t *up_ns, uint64_t *up_bytes) {
+    *made = atomic_load(&g_mk_n); *make_ns = atomic_load(&g_mk_ns); *up_ns = atomic_load(&g_up_all_ns); *up_bytes = atomic_load(&g_up_bytes); }
+static vka_img *img_create_t(const tex_t *t, const vka_fmt *f, uint32_t base);
 static vka_img *img_create(const tex_t *t, const vka_fmt *f, uint32_t base) {
+    uint64_t t0 = now_ns(); vka_img *im = img_create_t(t, f, base);
+    atomic_fetch_add_explicit(&g_mk_ns, now_ns() - t0, memory_order_relaxed); if (im) atomic_fetch_add_explicit(&g_mk_n, 1, memory_order_relaxed);
+    return im;
+}
+static vka_img *img_create_t(const tex_t *t, const vka_fmt *f, uint32_t base) {
     uint32_t b = base; uint64_t need = 0; int wlast = 0;   // (the address space the last finer level asked for and did not get: once that much is free, a finer start is tried again, sparse_refresh)
     for (; res_candidate(t, f, b); b++) {
         int why = 0; vka_img *im = img_create_(t, f, b, 1, &why, &need); wlast = why;
@@ -1574,7 +1585,7 @@ static int img_own(vka_img *im, VkCommandBuffer cb);
 static void upload(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // (callers hold g_tmu)
     if (im->m.z) img_own(im, cb);   // a CPU write into a zero-shared image's storage (vka_tex_prepare): memory of its own before the upload
     uint64_t t0 = now_ns(), nb = 0; upload_(im, t, cb, &nb);
-    atomic_fetch_add_explicit(&g_up_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_bytes, nb, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_up_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_all_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_bytes, nb, memory_order_relaxed);
 }
 // DM_VK_UPLOAD_NAN_ZERO=1 (a replay that starts mid-game, the x86 trace harness): NaN / infinite texels of float textures filled from storage read as 0. Storage the
 // GPU wrote before the trace's window holds what the tracing emulator left there, not the game's GPU output (Mario Kart World's 64x64 R11G11B10 reflection cube held

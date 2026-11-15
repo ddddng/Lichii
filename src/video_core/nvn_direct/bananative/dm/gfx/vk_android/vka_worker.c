@@ -66,6 +66,31 @@ static void aff_check(void) {
             if (d) closedir(d); VLOG("DM_VK_AFF_ALL=%#x: %d threads", a, n); } }
     if (r != r_was) { r_was = r; if (r) { aff_set(0, r); VLOG("DM_VK_AFF_REPLAY=%#x", r); } }
 }
+// Lab (DM_VK_SLOWSUB_MS=n, dotfiles-25x.13): each submission whose replay took over n ms of wall time, with what it spent: its CPU time (the rest it was blocked),
+// and the parts of it that the replay's counters see (images made, uploads, pipelines made on the frame path and waits for prewarm threads, pool placements and
+// give-backs, waits for the memory table and the encoder, tex_prepare, upload flushes, vkQueueSubmit)
+typedef struct { uint64_t v[16]; } slow_snap;
+extern uint64_t vka_o72_ns[8];
+void vka_tex_work_stats(uint64_t *made, uint64_t *make_ns, uint64_t *up_ns, uint64_t *up_bytes);
+void vka_mem_waits(uint64_t *place_ns, uint64_t *place_bytes, uint64_t *place_n, uint64_t *give_ns, uint64_t *wait_rec_ns, uint64_t *wait_other_ns);
+void vka_pso_waits(uint64_t *save_ns, uint64_t *pw_wait_ns);
+void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns);
+uint64_t vka_enc_waits(void);
+uint64_t vka_present_filled(void);
+static void slow_take(slow_snap *s) {
+    uint64_t lib, other;
+    vka_tex_work_stats(&s->v[0], &s->v[1], &s->v[2], &s->v[3]);
+    vka_mem_waits(&s->v[4], &s->v[5], &s->v[6], &s->v[7], &s->v[8], &other);
+    vka_pso_waits(&lib, &s->v[9]); mtl_create_ns(&lib, &s->v[10]);
+    s->v[11] = vka_enc_waits(); s->v[12] = vka_o72_ns[0]; s->v[13] = vka_o72_ns[2]; s->v[14] = vka_o72_ns[3]; s->v[15] = vka_o72_ns[4];
+}
+static void slow_log(uint64_t wall, uint64_t cpu, const slow_snap *a, const slow_snap *b) {
+    uint64_t d[16]; for (int i = 0; i < 16; i++) d[i] = b->v[i] - a->v[i];
+    VLOG("slow submission at present %llu: %.1f ms (CPU %.1f): %llu images made %.1f ms, uploads %.1f ms (%.1f MB), frame-path pipelines %.1f ms, prewarm waits %.1f ms, "
+         "pool placements %.1f ms (%llu, %.1f MB), give-backs %.1f ms, memory table waits %.1f ms, encoder waits %.1f ms, tex_prepare %.1f ms, upload flushes %.1f ms, submit %.1f ms, sub_begin %.1f ms",
+         (unsigned long long)vka_present_filled(), wall / 1e6, cpu / 1e6, (unsigned long long)d[0], d[1] / 1e6, d[2] / 1e6, d[3] / 1e6, d[10] / 1e6, d[9] / 1e6,
+         d[4] / 1e6, (unsigned long long)d[6], d[5] / 1e6, d[7] / 1e6, d[8] / 1e6, d[11] / 1e6, d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6);
+}
 static void *worker_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-replay");
     for (;;) {
@@ -76,6 +101,8 @@ static void *worker_main(void *arg) {
         pthread_mutex_unlock(&g_mu);
         uint64_t t1 = wns(), c1 = j.kind == J_SUB ? thread_cpu_ns() : 0; g_idle_ns += t1 - t0;
         aff_check();
+        static int slow_ms = -1; if (slow_ms < 0) { const char *e = getenv("DM_VK_SLOWSUB_MS"); slow_ms = e ? atoi(e) : 0; }
+        slow_snap sa; if (slow_ms > 0 && j.kind == J_SUB) slow_take(&sa);
         if (j.kind == J_SUB) {
             vka_rp_queue_activate(j.serial); vka_rp_set_queue_origin(j.origin_ll);
             vka_gp_sub_frame(j.frame); vka_exec_sub_frame(j.frame); vka_rp_sub_begin();
@@ -85,7 +112,8 @@ static void *worker_main(void *arg) {
         } else if (j.kind == J_PRESENT) vka_present_fill(j.ticket, &j.t, j.period, j.has_crop ? j.crop : NULL);
         else if (j.kind == J_FORGET) vka_rp_queue_forget(j.serial);
         else if (j.kind == J_EVENT) vka_rp_event(j.ev, j.ev_mode, j.ev_v);
-        uint64_t t2 = wns(); g_busy_ns += t2 - t1; if (j.kind == J_SUB) { g_sub_ns += t2 - t1; atomic_fetch_add_explicit(&g_sub_all, t2 - t1, memory_order_relaxed); atomic_fetch_add_explicit(&g_sub_cpu_all, thread_cpu_ns() - c1, memory_order_relaxed); }
+        uint64_t t2 = wns(); g_busy_ns += t2 - t1;
+        if (slow_ms > 0 && j.kind == J_SUB && t2 - t1 > (uint64_t)slow_ms * 1000000ull) { slow_snap sb; slow_take(&sb); slow_log(t2 - t1, thread_cpu_ns() - c1, &sa, &sb); } if (j.kind == J_SUB) { g_sub_ns += t2 - t1; atomic_fetch_add_explicit(&g_sub_all, t2 - t1, memory_order_relaxed); atomic_fetch_add_explicit(&g_sub_cpu_all, thread_cpu_ns() - c1, memory_order_relaxed); }
         if (j.kind == J_PRESENT && j.ticket % 300 == 0) {
             VLOG("replay worker up to present %llu: busy %.1f ms a frame (submissions %.1f), idle %.1f; the game waited %.1f ms a frame for the worker",
                  (unsigned long long)j.ticket, g_busy_ns / 300e6, g_sub_ns / 300e6, g_idle_ns / 300e6, g_room_ns / 300e6);

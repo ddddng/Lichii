@@ -437,9 +437,23 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
                                                 (unsigned long long)vka_fence_last(), (unsigned long long)vka_fence_queued(), r ? "yes" : "timeout", t0, ms_now(), ms_now() - t0);
         return r;
     }
+    static int slow_ms = -1; if (slow_ms < 0) { const char *e = getenv("DM_VK_SLOWSUB_MS"); slow_ms = e ? atoi(e) : 0; }   // (lab: vka_worker.c)
+    if (slow_ms > 0 && timeout_ns && vka_done() < fence) {
+        uint64_t t0 = now_ns(), q0 = vka_fence_queued(), l0 = vka_fence_last(); int r = vka_wait_fence(fence, timeout_ns); uint64_t w = now_ns() - t0;
+        if (w > (uint64_t)slow_ms * 1000000ull) VLOG("slow game wait: %.1f ms for fence %llu (at its start: last reserved %llu, queued %llu; at its end: queued %llu, %s)", w / 1e6,
+                                                    (unsigned long long)fence, (unsigned long long)l0, (unsigned long long)q0, (unsigned long long)vka_fence_queued(), r ? "done" : "timed out");
+        return r;
+    }
     return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence, dotfiles-25x.4)
 }
-int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return vka_wait_done(fence, timeout_ns); }   // (the presenting queue's last, and every fence before it: nvn_window.c)
+int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) {
+    static int slow_ms = -1; if (slow_ms < 0) { const char *e = getenv("DM_VK_SLOWSUB_MS"); slow_ms = e ? atoi(e) : 0; }   // (lab: vka_worker.c)
+    uint64_t t0 = slow_ms > 0 ? now_ns() : 0, q0 = slow_ms > 0 ? vka_fence_queued() : 0;
+    int r = vka_wait_done(fence, timeout_ns);
+    if (slow_ms > 0 && now_ns() - t0 > (uint64_t)slow_ms * 1000000ull) VLOG("slow game acquire wait: %.1f ms for fence %llu and every one before it (queued %llu at its start, %llu at its end, done %llu)",
+                                                                          (now_ns() - t0) / 1e6, (unsigned long long)fence, (unsigned long long)q0, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_done());
+    return r;
+}   // (the presenting queue's last, and every fence before it: nvn_window.c)
 void mtl_finish(void) { vka_wait_done(vka_fence_last(), UINT64_MAX); }
 void mtl_present_flush(void);
 void vka_pso_pause(int on);
