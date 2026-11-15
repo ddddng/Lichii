@@ -50,6 +50,11 @@ TEST_CASE("Scaled image limits", "[video_core][texture_cache]") {
     REQUIRE_FALSE(ScaledImageFits(Image(4096, 8193), Scale(2, 0), AmdLimit));
     REQUIRE(ScaledImageFits(Image(10923, 10923), Scale(3, 1), AmdLimit));
     REQUIRE_FALSE(ScaledImageFits(Image(10924, 10924), Scale(3, 1), AmdLimit));
+    // A 4x MSAA 3840x2160 target is 7680x4320 samples: at 3x its image is 11520x6480 texels.
+    ImageInfo msaa = Image(7680, 4320);
+    msaa.num_samples = 4;
+    REQUIRE(ScaledImageFits(msaa, Scale(3, 0), AmdLimit));
+    REQUIRE_FALSE(ScaledImageFits(msaa, Scale(5, 0), AmdLimit));
     // Only 2D images scale their height.
     REQUIRE(ScaledImageFits(Image(4096, 16384, ImageType::e1D), Scale(2, 0), AmdLimit));
 }

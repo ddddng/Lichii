@@ -165,7 +165,8 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
                                                const ImageInfo& overlap_info, u32 new_level,
                                                u32 overlap_level, bool strict_size) noexcept;
 
-/// Whether an image scaled by the resolution setting is at most max_extent wide and tall.
+/// Whether an image scaled by the resolution setting is at most max_extent texels wide and tall
+/// on the host (MSAA images have their sample grid in info.size).
 [[nodiscard]] bool ScaledImageFits(const ImageInfo& info,
                                    const Settings::ResolutionScalingInfo& resolution,
                                    u32 max_extent) noexcept;
