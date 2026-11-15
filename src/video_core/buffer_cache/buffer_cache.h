@@ -19,9 +19,11 @@
 #include <vector>
 #include <fmt/ranges.h>
 
+#include "common/game_presets.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
+#include "video_core/buffer_cache/storage_buffer_size.h"
 #include "video_core/buffer_cache/uniform_stream_reuse.h"
 #include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
@@ -1866,9 +1868,14 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
         }
         ssbo_addr = holder + indirect_offset;
     }
+    // Mario Kart World's NVN graphics descriptors carry a size, and its light-probe buffer runs
+    // past 8 MiB. Other native titles keep the bare-pointer cap: their next word need not be one.
+    const bool nvn_descriptor =
+        program_id == Settings::MarioKartWorldProgramId &&
+        IsNvnGraphicsStorageDescriptor(stage, cbuf_index, cbuf_offset, indirect_offset);
     channel_state->storage_buffers[stage][ssbo_index] =
         StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
-                             maxwell3d->GetNativeMacroEngine().native_turing ||
+                             (maxwell3d->GetNativeMacroEngine().native_turing && !nvn_descriptor) ||
                                  indirect_offset != ~0U,
                              indirect_offset != ~0U);
     if (indirect_offset != ~0U) {
