@@ -352,15 +352,15 @@ vka_shader *vka_shader_by_key(uint64_t key) {
     return ok ? vka_shader_make(&g_lib, key) : NULL;
 }
 
-// Lichii (dotfiles-25x.16): the keys of the game library's compute programs (a compute pipeline depends on its program alone: vka_pso.c makes them ahead). *keys is
-// malloc'd; returns their count (0: no library)
-unsigned vka_shlib_compute_keys(uint64_t **keys) {
+// Lichii (dotfiles-25x.16): the keys of the game library's shaders of a stage (DMSH_VK_STAGE_*), in the library's order: what vka_pso.c makes ahead (compute pipelines,
+// stage libraries). *keys is malloc'd; returns their count (0: no library)
+unsigned vka_shlib_stage_keys(int stage, uint64_t **keys) {
     *keys = NULL;
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     if (!ok) return 0;
     unsigned n = g_lib.h->entry_count, m = 0;
     uint64_t *k = malloc((n ? n : 1) * sizeof *k); if (!k) return 0;
-    for (unsigned i = 0; i < n; i++) if (vka_nvn_stage(g_lib.ent[i].stage) == 5) k[m++] = g_lib.ent[i].key;
+    for (unsigned i = 0; i < n; i++) if (g_lib.ent[i].stage == stage) k[m++] = g_lib.ent[i].key;
     *keys = k;
     return m;
 }

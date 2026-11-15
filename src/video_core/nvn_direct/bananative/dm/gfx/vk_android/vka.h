@@ -361,7 +361,7 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (st
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
-unsigned vka_shlib_compute_keys(uint64_t **keys);   // Lichii: the game library's compute program keys (malloc'd), their count
+unsigned vka_shlib_stage_keys(int stage, uint64_t **keys);   // Lichii: the game library's shader keys of a DMSH_VK_STAGE_* (malloc'd), their count
 vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none

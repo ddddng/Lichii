@@ -10,6 +10,11 @@
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
 // ways unchanged.
 
+#include <signal.h>
+#include <execinfo.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -149,7 +154,41 @@ static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, uint64_t
 }
 static const dispatch_entry g_empty = {"(empty)", d_empty, 0};
 
+// Lab (DM_VK_CRASH_STACK=1, dotfiles-25x.16): a crash outside the JIT writes the faulting thread's stack to stderr (addresses as eden-cli(+offset), for
+// llvm-symbolizer). The handler before it (dynarmic's, when it was there first) runs first and decides: a fastmem fault it handles returns as before
+static struct sigaction g_crash_old;
+static void crash_stack(int sig, siginfo_t* si, void* uc) {
+    if ((g_crash_old.sa_flags & SA_SIGINFO) && g_crash_old.sa_sigaction) {
+        g_crash_old.sa_sigaction(sig, si, uc);
+        struct sigaction now;
+        sigaction(sig, NULL, &now);
+        if (now.sa_handler != SIG_DFL) return;   // (handled: dynarmic resets the action only for a fault it does not handle)
+    }
+    char h[160], name[17] = {0};
+    prctl(PR_GET_NAME, name);
+    extern _Thread_local char vka_crash_note[96];   // (what the thread was doing, when it says: vka_pso.c)
+    int k = snprintf(h, sizeof h, "[dm] [RED] crash: signal %d at %p, thread %ld %s %s\n", sig, si->si_addr, (long)syscall(SYS_gettid), name, vka_crash_note);
+    write(2, h, (size_t)k);
+    void* b[64];
+    backtrace_symbols_fd(b, backtrace(b, 64), 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void crash_stack_install(void) {
+    const char* e = getenv("DM_VK_CRASH_STACK");
+    if (!e || atoi(e) != 1) return;
+    void* warm[2];
+    backtrace(warm, 2);   // (libgcc loaded outside the handler)
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_stack;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &g_crash_old);
+}
+
 void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory) {
+    crash_stack_install();
     g_arena = (uintptr_t)arena;
     g_guest_size = guest_size;
     g_memory = *memory;
