@@ -144,6 +144,7 @@ uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_hang_ns(void);                         // how long a fence may make no progress before it is a hang (DM_VK_HANG_S, default 6 s)
 int vka_hung(void);
 // Lichii: the emulator shuts down (dotfiles-25x.18, nvn_direct_stop / nvn_direct_park in nvn_shutdown.c)
+void vka_up_decoded(void);                          // vka_dev.c (Lichii): an ASTC decode went into the open upload batch
 void vka_heap_line(char *o, size_t n);               // vka_dev.c (Lichii): the driver's use and budget per heap, MiB
 int vka_dev_ext(const char *name);                  // vka_dev.c (Lichii): the host's device has the extension enabled
 void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
