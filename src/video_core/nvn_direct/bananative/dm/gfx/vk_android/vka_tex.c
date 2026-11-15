@@ -2097,6 +2097,13 @@ int vka_tex_id_target(int id) {
     pthread_mutex_unlock(&g_tmu);
     return t;
 }
+// Lichii (dotfiles-25x.11): the NVN format texture ID id stands for (its view's), -1 = not registered (the recompiler reads it, nvn_recompile.c)
+int vka_tex_id_format(int id) {
+    pthread_mutex_lock(&g_tmu);
+    int f = id > 0 && id < g_ntreg && g_treg[id].t.serial ? (g_treg[id].has_v && g_treg[id].v.set_format ? g_treg[id].v.format : g_treg[id].t.d.format) : -1;
+    pthread_mutex_unlock(&g_tmu);
+    return f;
+}
 int vka_tex_id_storage_pending(int id) {
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = id > 0 && id < g_ntreg && g_treg[id].t.serial ? map_get(g_treg[id].t.serial) : NULL;

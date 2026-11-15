@@ -646,6 +646,12 @@ int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
 // ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
 int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
+// Lichii's shader recompiler (nvn_direct_device.shader_translate, dotfiles-25x.11): a program stage translated, its result given back with vka_shader_translated_free
+int vka_shader_translate(const nvn_direct_shader_source *s, nvn_direct_shader *o) {
+    if (g_adopt.shader_translate) return g_adopt.shader_translate(g_adopt.shader_context, s, o);
+    memset(o, 0, sizeof *o); snprintf(o->error, sizeof o->error, "no shader recompiler"); return 0;
+}
+void vka_shader_translated_free(nvn_direct_shader *o) { if (g_adopt.shader_free) g_adopt.shader_free(g_adopt.shader_context, o); }
 void vka_pipeline_notify(int built) {   // (Lichii: nvn_direct_device.pipeline_building / pipeline_built, dotfiles-25x.16)
     void (*fn)(void *) = built ? g_adopt.pipeline_built : g_adopt.pipeline_building;
     if (fn) fn(g_adopt.pipeline_context);

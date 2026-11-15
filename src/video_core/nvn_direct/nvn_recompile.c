@@ -1,0 +1,446 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// The replay's shaders from Lichii's recompiler (dotfiles-25x.11), instead of the offline library
+// (vka_shader.c). EDEN_NX2_NVN_RECOMPILE (restart): 0 or unset = the library (the default), 1 =
+// every shader from the recompiler (no library), 2 = the library draws, and each of its shaders is
+// translated too and the two binding lists compared (logged; a lab check of the mapping below).
+//
+// A program stage is translated at its first draw or dispatch, with that draw's state: the
+// recompiler reads constant buffer words (bindless handles, storage buffer pointers), the types
+// and formats of the textures handles name, the vertex attributes' types and the depth mode, as
+// Lichii's Maxwell path reads them from the GPU's state. Its NVN2 control section is only valid
+// during nvnProgramSetShaders, so a copy is kept per shader key (vka_rc_keep, from there).
+//
+// Its SPIR-V numbers its descriptors from the stage's first binding in the replay's set 0
+// (dmsh_abi_vk.h: stage s at s * DMSH_VK_STAGE_BINDINGS; compute and mesh use the vertex range, task
+// the tess control one), and each descriptor becomes a binding record of the library's ABI
+// (rc_bind): what reads the bound NVN state is vka_bind.c's walker, as for library shaders. The
+// shader is a one-entry library in memory (rc_lib), so pipelines and binding take it unchanged.
+//
+// NVN2 compute lays out its driver constants c[0] per shader (control +0xa9 push constant words,
+// +0xb1 / +0xb2 / +0xb3 uniform, storage and texture entries, +0xba the size; InstEmitAmpere.cs
+// AMapC0 in Banana Native's translator). The library's translator remaps those reads to the fixed
+// tables; Lichii's reads them where they are, so a recompiled compute shader's c[0] is filled in
+// that layout (vka_rc_cs_c0, binding kind VKA_KIND_NVN2_CS_C0).
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "bananative/dm/gfx/vk_android/vka.h"
+#include "bananative/dm/host/plat/plat.h"
+#include "nvn_direct.h"
+#include "nvn_direct_front.h"
+
+int vka_shader_translate(const nvn_direct_shader_source* s, nvn_direct_shader* o); // vka_dev.c
+void vka_shader_translated_free(nvn_direct_shader* o);
+
+int vka_rc_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char* e = getenv("EDEN_NX2_NVN_RECOMPILE");
+        mode = e && *e ? atoi(e) : 0;
+        if (mode) VLOG("shaders: Lichii's recompiler (EDEN_NX2_NVN_RECOMPILE=%d: %s)", mode, mode == 1 ? "every shader, no library" : "the library draws, both compared");
+    }
+    return mode;
+}
+
+static uint32_t rd32(const uint8_t* p, size_t o) { uint32_t v; memcpy(&v, p + o, 4); return v; }
+static int nvn2_control(const uint8_t* c) { return c && rd32(c, 0) == 0x98761234u && rd32(c, 4) == 0xc9; }
+
+// ---------- Tables by shader key (open addressing, 0 = empty) ----------
+typedef struct { uint64_t key; void* val; } rc_ent;
+typedef struct { rc_ent* e; size_t cap, n; } rc_map;
+static size_t rc_slot(uint64_t k, size_t cap) { return (size_t)((k * 0x9E3779B97F4A7C15ull) >> 17) & (cap - 1); }
+static rc_ent* rc_find(rc_map* m, uint64_t key) {
+    if (!m->cap) return NULL;
+    for (size_t i = rc_slot(key, m->cap);; i = (i + 1) & (m->cap - 1)) { if (!m->e[i].key) return NULL; if (m->e[i].key == key) return &m->e[i]; }
+}
+static void rc_put(rc_map* m, uint64_t key, void* val) {
+    rc_ent* f = rc_find(m, key);
+    if (f) { f->val = val; return; }
+    if (2 * (m->n + 1) > m->cap) {
+        size_t nc = m->cap ? 2 * m->cap : 1024; rc_ent* n = calloc(nc, sizeof *n);
+        for (size_t i = 0; i < m->cap; i++) if (m->e[i].key) { size_t j = rc_slot(m->e[i].key, nc); while (n[j].key) j = (j + 1) & (nc - 1); n[j] = m->e[i]; }
+        free(m->e); m->e = n; m->cap = nc;
+    }
+    size_t j = rc_slot(key, m->cap); while (m->e[j].key) j = (j + 1) & (m->cap - 1);
+    m->e[j] = (rc_ent){key, val}; m->n++;
+}
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static rc_map g_ctl;      // key -> a copy of the NVN2 control section
+static rc_map g_sh;       // key -> rc_shader
+static rc_map g_cmp;      // key -> compared (mode 2)
+static uint64_t rc_key(uint64_t k) { return k ? k : 1; }   // (0 marks an empty slot)
+
+// nvnProgramSetShaders (mtl_prog_prefetch): the NVN2 control sections, while they are valid
+void vka_rc_keep(const prog_t* p) {
+    if (!vka_rc_mode()) return;
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        const uint8_t* c = p->sd[i].control; uint8_t md[8];
+        if (!nvn2_control(c) || !prog_key(p, i, md)) continue;
+        uint64_t key = rc_key(vka_shlib_key(md));
+        pthread_mutex_lock(&g_mu);
+        if (!rc_find(&g_ctl, key)) { uint8_t* copy = malloc(NVN_DIRECT_NVN2_CONTROL_SIZE); if (copy) { memcpy(copy, c, NVN_DIRECT_NVN2_CONTROL_SIZE); rc_put(&g_ctl, key, copy); } }
+        pthread_mutex_unlock(&g_mu);
+    }
+}
+static const uint8_t* rc_control(uint64_t key) {
+    pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_ctl, rc_key(key)); const uint8_t* c = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    return c;
+}
+
+// The draw or dispatch whose shaders are resolved now (vka_draw.c): the state translation reads
+static const vka_dstate* g_draw;
+void vka_rc_draw(const vka_dstate* d) { g_draw = d; }
+
+// ---------- NVN2 compute's c[0] ----------
+typedef struct { unsigned ub, sb, hb, ib, size, push; } cs_layout;
+static cs_layout cs_layout_of(const uint8_t* c) {
+    cs_layout l; l.push = c[0xa9] * 4u;
+    unsigned ubos = c[0xb1], ssbos = c[0xb2], textures = c[0xb3]; uint16_t size; memcpy(&size, c + 0xba, 2);
+    l.ub = 0x10 + ((l.push + 15) & ~15u); l.sb = l.ub + DMSH_C0_ROW * ubos; l.hb = l.sb + DMSH_C0_ROW * ssbos; l.ib = l.hb + DMSH_C2_ROW * textures; l.size = size;
+    return l;
+}
+static void put_range(uint8_t* d, unsigned at, const vka_range* r) {
+    if (at + 12 > DMSH_DRV_SIZE) return;
+    uint64_t a = nvn_direct_guest_of(r->addr); uint32_t n = (uint32_t)r->size;   // the game's address, as vka_drv_fill writes them
+    memcpy(d + at, &a, 8); memcpy(d + at + 8, &n, 4);
+}
+static void cs_c0_fill(const uint8_t* control, const vka_bstate* s, uint8_t* d) {
+    memset(d, 0, DMSH_DRV_SIZE);
+    cs_layout l = cs_layout_of(control);
+    memcpy(d + DMSH_C0_DISPATCH_NVN2, s->dispatch, 12);
+    memcpy(d + 0x10, s->push[1], l.push < DMSH_PUSH_SIZE ? l.push : DMSH_PUSH_SIZE);
+    for (unsigned r = 0; l.ub + DMSH_C0_ROW * r < l.sb && r < 16; r++) put_range(d, l.ub + DMSH_C0_ROW * r, &s->ubo[5][r]);
+    for (unsigned r = 0; l.sb + DMSH_C0_ROW * r < l.hb && r < 16; r++) put_range(d, l.sb + DMSH_C0_ROW * r, &s->ssbo[5][r]);
+    for (unsigned t = 0; l.hb + DMSH_C2_ROW * t < l.ib && l.hb + DMSH_C2_ROW * t + 4 <= DMSH_DRV_SIZE; t++) { uint32_t h = (uint32_t)vka_tex_slot(s, 5, t); memcpy(d + l.hb + DMSH_C2_ROW * t, &h, 4); }
+    for (unsigned i = 0; l.ib + DMSH_C2_ROW * i < l.size && i < 32 && l.ib + DMSH_C2_ROW * i + 4 <= DMSH_DRV_SIZE; i++) { uint32_t h = (uint32_t)s->img[5][i]; memcpy(d + l.ib + DMSH_C2_ROW * i, &h, 4); }
+}
+void vka_rc_cs_c0(const vka_shader* sh, const vka_bstate* s, uint8_t* d) {
+    if (sh && sh->nvn2_control) cs_c0_fill(sh->nvn2_control, s, d); else memset(d, 0, DMSH_DRV_SIZE);
+}
+
+// ---------- The draw's state as translation reads it ----------
+typedef struct {
+    const vka_dstate* d; int st; const uint8_t *control, *code; uint32_t ncode;
+    uint8_t drv[3][DMSH_DRV_SIZE], have[3], cs_c0[DMSH_DRV_SIZE], have_cs;
+} rc_ctx;
+static int rc_read(void* ctx, uint64_t addr, void* out, size_t n) {
+    (void)ctx;
+    if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void*)(uintptr_t)nvn_direct_host_of(addr), n); return 1; }
+    return !plat_mem_read(addr, out, n);
+}
+static uint32_t rc_cbuf(void* ctx, uint32_t bank, uint32_t off) {
+    rc_ctx* x = ctx; uint32_t v = 0;
+    if (bank == 1) {   // the shader's own constants: the code area between control +0x40 and +0x44
+        uint32_t a = rd32(x->control, 0x40), e = rd32(x->control, 0x44);
+        if (a <= e && e <= x->ncode && off + 4 <= e - a) memcpy(&v, x->code + a + off, 4);
+        return v;
+    }
+    if (!x->d) return 0;
+    if (bank == 0 && x->st == 5) {
+        if (!x->have_cs) { cs_c0_fill(x->control, &x->d->b, x->cs_c0); x->have_cs = 1; }
+        if (off + 4 <= DMSH_DRV_SIZE) memcpy(&v, x->cs_c0 + off, 4);
+        return v;
+    }
+    int i = bank == 0 ? 0 : bank == 2 ? 1 : bank == DMSH_PUSH_BANK ? 2 : -1;
+    if (i >= 0) {
+        if (!x->have[i]) { vka_drv_fill(&x->d->b, x->st, (int)bank, 0, x->drv[i]); x->have[i] = 1; }
+        if (off + 4 <= vka_drv_size((int)bank)) memcpy(&v, x->drv[i] + off, 4);
+        return v;
+    }
+    if (bank >= 3 && bank < 19) {
+        const vka_range* u = &x->d->b.ubo[x->st][bank - 3];
+        if (u->addr && (!u->size || off + 4 <= u->size) && !rc_read(NULL, u->addr + off, &v, 4)) v = 0;
+    }
+    return v;
+}
+int vka_tex_id_format(int id);   // vka_tex.c
+static int rc_texture(void* ctx, uint32_t handle, uint32_t* target, int32_t* vk_format) {
+    (void)ctx;
+    int id = (int)(handle & 0xfffff), t = id ? vka_tex_id_target(id) : -1, f = id ? vka_tex_id_format(id) : -1;
+    if (t < 0) return 0;
+    vka_fmt vf; *target = (uint32_t)t; *vk_format = f >= 0 && vka_fmt_of(f, &vf) ? (int32_t)vf.view : 0;
+    return 1;
+}
+
+// ---------- Descriptors as binding records ----------
+static uint8_t dim_of(const nvn_direct_shader_desc* s) {
+    static const uint8_t dim[9] = {0, 0 | DMSH_VK_DIM_ARRAY, 1, 1 | DMSH_VK_DIM_ARRAY, 2, 3, 3 | DMSH_VK_DIM_ARRAY, 5, 1};   // Shader::TextureType -> SPIR-V Dim
+    uint8_t d = s->texture_type < 9 ? dim[s->texture_type] : 1;
+    if (s->is_depth) d |= DMSH_VK_DIM_DEPTH;
+    if (s->is_multisample) d |= DMSH_VK_DIM_MS;
+    if (s->is_integer) d |= DMSH_VK_DIM_UINT;
+    return d;
+}
+static int c0_ssbo_table(int st) { return st == 0 ? DMSH_C0_SSBO_VS : st == 1 ? DMSH_C0_SSBO_PS : st == 2 ? DMSH_C0_SSBO_GS : st == 6 ? DMSH_C0_SSBO_TS : st == 7 ? DMSH_C0_SSBO_MS : -1; }
+// A handle word as an offset into the driver's c2 (compute: its own handle table in c[0]); -1 none
+static int c2_off(int st, const cs_layout* l, uint32_t bank, uint32_t off) {
+    if (bank == 2) return (int)off;
+    if (st == 5 && bank == 0 && off >= l->hb && off < l->ib) return (int)(DMSH_C2_TEX + off - l->hb);
+    if (st == 5 && bank == 0 && off >= l->ib && off < l->size) return (int)(DMSH_C2_IMG + off - l->ib);
+    return -1;
+}
+// One descriptor's record; 0 = the replay cannot fill it (why says what), the record UNKNOWN
+static int rc_bind(const nvn_direct_shader_desc* s, int st, const cs_layout* l, dmsh_vk_bind* b, char* why, size_t whyn) {
+    memset(b, 0, sizeof *b);
+    b->desc = s->vk_type; b->binding = s->binding; b->set = DMSH_VK_SET_DRAW; b->count = (uint16_t)(s->count ? s->count : 1); b->reg = -1; b->sreg = -1; b->soff = 0xFFFF;
+    b->kind = DMSH_VK_KIND_UNKNOWN;
+    if (s->is_written) b->flags |= DMSH_VK_BF_RW;
+    if (s->is_atomic) b->flags |= DMSH_VK_BF_ATOMIC;
+#define NO(...) do { snprintf(why, whyn, __VA_ARGS__); return 0; } while (0)
+    if (s->unsupported == 1) NO("binding %u: a handle computed per draw or a pointer read from memory (c%u + %#x)", s->binding, s->cbuf_index, s->cbuf_offset);
+    switch (s->kind) {
+    case NVN_DIRECT_DESC_CBUF:
+        if (s->cbuf_index == 0) { b->kind = st == 5 ? VKA_KIND_NVN2_CS_C0 : DMSH_VK_KIND_DRVCB; b->reg = 0; }
+        else if (s->cbuf_index == 1) b->kind = DMSH_VK_KIND_C1;
+        else if (s->cbuf_index == 2 || s->cbuf_index == DMSH_PUSH_BANK) { b->kind = DMSH_VK_KIND_DRVCB; b->reg = (int16_t)s->cbuf_index; }
+        else if (s->cbuf_index >= 3 && s->cbuf_index < 19) { b->kind = DMSH_VK_KIND_CBUF; b->reg = (int16_t)(s->cbuf_index - 3); }
+        else NO("binding %u: constant buffer c%u", s->binding, s->cbuf_index);
+        return 1;
+    case NVN_DIRECT_DESC_STORAGE:
+        if (s->cbuf_index == 0 && st == 5 && s->cbuf_offset >= l->sb && s->cbuf_offset < l->hb && !((s->cbuf_offset - l->sb) % DMSH_C0_ROW)) {
+            b->kind = DMSH_VK_KIND_SBUF; b->reg = (int16_t)((s->cbuf_offset - l->sb) / DMSH_C0_ROW);
+        } else if (s->cbuf_index == 0 && st == 5 && s->cbuf_offset >= l->ub && s->cbuf_offset < l->sb && !((s->cbuf_offset - l->ub) % DMSH_C0_ROW)) {
+            b->kind = DMSH_VK_KIND_UBO_PTR; b->reg = (int16_t)((s->cbuf_offset - l->ub) / DMSH_C0_ROW);
+        } else if (s->cbuf_index == 0 && st != 5 && c0_ssbo_table(st) >= 0 && s->cbuf_offset >= (uint32_t)c0_ssbo_table(st) &&
+                   s->cbuf_offset < (uint32_t)c0_ssbo_table(st) + DMSH_C0_ROW * DMSH_C0_SSBO_SLOTS && !((s->cbuf_offset - c0_ssbo_table(st)) % DMSH_C0_ROW)) {
+            b->kind = DMSH_VK_KIND_SBUF; b->reg = (int16_t)((s->cbuf_offset - c0_ssbo_table(st)) / DMSH_C0_ROW);
+        } else if (s->cbuf_index >= 3 && s->cbuf_index < 19 && s->cbuf_offset < 0x10000) {
+            b->kind = DMSH_VK_KIND_SBUF_UBO; b->reg = (int16_t)(s->cbuf_index - 3); b->off = (uint16_t)s->cbuf_offset;
+        } else NO("binding %u: storage buffer pointer at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
+        return 1;
+    case NVN_DIRECT_DESC_TEXTURE: case NVN_DIRECT_DESC_TEXTURE_BUFFER: {
+        b->dim = dim_of(s);
+        if (s->unsupported == 2) { b->kind = DMSH_VK_KIND_TEX; b->flags |= DMSH_VK_BF_NOSLOT; return 1; }   // a pointer word, never a handle: bound as nothing
+        if (s->shift_left || (s->has_secondary && s->secondary_shift_left)) NO("binding %u: a shifted handle", s->binding);
+        if (b->count > 1 && s->size_shift != 3) NO("binding %u: an array of handles %u bytes apart", s->binding, 1u << s->size_shift);
+        int c2 = c2_off(st, l, s->cbuf_index, s->cbuf_offset);
+        if (c2 >= 0) {
+            if (s->kind == NVN_DIRECT_DESC_TEXTURE_BUFFER) {
+                if (c2 < DMSH_C2_TEX || c2 >= DMSH_C2_SEPTEX || (c2 - DMSH_C2_TEX) % DMSH_C2_ROW) NO("binding %u: a texel buffer at c2 + %#x", s->binding, c2);
+                b->kind = DMSH_VK_KIND_TBUF; b->reg = (int16_t)((c2 - DMSH_C2_TEX) / DMSH_C2_ROW); return 1;
+            }
+            b->kind = DMSH_VK_KIND_TEX_C2A; b->off = (uint16_t)c2; b->skind = DMSH_VK_KIND_SAMP_C2A;
+            if (s->has_secondary) {
+                int c2s = c2_off(st, l, s->secondary_index, s->secondary_offset);
+                if (c2s < 0) NO("binding %u: a sampler word at c%u + %#x", s->binding, s->secondary_index, s->secondary_offset);
+                b->soff = (uint16_t)c2s;
+            }
+            return 1;
+        }
+        if (s->cbuf_index >= 3 && s->cbuf_index < 19 && b->count == 1 && s->kind == NVN_DIRECT_DESC_TEXTURE) {
+            b->kind = DMSH_VK_KIND_TEX_UBO; b->reg = (int16_t)(s->cbuf_index - 3); b->off = (uint16_t)s->cbuf_offset;
+            b->skind = DMSH_VK_KIND_SAMP_UBO; b->sreg = b->reg; b->soff = b->off;
+            if (s->has_secondary) {
+                if (s->secondary_index < 3 || s->secondary_index >= 19) NO("binding %u: a sampler word at c%u + %#x", s->binding, s->secondary_index, s->secondary_offset);
+                b->sreg = (int16_t)(s->secondary_index - 3); b->soff = (uint16_t)s->secondary_offset;
+            }
+            return 1;
+        }
+        NO("binding %u: a handle at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
+    }
+    case NVN_DIRECT_DESC_IMAGE: case NVN_DIRECT_DESC_IMAGE_BUFFER: {
+        b->dim = dim_of(s);
+        int c2 = c2_off(st, l, s->cbuf_index, s->cbuf_offset);
+        if (c2 < DMSH_C2_IMG || c2 >= DMSH_C2_IMG + DMSH_C2_ROW * 32 || (c2 - DMSH_C2_IMG) % DMSH_C2_ROW) NO("binding %u: an image handle at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
+        b->kind = DMSH_VK_KIND_IMG; b->reg = (int16_t)((c2 - DMSH_C2_IMG) / DMSH_C2_ROW);
+        return 1;
+    }
+    }
+    NO("binding %u: descriptor kind %u", s->binding, s->kind);
+#undef NO
+}
+
+// ---------- A translated stage as a one-entry library ----------
+static vka_shlib* rc_lib(uint64_t key, int vks, uint16_t flags, const nvn_direct_shader* o, const dmsh_vk_bind* b, unsigned nb, const uint8_t* c1, uint32_t c1_len, uint64_t vin_types, char* err, size_t errn) {
+    size_t bind_off = DMSH_VK_HEADER_SIZE + DMSH_VK_ENTRY_SIZE, mod_off = (bind_off + (size_t)DMSH_VK_BIND_SIZE * nb + 7) & ~(size_t)7, blob_off = (mod_off + DMSH_VK_MOD_SIZE + 15) & ~(size_t)15;
+    size_t spv = o->spirv_words * 4, c1_at = (spv + 15) & ~(size_t)15, size = blob_off + c1_at + c1_len;
+    uint8_t* m = calloc(1, size); vka_shlib* L = calloc(1, sizeof *L);
+    if (!m || !L) { free(m); free(L); snprintf(err, errn, "out of memory"); return NULL; }
+    dmsh_vk_header* h = (dmsh_vk_header*)m;
+    h->magic = DMSH_VK_LIB_MAGIC; h->version = DMSH_VK_LIB_VERSION;
+    h->entry_count = 1; h->entry_off = DMSH_VK_HEADER_SIZE; h->bind_count = nb; h->bind_off = (uint32_t)bind_off; h->mod_count = 1; h->mod_off = (uint32_t)mod_off;
+    h->blob_off = blob_off; h->blob_size = c1_at + c1_len; h->subgroup_size = 32; h->ssbo_align = (uint16_t)o->ssbo_align;
+    dmsh_vk_entry* e = (dmsh_vk_entry*)(m + DMSH_VK_HEADER_SIZE);
+    e->key = key; e->vin_types = vin_types; e->stage = (uint8_t)vks; e->flags = flags; e->mod_count = 1; e->bind_count = (uint16_t)nb;
+    for (int i = 0; i < 3; i++) e->local[i] = (uint16_t)o->local[i];
+    e->fout_mask = (uint8_t)o->output_mask; e->shared = o->shared; e->vin_mask = o->input_mask;
+    e->c1_off = (uint32_t)c1_at; e->c1_len = c1_len;
+    memcpy(m + bind_off, b, (size_t)DMSH_VK_BIND_SIZE * nb);
+    dmsh_vk_module* md = (dmsh_vk_module*)(m + mod_off);
+    md->size = md->stored = (uint32_t)spv; md->variant = DMSH_VK_MOD_BASE; md->codec = DMSH_VK_CODEC_RAW;
+    memcpy(m + blob_off, o->spirv, spv);
+    if (c1_len) memcpy(m + blob_off + c1_at, c1, c1_len);
+    if (!vka_shlib_check(L, m, size, NULL, NULL, NULL, NULL, err, errn)) { free(m); free(L); return NULL; }
+    return L;
+}
+
+// ---------- Translation ----------
+typedef struct { vka_shader* sh; int st, gl_depth; uint32_t prim; } rc_shader;   // prim: a mesh shader's generic outputs written per primitive
+static _Atomic unsigned g_made, g_failed, g_unplaced;
+static int rc_vks(int st) { return vka_vk_stage(st); }
+static unsigned rc_first_binding(int vks) { int r = vks == DMSH_VK_STAGE_CS || vks == DMSH_VK_STAGE_MS ? DMSH_VK_STAGE_VS : vks == DMSH_VK_STAGE_TS ? DMSH_VK_STAGE_TCS : vks; return (unsigned)r * DMSH_VK_STAGE_BINDINGS; }
+// A stage translated with draw d's state: 1 with *o filled (given back with vka_shader_translated_free), *vin_types the vertex inputs' types
+// it was made for (DMSH_VK_TYPE_* by location), *gl_depth its depth mode; else 0 and why
+static int rc_translate(const prog_t* p, unsigned i, const uint8_t* control, const vka_dstate* d, uint32_t prim_inputs, nvn_direct_shader* o, uint64_t* vin_types, int* gl_depth, char* why, size_t whyn) {
+    int st = control[0x56];
+    uint32_t nctl, ncode; nvn_ctl_lens(control, &nctl, &ncode);
+    uint64_t data = p->sd[i].data;
+    *vin_types = 0;
+    if (st > 7 || rc_vks(st) < 0) { snprintf(why, whyn, "NVN stage %d", st); return 0; }
+    if (!data || !ncode || !vka_addr(data, ncode, NULL, NULL, NULL)) { snprintf(why, whyn, "its code area (%u bytes at %#llx) is not in a memory pool", ncode, (unsigned long long)data); return 0; }
+    rc_ctx* x = calloc(1, sizeof *x); if (!x) { snprintf(why, whyn, "out of memory"); return 0; }
+    x->d = d; x->st = st; x->control = control; x->code = (const uint8_t*)(uintptr_t)nvn_direct_host_of(data); x->ncode = ncode;
+    nvn_direct_shader_source src = {.nvn_stage = (uint32_t)st, .control = control, .code = x->code, .code_size = ncode, .code_address = nvn_direct_guest_of(data),
+                                    .first_binding = rc_first_binding(rc_vks(st)), .convert_depth = !vka_depth_zero(), .per_primitive_inputs = st == 1 ? prim_inputs : 0, .context = x,
+                                    .read_cbuf = rc_cbuf, .read_memory = rc_read, .texture_info = rc_texture};
+    if (st == 0 && d)   // vertex inputs typed as the draw's attributes (the integer formats' classes): vka_draw.c then binds them retyping none
+        for (int loc = 0; loc < 16 && loc < d->nattr; loc++) {
+            vka_fmt vf; if (!d->attr[loc].fmt || !vka_fmt_of(d->attr[loc].fmt, &vf)) continue;
+            src.vertex_input_types[loc] = vf.kind == 1 ? 2 : vf.kind == 2 ? 1 : 0;
+            *vin_types |= (uint64_t)(vf.kind == 1 ? DMSH_VK_TYPE_UINT : vf.kind == 2 ? DMSH_VK_TYPE_SINT : DMSH_VK_TYPE_FLOAT) << (2 * loc);
+        }
+    *gl_depth = src.convert_depth;
+    int ok = vka_shader_translate(&src, o);
+    free(x);
+    if (!ok) { snprintf(why, whyn, "%s", o->error); return 0; }
+    return 1;
+}
+// A translated stage's binding records (malloc'd, o->desc_count of them); why names the first the replay cannot fill (the record then UNKNOWN)
+static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const uint8_t* control, char* why, size_t whyn) {
+    dmsh_vk_bind* b = calloc(o->desc_count ? o->desc_count : 1, sizeof *b);
+    if (!b) { snprintf(why, whyn, "out of memory"); return NULL; }
+    cs_layout l = cs_layout_of(control); char w2[200] = "";
+    for (unsigned k = 0; k < o->desc_count; k++) if (!rc_bind(&o->descs[k], st, &l, &b[k], w2, sizeof w2) && !*why) snprintf(why, whyn, "%s", w2);
+    return b;
+}
+
+// EDEN_NX2_NVN_RECOMPILE_DUMP=<dir> (lab): every module as <key>[-p<per-primitive inputs>].spv, for spirv-val
+static void dump_spirv(uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o) {
+    static const char* dir; static int init;
+    if (!init) { dir = getenv("EDEN_NX2_NVN_RECOMPILE_DUMP"); init = 1; }
+    if (!dir || !*dir) return;
+    char path[1024];
+    if (prim_inputs) snprintf(path, sizeof path, "%s/%016llx-p%x.spv", dir, (unsigned long long)key, prim_inputs);
+    else snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)key);
+    FILE* f = fopen(path, "wb");
+    if (f) { fwrite(o->spirv, 4, o->spirv_words, f); fclose(f); }
+}
+
+int vka_rc_stage(uint64_t key) { const uint8_t* c = rc_control(key); return c ? c[0x56] : -1; }
+uint32_t vka_rc_prim(uint64_t key) {
+    pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_sh, rc_key(key)); rc_shader* r = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    return r ? r->prim : 0;
+}
+// The recompiled shader of program p's stage i (key), translated at its first use with the draw's state; *st its
+// NVN stage (-1: no control section kept for the key). prim_inputs: a pixel shader's generic inputs its program's mesh shader writes per primitive
+// (PerPrimitiveEXT, flag DMSH_VK_F_MESH_PRIM: a shader of its own, valid only in a mesh pipeline). NULL: not translated or refused (logged once)
+vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t prim_inputs, int* st) {
+    *st = -1;
+    uint64_t slot = rc_key(prim_inputs ? key ^ ((uint64_t)prim_inputs << 32 | 0x9e1u) : key);
+    pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_sh, slot); rc_shader* r = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    if (r) {
+        *st = r->st;
+        if ((r->st == 0 || r->st == 7) && r->gl_depth != !vka_depth_zero()) VRED_ONCE("shader %016llx was translated for the other depth mode: its depth is wrong now", (unsigned long long)key);
+        return r->sh;
+    }
+    const uint8_t* control = rc_control(key);
+    if (!control) return NULL;
+    r = calloc(1, sizeof *r); r->st = control[0x56]; *st = r->st;
+    nvn_direct_shader o; uint64_t vin_types = 0; char why[300] = "";
+    uint64_t t0 = now_ns();
+    if (rc_translate(p, i, control, g_draw, prim_inputs, &o, &vin_types, &r->gl_depth, why, sizeof why)) {
+        r->prim = o.per_primitive_outputs;
+        dump_spirv(key, prim_inputs, &o);
+        dmsh_vk_bind* b = rc_binds(&o, r->st, control, why, sizeof why);
+        if (*why) g_unplaced++;   // a record the replay cannot fill: the shader is refused (vka_shader.c refusal) after this line
+        uint32_t a = rd32(control, 0x40), c1e = rd32(control, 0x44);
+        const uint8_t* code = (const uint8_t*)(uintptr_t)nvn_direct_host_of(p->sd[i].data);
+        uint32_t c1_len = a < c1e ? c1e - a : 0;
+        char err[200] = "";
+        uint16_t flags = (r->st == 1 && prim_inputs) || (r->st == 7 && r->prim) ? DMSH_VK_F_MESH_PRIM : 0;
+        vka_shlib* L = b ? rc_lib(key, rc_vks(r->st), flags, &o, b, o.desc_count, c1_len ? code + a : NULL, c1_len, vin_types, err, sizeof err) : NULL;
+        vka_shader_translated_free(&o);
+        free(b);
+        if (L) {
+            r->sh = vka_shader_make(L, key);
+            if (r->sh) { r->sh->nvn2_control = control; g_made++; }
+        } else if (!*why) snprintf(why, sizeof why, "%s", err);
+        if (*why || !r->sh) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VRED("recompiled shader %016llx (NVN stage %d): %s", (unsigned long long)key, r->st, *why ? why : "refused"); }
+    } else {
+        g_failed++;
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VRED("shader %016llx (NVN stage %d) not translated: %s; its draws are skipped", (unsigned long long)key, r->st, why);
+    }
+    uint64_t ms = (now_ns() - t0) / 1000000;
+    unsigned made = g_made, total = made + g_failed;
+    if (ms >= 50 || total <= 3 || total % 256 == 0)
+        VLOG("recompiler: %016llx (NVN stage %d) in %llu ms; %u made, %u not translated, %u with bindings the replay cannot fill", (unsigned long long)key, r->st,
+             (unsigned long long)ms, made, (unsigned)g_failed, (unsigned)g_unplaced);
+    pthread_mutex_lock(&g_mu); rc_put(&g_sh, slot, r); pthread_mutex_unlock(&g_mu);
+    return r->sh;
+}
+vka_shader* vka_rc_by_key(uint64_t key) {
+    pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_sh, rc_key(key)); rc_shader* r = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    return r ? r->sh : NULL;
+}
+
+// ---------- Mode 2: the library's records against the recompiler's ----------
+// A record as what it reads, without its binding number or descriptor kind spelling: (class, source) strings, sorted
+static int rec_name(const dmsh_vk_bind* b, char* o, size_t n) {
+    switch (b->kind) {
+    case DMSH_VK_KIND_CBUF: return snprintf(o, n, "c%d", b->reg + 3);
+    case DMSH_VK_KIND_C1: return snprintf(o, n, "c1");
+    case DMSH_VK_KIND_DRVCB: case VKA_KIND_NVN2_CS_C0: return snprintf(o, n, "c%d", b->kind == VKA_KIND_NVN2_CS_C0 || (b->reg == DMSH_PUSH_BANK) ? 0 : b->reg);   // (the library reads compute c[0]'s push constants at c24)
+    case DMSH_VK_KIND_SBUF: return snprintf(o, n, "ssbo%d", b->reg);
+    case DMSH_VK_KIND_SBUF_UBO: return snprintf(o, n, "ssbo@c%d+%#x", b->reg + 3, b->off);
+    case DMSH_VK_KIND_UBO_PTR: return snprintf(o, n, "ubo_ptr%d", b->reg);
+    // (textures by their handle word: Lichii declares one descriptor per type a slot is read as, the library one per slot)
+    case DMSH_VK_KIND_TEX: return b->flags & DMSH_VK_BF_NOSLOT ? snprintf(o, n, "tex-none") : snprintf(o, n, "tex@c2+%#x", DMSH_C2_TEX + DMSH_C2_ROW * b->reg);
+    case DMSH_VK_KIND_TEX_C2A: return snprintf(o, n, "tex@c2+%#x%s", b->off, b->count > 1 ? "[]" : "");
+    case DMSH_VK_KIND_TEX_UBO: return snprintf(o, n, "tex@c%d+%#x", b->reg + 3, b->off);
+    case DMSH_VK_KIND_TBUF: return snprintf(o, n, "tbuf%d", b->reg);
+    case DMSH_VK_KIND_IMG: return snprintf(o, n, "img%d", b->reg);
+    case DMSH_VK_KIND_SUPPORT: case DMSH_VK_KIND_GMEM_MAP: case DMSH_VK_KIND_GMEM_LOG: return 0;   // the library translator's own buffers
+    default: return snprintf(o, n, "kind%u:%d:%#x", b->kind, b->reg, b->off);
+    }
+}
+static int cmp_str(const void* a, const void* b) { return strcmp(*(char* const*)a, *(char* const*)b); }
+static void rec_list(const dmsh_vk_bind* b, unsigned n, char* out, size_t on) {
+    char names[128][48]; char* ptr[128]; unsigned m = 0;
+    for (unsigned k = 0; k < n && m < 128; k++) if (rec_name(&b[k], names[m], sizeof names[m]) > 0) { ptr[m] = names[m]; m++; }
+    qsort(ptr, m, sizeof *ptr, cmp_str);
+    size_t at = 0; out[0] = 0;
+    for (unsigned k = 0; k < m && at + 2 < on; k++) if (!k || strcmp(ptr[k], ptr[k - 1])) at += (size_t)snprintf(out + at, on - at, "%s%s", k ? " " : "", ptr[k]);
+}
+static _Atomic unsigned g_cmp_same, g_cmp_diff, g_cmp_fail;
+void vka_rc_compare(const prog_t* p, unsigned i, uint64_t key, const vka_shader* lib) {
+    if (!lib) return;
+    pthread_mutex_lock(&g_mu); int seen = rc_find(&g_cmp, rc_key(key)) != NULL; if (!seen) rc_put(&g_cmp, rc_key(key), (void*)1); pthread_mutex_unlock(&g_mu);
+    if (seen) return;
+    const uint8_t* control = rc_control(key);
+    if (!control) return;
+    nvn_direct_shader o; dmsh_vk_bind* b = NULL; uint64_t vin_types; int gl = 0; char why[300] = "";
+    int ok = rc_translate(p, i, control, g_draw, 0, &o, &vin_types, &gl, why, sizeof why);
+    if (ok && !(b = rc_binds(&o, control[0x56], control, why, sizeof why))) { vka_shader_translated_free(&o); ok = 0; }
+    if (!ok) {
+        g_cmp_fail++;
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VRED("compare %016llx (NVN stage %d): not translated: %s", (unsigned long long)key, control[0x56], why);
+    } else {
+        static char a[4096], c[4096];
+        rec_list(lib->b, lib->e->bind_count, a, sizeof a); rec_list(b, o.desc_count, c, sizeof c);
+        int same = !strcmp(a, c) && lib->e->vin_mask == o.input_mask && lib->e->fout_mask == o.output_mask;
+        if (same) g_cmp_same++; else g_cmp_diff++;
+        static _Atomic int n;
+        if ((!same || *why) && atomic_fetch_add(&n, 1) < 96)
+            VLOG("compare %016llx (NVN stage %d): %s inputs %#x/%#x outputs %#x/%#x%s%s\n  library:    %s\n  recompiler: %s", (unsigned long long)key, control[0x56], same ? "same" : "DIFFERENT",
+                 lib->e->vin_mask, o.input_mask, lib->e->fout_mask, o.output_mask, *why ? "; unplaced: " : "", why, a, c);
+        vka_shader_translated_free(&o); free(b);
+    }
+    unsigned t = g_cmp_same + g_cmp_diff + g_cmp_fail;
+    if (t <= 3 || t % 128 == 0) VLOG("compare: %u shaders, %u same, %u different, %u not translated", t, (unsigned)g_cmp_same, (unsigned)g_cmp_diff, (unsigned)g_cmp_fail);
+}

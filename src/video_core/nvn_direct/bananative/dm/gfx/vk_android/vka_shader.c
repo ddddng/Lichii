@@ -7,8 +7,8 @@
 // thread), not at nvnProgramSetShaders
 // Lichii (dotfiles-25x.6, lab only): the library is the file EDEN_NX2_NVN_SHLIB names (else DM_VK_SHLIB, else the pack path above), the offline MKW library of the lab
 // (.pi/o72-replay/mkw-shaders/lib/v-<chain>/dmsh_vk.lib). Its header's game must be this build's profile (game_profile.h: Mario Kart World), so another title gets no
-// library and no draws. A program stage whose key the library lacks is counted and logged with its key (missing_key), its draws skipped; Lichii's own recompiler is
-// the product path (dotfiles-25x.11)
+// library and no draws. A program stage whose key the library lacks is counted and logged with its key (missing_key), its draws skipped. Lichii's own recompiler
+// (dotfiles-25x.11, nvn_recompile.c) takes the library's place with EDEN_NX2_NVN_RECOMPILE=1
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
@@ -348,6 +348,7 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
 
 // A shader of the game's library by key, the library loaded if it is not yet (the prewarm threads, vka_pso.c); NULL = no library, not in it, or refused
 vka_shader *vka_shader_by_key(uint64_t key) {
+    if (vka_rc_mode() == 1) return vka_rc_by_key(key);   // Lichii: recompiled shaders only (nvn_recompile.c): those translated so far
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     return ok ? vka_shader_make(&g_lib, key) : NULL;
 }
@@ -356,6 +357,7 @@ vka_shader *vka_shader_by_key(uint64_t key) {
 // stage libraries). *keys is malloc'd; returns their count (0: no library)
 unsigned vka_shlib_stage_keys(int stage, uint64_t **keys) {
     *keys = NULL;
+    if (vka_rc_mode() == 1) return 0;   // (no library)
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     if (!ok) return 0;
     unsigned n = g_lib.h->entry_count, m = 0;
@@ -404,7 +406,7 @@ static void missing_key(uint64_t key, unsigned stage) {
     int fresh = !g_miss[j]; if (fresh) { g_miss[j] = k; g_miss_n++; }
     size_t n = g_miss_n;
     pthread_mutex_unlock(&g_miss_mu);
-    if (fresh && n <= 256) VRED("shader %016llx (program stage %u) is not in the shader library %s: its draws are skipped (%zu keys missing so far)", (unsigned long long)key, stage, g_lib_path, n);
+    if (fresh && n <= 256) VRED("shader %016llx (program stage %u) is not in the shader library %s: its draws are skipped (%zu keys missing so far)", (unsigned long long)key, stage, vka_rc_mode() == 1 ? "(recompiler: no control section kept)" : g_lib_path, n);
 }
 
 // ---------- Programs ----------
@@ -431,13 +433,31 @@ void mtl_prog_release(prog_t *p) {
     if (!p || !p->serial) return;
     pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) { e->serial = ~0ull; memset(&e->ps, 0, sizeof e->ps); } pthread_mutex_unlock(&g_mu);   // a tombstone
 }
-void mtl_prog_prefetch(const prog_t *p) { (void)p; }   // modules are made at the program's first draw (vka_prog_shaders)
+void mtl_prog_prefetch(const prog_t *p) { vka_rc_keep(p); }   // modules are made at the program's first draw (vka_prog_shaders); Lichii: the recompiler's copies of the control sections
 
 int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
     memset(out, 0, sizeof *out);
     if (!p || !p->serial) return 0;
     pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) *out = e->ps; pthread_mutex_unlock(&g_mu);
     if (e) return 1;
+    if (vka_rc_mode() == 1) {   // Lichii: every stage from the recompiler (nvn_recompile.c), translated with the draw's state
+        // The pixel stage last: drawn after the program's mesh shader, it reads that shader's per-primitive outputs as such (vka_rc_shader prim_inputs)
+        uint32_t prim = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+                uint8_t md[8];
+                if (!prog_key(p, i, md)) continue;
+                uint64_t key = vka_shlib_key(md); int st = vka_rc_stage(key);
+                if ((st == 1) != (pass == 1)) continue;
+                vka_shader *sh = vka_rc_shader(p, i, key, st == 1 ? prim : 0, &st);
+                if (st < 0 || st >= VKA_NSTAGE) { out->bad |= VKA_BAD_MISSING; missing_key(key, i); continue; }
+                if (st == 7) prim = vka_rc_prim(key);
+                out->sh[st] = sh;
+                if (!sh) out->bad |= 1u << st;
+            }
+        vka_prog_put(p->serial, out);
+        return 1;
+    }
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     if (!ok) return 0;
     for (unsigned i = 0; i < p->nstage && i < 6; i++) {   // (a program has at most 6 shaders: hle_nvn.c nvnProgramSetShaders)
@@ -451,6 +471,7 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
         if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
         out->sh[st] = vka_shader_make(&g_lib, key);
         if (!out->sh[st]) out->bad |= 1u << st;
+        if (vka_rc_mode() == 2) vka_rc_compare(p, i, key, out->sh[st]);   // Lichii: the recompiler's bindings against the library's (nvn_recompile.c)
     }
     vka_prog_put(p->serial, out);
     return 1;

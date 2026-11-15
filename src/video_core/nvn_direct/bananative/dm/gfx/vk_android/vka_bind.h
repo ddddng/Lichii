@@ -53,6 +53,11 @@ typedef struct {
 // Reads guest memory for handles kept in uniform buffers (TEX_UBO, SAMP_UBO, SBUF_UBO): 1 = read, 0 = not readable (the value reads as 0)
 typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);
 
+// Lichii (dotfiles-25x.11): a recompiled NVN2 compute shader's c[0], in the shader's own layout (nvn_recompile.c vka_rc_cs_c0): a VKA_R_DRV of bank
+// VKA_BANK_NVN2_CS_C0, which the walk's caller fills from the shader
+#define VKA_KIND_NVN2_CS_C0 64
+#define VKA_BANK_NVN2_CS_C0 0x100
+
 #define VKA_WALK_REFUSE (-1)
 // Walks one stage's binding records (e->bind_count of them from b) for NVN stage nvn_stage. Writes at most max results to out and returns their count, or VKA_WALK_REFUSE with
 // *why set when the draw cannot run correctly. Storage buffers of global memory (SBUF, SBUF_UBO, UBO_PTR): with the library's ssbo_align (header; DMSH_VK_SSBO_ALIGN) they are

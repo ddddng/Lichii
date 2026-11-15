@@ -526,8 +526,15 @@ static struct { int valid; uint64_t gen; vka_span s; } g_gm;
 static struct { int valid; uint32_t ref; vka_span s; } g_sm_ref;   // the support buffer with the alpha test's reference (stage_writes)
 static int g_drv_memo = 1; static uint64_t g_dm_hit, g_dm_miss;
 static void drv_memo_reset(void) { for (int st = 0; st < VKA_NSTAGE; st++) for (int b = 0; b < 3; b++) g_dm[st][b].valid = 0; g_gm.valid = 0; g_sm_ref.valid = 0; g_drv_memo = VKA_ENV("DM_VK_DRV_MEMO", 1); }
-static int drv_seg(const vka_dstate *d, int st, int bank, int pool, VkDescriptorBufferInfo *bi, c0_at *c0) {
+static int drv_seg(const vka_dstate *d, int st, int bank, int pool, VkDescriptorBufferInfo *bi, c0_at *c0, const vka_shader *sh) {
     size_t sz = vka_drv_size(bank); vka_span s;
+    if (bank == VKA_BANK_NVN2_CS_C0) {   // Lichii: a recompiled compute shader's c[0] in its own layout (nvn_recompile.c)
+        if (!vka_scratch(DMSH_DRV_SIZE, V.ub_align, &s)) return 0;
+        vka_rc_cs_c0(sh, &d->b, s.ptr);
+        *bi = (VkDescriptorBufferInfo){s.buf, s.off, DMSH_DRV_SIZE};
+        if (c0) { c0->buf = s.buf; c0->off = s.off; }
+        return 1;
+    }
     // One memo slot per segment kind: c0, c2 and the push bank. Any other driver bank (an all-zero c17-style read of DMSH_DRV_SIZE bytes) takes the fill below: sharing
     // the push bank's slot, an all-zero push block matched it and the 0x100-byte span was bound with a 0xA00-byte range (other draws' scratch, or past the buffer)
     int bi_ = bank == 0 ? 0 : bank == 2 ? 1 : bank == DMSH_PUSH_BANK ? 2 : -1;
@@ -662,7 +669,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
                 } else *bi = (VkDescriptorBufferInfo){g_support.buf, g_support.off, VKA_SUPPORT_SIZE};
                 break;
             case VKA_R_DRV: { uint64_t td_ = g_prof ? cntvct() : 0;
-                if (!drv_seg(d, st, r[i].bank, pool, bi, c0)) return 0;
+                if (!drv_seg(d, st, r[i].bank, pool, bi, c0, sh)) return 0;
                 if (g_prof) g_ps[3] += cntvct() - td_;
                 break; }
             case VKA_R_GMEM_MAP: ok = gmem_map(bi); break;
@@ -1078,6 +1085,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
                VRED_ONCE("indirect-count multi-draws read their count on the CPU at replay"); }
     d->b.base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
+    vka_rc_draw(d);   // Lichii: the state shaders recompiled at this draw read (nvn_recompile.c)
     PT(0);
     // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
     // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
@@ -1348,6 +1356,8 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     if (!d->inited) vka_dstate_reset(d);
     vka_rp_end();
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
+    d->b.dispatch[0] = (uint32_t)dp->x; d->b.dispatch[1] = (uint32_t)dp->y; d->b.dispatch[2] = (uint32_t)dp->z; d->b.nvn2 = (uint32_t)vka_nvn2();
+    vka_rc_draw(d);   // Lichii: the state shaders recompiled at this dispatch read (nvn_recompile.c)
     if (!resolve(d->cprog, 5, &sh[5], &bad)) SKIP("dispatch skipped: no shader library");
     if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!sh[5]) SKIP("dispatch with no compute shader bound: skipped");
@@ -1355,7 +1365,6 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     VkPipeline p = vka_cs_pipeline(sh[5], &lay);
     if (vka_nan_on()) vka_tex_watch_dispatch(sh[5]->key);
     if (!p) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
-    d->b.dispatch[0] = (uint32_t)dp->x; d->b.dispatch[1] = (uint32_t)dp->y; d->b.dispatch[2] = (uint32_t)dp->z; d->b.nvn2 = (uint32_t)vka_nvn2();
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize io = 0;
     if (dp->ind && (!vka_addr(dp->ind, 12, &ib, &io, NULL) || (io & 3))) SKIP("indirect dispatch arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)dp->ind);
     uint32_t sb = spill_bytes(sh[5]); uint64_t ns = 0;   // shared memory in the spill buffer: the slices this dispatch binds (spill_buf)

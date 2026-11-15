@@ -361,6 +361,7 @@ typedef struct vka_shader {
     int bad;                            // refused: no module, an unknown binding, an NV-only capability (logged once with its key)
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
+    const uint8_t *nvn2_control;        // Lichii (dotfiles-25x.11): a recompiled shader's NVN2 control section (nvn_recompile.c), NULL for the library's
 } vka_shader;
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
@@ -380,6 +381,19 @@ int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   //
 #define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask);   // the base module with those float inputs as uvec4 / ivec4 (vka_spv_vin_retype), made once per masks   // the module of that variant (DMSH_VK_MOD_*), made on first use; VK_NULL_HANDLE = the entry has none   // the shader of key in library L (the game's, or the selftest's own); NULL = not there or refused
 int vka_shlib_check_all(const vka_shlib *L);   // every module and compute pipeline of L made (DM_VK_SHLIB_CHECK=1): the failures
+// Lichii's recompiler (nvn_recompile.c, dotfiles-25x.11): EDEN_NX2_NVN_RECOMPILE's mode (0 library, 1 recompiler, 2 library compared with it); control sections kept at
+// nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN stage, -1 without a kept control section); a shader by key;
+// mode 2's comparison; a recompiled compute shader's c[0]
+int vka_rc_mode(void);
+void vka_rc_keep(const prog_t *p);
+typedef struct vka_dstate vka_dstate;
+void vka_rc_draw(const vka_dstate *d);
+vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t prim_inputs, int *st);
+int vka_rc_stage(uint64_t key);         // NVN stage of a kept control section, -1 none
+uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic outputs per primitive
+vka_shader *vka_rc_by_key(uint64_t key);
+void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
+void vka_rc_cs_c0(const vka_shader *sh, const vka_bstate *s, uint8_t *d);
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)
 
 // ---------- Pipelines (vka_pso.c) ----------
@@ -406,7 +420,7 @@ double vka_gpu_span_ms(uint64_t f);   // frame f's submissions from first part's
 
 // ---------- Draws and dispatches (vka_draw.c) ----------
 // The NVN state a queue keeps between submissions, as nvn_mtl.m's S (state_reset gives NVN's defaults)
-typedef struct {
+typedef struct vka_dstate {   // (named: nvn_recompile.c declares it ahead)
     vka_bstate b;
     const prog_t *bst[VKA_NSTAGE], *cprog;   // the program bound per graphics stage (NVN stage bits; [5] unused, [6] / [7] NVN2's task and mesh bits), the compute program
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
