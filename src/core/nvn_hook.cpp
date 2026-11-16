@@ -36,6 +36,7 @@
 #include "core/nvn_direct_choice.h"
 #include "core/nvn_hook.h"
 #include "core/nvn_trace.h"
+#include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_present.h"
 #include "video_core/framebuffer_config.h"
 #include "dynarmic/interface/A64/a64.h"
@@ -1090,8 +1091,8 @@ void PresentDirect(Core::System& system, State& state) {
     nvn_direct_frame frame{};
     const bool shown = nvn_direct_present_take(&frame) != 0;
     if (own <= 4 || own % 600 == 0) {
-        LOG_INFO(Core, "NVN direct: present #{} ({}x{}, {})", own, frame.width, frame.height,
-                 shown ? "shown" : "nothing to show");
+        LOG_INFO(Core, "NVN direct: present #{} ({}x{} VkFormat {}, {})", own, frame.width,
+                 frame.height, static_cast<int>(frame.format), shown ? "shown" : "nothing to show");
     }
     if (shown) {
         // The game's present waits for the previous frame's composite (as many images as the
@@ -1104,17 +1105,30 @@ void PresentDirect(Core::System& system, State& state) {
             crop_width = (std::min)(crop_width, 1920U);
             crop_height = (std::min)(crop_height, 1080U);
         }
+        // As nx2:vi2, the presenter converts by the image's format and colour space: Mario Kart
+        // World told HDR presents PQ in RGB10A2.
+        const auto image_format =
+            frame.format == VK_FORMAT_R16G16B16A16_SFLOAT ? Service::Nx2NativeImageFormat::Rgba16Float
+            : frame.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                ? Service::Nx2NativeImageFormat::Rgb10A2
+                : Service::Nx2NativeImageFormat::Rgba8;
         std::vector<Tegra::FramebufferConfig> layers{Tegra::FramebufferConfig{
             .address = NVN_DIRECT_FRAME_TAG | frame.id,
             .width = frame.width,
             .height = frame.height,
             .stride = frame.width,
-            .pixel_format = Service::android::PixelFormat::Rgba8888,
+            .pixel_format = image_format == Service::Nx2NativeImageFormat::Rgba16Float
+                                ? Service::android::PixelFormat::RgbaFp16
+                            : image_format == Service::Nx2NativeImageFormat::Rgb10A2
+                                ? Service::android::PixelFormat::Rgba1010102
+                                : Service::android::PixelFormat::Rgba8888,
             .transform_flags = Service::android::BufferTransformFlags::Unset,
             .crop_rect = {frame.crop[0], frame.crop[1],
                           frame.crop[0] + static_cast<int>(crop_width),
                           frame.crop[1] + static_cast<int>(crop_height)},
             .blending = Tegra::BlendMode::Opaque,
+            .color_space = Service::Nx2NativeImageColorSpace(image_format,
+                                                             Service::g_nx2_told_hdr.load()),
         }};
         system.GPU().RequestComposite(std::move(layers), {});
     }

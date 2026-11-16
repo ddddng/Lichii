@@ -481,7 +481,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
       requires_coherent_image_memory{program.info.requires_coherent_image_memory},
       vulkan_memory_model{vulkan_memory_model_}, stage{program.stage},
       texture_rescaling_index{bindings.texture_scaling_index},
-      image_rescaling_index{bindings.image_scaling_index} {
+      image_rescaling_index{bindings.image_scaling_index},
+      render_area_offset{bindings.render_area_offset} {
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -1530,14 +1531,14 @@ void EmitContext::DefineRescalingInput(const Info& info) {
         return;
     }
     if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
+        DefineRescalingInputPushConstant(info);
     } else {
         DefineRescalingInputUniformConstant();
     }
 }
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+void EmitContext::DefineRescalingInputPushConstant(const Info& info) {
+    boost::container::static_vector<Id, 4> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1553,6 +1554,11 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    }
+    const bool with_render_area{info.uses_render_area && render_area_offset != 0};
+    if (with_render_area) {
+        members.push_back(F32[4]);
+        render_are_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1572,9 +1578,17 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
     }
+    if (with_render_area) {
+        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset,
+                       render_area_offset);
+        MemberName(push_constant_struct, render_are_member_index, "render_area");
+    }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
     Name(rescaling_push_constants, "rescaling_push_constants");
+    if (with_render_area) {
+        render_area_push_constant = rescaling_push_constants;
+    }
 
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_push_constants);
@@ -1593,8 +1607,8 @@ void EmitContext::DefineRescalingInputUniformConstant() {
 }
 
 void EmitContext::DefineRenderArea(const Info& info) {
-    if (!info.uses_render_area) {
-        return;
+    if (!info.uses_render_area || Sirit::ValidId(render_area_push_constant)) {
+        return;   // (or a member of the rescaling block: DefineRescalingInputPushConstant)
     }
 
     if (profile.unified_descriptor_binding) {
@@ -1608,7 +1622,8 @@ void EmitContext::DefineRenderArea(const Info& info) {
         Decorate(push_constant_struct, spv::Decoration::Block);
         Name(push_constant_struct, "RenderAreaInfo");
 
-        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset, 0);
+        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset,
+                       render_area_offset);
         MemberName(push_constant_struct, render_are_member_index, "render_area");
 
         const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};

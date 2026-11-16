@@ -406,10 +406,10 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const rc_contr
 // Records: magic, size of the rest, slot, the shader key and the pixel shader's per-primitive inputs it was made for, gl_depth, per-primitive outputs,
 // vertex input types, the nvn_direct_shader fields, c1's size, the rc_control's size, descriptors, SPIR-V, rc_control, c1. Lichii: also "LRCS" records, the header
 // alone (key set, the rest 0): a shader translated speculatively (spec_main) in an earlier run, not done again
-#define RC_FILE_MAGIC 0x3443524cu   // "LRC4"
+#define RC_FILE_MAGIC 0x3543524cu   // "LRC5"
 #define RC_REC_MAGIC 0x5243524cu    // "LRCR"
 #define RC_SPEC_MAGIC 0x5343524cu   // "LRCS"
-typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, desc_count, spirv_words, c1_len, ctl_len; } rc_rec;
+typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, uses_render_area, desc_count, spirv_words, c1_len, ctl_len; } rc_rec;
 static size_t rc_rec_rest(const rc_rec* r) { return (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4 + r->ctl_len + r->c1_len; }
 static const rc_control* rc_rec_control(const rc_rec* r) { return (const rc_control*)((const uint8_t*)r + sizeof *r + (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4); }
 static rc_map g_disk;      // slot -> rc_rec + its descriptors, SPIR-V, control section and c1 (malloc'd, kept)
@@ -420,7 +420,9 @@ static void disk_open(void) {
     g_disk_state = -1;
     const char *t = getenv("DM_TEMP"), *e = getenv("EDEN_NX2_NVN_RECOMPILE_CACHE");
     if (!t || !*t || (e && !strcmp(e, "0"))) return;
-    const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion};
+    // (and to the render scale, which RescalingPass bakes into the SPIR-V)
+    const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion ^
+                                                    (vka_scale_on() ? ((uint64_t)vka_scale_up << 8 | vka_scale_shift) * 0x9E3779B97F4A7C15ull : 0)};
     char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
     FILE* f = fopen(path, "rb"); unsigned n = 0; long good = 0, end = 0;
     if (f) {
@@ -465,7 +467,7 @@ static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, in
     memset(o, 0, sizeof *o);
     o->descs = (nvn_direct_shader_desc*)(m + sizeof *r); o->desc_count = r->desc_count;
     o->spirv = (uint32_t*)(m + sizeof *r + (size_t)r->desc_count * sizeof(nvn_direct_shader_desc)); o->spirv_words = r->spirv_words;
-    memcpy(o->local, r->local, sizeof o->local); o->shared = r->shared; o->input_mask = r->input_mask; o->output_mask = r->output_mask; o->ssbo_align = r->ssbo_align;
+    memcpy(o->local, r->local, sizeof o->local); o->shared = r->shared; o->input_mask = r->input_mask; o->output_mask = r->output_mask; o->ssbo_align = r->ssbo_align; o->uses_render_area = r->uses_render_area;
     o->per_primitive_outputs = r->prim;
     *vin_types = r->vin_types; *gl_depth = r->gl_depth; *prim = r->prim;
     *control = rc_rec_control(r); *c1 = (const uint8_t*)*control + r->ctl_len; *c1_len = r->c1_len;
@@ -473,7 +475,7 @@ static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, in
 }
 static void disk_put(uint64_t slot, uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o, uint64_t vin_types, int gl_depth, const rc_control* control, const uint8_t* c1, uint32_t c1_len) {
     rc_rec r = {RC_REC_MAGIC, 0, slot, key, prim_inputs, gl_depth, o->per_primitive_outputs, vin_types, {o->local[0], o->local[1], o->local[2]}, o->shared, o->input_mask, o->output_mask, o->ssbo_align,
-                o->desc_count, (uint32_t)o->spirv_words, c1_len, (uint32_t)rc_control_bytes(control)};
+                o->uses_render_area, o->desc_count, (uint32_t)o->spirv_words, c1_len, (uint32_t)rc_control_bytes(control)};
     r.size = (uint32_t)(sizeof r + rc_rec_rest(&r));
     pthread_mutex_lock(&g_mu); disk_open();
     if (g_disk_f) {
@@ -541,13 +543,16 @@ static void rc_make(rc_shader* r, uint64_t key, const nvn_direct_shader* o, cons
     dmsh_vk_bind* b = rc_binds(o, r->st, control, why, whyn);
     if (*why) g_unplaced++;   // a record the replay cannot fill: the shader is refused (vka_shader.c refusal) after this line
     char err[200] = "";
-    uint16_t flags = (r->st == 1 && prim_inputs) || (r->st == 7 && r->prim) ? DMSH_VK_F_MESH_PRIM : 0;
+    uint16_t flags = ((r->st == 1 && prim_inputs) || (r->st == 7 && r->prim) ? DMSH_VK_F_MESH_PRIM : 0) | (o->uses_render_area ? VKA_F_RENDER_AREA : 0);
     vka_shlib* L = b ? rc_lib(key, rc_vks(r->st), flags, o, b, o->desc_count, c1_len ? c1 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
     free(b);
     if (!L) { if (!*why) snprintf(why, whyn, "%s", err); return; }
     r->sh = vka_shader_make(L, key);
     if (!r->sh) return;
     r->sh->nvn2_control = nvn2_control(control->bytes) ? control->bytes : NULL; g_made++;
+    for (unsigned k = 0; k < o->desc_count; k++) if (o->descs[k].kind == NVN_DIRECT_DESC_TEXTURE) {   // (the descriptors' order is RescalingPass's texture order)
+        r->sh->scale_tex_binding = o->descs[k].binding; r->sh->scale_tex_bit = (uint8_t)nvn_direct_scale_texture_bit((uint32_t)r->st);
+        r->sh->scale_tex_bits = (uint8_t)nvn_direct_scale_texture_bits((uint32_t)r->st); break; }
     for (unsigned k = 0; k < r->sh->e->bind_count; k++) if (r->sh->b[k].kind == VKA_KIND_LOOP_GUARD && !r->sh->loop_guard.buf && vka_static(16, V.sb_align, &r->sh->loop_guard)) {
         memset(r->sh->loop_guard.ptr, 0, 16); guard_add(key, &r->sh->loop_guard); }
 }

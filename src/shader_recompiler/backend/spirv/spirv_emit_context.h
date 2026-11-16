@@ -346,6 +346,7 @@ public:
 
     Id render_area_push_constant{};
     u32 render_are_member_index{};
+    u32 render_area_offset{};
 
     Id local_memory{};
 
@@ -519,7 +520,7 @@ private:
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
-    void DefineRescalingInputPushConstant();
+    void DefineRescalingInputPushConstant(const Info& info);
     void DefineRescalingInputUniformConstant();
     void DefineRenderArea(const Info& info);
 

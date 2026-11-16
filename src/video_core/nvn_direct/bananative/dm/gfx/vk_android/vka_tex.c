@@ -145,6 +145,7 @@ static pthread_mutex_t g_tmu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_img_bytes;
 static uint64_t g_tick;   // the VRAM budget's clock (vka_tex_budget): one tick a submission
 static int g_zwant;   // (under g_tmu) img_create_ may make a zero-shared image: vka_tex_get's new image whose content is ST_ZERO ("Zero-shared images" below)
+static int g_swant;   // (under g_tmu) img_create_ may make it at the render scale: the same, and an image made again in place of a scaled one (img_own)
 
 // Lichii (dotfiles-25x.13): the live images with storage by its address, so the lookups by storage (a new texture's image of the same storage and shape, vka_tex_get; a GPU
 // image over it, gpu_image_over; the images under a done GPU write, vka_tex_prepare) find them without a pass over every live image (about 36,000 in Mario Kart World's race:
@@ -526,6 +527,14 @@ static vka_img *img_create_(const tex_t *t, const vka_fmt *f, uint32_t base, int
     if ((ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) && !compressed(f)) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (d->flags & NVN_TEXTURE_FLAGS_IMAGE) && !f->srgb) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    // Lichii (dotfiles-25x.34): a render target at the render scale, as Lichii's texture cache picks them: GPU content (g_swant), dense, single-sampled, 2D or 2D array, not
+    // cube compatible, colour or depth attachable, uncompressed, not linear, taller than 288 texels (its rescale threshold: smaller ones hold lookup tables and the like), and
+    // with room for its levels at the scaled size
+    if (g_swant && vka_scale_on() && !res && !is3d && !is1d && !base && im->samples == 1 && !compressed(f) && (u & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        && !(d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && !im->vpool && im->h > 288 && !(im->w == im->h && im->layers >= 6 && im->layers % 6 == 0)) {
+        uint32_t sw = vka_scaled_size(im->w), sh = vka_scaled_size(im->h);
+        if ((sw > sh ? sw : sh) >> (im->levels - 1)) { im->w = sw; im->h = sh; im->scaled = 1; }
+    }
     // Views in another format: only an 8-bit / BC / ASTC UNORM image as its sRGB twin (NVN sRGB formats are stored as UNORM, and UNORM textures have sRGB views; the
     // only reinterpretation DKB's level makes). A two-entry format list instead of a bare MUTABLE_FORMAT keeps Adreno's UBWC compression on the image; every other image
     // takes views of its own format only
@@ -1327,7 +1336,9 @@ static int img_own(vka_img *im, VkCommandBuffer cb) {   // caller holds g_tmu; 1
     tex_t t = {0}; t.serial = im->serial; t.mem = (uint8_t *)im->mem; t.d = im->d; t.L = im->L;
     if (im->usage & VK_IMAGE_USAGE_STORAGE_BIT) t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // (made with storage use, or upgraded to it)
     VkCommandBuffer ucb = !vka_scr_up && cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE, rc = ucb ? ucb : cb;
+    g_swant = im->scaled;   // (the same size)
     vka_img *n = rc ? img_create(&t, &im->f, im->base) : NULL;   // (g_zwant is 0: memory of its own)
+    g_swant = 0;
     if (!n) { if (ucb) vka_up_end();
         static _Atomic int k; if (atomic_fetch_add(&k, 1) < 8) VRED("zero-shared image serial %llu %ux%u format %#x: no memory of its own (%.0f MiB%s): its writes go to the memory it shares", (unsigned long long)im->serial,
                                                                       im->w, im->h, im->d.format, im->m.size / 1048576.0, rc ? "" : ", no command buffer");
@@ -1494,7 +1505,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
         if (im) big_share(im, t);   // (another texture object of the same storage and shape: DM_VK_BIGIMG_MB diagnostic)
         uint32_t vmin = 0, base = sparse_sampled(t, &f) ? sparse_base(t->pool, t->mem, &t->d, &t->L, &vmin) : 0;
         int mode = 0;
-        if (!im) { mode = first_mode(t, &f, cpuw_take(t->serial, 0)); g_zwant = mode == ST_ZERO; im = img_create(t, &f, base); g_zwant = 0; }
+        if (!im) { mode = first_mode(t, &f, cpuw_take(t->serial, 0)); g_zwant = g_swant = mode == ST_ZERO; im = img_create(t, &f, base); g_zwant = g_swant = 0; }
         if (im && !im->inited) {
             im->vmin = view_vmin(im, vmin);
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
@@ -1663,7 +1674,9 @@ cut:;
     return 1;
 }
 static int img_own(vka_img *im, VkCommandBuffer cb);
+static int img_unscale(vka_img *im, VkCommandBuffer cb, const char *why);
 static void upload(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // (callers hold g_tmu)
+    if (im->scaled) img_unscale(im, cb, "a CPU upload");   // (the storage's texels are the texture's size)
     if (im->m.z) img_own(im, cb);   // a CPU write into a zero-shared image's storage (vka_tex_prepare): memory of its own before the upload
     uint64_t t0 = now_ns(), nb = 0; upload_(im, t, cb, &nb);
     atomic_fetch_add_explicit(&g_up_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_all_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_bytes, nb, memory_order_relaxed);
@@ -2085,6 +2098,53 @@ static int img_storage_upgrade(vka_img *im, VkCommandBuffer cb) {
     return 1;
 }
 
+// Lichii (dotfiles-25x.34): a scaled image made at its texture's own size again, as Lichii's texture cache scales an image down, for what the render scale cannot follow:
+// texels the CPU sees or gives (buffer copies, uploads), shader images (stores and loads address texels: recompiled shaders scale only texture fetches), and a pass whose
+// other targets are not scaled. Its content is blitted into the new image (filtered for colour formats that filter), which is swapped in place as img_storage_upgrade does
+// (every serial and view that shares it follows); it is not scaled again. Caller holds g_tmu; no render pass open in cb (the replay's: the blit is in replay order)
+static uint64_t g_unscaled;
+static int img_unscale(vka_img *im, VkCommandBuffer cb, const char *why) {
+    if (!im->scaled) return 1;
+    if (!cb || im->holds) return 0;
+    tex_t t = {0}; t.serial = im->serial; t.mem = (uint8_t *)im->mem; t.d = im->d; t.L = im->L;
+    if (im->usage & VK_IMAGE_USAGE_STORAGE_BIT) t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    vka_img *n = img_create(&t, &im->f, im->base);   // (g_swant is 0: the texture's own size)
+    if (!n) return 0;
+    vka_barrier(cb);
+    vka_img_barrier(cb, n->img, n->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->f.vk, &fp);
+    VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    VkFilter fl = im->f.kind == 0 && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    for (uint32_t lv = 0; lv < im->levels && im->inited; lv++) {
+        VkImageSubresourceLayers sr = {im->aspect, lv, 0, im->layers};
+        int32_t sw = (int32_t)(im->w >> lv ? im->w >> lv : 1), sh = (int32_t)(im->h >> lv ? im->h >> lv : 1), dw = (int32_t)(n->w >> lv ? n->w >> lv : 1), dh = (int32_t)(n->h >> lv ? n->h >> lv : 1);
+        if ((fp.optimalTilingFeatures & blit) == blit) {
+            VkImageBlit b = {sr, {{0, 0, 0}, {sw, sh, 1}}, sr, {{0, 0, 0}, {dw, dh, 1}}};
+            vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, n->img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, fl);
+        } else {   // no blits of this format: the texels the two sizes share, unscaled
+            VRED_ONCE("render scale: VkFormat %d cannot be blitted: an image of it made at its own size again keeps only its top-left texels", im->f.vk);
+            VkImageCopy c = {sr, {0, 0, 0}, sr, {0, 0, 0}, {(uint32_t)(sw < dw ? sw : dw), (uint32_t)(sh < dh ? sh : dh), 1}};
+            vk.vkCmdCopyImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, n->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        }
+    }
+    vka_barrier(cb);
+    VkImage oi = im->img; vka_imem om = im->m; void *ov = im->views; uint64_t ob = im->bytes; uint32_t ow = im->w, oh = im->h;
+    im->img = n->img; im->m = n->m; im->views = NULL; im->usage = n->usage; im->bytes = n->bytes; im->alt = n->alt; im->any_fmt = n->any_fmt; im->nx = n->nx; memcpy(im->xfmt, n->xfmt, sizeof im->xfmt);
+    im->w = n->w; im->h = n->h; im->scaled = 0;
+    n->img = oi; n->m = om; n->views = ov; n->bytes = ob; g_img_bytes -= ob;
+    vka_after(vka_fence_last() + 1, img_destroy, n);   // (after the submission being recorded, which may hold commands that read it)
+    atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
+    unsigned nid = redirty_ids(im);
+    if (g_unscaled++ < 16) VLOG("render scale: texture serial %llu %ux%u layers %u format %#x flags %#x made at its own size again (%ux%u before) for %s (frame %llu, %u texture IDs written again)",
+                                (unsigned long long)im->serial, im->w, im->h, im->layers, im->d.format, im->d.flags, ow, oh, why, (unsigned long long)vka_frame(), nid);
+    return 1;
+}
+int vka_tex_unscale(vka_img *im, VkCommandBuffer cb, const char *why) {
+    if (!im || !im->scaled) return 1;   // (scaled changes on the recording thread only)
+    pthread_mutex_lock(&g_tmu); int r = img_unscale(im, cb, why); pthread_mutex_unlock(&g_tmu);
+    return r;
+}
+
 // A texture whose pool was finalized since it was registered (or is another pool now, initialized at the same address) is not made or read: the game may have unmapped its
 // storage and the pool object (Mario Kart World on the phone, m22 / m23). Its ID gets the null view: sampling a texture of a finalized pool is undefined in NVN, and an ID
 // registered again is dirty again. pgen 0: its pool was not live at the registration (registered before the pool's Initialize, or after its Finalize): not dead by this
@@ -2111,6 +2171,7 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
     g_first_sampled = 0;
     nvn_pool_use(0);
     // (img_storage_upgrade runs without nvn_pool_use: it copies image to image and never reads the storage)
+    if (im && e->img && im->scaled) vka_tex_unscale(im, cb, "a shader image");
     if (im && e->img && im->m.z) { pthread_mutex_lock(&g_tmu); img_own(im, cb); pthread_mutex_unlock(&g_tmu); }   // (shaders write it: memory of its own first)
     if (im && e->img && !(im->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { pthread_mutex_lock(&g_tmu); img_storage_upgrade(im, cb); pthread_mutex_unlock(&g_tmu); }
     VkImageView view = im ? view_of(e, im, -1, 0) : VK_NULL_HANDLE;
@@ -2162,14 +2223,17 @@ static inline int vm_hit(const vmemo *m, int id, uint8_t dim) {
     return m->id == id && m->dim == dim && g_tver && m->ver == atomic_load_explicit(&g_tver[id], memory_order_acquire) && m->gen == atomic_load_explicit(&g_tgen, memory_order_acquire) && !in_fb(m->im);
 }
 // vka_tex_id_view for the recording thread (one thread at a time: the replay worker, or the submitting thread inline), with the memo; storage images take the full path
-VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout) {
+VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout, int *scaled) {
     if (layout) *layout = VK_IMAGE_LAYOUT_GENERAL;
-    if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) return id_view(id, cb, dim, storage, NULL);
+    *scaled = 0;
+    vka_img *im = NULL;
+    if (storage || id <= 0 || id >= (1 << 20) || !VKA_ENV("DM_VK_TEX_MEMO", 1)) { VkImageView v = id_view(id, cb, dim, storage, &im); *scaled = v && im && im->scaled; return v; }
     vmemo *m = vm_slot(id, dim);
-    if (vm_hit(m, id, dim)) { m->im->used = g_tick; if (m->im->nali) { pthread_mutex_lock(&g_tmu); alias_check(m->im); pthread_mutex_unlock(&g_tmu); } return m->v; }
+    if (vm_hit(m, id, dim)) { m->im->used = g_tick; if (m->im->nali) { pthread_mutex_lock(&g_tmu); alias_check(m->im); pthread_mutex_unlock(&g_tmu); } *scaled = m->im->scaled; return m->v; }
     uint32_t gen = atomic_load_explicit(&g_tgen, memory_order_acquire), ver = g_tver ? atomic_load_explicit(&g_tver[id], memory_order_acquire) : 0;
-    vka_img *im = NULL; VkImageView v = id_view(id, cb, dim, 0, &im);
+    VkImageView v = id_view(id, cb, dim, 0, &im);
     if (v && im && g_tver && !in_fb(im)) *m = (vmemo){id, dim, ver, gen, im, v};
+    *scaled = v && im && im->scaled;
     return v;
 }
 int vka_tex_id_pending_rec(int id, uint8_t dim) {   // 0 at once when the memo holds the ID (its image was made)
@@ -2202,6 +2266,7 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     int vt = dim_view_type(dim);
     if (vt < 0) return VK_NULL_HANDLE;
     if (((dim & DMSH_VK_DIM_MS) != 0) != (im->samples > 1)) return VK_NULL_HANDLE;
+    if (storage && im->scaled) vka_tex_unscale(im, cb, "a shader image");   // (vka_tex_id_storage_pending ended the pass)
     if (storage && im->m.z) { pthread_mutex_lock(&g_tmu); img_own(im, cb); pthread_mutex_unlock(&g_tmu); }   // (a shader image: memory of its own before the draw writes it; vka_tex_id_storage_pending ended the pass)
     if (!storage && im->m.size >= big_min()) { pthread_mutex_lock(&g_tmu); im->nsamp++; pthread_mutex_unlock(&g_tmu); }   // (DM_VK_BIGIMG_MB: bound for sampling)
     if (storage && !(im->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { pthread_mutex_lock(&g_tmu); int ok = img_storage_upgrade(im, cb); pthread_mutex_unlock(&g_tmu); if (!ok) return VK_NULL_HANDLE; }
@@ -2293,7 +2358,7 @@ int vka_tex_id_format(int id) {
 int vka_tex_id_storage_pending(int id) {
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = id > 0 && id < g_ntreg && g_treg[id].t.serial ? map_get(g_treg[id].t.serial) : NULL;
-    int r = e && e->im && ((!(e->im->usage & VK_IMAGE_USAGE_STORAGE_BIT) && storage_able(e->im) && !e->im->holds) || e->im->m.z);   // (a zero-shared image gets memory of its own: outside the pass too)
+    int r = e && e->im && ((!(e->im->usage & VK_IMAGE_USAGE_STORAGE_BIT) && storage_able(e->im) && !e->im->holds) || e->im->m.z || (e->im->scaled && !e->im->holds));   // (a zero-shared image gets memory of its own, a scaled one its own size: outside the pass too)
     pthread_mutex_unlock(&g_tmu);
     return r;
 }

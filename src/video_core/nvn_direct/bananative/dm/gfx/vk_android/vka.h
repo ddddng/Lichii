@@ -298,12 +298,23 @@ typedef struct vka_img {
     uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
     // Lichii (dotfiles-25x.17): wseq the GPU write order of its last write (0: none); ali the serials of textures of another shape found over its storage (images of their own)
     uint64_t wseq; uint64_t ali[8]; uint8_t nali;
+    uint8_t scaled;          // Lichii (dotfiles-25x.34): made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
 // The layers a render target view of level lv can name: a 3D texture's slices at that level (drawn into through 2D / 2D-array views, VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT), else the array layers
 static inline uint32_t vka_img_slices(const vka_img *im, uint32_t lv) { return im->d.target == NVN_TEXTURE_TARGET_3D ? (im->depth >> lv ? im->depth >> lv : 1) : im->layers; }
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's image, made (and filled from guest memory, or cleared) on first use in cb; NULL = no image
+// Lichii (dotfiles-25x.34): the render scale, Lichii's resolution setting (nvn_direct_device scale_up / scale_shift): render targets (GPU content, 2D, attachable,
+// see vka_tex.c img_create_) are made scale_up / 2^scale_shift times their size; passes over them, their viewports, scissors, clears and copies follow, and recompiled
+// shaders read the size through Lichii's RescalingPass (push constants, vka_draw.c). 1, 0: no scale, nothing of it runs
+extern uint32_t vka_scale_up, vka_scale_shift;
+static inline int vka_scale_on(void) { return vka_scale_up != 1 || vka_scale_shift; }
+static inline int32_t vka_scaled(int32_t v) { return (int32_t)(((int64_t)v * vka_scale_up) >> vka_scale_shift); }   // a coordinate
+static inline uint32_t vka_scaled_size(uint32_t v) { uint32_t s = (uint32_t)(((uint64_t)v * vka_scale_up) >> vka_scale_shift); return v && !s ? 1 : s; }   // a size (Settings' ScaleUp)
+// A scaled image made at the texture's own size again (its content resampled into it): for uses the scale cannot follow (CPU-visible bytes, shader images, a pass with targets of the other
+// kind). 0 = it stays scaled (held by a reader outside recording, or no memory). Any thread that records; no render pass may be open in cb
+int vka_tex_unscale(vka_img *im, VkCommandBuffer cb, const char *why);
 int vka_tex_astc_copy(vka_img *src, vka_img *dst, VkCommandBuffer cb);   // Lichii: a texture copy between ASTC textures keeps one BC block size on both sides (vka_tex.c); 0 = skip it
 uint64_t vka_tex_mem(int *n, uint64_t *gpu_written);   // bytes of image memory now: n images, of which gpu_written bytes the GPU wrote (the rest copies pool storage)
 void vka_tex_alias_stats(char *b, size_t n);        // image bytes by content (cleared, filled once, tracked) and how many of them could live on their pool storage
@@ -349,7 +360,7 @@ void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // 
 int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set)
 int vka_tex_id_target(int id);                      // the NVN target texture ID id stands for (its view's), -1 = not registered
 int vka_tex_id_pending(int id);                     // texture ID id is registered and its image is not made yet (its first use records commands)
-VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // the same on the recording thread, through a memo (DM_VK_TEX_MEMO)
+VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout, int *scaled);   // the same on the recording thread, through a memo (DM_VK_TEX_MEMO); *scaled: its image is (vka_img.scaled)
 int vka_tex_id_pending_rec(int id, uint8_t dim);
 int vka_tex_id_storage_pending(int id);            // texture ID id's image exists without storage use and would be remade with it at its next storage binding (a draw ends its pass first)
 VkSampler vka_samp_id_rec(int id);
@@ -373,6 +384,8 @@ typedef struct vka_shader {
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
     const uint8_t *nvn2_control;        // Lichii (dotfiles-25x.11): a recompiled shader's NVN2 control section (nvn_recompile.c), NULL for the library's
     vka_span loop_guard;                // Lichii: a recompiled shader's loop guard word (static memory; none when it has no loops)
+    uint16_t scale_tex_binding;         // Lichii (dotfiles-25x.34): a recompiled shader's first texture binding and that texture's bit in the render scale's push constants
+    uint8_t scale_tex_bit, scale_tex_bits;   // (nvn_direct.h nvn_direct_scale_texture_bit; scale_tex_bits 0: no textures)
 } vka_shader;
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
@@ -387,6 +400,7 @@ uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subg
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_SET_FS 2   // Lichii (dotfiles-25x.16): a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
+#define VKA_F_RENDER_AREA 16384   // Lichii (dotfiles-25x.40): an entry flag of recompiled shaders past the library's DMSH_VK_F_*: reads the draw's render area (vka_draw.c, nvn_direct.h NVN_DIRECT_RENDER_AREA_OFFSET)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
 #define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)

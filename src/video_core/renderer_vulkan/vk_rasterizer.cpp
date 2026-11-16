@@ -4034,8 +4034,8 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
             .image_view = frame.view,
             .width = frame.width,
             .height = frame.height,
-            .scaled_width = frame.width,
-            .scaled_height = frame.height,
+            .scaled_width = frame.scaled_width,
+            .scaled_height = frame.scaled_height,
         };
     }
 #endif

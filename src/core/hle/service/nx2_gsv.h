@@ -2658,7 +2658,7 @@ private:
             .crop_rect = {0, 0, static_cast<int>(crop_width), static_cast<int>(crop_height)},
             .blending = Tegra::BlendMode::Opaque,
             .native_tiling = true,
-            .color_space = Nx2NativeImageColorSpace(image_format, m_told_hdr.load()),
+            .color_space = Nx2NativeImageColorSpace(image_format, g_nx2_told_hdr.load()),
             .linear_unit_luminance = image_format == Nx2NativeImageFormat::Rgba16Float
                                          ? static_cast<u16>((image_word7 >> 8) & 0xFFFF)
                                          : u16{},
@@ -2802,7 +2802,7 @@ private:
     // MKW's SDK converts these to public formats 0/1 before DefaultDisplay tests for HDR.
     void QueryDisplayHdrStatus(HLERequestContext& ctx) {
         const auto output = HostHdrOutput();
-        m_told_hdr = output.enabled;
+        g_nx2_told_hdr = output.enabled;
         TipcReplyWords(ctx, {output.enabled ? 2U : 1U, 0, output.peak_luminance});
     }
 
@@ -3065,7 +3065,6 @@ private:
     u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
     u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
     u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white
-    std::atomic<bool> m_told_hdr{};   // the last HDR status answer was HDR
 };
 
 // True the first time a Switch 2 video command is seen, so each one is logged once in full and new

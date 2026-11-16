@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -37,6 +38,13 @@ namespace Vulkan {
 namespace {
 
 using Shader::Ampere::Instruction;
+
+using Shader::Backend::SPIRV::RenderAreaLayout;
+using Shader::Backend::SPIRV::RescalingLayout;
+static_assert(sizeof(RenderAreaLayout) == NVN_DIRECT_RENDER_AREA_SIZE);
+static_assert(sizeof(RescalingLayout) <= NVN_DIRECT_SCALE_PUSH_SIZE &&
+              offsetof(RescalingLayout, rescaling_images) == NVN_DIRECT_SCALE_IMAGES_OFFSET &&
+              offsetof(RescalingLayout, down_factor) == NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET);
 
 u32 Read32(const u8* bytes, size_t offset) {
     u32 value;
@@ -456,9 +464,17 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
     std::array<Shader::IR::Program*, 1> programs{&program};
     Shader::Optimization::LimitPipelineSampledTextureArrays(programs, host_info);
     const Shader::Info& info = program.info;
-    // The replay's pipeline layouts have no push constants for Lichii's own.
-    if (info.uses_rescaling_uniform || info.uses_render_area) {
-        throw Shader::RuntimeError("Reads Lichii's rescaling or render area push constants");
+    // The replay's pipeline layouts have push constants for the render area of a draw (nvn_direct.h
+    // NVN_DIRECT_RENDER_AREA_OFFSET), and those of the resolution scale while it scales
+    // (NVN_DIRECT_SCALE_PUSH_SIZE), each stage in its own bits.
+    if (info.uses_render_area && stage == Shader::Stage::Compute) {
+        throw Shader::RuntimeError("Reads Lichii's render area push constants in a compute shader");
+    }
+    if (info.uses_rescaling_uniform &&
+        (info.texture_descriptors.size() > nvn_direct_scale_texture_bits(source.nvn_stage) ||
+         info.image_descriptors.size() > nvn_direct_scale_image_bits(source.nvn_stage))) {
+        throw Shader::RuntimeError("{} textures and {} images, more than the resolution scale's bits for the stage",
+                                   info.texture_descriptors.size(), info.image_descriptors.size());
     }
 
     Shader::RuntimeInfo runtime_info;
@@ -491,6 +507,9 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
     Shader::Maxwell::ConvertLegacyToGeneric(program, runtime_info);
     Shader::Backend::Bindings bindings;
     bindings.unified = source.first_binding;
+    bindings.texture_scaling_index = nvn_direct_scale_texture_bit(source.nvn_stage);
+    bindings.image_scaling_index = nvn_direct_scale_image_bit(source.nvn_stage);
+    bindings.render_area_offset = NVN_DIRECT_RENDER_AREA_OFFSET;
     const std::vector<u32> spirv{
         Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings)};
 
@@ -626,6 +645,7 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
         }
     }
     shader.ssbo_align = static_cast<u32>(host_info.min_ssbo_alignment);
+    shader.uses_render_area = info.uses_render_area ? 1 : 0;
 }
 
 } // namespace Vulkan
