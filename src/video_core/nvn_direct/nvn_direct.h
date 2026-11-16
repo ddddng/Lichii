@@ -106,6 +106,7 @@ typedef struct nvn_direct_shader {
     uint32_t output_mask;      ///< fragment: colour outputs written
     uint32_t per_primitive_outputs; ///< mesh: generic outputs written per primitive
     uint32_t ssbo_align;       ///< storage buffers are bound at their address rounded down to this
+    uint32_t uses_render_area; ///< graphics: reads the render area (NVN_DIRECT_RENDER_AREA_OFFSET)
     char error[256];           ///< why it was not translated
 } nvn_direct_shader;
 
@@ -169,6 +170,11 @@ typedef struct nvn_direct_device {
 #define NVN_DIRECT_SCALE_PUSH_SIZE 32
 #define NVN_DIRECT_SCALE_IMAGES_OFFSET 16
 #define NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET 24
+/// The render area a stage reads in place of the console's blit parameters (Lichii's
+/// BlitConstantsPass, RenderAreaLayout: width, height and two unused words) follows them in the
+/// same push-constant range.
+#define NVN_DIRECT_RENDER_AREA_OFFSET NVN_DIRECT_SCALE_PUSH_SIZE
+#define NVN_DIRECT_RENDER_AREA_SIZE 16
 static inline uint32_t nvn_direct_scale_texture_bit(uint32_t nvn_stage) {
     return nvn_stage == 1 || nvn_stage == 5 ? 0 : nvn_stage == 0 || nvn_stage == 7 ? 64 : 96;
 }

@@ -7,7 +7,7 @@
 // so the next start builds from it. Layouts follow dmsh_abi_vk.h: set 0 the per-draw records of every stage (push descriptors when they fit), set 1 the pools (vka_tex.c)
 #if defined(__ANDROID__)
 #include "vka.h"
-#include "nvn_direct.h"   // Lichii: NVN_DIRECT_SCALE_PUSH_SIZE (the render scale)
+#include "nvn_direct.h"   // Lichii: NVN_DIRECT_SCALE_PUSH_SIZE (the render scale), NVN_DIRECT_RENDER_AREA_OFFSET
 #include "../nvn/nvn_mtl.h"
 #include <stdlib.h>
 #include <string.h>
@@ -119,9 +119,11 @@ static VkPipelineLayout pipe_layout(VkDescriptorSetLayout s0, VkDescriptorSetLay
     if (had) return (VkPipelineLayout)had;
     VkDescriptorSetLayout sets[3] = {s0, pk.s[1], s2}; uint32_t n = graphics ? 3 : pk.s[1] ? 2 : 1;
     if (!V.gpl) for (uint32_t i = 0; i < n; i++) if (!sets[i]) sets[i] = empty_set_layout();
-    VkPushConstantRange scale = {VK_SHADER_STAGE_ALL, 0, NVN_DIRECT_SCALE_PUSH_SIZE};   // (Lichii, dotfiles-25x.34: the render scale's, in every layout while it scales)
+    // Lichii: one push-constant range in every layout, so that all of them stay compatible for push constants: the render scale's while it scales (dotfiles-25x.34),
+    // then the render area (dotfiles-25x.40)
+    VkPushConstantRange push = {VK_SHADER_STAGE_ALL, vka_scale_on() ? 0 : NVN_DIRECT_RENDER_AREA_OFFSET, (vka_scale_on() ? NVN_DIRECT_RENDER_AREA_OFFSET : 0) + NVN_DIRECT_RENDER_AREA_SIZE};
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .flags = graphics && V.gpl ? VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT : 0, .setLayoutCount = n, .pSetLayouts = sets,
-                                     .pushConstantRangeCount = vka_scale_on() ? 1 : 0, .pPushConstantRanges = &scale};
+                                     .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
     VkPipelineLayout l = VK_NULL_HANDLE; VkResult r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &l);
     if (r) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 8) VRED("pipeline layout: %d", r); return VK_NULL_HANDLE; }
     km_put(&g_playouts, &pk, h, (void *)l); g_nlayouts++;
