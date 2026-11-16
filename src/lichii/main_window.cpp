@@ -544,9 +544,11 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             });
     connect(&nextendo_status_watcher,
             &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this, [this] {
-                // A reply for the user before a profile switch isn't this user's.
+                // A reply for the user before a profile switch isn't this user's, and the check
+                // a game booted on the new profile meanwhile waited for this one.
                 if (nextendo_status_profile !=
                     Service::Account::Nextendo::CurrentProfile(*QtCommon::system)) {
+                    CheckNextendoOnlineStatus();
                     return;
                 }
                 const auto status = nextendo_status_watcher.result();
