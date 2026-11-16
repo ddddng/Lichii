@@ -812,7 +812,12 @@ void MigrateAccountFile(const Common::UUID& profile) {
     if (!WritePrivateFile(AccountPath(profile), text)) {
         return;
     }
-    void(FS::RemoveFile(legacy));
+    // A legacy file left behind would be copied again to whichever profile is current next time.
+    if (!FS::RemoveFile(legacy)) {
+        LOG_ERROR(Common, "Could not remove the old Nextendo account file");
+        void(FS::RemoveFile(AccountPath(profile)));
+        return;
+    }
     accounts[profile].loaded = false;
     LOG_INFO(Common, "Moved the Nextendo account to profile {}", profile.FormattedString());
 }

@@ -543,8 +543,11 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                                          tr("Sign in again in Configure > Network."));
             });
     connect(&nextendo_status_watcher,
-            &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this,
-            [this] {
+            &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this, [this] {
+                // The profile can't change while a game runs, so the reply is still its own.
+                if (!QtCommon::system->IsPoweredOn()) {
+                    return;
+                }
                 const auto status = nextendo_status_watcher.result();
                 QString message;
                 if (!Common::Nextendo::LoadAccount(
@@ -614,12 +617,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // Check for orphaned profiles and reset profile data if necessary
     QtCommon::Content::FixProfiles();
 
-    // The profiles are read from the configured NAND only now.
-    Common::Nextendo::MigrateAccountFile(
-        Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
-    nextendo_session_timer.start(std::chrono::minutes{2});
-    KeepNextendoSessionAlive();
-
     if (Settings::values.use_dev_keys.GetValue()) {
         Core::Crypto::KeyManager::Instance().ReloadKeys();
     }
@@ -687,6 +684,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // to prevent the UI from blowing up.
     UpdateUITheme();
 
+    std::optional<Core::LaunchParams> launch;
     if (QStringList args = QApplication::arguments(); args.size() >= 2) {
         QList<QByteArray> qba{};
         for (auto const& e : args)
@@ -695,7 +693,18 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         for (auto& e : qba)
             args_cstr.push_back(e.data());
 
-        auto const lp = Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+        launch =
+            Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+    }
+
+    // Once FixProfiles has read the configured NAND and -u may have picked another user.
+    Common::Nextendo::MigrateAccountFile(
+        Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
+    nextendo_session_timer.start(std::chrono::minutes{2});
+    KeepNextendoSessionAlive();
+
+    if (launch) {
+        const auto& lp = *launch;
 
         // Override fullscreen setting if gamepath or argument is provided
         if (!lp.filepath.empty() || lp.fullscreen) {
