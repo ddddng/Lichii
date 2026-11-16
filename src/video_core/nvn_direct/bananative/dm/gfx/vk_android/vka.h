@@ -152,6 +152,7 @@ int vka_hung(void);
 void vka_up_decoded(void);                          // vka_dev.c (Lichii): an ASTC decode went into the open upload batch
 void vka_heap_line(char *o, size_t n);               // vka_dev.c (Lichii): the driver's use and budget per heap, MiB
 int vka_dev_ext(const char *name);                  // vka_dev.c (Lichii): the host's device has the extension enabled
+int vka_async_pipelines(void);                     // vka_dev.c: Lichii's asynchronous shader building setting (nvn_direct_device.async_pipelines)
 void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
 void vka_stall_stacks(void);                         // vka_dev.c: DM_VK_STALL_STACKS=1: every thread's stack to stderr (lab)
 void vka_stop(void);                                // vka_dev.c: as after a hang nothing more is submitted and every fence reads as done, silently; waits return at once

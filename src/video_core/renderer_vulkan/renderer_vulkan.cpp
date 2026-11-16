@@ -300,6 +300,7 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
             static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderComplete();
         },
         .pipeline_context = &shader_notify,
+        .async_pipelines = Settings::values.use_asynchronous_shaders.GetValue(),
         .shader_translate = &NvnDirectShaders::Translate,
         .shader_free = &NvnDirectShaders::Free,
         .shader_context = &shaders,

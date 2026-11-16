@@ -40,8 +40,12 @@ static void *vram_trace_main(void *a) {
         VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0); }
     return NULL;
 }
+int vka_async_pipelines(void) { return g_adopt.async_pipelines; }
 int nvn_direct_adopt_device(const nvn_direct_device *d) {
     pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
+    { char e[16]; const int lab = vka_env_str("DM_VK_ASYNC_PSO", e, sizeof e);
+      VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (%s)", (lab ? atoi(e) != 0 : g_adopt.async_pipelines) ? "on" : "off",
+           lab ? "DM_VK_ASYNC_PSO" : "asynchronous shader building setting"); }
     char h[256]; uint64_t u = 0, b = 0;
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();

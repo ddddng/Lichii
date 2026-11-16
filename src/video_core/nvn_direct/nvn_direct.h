@@ -151,6 +151,10 @@ typedef struct nvn_direct_device {
     void (*pipeline_building)(void* context);
     void (*pipeline_built)(void* context);
     void* pipeline_context;
+    /// Lichii's asynchronous shader building: a draw whose pipeline is not made yet is skipped
+    /// until asynchronous threads have made it, instead of the frame waiting for its compile
+    /// (vka_pso.c async_threads; DM_VK_ASYNC_PSO=0/1 overrides it).
+    int async_pipelines;
     /// Translates a program stage with Lichii's shader recompiler (dotfiles-25x.11): 1 = done,
     /// 0 = not (shader->error says why). NULL: no recompiler.
     int (*shader_translate)(void* context, const nvn_direct_shader_source* source, nvn_direct_shader* shader);
