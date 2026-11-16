@@ -16,6 +16,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/nifm/nifm.h"
 #include "core/hle/service/server_manager.h"
@@ -117,14 +118,19 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
                                                       event2.GetPointerUnsafe()};
     };
 
+    const auto signaled = [&](const Kernel::KReadableEvent* event) {
+        Kernel::KScopedSchedulerLock lk{kernel};
+        return event->IsSignaled(kernel);
+    };
+
     SECTION("without Nextendo a submitted request waits on hold and signals the first event") {
         Settings::values.nextendo_enabled.SetValue(false);
         const auto request = create();
         const auto [event1, event2] = events(*request);
         REQUIRE(result(call(*request, Submit)) == ResultSuccess.raw);
         CHECK(state(*request) == StateOnHold);
-        CHECK(event1->IsSignaled(kernel));
-        CHECK_FALSE(event2->IsSignaled(kernel));
+        CHECK(signaled(event1));
+        CHECK_FALSE(signaled(event2));
     }
     SECTION("with Nextendo a submitted request resolves at once and signals both events") {
         Settings::values.nextendo_enabled.SetValue(true);
@@ -134,8 +140,8 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
         REQUIRE(result(call(*request, Submit)) == ResultSuccess.raw);
         CHECK(state(*request) == StateInvalid);
         CHECK(result(call(*request, GetResult)) != ResultSuccess.raw);
-        CHECK(event1->IsSignaled(kernel));
-        CHECK(event2->IsSignaled(kernel));
+        CHECK(signaled(event1));
+        CHECK(signaled(event2));
     }
     SECTION("turning Nextendo on after the request was created applies from its submit") {
         Settings::values.nextendo_enabled.SetValue(false);
@@ -145,8 +151,8 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
         Settings::values.airplane_mode.SetValue(true);
         REQUIRE(result(call(*request, Submit)) == ResultSuccess.raw);
         CHECK(state(*request) == StateInvalid);
-        CHECK(event1->IsSignaled(kernel));
-        CHECK(event2->IsSignaled(kernel));
+        CHECK(signaled(event1));
+        CHECK(signaled(event2));
     }
     SECTION("with Nextendo a submitted request follows a network change by itself") {
         Settings::values.nextendo_enabled.SetValue(true);
@@ -167,8 +173,8 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
             core_timing.AddTicks(1'000'000);
         }
         core_timing.Advance();
-        CHECK(event1->IsSignaled(kernel));
-        CHECK(event2->IsSignaled(kernel));
+        CHECK(signaled(event1));
+        CHECK(signaled(event2));
         CHECK(state(*request) == StateInvalid);
     }
 }
