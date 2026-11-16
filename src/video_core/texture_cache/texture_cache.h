@@ -233,8 +233,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         return true;
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode, &CanEvict,
-                          &keep, &keep_ticks, out_of_memory, &overlap_downloads,
-                          download_overlaps, async_downloads](ImageId image_id) {
+                          &evict_bad_overlaps, &keep, &keep_ticks, out_of_memory,
+                          &overlap_downloads, download_overlaps,
+                          async_downloads](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
@@ -316,8 +317,11 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             }
         }
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
+        trace_delete_flags = static_cast<u32>(image.flags);
+        trace_delete_downloaded = must_download || download_queued;
         UnregisterImage(image_id);
-        trace_delete_reason = aggressive_mode      ? "gc-aggressive"
+        trace_delete_reason = evict_bad_overlaps   ? "gc-bad-overlap"
+                              : aggressive_mode    ? "gc-aggressive"
                               : high_priority_mode ? "gc-high-priority"
                                                    : "gc";
         DeleteImage(image_id, !download_queued && image.scale_tick > frame_tick + 5);
@@ -3232,6 +3236,13 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
                 }
             }
             if (!upload) {
+                if (TextureCacheTrace()) {
+                    LOG_WARNING(HW_GPU,
+                                "TCTRACE stale-skip gpu={:#x} fmt={} {}x{}x{} guest={}KiB frame={}",
+                                image.gpu_addr, static_cast<u32>(image.info.format),
+                                image.info.size.width, image.info.size.height,
+                                image.info.size.depth, image.guest_size_bytes / 1024, frame_tick);
+                }
                 ++tc_stale_skips;
                 tc_stale_skip_bytes += image.guest_size_bytes;
                 runtime.TransitionImageLayout(image);
@@ -5185,13 +5196,16 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         if (TextureCacheTrace()) {
             LOG_WARNING(HW_GPU,
                         "TCTRACE delete id={} gpu={:#x} fmt={} {}x{}x{} guest={}KiB immediate={} "
-                        "reason={} frame={}",
+                        "reason={} flags={:#x} downloaded={} frame={}",
                         image_id.index, image.gpu_addr, static_cast<u32>(image.info.format),
                         image.info.size.width, image.info.size.height, image.info.size.depth,
                         image.guest_size_bytes / 1024, immediate_delete, trace_delete_reason,
-                        frame_tick);
+                        static_cast<u32>(image.flags) | trace_delete_flags,
+                        trace_delete_downloaded, frame_tick);
         }
         trace_delete_reason = "other";
+        trace_delete_flags = 0;
+        trace_delete_downloaded = false;
     }
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
