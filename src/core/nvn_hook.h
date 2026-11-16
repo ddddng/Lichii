@@ -90,6 +90,11 @@ void StopDirect();
 /// exports in the application's modules (after they are loaded). Logs the decision.
 void Install(Core::System& system, Kernel::KProcess& process);
 
+/// Direct mode, the Vulkan renderer being made (before the game runs): the direct renderer could
+/// not start on the device. The boot falls back to GPU emulation, and so does every later boot
+/// in this process that asks for the direct renderer. Logged.
+void DirectFailed();
+
 /// The boot is over (the end of System::ShutdownMainProcess): its hook state goes.
 void Uninstall();
 

@@ -22,6 +22,7 @@ enum class RendererChoice : u8 {
     Not64Bit,    ///< a 32-bit game: the NVN hook covers A64 code only
     NoNvn,       ///< the game exports no nvnBootstrapLoader
     EarlierBoot, ///< an earlier game in this process ran the direct renderer (it starts once)
+    ReplayFailed, ///< the direct renderer could not start on the Vulkan device (in this process)
 };
 
 struct RendererInputs {
@@ -32,6 +33,7 @@ struct RendererInputs {
     bool is_64bit;
     bool has_nvn; ///< nvnBootstrapLoader found
     bool direct_ran_before;
+    bool replay_failed; ///< an earlier start of the direct renderer in this process failed
 };
 
 [[nodiscard]] constexpr RendererChoice ChooseRenderer(const RendererInputs& in) {
@@ -52,6 +54,9 @@ struct RendererInputs {
     }
     if (!in.has_nvn) {
         return RendererChoice::NoNvn;
+    }
+    if (in.replay_failed) {
+        return RendererChoice::ReplayFailed;
     }
     if (in.direct_ran_before) {
         return RendererChoice::EarlierBoot;
@@ -90,6 +95,9 @@ struct RendererInputs {
     case RendererChoice::EarlierBoot:
         return "fallback: an earlier game in this session ran the NVN direct renderer, which "
                "starts once per process (restart Lichii)";
+    case RendererChoice::ReplayFailed:
+        return "fallback: the NVN direct renderer could not start on this GPU (it needs Vulkan "
+               "1.3; the replay's log lines say what is missing)";
     }
     return "?";
 }

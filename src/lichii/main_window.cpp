@@ -2314,6 +2314,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                 return tr("the game is 32-bit");
             case RendererChoice::NoNvn:
                 return tr("the game does not use NVN");
+            case RendererChoice::ReplayFailed:
+                return tr("it could not start on this GPU");
             case RendererChoice::EarlierBoot:
             default:
                 return tr("it runs once per session: restart Lichii to use it again");

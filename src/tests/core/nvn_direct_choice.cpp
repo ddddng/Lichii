@@ -19,6 +19,7 @@ constexpr RendererInputs Runnable{
     .is_64bit = true,
     .has_nvn = true,
     .direct_ran_before = false,
+    .replay_failed = false,
 };
 } // namespace
 
@@ -49,6 +50,11 @@ TEST_CASE("A game the direct renderer cannot run falls back", "[nvn_direct_choic
     REQUIRE(with([](RendererInputs& in) { in.has_nvn = false; }) == RendererChoice::NoNvn);
     REQUIRE(with([](RendererInputs& in) { in.direct_ran_before = true; }) ==
             RendererChoice::EarlierBoot);
+    // A start that failed on the device stays the reason for the later boots of the process.
+    REQUIRE(with([](RendererInputs& in) {
+                in.direct_ran_before = true;
+                in.replay_failed = true;
+            }) == RendererChoice::ReplayFailed);
     // The override cannot force a game the direct renderer cannot run.
     REQUIRE(with([](RendererInputs& in) {
                 in.override_ = true;
@@ -70,5 +76,6 @@ TEST_CASE("Only refusals of an asked-for direct renderer are fallbacks", "[nvn_d
     REQUIRE_FALSE(IsFallback(RendererChoice::SettingOff));
     REQUIRE_FALSE(IsFallback(RendererChoice::OverrideOff));
     REQUIRE(IsFallback(RendererChoice::EarlierBoot));
+    REQUIRE(IsFallback(RendererChoice::ReplayFailed));
     REQUIRE_FALSE(IsDirect(RendererChoice::EarlierBoot));
 }

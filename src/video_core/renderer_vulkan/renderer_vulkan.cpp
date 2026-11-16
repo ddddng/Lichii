@@ -256,8 +256,8 @@ struct NvnDirectMemory {
 
 /// NVN2 direct mode (dotfiles-25x.2): the replay runs on this device. Its NVN queues take the
 /// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
-/// submission of the replay holds the scheduler's submit lock.
-void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
+/// submission of the replay holds the scheduler's submit lock. Returns whether the replay is up.
+bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
                     Scheduler& scheduler, NvnDirectAstc* astc, NvnDirectShaders& shaders,
                     VideoCore::ShaderNotify& shader_notify) {
     std::vector<const char*> extensions;
@@ -328,6 +328,7 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
     const bool up = nvn_direct_adopt_device(&adopted) != 0;
     LOG_INFO(Render_Vulkan, "NVN2 direct mode: the replay {} on Lichii's device ({}, {} queues)",
              up ? "is up" : "failed to start", device.GetModelName(), queues.size());
+    return up;
 }
 #endif
 
@@ -466,9 +467,16 @@ try
         }
         const PipelineCache& pipeline_cache = rasterizer.GetPipelineCache();
         nvn_direct_shaders.emplace(device, pipeline_cache.GetProfile(), pipeline_cache.GetHostInfo());
-        AdoptNvnDirect(dld, *instance, device, scheduler,
-                       nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
-                       gpu_.ShaderNotify());
+        if (!AdoptNvnDirect(dld, *instance, device, scheduler,
+                            nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
+                            gpu_.ShaderNotify())) {
+            // Before the game runs: it falls back to GPU emulation on this device rather than
+            // run with nothing to show.
+            nvn_direct_shaders.reset();
+            nvn_direct_astc.reset();
+            device.EndNvnDirect();
+            Core::NvnHook::DirectFailed();
+        }
     } else if (device.IsNvnDirect()) {
         LOG_INFO(Render_Vulkan, "NVN2 direct mode: null backend, the replay has no device");
     }

@@ -226,6 +226,8 @@ std::unique_ptr<State> g_state;
 u64 g_boots{};
 /// A boot of this process ran the direct renderer: its replay starts once per process.
 bool g_direct_ran{};
+/// The direct renderer failed to start on the device in this process (DirectFailed).
+bool g_replay_failed{};
 RendererChoice g_choice{RendererChoice::SettingOff};
 
 std::unique_ptr<State> Create() {
@@ -880,6 +882,7 @@ void Install(Core::System& system, Kernel::KProcess& process) {
         .is_64bit = process.Is64Bit(),
         .has_nvn = state_owner != nullptr && !state_owner->bootstrap_entries.empty(),
         .direct_ran_before = g_direct_ran,
+        .replay_failed = g_replay_failed,
     });
     if (built || IsFallback(g_choice)) {
         LOG_INFO(Core, "Renderer: {} ({})",
@@ -904,6 +907,14 @@ void Install(Core::System& system, Kernel::KProcess& process) {
              state.bootstrap_entries.size(), state.sdk_major, state.private0_address,
              state.private0_size, state.synthetic_base);
     g_state = std::move(state_owner);
+}
+
+void DirectFailed() {
+    g_replay_failed = true;
+    g_choice = RendererChoice::ReplayFailed;
+    LOG_WARNING(Core, "Renderer: GPU emulation ({})", Describe(g_choice));
+    // The game has not run yet: without a state its NVN driver runs, on GPU emulation.
+    g_state.reset();
 }
 
 void Uninstall() {
