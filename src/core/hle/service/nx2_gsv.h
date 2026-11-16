@@ -2215,13 +2215,14 @@ private:
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
                          "pacing {} us, {} ran a frame ahead, {} vblanks asked ({}% of real "
-                         "time at 60 Hz)",
+                         "time at 60 Hz), {} held one vblank to catch up",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
                          m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.vblanks,
                          m_stats.frame_us > 0 ? m_stats.vblanks * 1'000'000 / 60 * 100 /
                                                     m_stats.frame_us
-                                              : 0);
+                                              : 0,
+                         m_stats.catch_up_holds);
                 m_stats = {.last_present = entered};
             }
         }
@@ -2239,7 +2240,7 @@ private:
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{}, vblanks{};
-        u32 presents{}, ran_ahead{};
+        u32 presents{}, ran_ahead{}, catch_up_holds{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
@@ -2568,7 +2569,10 @@ private:
                         : std::chrono::nanoseconds{100'000'000'000LL * swap_interval /
                                                    refresh_rate /
                                                    (speed_limited ? Settings::SpeedLimit() : 100)};
-        const auto interval = PacedInterval(vblank_interval, fps_limit);
+        const auto held_interval =
+            m_present_pacer.Hold(vblank_interval, swap_interval, forced_interval == 0);
+        m_stats.catch_up_holds += held_interval < vblank_interval ? 1 : 0;
+        const auto interval = PacedInterval(held_interval, fps_limit);
         Tegra::g_nx2_guest_frame_interval_ns.store(
             static_cast<u64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(interval).count()),
@@ -2598,6 +2602,7 @@ private:
                     std::chrono::steady_clock::now() - sleep_start).count();
             }
         }
+        m_present_pacer.Released(std::chrono::steady_clock::now());
     }
 
     /// Allocate one reusable session event; resource exhaustion retains the host wait.
