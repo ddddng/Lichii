@@ -228,14 +228,17 @@ fail:
 // at gl_PrimitiveIDIn; only the run that finds it 0 writes memory. Every store and copy into Uniform / StorageBuffer / PhysicalStorageBuffer / Image memory, image write and
 // atomic is put under that condition (its block split around it); the other runs see an atomic's result as the memory's value (a compare-exchange its comparator, so a
 // compare-exchange loop ends). What the shader emits is left alone: every run emits as before. Returns the count of memory writes (0: nothing to do, *out NULL), -1 with err
-// on failure; with out and a count above 0, the rewritten module (malloc'd, *out_nw words)
+// on failure; with out and a count above 0, the rewritten module (malloc'd, *out_nw words).
+// Lichii (dotfiles-25x.37): the claim buffer is declared as the module's SPIR-V version allows, a Uniform BufferBlock up to 1.2 (the library's), a StorageBuffer Block from
+// 1.3 (Lichii's recompiler emits 1.6, where BufferBlock does not exist), and from 1.4 the claim and guard variables join the entry point's interface. RADV crashed in
+// spirv_to_nir on the BufferBlock claim of Donkey Kong Bananza's 5d537f7630ec3671 at its first load into the game
 enum { OpUndef = 1, OpExecutionMode = 16, OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypeForwardPointer = 39,
        OpFunctionEnd = 56, OpFunctionParameter = 55, OpImageTexelPointer = 60, OpStore = 62, OpCopyMemory = 63, OpCopyMemorySized = 64, OpPtrAccessChain = 67,
        OpInBoundsPtrAccessChain = 70, OpImageWrite = 99, OpConvertUToPtr = 120, OpIEqual = 170, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248,
        OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251, OpKill = 252, OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255, OpTerminateInvocation = 4416,
        OpAtomicStore = 228, OpAtomicExchange = 229, OpAtomicCompareExchange = 230, OpAtomicCompareExchangeWeak = 231, OpAtomicXor = 242,
        OpAtomicFMinEXT = 5614, OpAtomicFMaxEXT = 5615, OpAtomicFAddEXT = 6035, OpDecorationGroup = 73, OpGroupDecorate = 74, OpGroupMemberDecorate = 75 };
-enum { SCUniform = 2, SCPrivate = 6, SCImage = 11, SCStorageBuffer = 12, SCPhysicalStorageBuffer = 5349, DecBufferBlock = 3, DecArrayStride = 6, DecOffset = 35,
+enum { SCUniform = 2, SCPrivate = 6, SCImage = 11, SCStorageBuffer = 12, SCPhysicalStorageBuffer = 5349, DecBlock = 2, DecBufferBlock = 3, DecArrayStride = 6, DecOffset = 35,
        DecBinding = 33, DecDescriptorSet = 34, BIPrimitiveId = 7 };
 static int sc_mem(uint32_t sc) { return sc == SCUniform || sc == SCImage || sc == SCStorageBuffer || sc == SCPhysicalStorageBuffer; }
 static int is_term(uint32_t op) { return op == OpBranch || op == OpBranchConditional || op == OpSwitch || op == OpKill || op == OpReturn || op == OpReturnValue || op == OpUnreachable || op == OpTerminateInvocation; }
@@ -245,6 +248,8 @@ static int is_annot(uint32_t op) { return op == OpDecorate || op == OpMemberDeco
 static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint32_t *last, uint32_t *rec, vec_t *o, int *found, char *err, size_t errn) {
 #define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
     uint32_t bound = w[3], nb = bound;
+    const uint32_t sc_claim = w[1] >= 0x10300 ? SCStorageBuffer : SCUniform, dec_claim = sc_claim == SCStorageBuffer ? DecBlock : DecBufferBlock;   // (the claim buffer's)
+    const int iface_all = w[1] >= 0x10400;   // (every global variable the entry point uses is in its interface)
     uint32_t *psc = calloc(bound, 4), *ty = calloc(bound, 4);   // psc[pointer type]: storage class + 1; ty[id]: the type of a pointer-valued id
     if (!psc || !ty) FAIL("out of memory");
     uint32_t t_bool = 0, t_u32 = 0, t_i32 = 0, p_in_i32 = 0, p_priv_bool = 0, p_uni_u32 = 0, main_fn = 0, prim_var = 0;
@@ -256,7 +261,7 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
         if (op == OpTypePointer && len >= 4) {
             if (w[i + 2] == SCInput && w[i + 3] && w[i + 3] == t_i32) p_in_i32 = w[i + 1];
             if (w[i + 2] == SCPrivate && w[i + 3] && w[i + 3] == t_bool) p_priv_bool = w[i + 1];
-            if (w[i + 2] == SCUniform && w[i + 3] && w[i + 3] == t_u32) p_uni_u32 = w[i + 1];
+            if (w[i + 2] == sc_claim && w[i + 3] && w[i + 3] == t_u32) p_uni_u32 = w[i + 1];
         }
         else if ((op == OpVariable || op == OpAccessChain || op == OpInBoundsAccessChain || op == OpPtrAccessChain || op == OpInBoundsPtrAccessChain || op == OpConvertUToPtr ||
                   op == OpBitcast || op == OpCopyObject || op == OpImageTexelPointer || op == OpFunctionParameter) && len >= 3 && w[i + 2] < bound) ty[w[i + 2]] = w[i + 1];
@@ -282,13 +287,14 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
     uint32_t cur = 0, cur_orig = 0; int in_fn = 0, in_main_entry = 0;
     for (size_t i = 5; i < nw;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
-        if (i == ep_at && !mk_prim) { if (!put_n(o, in, len)) FAIL("out of memory"); i += len; continue; }
-        if (i == ep_at) {   // the PrimitiveId input joins the interface
-            if (!put(o, (len + 1) << 16 | OpEntryPoint) || !put_n(o, in + 1, len - 1) || !put(o, prim_var)) FAIL("out of memory");
+        if (i == ep_at) {   // a new PrimitiveId input joins the interface, and from SPIR-V 1.4 the claim and guard variables
+            uint32_t add = (mk_prim ? 1 : 0) + (iface_all ? 2 : 0);
+            if (!put(o, (len + add) << 16 | OpEntryPoint) || !put_n(o, in + 1, len - 1)) FAIL("out of memory");
+            if ((mk_prim && !put(o, prim_var)) || (iface_all && (!put(o, cvar) || !put(o, gvar)))) FAIL("out of memory");
             i += len; continue;
         }
         if (i == first_annot) {
-            uint32_t x[] = {4u << 16 | OpDecorate, rta, DecArrayStride, 4, 3u << 16 | OpDecorate, st, DecBufferBlock, 5u << 16 | OpMemberDecorate, st, 0, DecOffset, 0,
+            uint32_t x[] = {4u << 16 | OpDecorate, rta, DecArrayStride, 4, 3u << 16 | OpDecorate, st, dec_claim, 5u << 16 | OpMemberDecorate, st, 0, DecOffset, 0,
                             4u << 16 | OpDecorate, cvar, DecDescriptorSet, 0, 4u << 16 | OpDecorate, cvar, DecBinding, binding};
             if (!put_n(o, x, sizeof x / 4)) FAIL("out of memory");
             if (mk_prim) { uint32_t y[] = {4u << 16 | OpDecorate, mk_prim, DecBuiltIn, BIPrimitiveId}; if (!put_n(o, y, 4)) FAIL("out of memory"); }
@@ -298,10 +304,10 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
             if (mk_i32) { uint32_t x[] = {4u << 16 | OpTypeInt, mk_i32, 32, 1}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_pin) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pin, SCInput, t_i32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_ppb) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_ppb, SCPrivate, t_bool}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
-            if (mk_pu) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pu, SCUniform, t_u32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
+            if (mk_pu) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pu, sc_claim, t_u32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_prim) { uint32_t x[] = {4u << 16 | OpVariable, p_in_i32, mk_prim, SCInput}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
-            uint32_t x[] = {3u << 16 | OpTypeRuntimeArray, rta, t_u32, 3u << 16 | OpTypeStruct, st, rta, 4u << 16 | OpTypePointer, pst, SCUniform, st,
-                            4u << 16 | OpVariable, pst, cvar, SCUniform, 4u << 16 | OpConstant, t_u32, c0, 0, 4u << 16 | OpConstant, t_u32, c1, 1,
+            uint32_t x[] = {3u << 16 | OpTypeRuntimeArray, rta, t_u32, 3u << 16 | OpTypeStruct, st, rta, 4u << 16 | OpTypePointer, pst, sc_claim, st,
+                            4u << 16 | OpVariable, pst, cvar, sc_claim, 4u << 16 | OpConstant, t_u32, c0, 0, 4u << 16 | OpConstant, t_u32, c1, 1,
                             4u << 16 | OpVariable, p_priv_bool, gvar, SCPrivate};
             if (!put_n(o, x, sizeof x / 4)) FAIL("out of memory");
         }
