@@ -43,6 +43,8 @@ constexpr std::string_view RevokePath = "/api/oauth/revoke";
 // The friend list, friend requests and the player's presence, read and sent with the access token.
 constexpr std::string_view FriendsPath = "/api/friends";
 constexpr std::string_view PresencePath = "/api/presence";
+// Public, signed with GameCatalogKey (nextendo_game_catalog.h).
+constexpr std::string_view GameCatalogPath = "/service-catalog/v1/game-catalog";
 constexpr std::string_view Scopes = "identity game.matchmaking friends presence";
 constexpr u16 CallbackPort = 47823;
 
@@ -77,11 +79,22 @@ struct Account {
     s64 nex_expires{};
     // What the sign-in granted, space separated. Empty for sign-ins from before Lichii kept it.
     std::string scope;
+    // The account's BAAS user id ("nsa" from /api/me), the account id a Switch has. 0 when unknown.
+    u64 baas_nsa{};
 };
 
 // True when the sign-in granted friends and presence. Older sign-ins didn't and need a new one;
 // online play works without them.
 bool HasSocialScopes(const Account& account);
+
+constexpr u64 AnimalCrossingNewHorizons = 0x01006F8002326000;
+
+// The network service account id a title sees: the pid the game token proves, except Animal
+// Crossing: New Horizons, which matches players with their console friends by the BAAS user id.
+u64 NetworkServiceAccountId(u64 program_id, const Account& account);
+
+// /api/me's "nsa": 16 hex digits, else 0.
+u64 ParseBaasNsa(std::string_view text);
 
 std::optional<Account> LoadAccount();
 void SaveAccount(const Account& account);
@@ -188,6 +201,10 @@ std::optional<Account> EnsureGameToken(std::string_view client_id);
 // Whether the signed-in account may play online, and why not. nullopt without a game token or
 // when nextendo.network can't be reached.
 std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id);
+
+// The game catalogue's signed envelope, not yet verified. nullopt when nextendo.network can't be
+// reached. Blocks on the request.
+std::optional<std::string> FetchGameCatalog(std::string_view client_id);
 
 // Ends a signed-out session's tokens on nextendo.network. Blocks on the request.
 void RevokeToken(std::string_view client_id, const std::string& refresh_token);
