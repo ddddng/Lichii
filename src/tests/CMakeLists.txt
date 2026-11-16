@@ -52,6 +52,7 @@ add_executable(tests
     core/memory_acquire.cpp
     core/kip_sections.cpp
     core/memory_span.cpp
+    core/kip_blz.cpp
     core/builtin_patches.cpp
     core/cheat_parser.cpp
     core/builtin_font_glyphs.cpp
@@ -129,6 +130,7 @@ add_executable(tests
     video_core/safe_command_reads.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
+    hid_core/emulated_controller_config.cpp
     hid_core/sensor_info.cpp
     common/paged_scalar.cpp
     common/queue_lifetime.cpp
@@ -152,6 +154,7 @@ add_executable(tests
     video_core/shader_cache_v2_programs.cpp
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
+    video_core/vulkan_buffer_oom.cpp
     video_core/shader_precache.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
