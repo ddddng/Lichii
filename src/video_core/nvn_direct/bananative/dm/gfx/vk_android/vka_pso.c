@@ -564,6 +564,7 @@ static _Thread_local int t_ahead;   // gpl_link makes only these libraries (1 pr
 static _Thread_local int t_lib_peek;            // lib_make answers from the map only: a library not made yet is not made here (the link fails)
 static _Thread_local const char *t_how = "";    // appended to the build lines of this thread (" (asynchronous)")
 static _Atomic uint64_t g_async_made, g_async_ns, g_async_skips;   // made asynchronously, their time, the draws skipped meanwhile
+static _Atomic uint64_t g_async_claimed;   // pipelines the frame path took back from the asynchronous threads or waited for (async_claim)
 // Lichii (dotfiles-25x.13): libraries the ahead threads made (and let go of, DM_VK_LIB_AHEAD_KEEP=0), and the ones other threads compiled (over 20 ms: not a cache hit)
 static _Atomic uint64_t g_lib_ahead_made, g_lib_slow;
 static int lib_ahead_keep(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_LIB_AHEAD_KEEP", 0) != 0; return v; }
@@ -793,11 +794,11 @@ static void opt_queue(gval *g, vka_shader *const sh[VKA_NSTAGE], const vka_layou
 void vka_gpl_line(char *out, size_t n) {
     pthread_mutex_lock(&g_mu);
     if (n) snprintf(out, n, "libraries %llu vertex input / %llu pre-rasterization / %llu fragment shader / %llu fragment output / %llu combined, %.0f ms; %llu linked (%.1f ms), %llu optimized in the background, %llu waiting; "
-                    "cache-only tries %llu hit / %llu missed (%.0f ms in the misses); asynchronous %llu made (%.0f ms), %llu draws skipped meanwhile%s",
+                    "cache-only tries %llu hit / %llu missed (%.0f ms in the misses); asynchronous %llu made (%.0f ms), %llu draws skipped meanwhile, %llu taken back or waited for (targets not drawn in the frames before)%s",
                     (unsigned long long)g_nlib[L_VI], (unsigned long long)g_nlib[L_PRE], (unsigned long long)g_nlib[L_FS], (unsigned long long)g_nlib[L_FO], (unsigned long long)g_nlib[L_PREFS], g_lib_ms,
                     (unsigned long long)g_nlinked, g_link_ms, (unsigned long long)g_nopt, (unsigned long long)g_opt_waiting, (unsigned long long)g_probe_hit, (unsigned long long)g_probe_miss,
                     g_probe_miss_ns / 1e6, (unsigned long long)atomic_load(&g_async_made), atomic_load(&g_async_ns) / 1e6, (unsigned long long)atomic_load(&g_async_skips),
-                    atomic_load(&g_gpl_off) ? "; OFF for this run (pre-rasterization refused)" : "");
+                    (unsigned long long)atomic_load(&g_async_claimed), atomic_load(&g_gpl_off) ? "; OFF for this run (pre-rasterization refused)" : "");
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -958,7 +959,7 @@ static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen
     else VLOG("pipeline made on the frame path (%.1f ms%s), not in the prewarm list: %d records with these shaders, the nearest differs in %s",
               ms, linked ? ", linked" : "", same_sh, d[0] ? d : "nothing: the same key (the prewarm threads had not reached it yet)");
 }
-static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int *made);
+static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int wait, int *made);
 static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made);
 static void *pw_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-prewarm");
@@ -989,7 +990,7 @@ static void *pw_main(void *a) {
             else {
                 gkey_full fk; memset(&fk, 0, sizeof fk); memcpy(fk.sh, sh, sizeof fk.sh); fk.layout = lay.layout; fk.k = k;
                 size_t len = k.vin_static ? sizeof fk : offsetof(gkey_full, k.va);
-                gfx_obtain(&fk, fnv(&fk, len, 1469598103934665603ull), len, sh, &lay, &k, 1, &made);
+                gfx_obtain(&fk, fnv(&fk, len, 1469598103934665603ull), len, sh, &lay, &k, 1, 0, &made);
             }
         }
         if (made) atomic_fetch_add(&g_pw_made, 1); else if (!bad) atomic_fetch_add(&g_pw_had, 1);
@@ -1029,7 +1030,9 @@ static void busy_wait(gval *g) {
 // to 8.7 s, ux-cold-1; with it none, ux-cold-3). A skipped draw that renders something once is lost for good (ux-cold-3: the Grand Prix mode list's
 // blurred backdrop, taken once when the menu opens, stayed black). What stays on the frame path is what costs no compile: the pipeline cache's pipeline
 // (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) and the link of graphics pipeline libraries all made before (t_lib_peek). A key another thread is making
-// (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify)
+// (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify).
+// A draw into targets that were not all drawn in the 3 frames before (vka_draw.c drawn_again: a pass the game may draw once) is never skipped: its pipeline is made on the
+// frame path, a queued build of it taken back, one in progress waited for (vka_gfx_pipeline's wait; ux-cold-3's backdrop)
 enum { MK_FRAME, MK_PREWARM, MK_ASYNC };
 static int async_threads(void) { static int n = -1; if (n < 0) { n = VKA_ENV("DM_VK_ASYNC_PSO", vka_async_pipelines()) ? VKA_ENV("DM_VK_ASYNC_THREADS", 4) : 0; if (n > 8) n = 8; if (n < 0) n = 0; } return n; }
 typedef struct async_job { struct async_job *next; gval *g; gkey_full fk; size_t len; vka_layout lay; uint64_t queued; } async_job;
@@ -1051,11 +1054,11 @@ static VkPipeline cache_probe(pstate *P) {
     return VK_NULL_HANDLE;
 }
 // Makes g's pipeline (g busy, in the map). 0: the frame path left it to the asynchronous threads (g stays busy until they are done)
-static int gfx_make(gval *g, const gkey_full *fk, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int mode) {
+static int gfx_make(gval *g, const gkey_full *fk, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int mode, int wait) {
     uint64_t t_make = now_ns();
     pc_open();
     VkPipeline p = VK_NULL_HANDLE; int linked = 0;
-    const int async = mode == MK_FRAME && async_threads() > 0;
+    const int async = mode == MK_FRAME && !wait && async_threads() > 0;
     pstate *P = malloc(sizeof *P);
     if (P && pstate_fill(P, sh, lay, k)) {   // (else logged by vka_shader_module)
         const int gpl = gpl_on() && !P->mesh;   // (a mesh pipeline is made whole: the libraries here are cut for vertex input pipelines)
@@ -1096,7 +1099,7 @@ static void *async_main(void *a) {
         async_job *j = g_as_head; g_as_head = j->next; if (!g_as_head) g_as_tail = &g_as_head;
         pthread_mutex_unlock(&g_as_mu);
         uint64_t t0 = now_ns();
-        gfx_make(j->g, &j->fk, j->len, j->fk.sh, &j->lay, &j->fk.k, MK_ASYNC);
+        gfx_make(j->g, &j->fk, j->len, j->fk.sh, &j->lay, &j->fk.k, MK_ASYNC, 0);
         uint64_t t1 = now_ns(), d = t1 - t0; atomic_fetch_add(&g_async_made, 1); atomic_fetch_add(&g_async_ns, d);
         vka_pipeline_notify(1);
         if (t1 - j->queued > 1000000000ull) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 50) VLOG("pipeline made asynchronously %.1f s after its first draw (%.0f ms making it): its draws were skipped meanwhile", (t1 - j->queued) / 1e9, d / 1e6); }
@@ -1116,24 +1119,39 @@ static void async_queue(gval *g, const gkey_full *fk, size_t len, const vka_layo
     async_job *j = calloc(1, sizeof *j);
     if (j) { j->g = g; memcpy(&j->fk, fk, len); j->len = len; j->lay = *lay; j->queued = now_ns(); }
     if (!j || !started) {   // no thread: made here, as before
-        free(j); gfx_make(g, fk, len, fk->sh, lay, &fk->k, MK_ASYNC); return;
+        free(j); gfx_make(g, fk, len, fk->sh, lay, &fk->k, MK_ASYNC, 0); return;
     }
     vka_pipeline_notify(0);
     pthread_mutex_lock(&g_as_mu); *g_as_tail = j; g_as_tail = &j->next; pthread_cond_signal(&g_as_cv); pthread_mutex_unlock(&g_as_mu);
 }
-static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int *made) {
+// The frame path needs g (busy) for a draw it does not skip: a build still queued is made here, one in progress (or a prewarm thread's) waited for
+static void async_claim(gval *g) {
+    atomic_fetch_add_explicit(&g_async_claimed, 1, memory_order_relaxed);
+    pthread_mutex_lock(&g_as_mu);
+    async_job *j = NULL;
+    for (async_job **pp = &g_as_head; *pp; pp = &(*pp)->next) if ((*pp)->g == g) { j = *pp; *pp = j->next; if (!*pp) g_as_tail = pp; break; }
+    pthread_mutex_unlock(&g_as_mu);
+    if (j) { gfx_make(g, &j->fk, j->len, j->fk.sh, &j->lay, &j->fk.k, MK_FRAME, 1); vka_pipeline_notify(1); free(j); return; }
+    pthread_mutex_lock(&g_mu); if (g->busy) busy_wait(g); pthread_mutex_unlock(&g_mu);
+}
+static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int wait, int *made) {
     *made = 0;
     pthread_mutex_lock(&g_mu);
     gval *g = km_get(&g_gfx, fk, h);
     if (g) {
-        if (g->busy && (prewarm || async_threads() > 0)) { pthread_mutex_unlock(&g_mu); return prewarm ? NULL : g; }   // (the frame path skips its draws: gval_use)
+        if (g->busy && (prewarm || async_threads() > 0)) {   // (the frame path skips its draws, gval_use, unless it waits)
+            pthread_mutex_unlock(&g_mu);
+            if (prewarm) return NULL;
+            if (wait) async_claim(g);
+            return g;
+        }
         if (g->busy) busy_wait(g);
         pthread_mutex_unlock(&g_mu);
         return g;
     }
     g = calloc(1, sizeof *g); g->busy = 1; g->pw = (uint8_t)(prewarm != 0); g->tid = prewarm ? gettid() : 0; km_put(&g_gfx, fk, h, g);
     pthread_mutex_unlock(&g_mu);
-    gfx_make(g, fk, len, sh, lay, k, prewarm ? MK_PREWARM : MK_FRAME);
+    gfx_make(g, fk, len, sh, lay, k, prewarm ? MK_PREWARM : MK_FRAME, wait);
     *made = 1;
     return g;
 }
@@ -1144,16 +1162,19 @@ static inline VkPipeline gval_use(gval *g) {
     if (!p && __atomic_load_n(&g->busy, __ATOMIC_ACQUIRE)) atomic_fetch_add_explicit(&g_async_skips, 1, memory_order_relaxed);   // (Lichii: being made off the frame path)
     return p;
 }
-VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k) {
+VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int wait) {
     static gkey_full fk, last; static gval *last_g;
     // With vertex input dynamic state the key's static vertex input (va, vb: two thirds of it) stays zero: only what comes before it is hashed and compared with the
     // previous draw's key (draws in a row often share their pipeline). The entry's pipeline is read at each draw: the optimized one replaces a linked one in place
     size_t len = k->vin_static ? sizeof fk : offsetof(gkey_full, k.va);
     memset(&fk, 0, len);   // (the rest stays zero: vin_static is the device's, the same for every key)
     memcpy(fk.sh, sh, sizeof fk.sh); fk.layout = lay->layout; memcpy(&fk.k, k, len - offsetof(gkey_full, k));
-    if (last_g && !memcmp(&fk, &last, len)) return gval_use(last_g);
+    if (last_g && !memcmp(&fk, &last, len)) {
+        if (wait && __atomic_load_n(&last_g->busy, __ATOMIC_ACQUIRE)) async_claim(last_g);
+        return gval_use(last_g);
+    }
     int made;
-    gval *g = gfx_obtain(&fk, fnv(&fk, len, 1469598103934665603ull), len, sh, lay, k, 0, &made);
+    gval *g = gfx_obtain(&fk, fnv(&fk, len, 1469598103934665603ull), len, sh, lay, k, 0, wait, &made);
     memcpy(&last, &fk, len); last_g = g;
     return gval_use(g);
 }

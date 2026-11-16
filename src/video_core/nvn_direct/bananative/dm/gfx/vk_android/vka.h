@@ -299,6 +299,7 @@ typedef struct vka_img {
     // Lichii (dotfiles-25x.17): wseq the GPU write order of its last write (0: none); ali the serials of textures of another shape found over its storage (images of their own)
     uint64_t wseq; uint64_t ali[8]; uint8_t nali;
     uint8_t scaled;          // Lichii (dotfiles-25x.34): made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
+    uint64_t drawn[2];       // Lichii (dotfiles-25x.32): the last two frames (presents filled, plus 1) a pass drew into it, the newest first (vka_draw.c drawn_again)
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
@@ -443,7 +444,7 @@ typedef struct {
     VkDescriptorSetLayout set_fs; uint32_t ndesc_fs; VkPipelineLayout pre_layout, fs_layout;
 } vka_layout;
 int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out);   // the set-0 layout of these stages' records with the pools' set 1
-VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k);
+VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int wait);   // wait: never left to the asynchronous threads (vka_pso.c)
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay);
 void vka_pso_save(int force);         // the VkPipelineCache and the prewarm list to the app's files (DM_TEMP): due DM_VK_PCACHE_SAVE_S after the last save, on the saver thread; force = now, on the caller's
 void vka_pso_waits(uint64_t *save_ns, uint64_t *pw_wait_ns);   // cumulative: time saving the cache (saver thread), the frame path's waits for a prewarm thread making the same pipeline

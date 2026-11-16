@@ -274,6 +274,7 @@ static struct {
     int bar_pending;                                     // a game barrier came inside the pass and was taken there (vka_rp_game_barrier): the draws after it are checked (bar_hazard)
     int scaled;                                          // Lichii (dotfiles-25x.34): its targets are at the render scale: viewports and scissors scaled
     VkExtent2D own;                                      // Lichii (dotfiles-25x.40): the area in the targets' own texels (not scaled): the render area shaders read
+    int again;                                           // Lichii (dotfiles-25x.32): every target was drawn in the frames just before too (drawn_again): only such draws are skipped while their pipeline is made asynchronously
 } R;
 // Lichii (dotfiles-25x.34): the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
 // pixel stage's down factor; no image is scaled: vka_tex.c img_unscale), and the last pushed, which stays while every layout has the same push constant range (vka_dyn_invalidate forgets it)
@@ -335,6 +336,13 @@ static void own_min(const vka_img *im, uint32_t lv, uint32_t lw, uint32_t lh, ui
     if (im->scaled) { lw = im->d.width >> lv ? im->d.width >> lv : 1; lh = im->d.height >> lv ? im->d.height >> lv : 1; }
     if (lw < *ow) *ow = lw; if (lh < *oh) *oh = lh;
 }
+// Lichii (dotfiles-25x.32): marks im drawn in this frame (the presents the replay filled so far); returns whether a pass drew into it in one of the 3 frames before too
+// (targets the game draws every frame, double or triple buffered)
+static int drawn_again(vka_img *im) {
+    uint64_t vka_present_filled(void); const uint64_t f = vka_present_filled() + 1;
+    if (im->drawn[0] != f) { im->drawn[1] = im->drawn[0]; im->drawn[0] = f; }
+    return im->drawn[1] && im->drawn[1] + 3 >= f;
+}
 // Opens the pass over the bound targets: 0 = it cannot (no target can be an attachment), logged
 static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (R.on) { if (!g_pass_keep || rt_same(rt, has_rt, &R.rt, R.has_rt)) return 1; vka_rp_end(); }   // a new SET_RT of other targets ends the pass at its first draw (exec does not)
@@ -388,6 +396,8 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
             }
         } else if (im) VRED_ONCE("depth target (format %#x) cannot be a Vulkan depth attachment: drawn without depth", rt->depth->d.format);
     }
+    R.again = nfb > 0;
+    for (int i = 0; i < nfb; i++) { const int again = drawn_again(fb_im[i]); R.again &= again; }
     if (w == UINT32_MAX) {   // no attachment at all (rasterizer discard, or targets Vulkan cannot take): the viewport's size, for side effects
         if (!d->has_vp) { VRED_ONCE("a draw with no render target and no viewport: skipped"); return 0; }
         w = (uint32_t)fabsf(d->vp[0][2]); h = (uint32_t)fabsf(d->vp[0][3]); if (!w) w = 1; if (!h) h = 1; layers = 1;
@@ -1446,7 +1456,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     PT(3);
     if (!mesh) vin_build(d, sh[0], &k);
     PT(4);
-    VkPipeline p = vka_gfx_pipeline(sh, &lay, &k);
+    VkPipeline p = vka_gfx_pipeline(sh, &lay, &k, !R.again);
     drawflip_note(sh[7] ? sh[7]->key : sh[0] ? sh[0]->key : 0, dw ? dw->ind != 0 : di->ind != 0);
     if (!p) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
