@@ -431,7 +431,7 @@ struct GPU::Impl {
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
                 if (num_fences == 0) {
-                    renderer->Composite(composite_layers);
+                    CompositeOnOwner(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
@@ -443,18 +443,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
-                    const auto composite = [this](const VideoCommon::DueComposites::Layers& due) {
-                        renderer->Composite(due);
-                    };
-                    // A fence another thread reached waits for the owner's next tick. That
-                    // thread may be one the GPU threads wait for, so it doesn't wait.
-                    due_composites.Reached(
-                        composite_layers, VideoCommon::GpuSplit::OwnsScheduler(), composite,
-                        [this, composite] {
-                            (void)RequestSyncOperation(
-                                [this, composite] { due_composites.Run(composite); });
-                            gpu_thread.TickGPU(true);
-                        });
+                    CompositeOnOwner(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {
                     syncpoint_manager.RegisterGuestAction(composite_fences[i].id,
@@ -462,6 +451,21 @@ struct GPU::Impl {
                 }
             });
         gpu_thread.TickGPU(is_async);
+    }
+
+    /// A present whose fences were all reached, on the thread that reached the last one. Every
+    /// present goes through due_composites, so none overtakes one queued for the owner.
+    void CompositeOnOwner(const VideoCommon::DueComposites::Layers& layers) {
+        const auto composite = [this](const VideoCommon::DueComposites::Layers& due) {
+            renderer->Composite(due);
+        };
+        // A fence another thread reached waits for the owner's next tick. That thread may be one
+        // the GPU threads wait for, so it doesn't wait.
+        due_composites.Reached(
+            layers, VideoCommon::GpuSplit::OwnsScheduler(), composite, [this, composite] {
+                (void)RequestSyncOperation([this, composite] { due_composites.Run(composite); });
+                gpu_thread.TickGPU(true);
+            });
     }
 
     void WaitForComposite() {
