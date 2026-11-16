@@ -620,7 +620,8 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
     // A list wait after a sync met by a queued release: its time before and after the back ran
-    // the release, counted apart.
+    // the release, counted apart. The back stores its position within a batch only at the wait's
+    // target, so the wait targets the release first.
     const u64 release = g_acquire_counting && (site == DrainSite::ListWriters ||
                                                site == DrainSite::ListCopies)
                             ? queued_sync_release
@@ -628,10 +629,22 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     using Clock = std::chrono::steady_clock;
     const Clock::time_point wait_start = release != 0 ? Clock::now() : Clock::time_point{};
     std::optional<Clock::time_point> release_ran;
+    if (release != 0 && release < target) {
+        wait_target.store(release, std::memory_order_seq_cst);
+    }
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (release != 0 && !release_ran && consumed_cache >= release) {
             release_ran = Clock::now();
+            if (release < target) {
+                wait_target.store(target, std::memory_order_seq_cst);
+                spins = 0;
+                continue;
+            }
+        }
+        if (release != 0 && !release_ran) {
+            Backoff(spins, release);
+            continue;
         }
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
