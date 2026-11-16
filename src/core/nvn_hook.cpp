@@ -782,6 +782,14 @@ void Install(Core::System& system, Kernel::KProcess& process) {
             state.private0_size = size;
         }
     }
+    // Older SDKs ship the driver as a module of its own (Breath of the Wild 1.6.0: "nvn", which
+    // exports nvnBootstrapLoader); the version string is then in nnSdk's module.
+    for (auto it = modules.begin(); state.sdk_major == 0 && !state.bootstrap_entries.empty() &&
+                                    it != modules.end();
+         ++it) {
+        state.sdk_major =
+            SdkMajor(memory, it->first, GetInteger(Core::GetModuleEnd(&process, it->first)));
+    }
     // The synthetic addresses: in the first unmapped range from 64 KiB that holds every slot.
     // Nothing is ever mapped executable there, and the JIT reads no guest code for them.
     auto& page_table = process.GetPageTable();
