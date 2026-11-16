@@ -84,6 +84,13 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
         if (enabled) {
             ui->airplane_mode->setChecked(false);
         }
+        if (nextendo_signing_in) {
+            return;
+        }
+        UpdateNextendoStatus();
+        if (!ui->nextendo_friends->isHidden()) {
+            RunFriendsRequest(Common::Nextendo::RefreshFriends);
+        }
     });
     connect(ui->redirect_ca_browse, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
@@ -293,8 +300,8 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in
         }
     }
     ui->nextendo_status->setText(status);
-    const bool friends = account && Common::Nextendo::HasSocialScopes(*account) &&
-                         Common::Nextendo::OnlinePlayActive();
+    const bool friends =
+        account && Common::Nextendo::HasSocialScopes(*account) && ui->nextendo_enabled->isChecked();
     ui->nextendo_friends->setVisible(friends);
     if (friends) {
         ShowNextendoFriends();
@@ -351,14 +358,15 @@ void ConfigureNetwork::AnswerNextendoFriend(Common::Nextendo::FriendAction actio
     if (items.isEmpty()) {
         return;
     }
+    // A refresh finishing while the question is open rebuilds the list and deletes its items.
+    const u64 pid = items.front()->data(Qt::UserRole).toULongLong();
+    const QString text = items.front()->text();
     if (action == Common::Nextendo::FriendAction::Remove &&
-        QMessageBox::question(
-            this, tr("Remove friend"),
-            tr("Remove %1 from your Nextendo friends?").arg(items.front()->text())) !=
+        QMessageBox::question(this, tr("Remove friend"),
+                              tr("Remove %1 from your Nextendo friends?").arg(text)) !=
             QMessageBox::Yes) {
         return;
     }
-    const u64 pid = items.front()->data(Qt::UserRole).toULongLong();
     RunFriendsRequest([action, pid](const std::string& client_id) {
         return ThenRefresh(client_id, Common::Nextendo::AnswerFriend(client_id, action, pid));
     });

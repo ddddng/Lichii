@@ -584,6 +584,10 @@ SocialResult SendSocial(std::string_view client_id, std::string_view scope, cons
         if (!renewed) {
             return {.status = SocialStatus::NotSignedIn, .http_status = 401};
         }
+        // A sign-in in the meantime must not get this account's request.
+        if (renewed->generation != session->generation) {
+            return {.status = SocialStatus::NotSignedIn, .http_status = 401};
+        }
         if (renewed->account.access_token == session->account.access_token) {
             return {.status = SocialStatus::Failed, .http_status = 401};
         }
@@ -1165,7 +1169,9 @@ SocialResult RefreshFriends(std::string_view client_id) {
         return {.status = SocialStatus::Failed, .http_status = result.http_status};
     }
     std::scoped_lock lock{account_mutex, social_mutex};
-    if (generation == account_generation) {
+    // A sign-in, or a 403 that dropped the scope, while the list was on its way.
+    if (const auto account = LoadAccountLocked();
+        generation == account_generation && account && HasScope(account->scope, "friends")) {
         friend_cache = std::move(*list);
     }
     return result;
@@ -1237,8 +1243,10 @@ SocialResult UpdatePresence(std::string_view client_id, u64 app_id) {
     std::optional<Presence> last;
     const auto now = std::chrono::steady_clock::now();
     std::chrono::steady_clock::duration since_last;
+    u64 generation;
     {
-        std::scoped_lock lock{social_mutex};
+        std::scoped_lock lock{account_mutex, social_mutex};
+        generation = account_generation;
         if (app_id != 0 && app_id == game_app_id) {
             next.app_field = game_app_field;
         }
@@ -1253,8 +1261,8 @@ SocialResult UpdatePresence(std::string_view client_id, u64 app_id) {
         SendSocial(client_id, "presence", [&body](ApiClient& api, const httplib::Headers& headers) {
             return api.PostJson(PresencePath, headers, body);
         });
-    if (result.status == SocialStatus::Ok) {
-        std::scoped_lock lock{social_mutex};
+    std::scoped_lock lock{account_mutex, social_mutex};
+    if (result.status == SocialStatus::Ok && generation == account_generation) {
         last_presence = std::move(next);
         last_presence_time = now;
     }

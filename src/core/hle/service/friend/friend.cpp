@@ -588,11 +588,14 @@ private:
     }
 
     void GetFriendCount(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_Friend, "called");
+        IPC::RequestParser rp{ctx};
+        [[maybe_unused]] const auto uuid = rp.PopRaw<Common::UUID>();
+        const auto count = FilteredFriends(rp.PopRaw<SizedFriendFilter>()).size();
+        LOG_DEBUG(Service_Friend, "called -> {}", count);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(static_cast<u32>(Friends().size()));
+        rb.Push(static_cast<u32>(count));
     }
 
     void GetNewlyFriendCount(HLERequestContext& ctx) {
