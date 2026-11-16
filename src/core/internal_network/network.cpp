@@ -172,6 +172,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case WSAEISCONN:
         return Errno::ISCONN;
+    case WSAEADDRINUSE:
+        return Errno::ADDRINUSE;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
         return Errno::OTHER;
@@ -321,6 +323,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case EISCONN:
         return Errno::ISCONN;
+    case EADDRINUSE:
+        return Errno::ADDRINUSE;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
         return Errno::OTHER;
@@ -944,6 +948,16 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int level, int option, T value) {
     return GetAndLogLastError();
 }
 
+#ifdef _WIN32
+/// Whether a receive on UDP socket fd fails once a send drew ICMP port unreachable.
+static void ReportUdpResets(SOCKET fd, bool report) {
+    BOOL report_reset = report ? TRUE : FALSE;
+    DWORD bytes_returned = 0;
+    WSAIoctl(fd, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0,
+             &bytes_returned, nullptr, nullptr);
+}
+#endif
+
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
     if (fd == INVALID_SOCKET) {
@@ -954,11 +968,9 @@ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     if (type == Type::DGRAM) {
         // Windows fails the next receive with WSAECONNRESET once a peer answers a send with ICMP
         // port unreachable. The console does not on an unconnected socket, which Pia shares
-        // among its peers, so one peer that left would read as the network failing.
-        BOOL report_reset = FALSE;
-        DWORD bytes_returned = 0;
-        WSAIoctl(fd, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0,
-                 &bytes_returned, nullptr, nullptr);
+        // among its peers, so one peer that left would read as the network failing. Connect
+        // turns the reports back on.
+        ReportUdpResets(fd, false);
     }
 #endif
     return Errno::SUCCESS;
@@ -994,8 +1006,17 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
         return {AcceptResult{}, GetAndLogLastError()};
     }
 
+    auto accepted = std::make_unique<Socket>(new_socket);
+#ifdef _WIN32
+    // The accepted socket takes the listener's options, the host's SO_REUSEADDR among them.
+    {
+        std::scoped_lock lock{reuse_mutex};
+        accepted->reuse_addr = reuse_addr;
+        accepted->reuse_port = reuse_port;
+    }
+#endif
     AcceptResult result{
-        .socket = std::make_unique<Socket>(new_socket),
+        .socket = std::move(accepted),
         .sockaddr_in = TranslateToSockAddrIn(addr, addrlen),
     };
     if (!LocalRedirect::Allowed(result.sockaddr_in)) {
@@ -1021,6 +1042,13 @@ Errno Socket::Connect(SockAddrIn addr_in) {
     }
     const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
     if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
+#ifdef _WIN32
+        // As on the console, a connected UDP socket's receive fails once its peer's port is
+        // unreachable.
+        if (socket_type == Type::DGRAM) {
+            ReportUdpResets(fd, true);
+        }
+#endif
         return Errno::SUCCESS;
     }
 

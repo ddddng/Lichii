@@ -2026,6 +2026,7 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     }
     case OptName::NOSIGPIPE:
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
+        StoreSockOpt(descriptor->socket, level, optname, optval);
         return Errno::SUCCESS;
     default:
         StoreSockOpt(descriptor->socket, level, optname, optval);

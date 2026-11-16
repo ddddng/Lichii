@@ -91,7 +91,7 @@ TEST_CASE("Network::ReusePortSharesUdpPort", "[core][sockets]") {
     CHECK(first.GetReusePort() == std::pair{true, Network::Errno::SUCCESS});
     CHECK(without_option.GetReusePort() == std::pair{false, Network::Errno::SUCCESS});
     CHECK(second.Bind(address) == Network::Errno::SUCCESS);
-    CHECK(without_option.Bind(address) != Network::Errno::SUCCESS);
+    CHECK(without_option.Bind(address) == Network::Errno::ADDRINUSE);
 }
 
 TEST_CASE("Network::ReuseOptionsStayIndependent", "[core][sockets]") {
