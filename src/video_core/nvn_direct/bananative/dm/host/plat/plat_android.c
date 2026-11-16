@@ -215,6 +215,11 @@ void plat_slot_check(uint64_t off) {   // the load the rewritten code makes: [[t
 }
 
 // ---- Threads ----
+#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 42)
+// Lichii: glibc has pthread_gettid_np from 2.42 (Bionic always had it). Without it another
+// thread's ID is unknown: plat_thread_of answers -1 and plat_qos_of PLAT_QOS_UNSPECIFIED.
+static pid_t pthread_gettid_np(pthread_t t) { (void)t; return -1; }
+#endif
 plat_thread_t plat_thread_of(pthread_t t) { return (plat_thread_t)pthread_gettid_np(t); }
 plat_thread_t plat_thread_self(void) { return (plat_thread_t)gettid(); }
 void plat_thread_self_release(plat_thread_t t) { (void)t; }
