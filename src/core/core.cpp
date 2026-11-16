@@ -63,6 +63,7 @@
 #include "core/hle/service/filesystem/fsp/fs_read_trace.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
+#include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/psc/time/static.h"
 #include "core/hle/service/psc/time/steady_clock.h"
 #include "core/hle/service/psc/time/system_clock.h"
@@ -625,6 +626,7 @@ struct System::Impl {
 
         // Reset per-game flags
         Settings::values.use_squashed_iterated_blend = false;
+        Service::g_nx2_told_hdr = false;
 
         // Once powered off, services stop writing replies, so a guest thread whose IPC call
         // completes would read its own request back and abort (2010-0212, a Userspace PANIC on

@@ -20,7 +20,7 @@ enum class Nx2NativeImageFormat : u32 {
 };
 
 // The last nx2:vi2 HDR status answer was HDR. Both presenters (nx2:vi2 and NVN2 direct mode's
-// nvnQueuePresentTexture) label the game's RGB10A2 images by it.
+// nvnQueuePresentTexture) label the game's RGB10A2 images by it. Per boot: the shutdown clears it.
 inline std::atomic<bool> g_nx2_told_hdr{};
 
 // The colour space of a presented native image. FP16 is linear scRGB by its format. RGB10A2 holds
