@@ -133,6 +133,17 @@ struct GpuSplitTestAccess {
         split.front_macros = true;
     }
 
+    static u64 SyncedWriters(const GpuSplit& split) {
+        return split.synced_writer_position;
+    }
+
+    /// The back notes the entries that first mark pages GPU-written, as with
+    /// EDEN_NX2_ACQUIRE_VERIFY.
+    static void NoteFirstWrites(GpuSplit& split, bool note) {
+        GpuSplit::first_write_split = &split;
+        Tegra::g_nx2_first_write_hook = note ? &GpuSplit::NoteFirstWrite : nullptr;
+    }
+
     /// Runs what was sent and not run yet on the calling thread, as the back does.
     static void RunBack(GpuSplit& split) {
         GpuSplit::on_back_thread = true;
@@ -1454,6 +1465,93 @@ TEST_CASE("Split command list fetches wait only for the writers before the last 
     other = true;
     later = true;
     split.Drain(VideoCommon::DrainSite::Other);
+}
+
+TEST_CASE("Split acquires met by a queued release order only the writers before it",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    split.Defer([] {});
+    split.NoteWriter();
+    const u64 before = Access::End(split);
+    // A compute launch that carries the release: it is noted in the entry, the writer after it.
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x1000, 1, true);
+    split.NoteWriter();
+    const auto launch = split.QueuedSemaphoreWriteAt(0x1000);
+    REQUIRE(launch);
+    REQUIRE(launch->position == Access::End(split));
+    split.Defer([] {});
+    split.NoteWriter();
+    const u64 after = Access::End(split);
+
+    // The writer sent after the release is not ordered before the commands after the acquire; the
+    // launch is.
+    split.NoteSyncAt(launch->position);
+    REQUIRE(Access::SyncedWriters(split) == launch->position);
+    // No writer since the release: the last writer.
+    split.Defer([] {});
+    split.NoteSyncAt(Access::End(split));
+    REQUIRE(Access::SyncedWriters(split) == after);
+    // An earlier release keeps what a host-level wait before it ordered.
+    split.NoteSync();
+    REQUIRE(Access::SyncedWriters(split) == after);
+    split.NoteSyncAt(before);
+    REQUIRE(Access::SyncedWriters(split) == after);
+}
+
+TEST_CASE("Split list read verify finds a page a skipped writer wrote first",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    auto& stats = VideoCommon::g_acquire_stats;
+    Tegra::Nx2ClearGpuWrittenPages();
+    VideoCommon::g_acquire_counting = true;
+    VideoCommon::g_acquire_verify = true;
+    Access::NoteFirstWrites(split, true);
+    SCOPE_EXIT {
+        Access::NoteFirstWrites(split, false);
+        VideoCommon::g_acquire_verify = false;
+        VideoCommon::g_acquire_counting = false;
+        Tegra::Nx2ClearGpuWrittenPages();
+        stats.list_skips = 0;
+        stats.list_skip_mismatches = 0;
+    };
+    stats.list_skips = 0;
+    stats.list_skip_mismatches = 0;
+    constexpr u64 Before = 0x10000000;
+    constexpr u64 Skipped = 0x10001000;
+    constexpr u64 Later = 0x10002000;
+    constexpr u64 Never = 0x10003000;
+    const auto writer = [&split](u64 address) {
+        split.Defer([address] { Tegra::Nx2MarkGpuWritten(address, 4); });
+        split.NoteWriter();
+    };
+    writer(Before);
+    split.Defer([] {});
+    const u64 release = Access::End(split);
+    Access::RunBack(split);
+    writer(Skipped);
+    split.NoteSyncAt(release);
+    const auto ran = split.SkippedWritersFrom();
+    REQUIRE(ran == release);
+    const auto pages = [](u64 address) {
+        return std::vector<u64>{address >> Tegra::Nx2WrittenPageBits};
+    };
+    split.VerifyListRead(pages(Skipped), *ran);
+    split.VerifyListRead(pages(Never), *ran);
+    writer(Later);
+    split.VerifyListRead(pages(Later), *ran);
+    Access::RunBack(split);
+    REQUIRE(stats.list_skips.load() == 3);
+    REQUIRE(stats.list_skip_mismatches.load() == 1);
+    REQUIRE_FALSE(split.SkippedWritersFrom());
 }
 
 TEST_CASE("Split restart resets writer positions without replaying old releases",

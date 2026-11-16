@@ -575,7 +575,8 @@ bool DmaPusher::Step() {
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() && safe_reads;
         // Pages no GPU work has written yet may still get the list from compute or copy work
         // queued before it. The GPU fetches the list after that work only past a host-level wait
-        // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
+        // (NoteSync), or an acquire a queued release met only after the work before that release
+        // (NoteSyncAt): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
         // Safe reads wait for all of the work before that wait, draws included: a queued draw may
         // write the list's page for the first time.
@@ -586,8 +587,22 @@ bool DmaPusher::Step() {
             } else {
                 split.WaitForSyncedWriters();
             }
+            const auto skipped_from = !safe_reads && VideoCommon::g_acquire_verify
+                                          ? split.SkippedWritersFrom()
+                                          : std::nullopt;
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            if (skipped_from && !gpu_written) {
+                std::vector<u64> pages;
+                const GPUVAddr end = dma_state.dma_get + u64{header.size} * sizeof(u32);
+                for (GPUVAddr page = dma_state.dma_get & ~GPUVAddr{0xfff}; page < end;
+                     page += 0x1000) {
+                    if (const auto device = memory_manager.GpuToCpuAddress(page)) {
+                        pages.push_back(*device >> Nx2WrittenPageBits);
+                    }
+                }
+                split.VerifyListRead(std::move(pages), *skipped_from);
+            }
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&

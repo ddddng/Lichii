@@ -56,8 +56,8 @@ void Pause() {
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
 BackIdleTrace::FrontState WaitState(DrainSite site) {
-    return site == DrainSite::ListWriters || site == DrainSite::ListSync ||
-                   site == DrainSite::ListFlush
+    return site == DrainSite::ListWriters || site == DrainSite::ListCopies ||
+                   site == DrainSite::ListSync || site == DrainSite::ListFlush
                ? BackIdleTrace::FrontState::Writers
                : BackIdleTrace::FrontState::Drain;
 }
@@ -180,6 +180,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     g_acquire_counting = g_acquire_verify || Nx2Profile::Enabled() ||
                          std::getenv("EDEN_NX2_ACQUIRE_STATS") != nullptr ||
                          std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
+    first_write_split = this;
+    Tegra::g_nx2_first_write_hook = g_acquire_verify ? &NoteFirstWrite : nullptr;
     ring = std::make_unique<u64[]>(RingWords);
     ++starts; // Before the back starts: its holds name entries with it (EntryTag)
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
@@ -208,8 +210,12 @@ void GpuSplit::Stop() {
     last_writer_position = 0;
     last_sync_position = 0;
     synced_writer_position = 0;
+    full_synced_writer_position = 0;
+    queued_sync_release = 0;
     last_entry_start = 0;
     back_entry_start = 0;
+    Tegra::g_nx2_first_write_hook = nullptr;
+    first_writes.clear();
     {
         std::scoped_lock lock{fenced_mutex};
         fenced_entries.clear();
@@ -333,7 +339,7 @@ void GpuSplit::Drain(DrainSite site) {
 }
 
 bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListCopies);
 }
 
 bool GpuSplit::WaitForSync() {
@@ -618,15 +624,73 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
+    // A list wait after a sync met by a queued release: its time before and after the back ran
+    // the release, counted apart.
+    const u64 release = g_acquire_counting && (site == DrainSite::ListWriters ||
+                                               site == DrainSite::ListCopies)
+                            ? queued_sync_release
+                            : 0;
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point wait_start = release != 0 ? Clock::now() : Clock::time_point{};
+    std::optional<Clock::time_point> release_ran;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
+        if (release != 0 && !release_ran && consumed_cache >= release) {
+            release_ran = Clock::now();
+        }
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
             Nx2Profile::AddDrain(site, start);
+            if (release != 0) {
+                const auto end = Clock::now();
+                const auto ran = release_ran.value_or(end);
+                const auto ns = [](Clock::duration duration) {
+                    return static_cast<u64>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+                };
+                const auto index = static_cast<size_t>(site);
+                Count(g_acquire_stats.site_queued_waits[index]);
+                Count(g_acquire_stats.site_queued_before_ns[index], ns(ran - wait_start));
+                Count(g_acquire_stats.site_queued_after_ns[index], ns(end - ran));
+            }
             return true;
         }
         Backoff(spins, target);
     }
+}
+
+void GpuSplit::NoteFirstWrite(u64 page) {
+    if (on_back_thread) {
+        first_write_split->first_writes.insert_or_assign(page,
+                                                         first_write_split->back_entry_start);
+    }
+}
+
+void GpuSplit::VerifyListRead(std::vector<u64> pages, u64 ran) {
+    Count(g_acquire_stats.list_skips);
+    // The entries in [ran, full) had not run: the list would have waited for them under the full
+    // sync. A page first marked by an earlier entry was marked when the list was read (or its mark
+    // was cleared since), and the work after them isn't ordered before the list.
+    const u64 full = (std::min)(full_synced_writer_position, write_position);
+    DeferFunction(
+        [this, pages = std::move(pages), full, ran] {
+            for (const u64 page : pages) {
+                const auto it = first_writes.find(page);
+                if (it == first_writes.end() || it->second < ran || it->second >= full) {
+                    continue;
+                }
+                Count(g_acquire_stats.list_skip_mismatches);
+                if (static std::atomic<u32> logged{}; logged.fetch_add(1) < 32) {
+                    LOG_ERROR(HW_GPU,
+                              "List read verify: a command list was read from device page {:#x} "
+                              "before the entry at {} first wrote it; the full sync orders the "
+                              "writers before {}, the back had run {} at the read",
+                              page << Tegra::Nx2WrittenPageBits, it->second, full, ran);
+                }
+                return;
+            }
+        },
+        Writes::Noted);
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
@@ -1004,9 +1068,19 @@ void GpuSplit::ReportAcquire() {
     for (size_t site = 0; site < drain_site_names.size(); ++site) {
         const u64 count = take(stats.site_drains[site]);
         const u64 ns = take(stats.site_drain_ns[site]);
+        const u64 queued = take(stats.site_queued_waits[site]);
+        const u64 before_ns = take(stats.site_queued_before_ns[site]);
+        const u64 after_ns = take(stats.site_queued_after_ns[site]);
         if (count != 0) {
-            sites += fmt::format("{}{} {} ({:.1f} ms)", sites.empty() ? "" : ", ",
+            sites += fmt::format("{}{} {} ({:.1f} ms", sites.empty() ? "" : ", ",
                                  drain_site_names[site], count, static_cast<double>(ns) / 1e6);
+            if (queued != 0) {
+                sites += fmt::format("; {} after a queued release met an acquire: {:.1f} ms "
+                                     "before the back ran it, {:.1f} ms after",
+                                     queued, static_cast<double>(before_ns) / 1e6,
+                                     static_cast<double>(after_ns) / 1e6);
+            }
+            sites += ')';
         }
     }
     LOG_INFO(HW_GPU,
@@ -1051,6 +1125,15 @@ void GpuSplit::ReportAcquire() {
                     "queued release not in memory after it, {} polls waited though a drain meets "
                     "them, in 10 s",
                     mismatches, unlanded, late);
+    }
+    if (g_acquire_verify) {
+        const u64 list_skips = take(stats.list_skips);
+        const u64 list_skip_mismatches = take(stats.list_skip_mismatches);
+        LOG_INFO(HW_GPU,
+                 "List read verify in 10 s: {} command lists read from pages no GPU work wrote "
+                 "while writers the full sync orders before them were queued, {} of them from a "
+                 "page one of those writers wrote first",
+                 list_skips, list_skip_mismatches);
     }
 }
 

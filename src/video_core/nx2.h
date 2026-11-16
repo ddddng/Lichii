@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <functional>
 #include <map>
@@ -50,6 +51,8 @@ static_assert(Nx2GpuAddressSpaceSize == (1ULL << 40));
 // reads the command list. One bit per 4 KiB of the 36-bit device address space (2 MiB).
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
+/// EDEN_NX2_ACQUIRE_VERIFY: told of each page as it is first marked (GpuSplit::NoteFirstWrite).
+inline void (*g_nx2_first_write_hook)(u64 page){};
 
 inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
@@ -64,7 +67,10 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
         const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
         auto& word = g_nx2_gpu_written_pages[page / 64];
         if ((word.load(std::memory_order_relaxed) & mask) != mask) {
-            word.fetch_or(mask, std::memory_order_relaxed);
+            u64 fresh = mask & ~word.fetch_or(mask, std::memory_order_relaxed);
+            for (; g_nx2_first_write_hook != nullptr && fresh != 0; fresh &= fresh - 1) {
+                g_nx2_first_write_hook(page - first_bit + std::countr_zero(fresh));
+            }
         }
         page += bits;
     }

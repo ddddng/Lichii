@@ -17,6 +17,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/container/unordered_map.h"
@@ -43,7 +44,8 @@ enum class DrainSite : u32 {
     Acquire,        ///< A semaphore acquire reads the value the back may release
     SemaphoreFlush, ///< The acquired semaphore is in the buffer cache
     FenceRelease,   ///< The puller's acquires release the pending fences
-    ListWriters,    ///< GPU-written command lists: the dispatches and copies sent before them
+    ListWriters,    ///< Command lists on pages no GPU work wrote: the writers the last sync orders
+    ListCopies,     ///< GPU-written command lists: the dispatches and copies sent before them
     ListSync,       ///< Command lists on draw-written pages: the work before the last host sync
     ListFlush,      ///< Command lists on GPU-written pages: drain and flush the pages
     MacroDmaRead,   ///< The front's macros read memory (MME DMA) the caches may still write
@@ -127,6 +129,13 @@ struct AcquireStats {
     /// The front's waits for its back (Drain, WaitFor, a full ring) and their time, by site
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drains{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_drain_ns{};
+    /// Of the list waits: those after a sync met by a queued release (NoteSyncAt), and their
+    /// time before and after the back ran that release
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_waits{};
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_before_ns{};
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> site_queued_after_ns{};
+    std::atomic<u64> list_skips{}; ///< VERIFY: lists read before writers a full sync orders ran
+    std::atomic<u64> list_skip_mismatches{}; ///< ...from a page one of those writers wrote first
 };
 inline AcquireStats g_acquire_stats;
 /// Whether g_acquire_stats counts, as of the split's last start.
@@ -142,9 +151,9 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",           "fetch drain",   "acquire",    "semaphore flush", "fence release",
-    "list writers",    "list sync",     "list flush", "macro dma read",  "macro dma writes",
-    "macro dma flush", "gp sync fence", "map",        "front start",     "front verify",
-    "ring full",       "back register", "back code",     "safe read",
+    "list writers",    "list copy writers", "list sync", "list flush", "macro dma read",
+    "macro dma writes", "macro dma flush", "gp sync fence", "map",     "front start",
+    "front verify",    "ring full",     "back register", "back code", "safe read",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -422,7 +431,34 @@ public:
     void NoteSync() {
         last_sync_position = write_position;
         synced_writer_position = last_writer_position;
+        full_synced_writer_position = last_writer_position;
+        queued_sync_release = 0;
     }
+    /// A semaphore acquire was just met by a release still queued, which the back ran once it
+    /// ran `release` (QueuedSemaphoreWrite::position): the acquire orders the work sent before
+    /// the release before the commands after it, not the work sent since (as Quixomatic's
+    /// pipeline-v2 73aff551d8 syncs at the release). Never below what an earlier sync ordered.
+    void NoteSyncAt(u64 release) {
+        last_sync_position = write_position;
+        synced_writer_position =
+            (std::max)(synced_writer_position, (std::min)(last_writer_position, release));
+        full_synced_writer_position = last_writer_position;
+        queued_sync_release = release;
+    }
+    /// EDEN_NX2_ACQUIRE_VERIFY: the position the back ran to, if the writers the syncs would order
+    /// before the commands fetched now, were none of them narrowed to its release (NoteSyncAt),
+    /// may still be queued past it.
+    [[nodiscard]] std::optional<u64> SkippedWritersFrom() const {
+        const u64 ran = consumed.load(std::memory_order_acquire);
+        if (ran >= (std::min)(full_synced_writer_position, write_position)) {
+            return std::nullopt;
+        }
+        return ran;
+    }
+    /// VERIFY: a command list was just read from device `pages` (address >> 12) no GPU work wrote
+    /// once the back ran to `ran` (SkippedWritersFrom). The back checks at the list's place that
+    /// none of the work it skipped wrote one of them first: else the list was read stale.
+    void VerifyListRead(std::vector<u64> pages, u64 ran);
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
@@ -746,6 +782,8 @@ private:
     u64 last_writer_position{};
     u64 last_sync_position{};
     u64 synced_writer_position{};
+    u64 full_synced_writer_position{}; ///< synced_writer_position without NoteSyncAt's narrowing
+    u64 queued_sync_release{}; ///< The release the last sync waited for, if NoteSyncAt
     u64 last_entry_start{}; ///< Where the last entry sent starts
     struct SemaphoreWrite {
         u64 position; ///< write_position once it was sent
@@ -790,6 +828,12 @@ private:
     // Back side, in its own block.
     alignas(128) Tegra::Engines::EngineInterface* back_engine{};
     u64 back_entry_start{}; ///< Where the entry the back runs starts (TrackFencedWrite)
+    /// VERIFY: where the entry that first marked each device page GPU-written starts (by page)
+    Common::unordered_map<u64, u64> first_writes;
+    /// Tegra::g_nx2_first_write_hook while VERIFY: the back of `first_write_split` notes the entry
+    /// it runs.
+    static void NoteFirstWrite(u64 page);
+    static inline GpuSplit* first_write_split{};
 
     /// An entry's position as fenced writes name it, with this start of the split in the high
     /// bits: a hold of an earlier start released late lands nothing of this one (positions stay
