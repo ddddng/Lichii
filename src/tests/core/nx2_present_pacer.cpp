@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,6 +15,21 @@ constexpr auto Start = Pacer::Clock::time_point{1s};
 constexpr auto OneVblank = 16'666'666ns;
 constexpr auto TwoVblanks = 33'333'333ns;
 constexpr auto ThreeVblanks = 50'000'000ns;
+
+// A game that works for `work` and then presents asking for `swap_interval` vblanks, paced the
+// way PaceToVblank paces it. Returns the hold the pacer chose.
+struct PacedGame {
+    Pacer pacer;
+    Pacer::Clock::time_point now = Start;
+
+    std::chrono::nanoseconds Present(std::chrono::nanoseconds work, std::uint32_t swap_interval) {
+        now += work;
+        const auto hold = pacer.Hold(OneVblank * swap_interval, swap_interval, true);
+        now = (std::max)(now, pacer.Advance(now, hold).deadline);
+        pacer.Released(now);
+        return hold;
+    }
+};
 }
 
 TEST_CASE("NX2 FPS limit only lengthens a vblank it is below", "[core][nx2_present_pacer]") {
@@ -107,4 +123,36 @@ TEST_CASE("NX2 fixed-period pacing matches the previous algorithm", "[core][nx2_
             old_next += period;
         }
     }
+}
+
+TEST_CASE("NX2 interval 2 holds one vblank only while the game is behind", "[core][nx2_present_pacer]") {
+    PacedGame game;
+    for (int frame = 0; frame < 10; ++frame) {
+        REQUIRE(game.Present(5ms, 1) == OneVblank);
+    }
+    SECTION("on time at 30 fps (Fire Emblem: Fortune's Weave)") {
+        game.Present(5ms, 2);
+        game.Present(5ms, 2);
+        for (int frame = 0; frame < 60; ++frame) {
+            REQUIRE(game.Present(5ms, 2) == OneVblank * 2);
+        }
+    }
+    SECTION("behind after a hitch (Mario Kart World)") {
+        game.Present(100ms, 1);
+        int one_vblank_holds = 0;
+        while (game.Present(5ms, 2) == OneVblank) {
+            REQUIRE(++one_vblank_holds <= 6);
+        }
+        REQUIRE(one_vblank_holds >= 4);
+        for (int frame = 0; frame < 60; ++frame) {
+            REQUIRE(game.Present(5ms, 2) == OneVblank * 2);
+        }
+    }
+}
+
+TEST_CASE("NX2 a forced interval holds every vblank it asks for", "[core][nx2_present_pacer]") {
+    Pacer pacer;
+    pacer.Released(Start);
+    pacer.Released(Start + 100ms);
+    REQUIRE(pacer.Hold(TwoVblanks, 2, false) == TwoVblanks);
 }
