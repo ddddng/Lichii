@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <exception>
@@ -1902,7 +1903,9 @@ public:
     }
     void SignalSyncPoint(u32) override {}
     void SignalReference() override {}
-    void ReleaseFences(bool) override {}
+    void ReleaseFences(bool) override {
+        ++fence_releases;
+    }
     void FlushAll() override {}
     void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
     bool MustFlushRegion(DAddr, u64, VideoCommon::CacheType) override {
@@ -1937,6 +1940,7 @@ public:
     };
     Tegra::MemoryManager& memory;
     std::vector<Report> reports;
+    std::atomic<u32> fence_releases{}; ///< ReleaseFences calls (on the back)
 };
 
 } // Anonymous namespace
@@ -2342,6 +2346,94 @@ TEST_CASE("Split front passes an acquire on a QMD release the back ran before it
     CHECK(f.memory.Read<u32>(other) == 3);
 }
 
+TEST_CASE("Split front suspends an acquire nothing sent meets without waiting for the back",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using MethodCall = Tegra::Engines::Puller::MethodCall;
+    constexpr GPUVAddr word = MappedPages::gpu_address + 0x1000;
+    constexpr DAddr word_device = MappedPages::device_address + 0x1000;
+    const auto fixture = std::make_unique<Fixture>();
+    Fixture& f = *fixture;
+    f.system.Initialize();
+    Tegra::Nx2ClearGpuWrittenPages();
+    MappedPages pages{f};
+    FencedReports fences{f.memory};
+    Tegra::Control::ChannelState channel_state{0};
+    Tegra::DmaPusher dma_pusher{f.system, f.memory, channel_state};
+    dma_pusher.BindRasterizer(&fences);
+    const auto accuracy = Settings::values.current_gpu_accuracy;
+    Settings::values.current_gpu_accuracy = Settings::GpuAccuracy::Low;
+    const bool ampere = Tegra::g_nx2_ampere.exchange(true);
+    const bool counting = std::exchange(VideoCommon::g_acquire_counting, true);
+    auto& split = VideoCommon::GpuSplit::Get();
+    Access::Start(split, f.system);
+    Access::SetFrontMacros(split);
+    std::atomic<bool> open{};
+    SCOPE_EXIT {
+        open = true;
+        split.Stop();
+        VideoCommon::g_acquire_counting = counting;
+        Tegra::g_nx2_ampere = ampere;
+        Settings::values.current_gpu_accuracy = accuracy;
+    };
+    auto& puller = dma_pusher.puller;
+    const auto acquire = [&](u32 value) {
+        const std::array<std::pair<u32, u32>, 4> methods{{
+            {0x4, static_cast<u32>(word >> 32)},
+            {0x5, static_cast<u32>(word)},
+            {0x6, value},
+            {0x7, 4}, // AcquireGequal
+        }};
+        for (const auto& [method, argument] : methods) {
+            puller.CallMethod(dma_pusher, MethodCall{method, argument});
+        }
+        return !puller.HasPendingAcquire();
+    };
+    auto& stats = VideoCommon::g_acquire_stats;
+    const u64 drained = stats.drained.load();
+
+    // The back is held: a drain would wait for it (up to 2 s here), the suspension doesn't.
+    split.Defer(
+        [open = &open] {
+            const auto end = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            while (!open->load() && std::chrono::steady_clock::now() < end) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Noted);
+    split.Publish();
+    const u64 not_met = stats.trigger_not_met.load();
+    CHECK_FALSE(acquire(5));
+    CHECK(stats.trigger_not_met.load() == not_met + 1);
+    CHECK(stats.drained.load() == drained);
+    // The fence work is sent, not run: the back runs it once it got there.
+    CHECK(fences.fence_releases.load() == 0);
+    open = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    CHECK(fences.fence_releases.load() == 1);
+
+    // Polls wait without a drain, also once the 1 ms valve is due.
+    CHECK_FALSE(puller.CanResumeAcquire(dma_pusher));
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    const u64 valve = stats.valve_requests.load();
+    CHECK_FALSE(puller.CanResumeAcquire(dma_pusher));
+    CHECK(stats.valve_requests.load() == valve + 1);
+    CHECK(stats.drained.load() == drained);
+
+    // A guest CPU store meets it.
+    const u64 memory = stats.no_drain_memory.load();
+    f.memory.Write<u32>(word, 5);
+    CHECK(puller.ResumeAcquire(dma_pusher));
+    CHECK(stats.no_drain_memory.load() == memory + 1);
+
+    // The waiter is registered as it suspends: a GPU release that lands later latches it.
+    const u64 latched = stats.no_drain_latched.load();
+    CHECK_FALSE(acquire(9));
+    Tegra::Nx2SemaphoreWaiters::Get().OnWrite(word_device, 9);
+    CHECK(puller.ResumeAcquire(dma_pusher));
+    CHECK(stats.no_drain_latched.load() == latched + 1);
+    CHECK(stats.drained.load() == drained);
+}
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

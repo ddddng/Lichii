@@ -96,9 +96,17 @@ struct AcquireStats {
     std::atomic<u64> queued_unknown{};  ///< Of drain_queued: its value is unknown (a reduction)
     std::atomic<u64> queued_unknown_met{}; ///< ...and the word in memory already meets the acquire
     std::atomic<u64> trigger_not_met{};    ///< Acquire methods not met without a drain (NotMet)
-    std::atomic<u64> trigger_not_met_twice{}; ///< ...still not met after it: fences drain again
-    std::atomic<u64> valve_drains{}; ///< Of drained: polls of an unmet acquire, once per 1 ms
+    /// How those that suspended at once ended: latched by a release the back or its fences ran,
+    /// met in memory unlatched (the guest CPU's stores), by a release queued since, or drained
+    std::atomic<u64> no_drain_latched{};
+    std::atomic<u64> no_drain_memory{};
+    std::atomic<u64> no_drain_queued{};
+    std::atomic<u64> no_drain_drained{};
+    std::atomic<u64> no_drain_wait_ns{};     ///< ...their waits, all together
+    std::atomic<u64> no_drain_wait_max_ns{}; ///< ...the longest (front only)
+    std::atomic<u64> no_drain_over_1ms{};    ///< ...those over 1 ms
     std::atomic<u64> polls{};     ///< Polls that keep waiting without a drain
+    std::atomic<u64> valve_requests{}; ///< Of polls: once per 1 ms, ask the back to submit
     std::atomic<u64> acquire_polls{}; ///< Polls of suspended channels waiting on an acquire
     std::atomic<u64> list_polls{};    ///< ...and on a command list copy the GPU writes
     std::atomic<u64> front_polls{};   ///< GPU thread waits for them in hardware (gpu_thread.cpp)
@@ -107,6 +115,7 @@ struct AcquireStats {
     std::atomic<u64> front_stored{};  ///< ...by a store to a word a channel waits on (WordStored)
     std::atomic<u64> front_found_polling{}; ///< Channels found moving by a timed-out hardware wait
     std::atomic<u64> front_found_late{};    ///< ...and by a timed-out OS wait, after the poll
+    std::atomic<u64> pending_pops{}; ///< Commands the GPU thread took while channels were suspended
     std::atomic<u64> early_publishes{}; ///< Publishes to a back that waits for work (Commit)
     std::atomic<u64> settles{};   ///< Idle hooks asked of a back that ran everything (SettleIdleBack)
     std::atomic<u64> back_waits{};      ///< The back ran out of work

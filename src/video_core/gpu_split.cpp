@@ -968,9 +968,17 @@ void GpuSplit::ReportAcquire() {
     const u64 queued_unknown = take(stats.queued_unknown);
     const u64 queued_unknown_met = take(stats.queued_unknown_met);
     const u64 trigger_not_met = take(stats.trigger_not_met);
-    const u64 trigger_not_met_twice = take(stats.trigger_not_met_twice);
-    const u64 valve_drains = take(stats.valve_drains);
+    const u64 no_drain_latched = take(stats.no_drain_latched);
+    const u64 no_drain_memory = take(stats.no_drain_memory);
+    const u64 no_drain_queued = take(stats.no_drain_queued);
+    const u64 no_drain_drained = take(stats.no_drain_drained);
+    const u64 no_drain_ended =
+        no_drain_latched + no_drain_memory + no_drain_queued + no_drain_drained;
+    const double no_drain_wait_ms = static_cast<double>(take(stats.no_drain_wait_ns)) / 1e6;
+    const double no_drain_max_ms = static_cast<double>(take(stats.no_drain_wait_max_ns)) / 1e6;
+    const u64 no_drain_over_1ms = take(stats.no_drain_over_1ms);
     const u64 polls = take(stats.polls);
+    const u64 valve_requests = take(stats.valve_requests);
     const u64 acquire_polls = take(stats.acquire_polls);
     const u64 list_polls = take(stats.list_polls);
     const u64 front_polls = take(stats.front_polls);
@@ -979,6 +987,7 @@ void GpuSplit::ReportAcquire() {
     const u64 front_stored = take(stats.front_stored);
     const u64 front_found_polling = take(stats.front_found_polling);
     const u64 front_found_late = take(stats.front_found_late);
+    const u64 pending_pops = take(stats.pending_pops);
     const u64 early_publishes = take(stats.early_publishes);
     const u64 settles = take(stats.settles);
     const u64 back_waits = take(stats.back_waits);
@@ -986,20 +995,21 @@ void GpuSplit::ReportAcquire() {
     const double spin_ms = static_cast<double>(take(stats.back_spin_ns)) / 1e6;
     LOG_INFO(HW_GPU,
              "Acquires: {} passed without a drain ({} by a queued release), {} resumed by a "
-             "latch, {} drained ({} by the 1 ms valve; {} equal or mask, {} by the settings, {} "
-             "unmapped or GPU-written word, {} queued release unknown or short), {} polls waited "
-             "without a drain in 10 s; polls: {} of acquires, {} of GPU-written list copies; "
-             "back: {} waits for work, {} slept, {:.1f} ms spinning; {} early publishes, {} idle "
-             "hooks asked by polls",
-             passed, by_queued, latched, drained, valve_drains, drain_operation, drain_settings,
-             drain_word, drain_queued, polls, acquire_polls, list_polls, back_waits, back_sleeps,
-             spin_ms, early_publishes, settles);
+             "latch, {} drained ({} equal or mask, {} by the settings, {} unmapped or GPU-written "
+             "word, {} queued release unknown or short), {} polls waited without a drain ({} "
+             "asked the back to submit, the 1 ms valve) in 10 s; polls: {} of acquires, {} of "
+             "GPU-written list copies; back: {} waits for work, {} slept, {:.1f} ms spinning; {} "
+             "early publishes, {} idle hooks asked by polls",
+             passed, by_queued, latched, drained, drain_operation, drain_settings, drain_word,
+             drain_queued, polls, valve_requests, acquire_polls, list_polls, back_waits,
+             back_sleeps, spin_ms, early_publishes, settles);
     LOG_INFO(HW_GPU,
              "GPU thread waits for suspended channels in 10 s: {} in hardware, {} in the OS, {} "
              "ended by a wake, {} by a store to a semaphore word; channels that moved without "
-             "either: {} found while polling, {} found late in the OS wait",
+             "either: {} found while polling, {} found late in the OS wait; {} commands taken "
+             "meanwhile",
              front_polls, front_sleeps, front_woken, front_stored, front_found_polling,
-             front_found_late);
+             front_found_late, pending_pops);
     std::string sites;
     for (size_t site = 0; site < drain_site_names.size(); ++site) {
         const u64 count = take(stats.site_drains[site]);
@@ -1011,11 +1021,15 @@ void GpuSplit::ReportAcquire() {
     }
     LOG_INFO(HW_GPU,
              "Front waits for the back in 10 s by site: {}; acquire methods not met without a "
-             "drain: {} ({} still not met after it, which drain again to release the fences); "
-             "drains for a queued release of unknown value (a reduction or a counter) to a word memory "
+             "drain: {}, suspended at once; {} such waits ended: {} latched by a GPU release, {} "
+             "met in memory unlatched (guest CPU stores), {} by a release queued since, {} "
+             "drained; {:.1f} ms waited ({:.3f} ms mean, {:.3f} ms max, {} over 1 ms); drains "
+             "for a queued release of unknown value (a reduction or a counter) to a word memory "
              "already meets: {} of {}",
-             sites.empty() ? "none" : sites, trigger_not_met, trigger_not_met_twice,
-             queued_unknown_met, queued_unknown);
+             sites.empty() ? "none" : sites, trigger_not_met, no_drain_ended, no_drain_latched,
+             no_drain_memory, no_drain_queued, no_drain_drained, no_drain_wait_ms,
+             no_drain_ended != 0 ? no_drain_wait_ms / static_cast<double>(no_drain_ended) : 0.0,
+             no_drain_max_ms, no_drain_over_1ms, queued_unknown_met, queued_unknown);
     const u64 qmd_valued = take(stats.qmd_valued);
     const u64 qmd_waits = take(stats.qmd_waits);
     const u64 qmd_late = take(stats.qmd_late);

@@ -114,6 +114,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
                 const bool popped = state.queue.TryPop(next);
                 if (popped) {
+                    VideoCommon::Count(acquire_stats.pending_pops);
                     BackIdleTrace::SetFrontState(FrontState::Parse);
                 }
                 if (resumed || popped) {
