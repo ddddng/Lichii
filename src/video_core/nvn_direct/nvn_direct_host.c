@@ -61,8 +61,6 @@ int vka_fg_frame(uint64_t serial, const int* crop, double period, uint64_t fence
     if (out_period) *out_period = 0;
     return 0;
 }
-int dm_sdk_ounce(void) { return 1; } // direct mode is for NVN2 (Switch 2) games
-
 
 // Guest memory. The front end and the replay reach it through host pointers into Lichii's
 // fastmem arena (the dispatch adds the arena's base to the game's addresses); every page they

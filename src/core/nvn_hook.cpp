@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -167,6 +168,7 @@ struct State {
     /// nvnBootstrapLoader, every module's export: LM3 (Switch 1) exports it from a subsdk
     /// (nnSdkEn) and from nnSdk (dotfiles-1gi).
     std::vector<u64> bootstrap_entries;
+    int sdk_major{-1}; ///< NintendoSDK major of the game's sdk (-1 unknown)
     u64 lookup_driver{};   ///< nvnDeviceGetProcAddress, as nvnBootstrapLoader returned it
     u64 private0_address{};
     u64 private0_size{};
@@ -338,6 +340,41 @@ u64 ReadPrivate0(const State& state, Core::Memory::Memory& memory) {
     default:
         return memory.Read32(state.private0_address);
     }
+}
+
+/// The NintendoSDK major [begin, end) was built with, from its version string
+/// ("NintendoSdk_nnSdk-7_3_2-Release", a variant name such as "Generic_" may precede the version):
+/// -1 when it has none. Read as upstream's loader.c dm_sdk_major does, but a prerelease SDK 0.x
+/// (Breath of the Wild 1.6.0: "nnSdk-0_12_14") is 0, not unknown.
+int SdkMajor(Core::Memory::Memory& memory, u64 begin, u64 end) {
+    constexpr std::string_view Tag{"_nnSdk-"};
+    constexpr std::string_view Sdk{"nintendosdk"};
+    std::string bytes;
+    for (u64 address = begin; address < end; address += Core::Memory::LICHII_PAGESIZE) {
+        const u8* const page = memory.GetPointerSilent(Common::ProcessAddress{address});
+        if (page == nullptr) {
+            break;
+        }
+        bytes.append(reinterpret_cast<const char*>(page), Core::Memory::LICHII_PAGESIZE);
+    }
+    for (size_t at = bytes.find(Tag); at != std::string::npos; at = bytes.find(Tag, at + 1)) {
+        if (at < Sdk.size() ||
+            !std::ranges::equal(std::string_view{bytes}.substr(at - Sdk.size(), Sdk.size()), Sdk,
+                                [](char a, char b) { return std::tolower(a) == b; })) {
+            continue;
+        }
+        size_t version = at + Tag.size();
+        while (version < bytes.size() && std::isalpha(static_cast<unsigned char>(bytes[version]))) {
+            ++version;
+        }
+        if (version > at + Tag.size() && version < bytes.size() && bytes[version] == '_') {
+            ++version;
+        }
+        if (version < bytes.size() && std::isdigit(static_cast<unsigned char>(bytes[version]))) {
+            return std::atoi(bytes.c_str() + version);
+        }
+    }
+    return -1;
 }
 
 bool ReadGuest(Core::Memory::Memory& memory, u64 address, void* out, size_t size) {
@@ -650,7 +687,8 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
                                           .backing_fd = state.host_memory->BackingFd(),
                                           .backing_base = state.host_memory->BackingBasePointer()};
             nvn_direct_init(page_table.GetImpl().fastmem_arena,
-                            u64{1} << page_table.GetAddressSpaceWidth(), &views);
+                            u64{1} << page_table.GetAddressSpaceWidth(), &views,
+                            state.process->IsSwitch2(), state.sdk_major);
             state.direct_ready = true;
         }
         const u32 found = DirectSlotOf(state, name);
@@ -734,6 +772,10 @@ void Install(Core::System& system, Kernel::KProcess& process) {
         };
         if (const auto [address, size] = find("nvnBootstrapLoader"); address != 0) {
             state.bootstrap_entries.push_back(address);
+            if (state.sdk_major < 0) {
+                state.sdk_major =
+                    SdkMajor(memory, base, GetInteger(Core::GetModuleEnd(&process, base)));
+            }
             LOG_INFO(Core, "NVN hook: nvnBootstrapLoader in module {} at {:#x}: {:#x}", module,
                      base, address);
         }
@@ -741,6 +783,14 @@ void Install(Core::System& system, Kernel::KProcess& process) {
             state.private0_address = address;
             state.private0_size = size;
         }
+    }
+    // Older SDKs ship the driver as a module of its own (Breath of the Wild 1.6.0: "nvn", which
+    // exports nvnBootstrapLoader); the version string is then in nnSdk's module.
+    for (auto it = modules.begin(); state.sdk_major < 0 && !state.bootstrap_entries.empty() &&
+                                    it != modules.end();
+         ++it) {
+        state.sdk_major =
+            SdkMajor(memory, it->first, GetInteger(Core::GetModuleEnd(&process, it->first)));
     }
     // The synthetic addresses: in the first unmapped range from 64 KiB that holds every slot.
     // Nothing is ever mapped executable there, and the JIT reads no guest code for them.
@@ -776,9 +826,9 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     }
     NvnTrace::Install(process);
     LOG_INFO(Core,
-             "NVN hook: {} nvnBootstrapLoader exports, nvnPrivate0 {:#x} ({} bytes), synthetic "
-             "addresses from {:#x}",
-             state.bootstrap_entries.size(), state.private0_address,
+             "NVN hook: {} nvnBootstrapLoader exports (SDK {}), nvnPrivate0 {:#x} ({} bytes), "
+             "synthetic addresses from {:#x}",
+             state.bootstrap_entries.size(), state.sdk_major, state.private0_address,
              state.private0_size, state.synthetic_base);
 }
 

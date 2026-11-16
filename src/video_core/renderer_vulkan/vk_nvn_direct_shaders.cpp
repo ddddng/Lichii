@@ -102,17 +102,80 @@ Shader::TextureType TextureTypeOf(u32 nvn_target) {
     }
 }
 
-/// A program stage as the recompiler reads it: its Ampere code captured and lowered from the
-/// code area as GenericEnvironment::LowerNativeCode does from GPU memory, the NVN2 control
-/// section in place of the engine registers the guest's driver would set from it, and the
-/// draw's state through the replay's callbacks.
+bool IsNvn2Control(const u8* control) {
+    return Read32(control, 0) == 0x98761234U && Read32(control, 4) == 0xc9;
+}
+
+/// A program stage as the recompiler reads it: an NVN2 stage's Ampere code captured and lowered
+/// from the code area as GenericEnvironment::LowerNativeCode does from GPU memory, or an NVN1
+/// stage's Maxwell code as it is; the control section in place of the engine registers the
+/// guest's driver would set from it, and the draw's state through the replay's callbacks.
 class NvnDirectEnvironment final : public Shader::Environment {
 public:
     explicit NvnDirectEnvironment(const nvn_direct_shader_source& source_,
                                   const NvnDirectShaders& shaders_)
-        : source{source_}, shaders{shaders_} {
+        : source{source_}, shaders{shaders_}, nvn2{IsNvn2Control(source_.control)} {
         stage = StageOf(source.nvn_stage);
         is_proprietary_driver = true;
+        if (nvn2) {
+            LoadAmpere();
+        } else {
+            LoadMaxwell();
+        }
+    }
+
+    u64 ReadInstruction(u32 address) override {
+        if (address / sizeof(u64) >= code.size()) {
+            throw Shader::RuntimeError("Instruction address out of range: {:#x}", address);
+        }
+        return code[address / sizeof(u64)];
+    }
+
+    u32 TranslateProgramAddress(u32 address) const override {
+        if (!nvn2) {
+            return address;
+        }
+        if (const auto translated = Shader::Ampere::NativeProgramAddress(code, address)) {
+            return *translated;
+        }
+        throw Shader::RuntimeError("Invalid native indirect branch address {:#x}", address);
+    }
+
+    bool IsNativeProgram() const override {
+        return nvn2;
+    }
+
+    bool HasNativeInstructions() const override {
+        return nvn2;
+    }
+
+private:
+    /// An NVN1 stage (Switch 1): Maxwell code after the code area's 0x30-byte header, a graphics
+    /// stage's 0x50-byte SPH first, its instructions at +0x80; compute's at +0x100 after a header of
+    /// its own (magic 0x12345679), at +0 without one. Addresses are the code area's, which puts the
+    /// scheduling words where the frontend expects them (every 32 bytes). Control +0x748 is
+    /// compute's workgroup, +0x754 its shared memory.
+    void LoadMaxwell() {
+        const bool compute = stage == Shader::Stage::Compute;
+        const bool compute_header = source.code_size >= 4 && Read32(source.code, 0) == 0x12345679U;
+        start_address = !compute ? 0x30 : compute_header ? 0x100 : 0;
+        if (source.code_size < start_address + (compute ? 0 : sizeof(sph))) {
+            throw Shader::RuntimeError("Code area of {:#x} bytes", source.code_size);
+        }
+        code.resize(source.code_size / sizeof(u64));
+        std::memcpy(code.data(), source.code, code.size() * sizeof(u64));
+        if (compute) {
+            workgroup_size = {Read32(source.control, 0x748), Read32(source.control, 0x74c),
+                              Read32(source.control, 0x750)};
+            shared_memory_size = Read32(source.control, 0x754);
+        } else {
+            std::memcpy(&sph, source.code + start_address, sizeof(sph));
+            local_memory_size = static_cast<u32>(sph.LocalMemorySize()) +
+                                sph.common3.shader_local_memory_crs_size;
+        }
+    }
+
+    void LoadAmpere() {
         const u8* const control = source.control;
         const bool compute = stage == Shader::Stage::Compute;
         // Graphics code areas start with a 0x80-byte header (SPH version 4, whose first 0x50
@@ -206,28 +269,7 @@ public:
         }
     }
 
-    u64 ReadInstruction(u32 address) override {
-        if (address / sizeof(u64) >= code.size()) {
-            throw Shader::RuntimeError("Lowered instruction address out of range: {:#x}", address);
-        }
-        return code[address / sizeof(u64)];
-    }
-
-    u32 TranslateProgramAddress(u32 address) const override {
-        if (const auto translated = Shader::Ampere::NativeProgramAddress(code, address)) {
-            return *translated;
-        }
-        throw Shader::RuntimeError("Invalid native indirect branch address {:#x}", address);
-    }
-
-    bool IsNativeProgram() const override {
-        return true;
-    }
-
-    bool HasNativeInstructions() const override {
-        return true;
-    }
-
+public:
     bool IsCbufStorageBufferPointer(u32 index, u32 offset) override {
         const u64 address = ReadPointer(index, offset);
         u8 byte;
@@ -326,6 +368,7 @@ private:
 
     const nvn_direct_shader_source& source;
     const NvnDirectShaders& shaders;
+    const bool nvn2;
     std::vector<u64> code;
     u32 texture_bound{2};
     u32 local_memory_size{};
@@ -356,6 +399,15 @@ NvnDirectShaders::NvnDirectShaders(const Device& device, const Shader::Profile& 
     : profile{profile_}, host_info{host_info_} {
     // The replay sets no VK_EXT_depth_clip_control: the GL depth mode is converted in the shader.
     profile.support_native_ndc = false;
+    // The replay binds at most 512 descriptors a draw (vka_draw.c), over every stage: an array of
+    // handles a shader indexes (the recompiler makes it up to 1,024 long) gets at most half of
+    // them, which still covers the driver's c2 handle tables up into the separate samplers' from
+    // the combined slots (Luigi's Mansion 3's shadow cascades index c2 from combined slot 12).
+    constexpr u32 max_stage_textures = 256;
+    host_info.max_per_stage_descriptor_sampled_images =
+        (std::min)(host_info.max_per_stage_descriptor_sampled_images, max_stage_textures);
+    host_info.max_descriptor_set_sampled_images =
+        (std::min)(host_info.max_descriptor_set_sampled_images, max_stage_textures);
     for (size_t index = 0; index < VideoCore::Surface::MaxPixelFormat; ++index) {
         const auto format = static_cast<VideoCore::Surface::PixelFormat>(index);
         const VkFormat vk_format =

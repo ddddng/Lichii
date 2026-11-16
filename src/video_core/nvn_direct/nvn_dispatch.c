@@ -194,11 +194,20 @@ static void crash_stack_install(void) {
     sigaction(SIGSEGV, &sa, &g_crash_old);
 }
 
-void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory) {
+// The game's NVN (nvn_direct_init): the front end and the replay choose NVN2's behaviour by
+// dm_sdk_ounce and NVN1's API version by dm_sdk_major (upstream's loader.c reads both from the sdk).
+static int g_switch2, g_sdk_major;
+int dm_sdk_ounce(void) { return g_switch2; }
+int dm_sdk_major(void) { return g_sdk_major; }
+
+void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory,
+                     int switch2, int sdk_major) {
     crash_stack_install();
     g_arena = (uintptr_t)arena;
     g_guest_size = guest_size;
     g_memory = *memory;
+    g_switch2 = switch2 != 0;
+    g_sdk_major = sdk_major;
     nvn_nops_register();
     for (int i = 0; i < NVN_NFUNC; i++) {
         void* fn = nvn_slot[i].fn;
