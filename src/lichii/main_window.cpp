@@ -5504,7 +5504,7 @@ void MainWindow::UpdateStatusBar() {
     if (QtCommon::system->IsWaitingForDebugger()) {
         const QString notice =
             tr("Waiting for a debugger on port %1 (Emulation > Configure > Debug > Enable GDB "
-               "Stub). Turn it off to play.")
+               "Stub). Turn it off and restart the game to play.")
                 .arg(Settings::values.gdbstub_port.GetValue());
         message_label->setText(notice);
         loading_screen->SetDebuggerNotice(notice);
