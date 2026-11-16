@@ -188,8 +188,8 @@ typedef struct nvn_direct_memory {
 /// Takes the front end's slot table (the names of upstream's names.txt, in its order), the
 /// arena the game's addresses are offsets into (host = arena + address for every address below
 /// guest_size), the guest memory's views and the game's NVN: switch2 = NVN2 (else NVN1), sdk_major
-/// the NintendoSDK major its sdk was built with (0 unknown; NVN1 reports another API version to
-/// SDK 10 and older). Called once, when the game's NVN is taken over.
+/// the NintendoSDK major its sdk was built with (-1 unknown, 0 a prerelease SDK 0.x; NVN1 reports
+/// other API versions to SDK 10 and older). Called once, when the game's NVN is taken over.
 void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory,
                      int switch2, int sdk_major);
 

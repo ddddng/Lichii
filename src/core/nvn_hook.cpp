@@ -167,7 +167,7 @@ struct State {
     /// nvnBootstrapLoader, every module's export: LM3 (Switch 1) exports it from a subsdk
     /// (nnSdkEn) and from nnSdk (dotfiles-1gi).
     std::vector<u64> bootstrap_entries;
-    int sdk_major{}; ///< NintendoSDK major of the module exporting nvnBootstrapLoader (0 unknown)
+    int sdk_major{-1}; ///< NintendoSDK major of the game's sdk (-1 unknown)
     u64 lookup_driver{};   ///< nvnDeviceGetProcAddress, as nvnBootstrapLoader returned it
     u64 private0_address{};
     u64 private0_size{};
@@ -343,7 +343,8 @@ u64 ReadPrivate0(const State& state, Core::Memory::Memory& memory) {
 
 /// The NintendoSDK major [begin, end) was built with, from its version string
 /// ("NintendoSdk_nnSdk-7_3_2-Release", a variant name such as "Generic_" may precede the version):
-/// 0 when it has none. Read as upstream's loader.c dm_sdk_major does.
+/// -1 when it has none. Read as upstream's loader.c dm_sdk_major does, but a prerelease SDK 0.x
+/// (Breath of the Wild 1.6.0: "nnSdk-0_12_14") is 0, not unknown.
 int SdkMajor(Core::Memory::Memory& memory, u64 begin, u64 end) {
     constexpr std::string_view Tag{"_nnSdk-"};
     constexpr std::string_view Sdk{"nintendosdk"};
@@ -372,7 +373,7 @@ int SdkMajor(Core::Memory::Memory& memory, u64 begin, u64 end) {
             return std::atoi(bytes.c_str() + version);
         }
     }
-    return 0;
+    return -1;
 }
 
 bool ReadGuest(Core::Memory::Memory& memory, u64 address, void* out, size_t size) {
@@ -770,7 +771,7 @@ void Install(Core::System& system, Kernel::KProcess& process) {
         };
         if (const auto [address, size] = find("nvnBootstrapLoader"); address != 0) {
             state.bootstrap_entries.push_back(address);
-            if (state.sdk_major == 0) {
+            if (state.sdk_major < 0) {
                 state.sdk_major =
                     SdkMajor(memory, base, GetInteger(Core::GetModuleEnd(&process, base)));
             }
@@ -784,7 +785,7 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     }
     // Older SDKs ship the driver as a module of its own (Breath of the Wild 1.6.0: "nvn", which
     // exports nvnBootstrapLoader); the version string is then in nnSdk's module.
-    for (auto it = modules.begin(); state.sdk_major == 0 && !state.bootstrap_entries.empty() &&
+    for (auto it = modules.begin(); state.sdk_major < 0 && !state.bootstrap_entries.empty() &&
                                     it != modules.end();
          ++it) {
         state.sdk_major =
