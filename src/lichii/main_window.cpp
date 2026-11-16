@@ -586,14 +586,19 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     connect(&nextendo_profile_watcher,
             &QFutureWatcher<std::optional<Common::Nextendo::ProfilePull>>::finished, this, [this] {
                 const auto pull = nextendo_profile_watcher.result();
-                if (!pull) {
-                    return;
+                // Asked for while this pull ran, for another user or a new sign-in.
+                const bool pending = nextendo_profile_force;
+                if (pull && Common::Nextendo::OnlinePlayActive() &&
+                    Settings::values.nextendo_sync_profile.GetValue()) {
+                    // A game that booted meanwhile reads the profile: write it once the game stops.
+                    if (QtCommon::system->IsPoweredOn() ||
+                        !WriteNextendoProfile(QtCommon::system->GetProfileManager(),
+                                              nextendo_profile_user, *pull)) {
+                        nextendo_profile_force = true;
+                    }
                 }
-                // A game that booted meanwhile reads the profile: write it once the game stops.
-                if (QtCommon::system->IsPoweredOn() ||
-                    !WriteNextendoProfile(QtCommon::system->GetProfileManager(),
-                                          nextendo_profile_user, *pull)) {
-                    nextendo_profile_force = true;
+                if (pending) {
+                    SyncNextendoProfile(false);
                 }
             });
 
