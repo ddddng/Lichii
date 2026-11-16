@@ -314,6 +314,13 @@ bool PolygonOffsetEnabled(const Maxwell& regs, Maxwell::PrimitiveTopology topolo
     return enabled_lut[POLYGON_OFFSET_ENABLE_LUT[static_cast<u32>(topology)]] != 0;
 }
 
+/// Viewport 0 passes position z and w through unswizzled
+bool ViewportKeepsDepth(const Maxwell& regs) {
+    const auto& swizzle = regs.viewport_transform[0].swizzle;
+    return swizzle.z == Maxwell::ViewportSwizzle::PositiveZ &&
+           swizzle.w == Maxwell::ViewportSwizzle::PositiveW;
+}
+
 /// Depth bias, in units of the depth format, that pushes far plane draws past the far value so
 /// that depth clamping puts them exactly on it. A vertex shader that stores one value to position
 /// z and w puts every vertex on the far plane, the usual way to draw a sky. NVIDIA fills such a
@@ -4275,8 +4282,8 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         flags[Dirty::DepthBiasEnable] = true;
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
-    const bool far_plane =
-        pipeline != nullptr && pipeline->OnFarPlane() && !PolygonOffsetEnabled(regs, topology);
+    const bool far_plane = pipeline != nullptr && pipeline->OnFarPlane() &&
+                           !PolygonOffsetEnabled(regs, topology) && ViewportKeepsDepth(regs);
     if (far_plane || far_plane != far_plane_draw) {
         flags[Dirty::DepthBias] = true;
     }

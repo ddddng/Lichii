@@ -55,6 +55,13 @@ constexpr size_t NUM_SUPPORTED_VERTEX_ATTRIBUTES = 16;
 /// (Mario Kart 8 Deluxe's Sky-High Sundae, #1905).
 constexpr GLfloat FAR_PLANE_DEPTH_BIAS = 16.0f;
 
+/// Viewport 0 passes position z and w through unswizzled
+bool ViewportKeepsDepth(const Maxwell& regs) {
+    const auto& swizzle = regs.viewport_transform[0].swizzle;
+    return swizzle.z == Maxwell::ViewportSwizzle::PositiveZ &&
+           swizzle.w == Maxwell::ViewportSwizzle::PositiveW;
+}
+
 void oglEnable(GLenum cap, bool state) {
     (state ? glEnable : glDisable)(cap);
 }
@@ -255,7 +262,8 @@ void RasterizerOpenGL::PrepareDraw(bool is_indexed, Func&& draw_func) {
 
     const auto& regs = maxwell3d->regs;
     SetFarPlaneDraw(pipeline->OnFarPlane() && !regs.polygon_offset_fill_enable &&
-                    !regs.polygon_offset_line_enable && !regs.polygon_offset_point_enable);
+                    !regs.polygon_offset_line_enable && !regs.polygon_offset_point_enable &&
+                    ViewportKeepsDepth(regs));
     SyncState();
 
     const auto& draw_state = maxwell3d->draw_manager.draw_state;

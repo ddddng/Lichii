@@ -181,7 +181,8 @@ public:
         return fragment_has_color0_output;
     }
 
-    /// The vertex shader is the last pre-rasterization stage and puts every vertex on the far plane
+    /// The vertex shader is the last pre-rasterization stage and puts every vertex on the far
+    /// plane, and depth bias enable and depth clamp enable are dynamic states
     bool OnFarPlane() const noexcept {
         return on_far_plane;
     }

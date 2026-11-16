@@ -993,7 +993,8 @@ void GatherInfoFromHeader(Environment& env, Info& info) {
     }
 }
 
-/// True when position z and w are each stored once, in the same block, from the same value.
+/// True when position z and w are each stored once, in the same block, from the same value, and
+/// the program leaves the viewport at 0.
 bool PositionOnFarPlane(const IR::Program& program) {
     const IR::Inst* z_store{};
     const IR::Inst* w_store{};
@@ -1008,6 +1009,9 @@ bool PositionOnFarPlane(const IR::Program& program) {
                 continue;
             }
             const IR::Attribute attr{inst.Arg(0).Attribute()};
+            if (attr == IR::Attribute::ViewportIndex || attr == IR::Attribute::ViewportMask) {
+                return false;
+            }
             if (attr != IR::Attribute::PositionZ && attr != IR::Attribute::PositionW) {
                 continue;
             }

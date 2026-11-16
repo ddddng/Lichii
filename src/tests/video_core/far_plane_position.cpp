@@ -111,6 +111,13 @@ TEST_CASE("Other position stores are not on the far plane", "[shader_recompiler]
         ir.SetAttribute(IR::Attribute::PositionW, depth, ir.Imm32(0));
         ir.SetAttributeIndexed(ir.Imm32(0x78), depth, ir.Imm32(0));
     }));
+    // The draw may land in another viewport
+    REQUIRE_FALSE(OnFarPlane([](IR::IREmitter& ir) {
+        const IR::F32 depth{Depth(ir)};
+        ir.SetAttribute(IR::Attribute::PositionZ, depth, ir.Imm32(0));
+        ir.SetAttribute(IR::Attribute::PositionW, depth, ir.Imm32(0));
+        ir.SetAttribute(IR::Attribute::ViewportIndex, ir.Imm32(1.0f), ir.Imm32(0));
+    }));
     // Only vertex shaders are marked
     REQUIRE_FALSE(OnFarPlane(
         [](IR::IREmitter& ir) {
