@@ -42,12 +42,14 @@ typedef struct nvn_direct_astc_level {
     int bc3; ///< BC3 (with alpha), else BC1
 } nvn_direct_astc_level;
 
-/// One NVN2 program stage for Lichii's shader recompiler (dotfiles-25x.11): its code and control
+/// One NVN program stage for Lichii's shader recompiler (dotfiles-25x.11): its code and control
 /// section, and the reads of the draw's state translation makes (constant buffer words, the
 /// texture formats of handles, guest memory).
 typedef struct nvn_direct_shader_source {
     uint32_t nvn_stage;        ///< 0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute, 6 task, 7 mesh
-    const uint8_t* control;    ///< the NVN2 control section (NVN_DIRECT_NVN2_CONTROL_SIZE bytes)
+    /// The control section: NVN2's (NVN_DIRECT_NVN2_CONTROL_SIZE bytes, version 0xc9 at +4) or the
+    /// first NVN_DIRECT_NVN1_CONTROL_SIZE bytes of NVN1's (Maxwell code)
+    const uint8_t* control;
     const uint8_t* code;       ///< the code area in host memory
     uint32_t code_size;        ///< bytes of the code area
     uint64_t code_address;     ///< the code area's guest address
@@ -64,6 +66,7 @@ typedef struct nvn_direct_shader_source {
 } nvn_direct_shader_source;
 
 #define NVN_DIRECT_NVN2_CONTROL_SIZE 0xd8
+#define NVN_DIRECT_NVN1_CONTROL_SIZE 0x760
 
 /// What a descriptor of a translated shader reads (Shader::Info's descriptor lists)
 enum {
