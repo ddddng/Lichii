@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -41,6 +42,21 @@ using Tegra::Engines::Maxwell3D;
 using VideoCommon::QueryType;
 
 namespace {
+// Tilers skip the samples query write sync and the conditional rendering compares (dbb9e0c5fe).
+// EDEN_NX2_SKIP_QUERY_SYNC=1 does the same on any driver: an A/B for MoltenVK (#1068).
+bool SkipsQueryWriteSync(VkDriverId driver_id) {
+    static const bool forced = std::getenv("EDEN_NX2_SKIP_QUERY_SYNC") != nullptr;
+    return forced || driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+           driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP;
+}
+
+// EDEN_NX2_NO_HOST_SAMPLES=1 records no host occlusion queries and reports every count as 1:
+// a timing A/B of Ocarina's query per draw on MoltenVK (#1068). Occlusion results are wrong.
+bool NoHostSamples() {
+    static const bool enabled = std::getenv("EDEN_NX2_NO_HOST_SAMPLES") != nullptr;
+    return enabled;
+}
+
 class SamplesQueryBank : public VideoCommon::BankBase {
 public:
     static constexpr size_t BANK_SIZE = 256;
@@ -200,7 +216,7 @@ public:
     ~SamplesStreamer() = default;
 
     void StartCounter() override {
-        if (has_started) {
+        if (has_started || NoHostSamples()) {
             return;
         }
 
@@ -290,8 +306,7 @@ public:
         }
         PauseCounter();
         const auto driver_id = device.GetDriverID();
-        if (driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
-            driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP) {
+        if (SkipsQueryWriteSync(driver_id)) {
             pending_sync.clear();
             sync_values_stash.clear();
             return;
@@ -433,7 +448,7 @@ public:
         auto index = BuildQuery();
         auto* new_query = GetQuery(index);
         new_query->guest_address = address;
-        new_query->value = 0;
+        new_query->value = NoHostSamples() ? 1 : 0;
         new_query->flags &= ~VideoCommon::QueryFlagBits::IsOrphan;
         if (has_timestamp) {
             new_query->flags |= VideoCommon::QueryFlagBits::HasTimestamp;
@@ -1677,7 +1692,7 @@ bool QueryCacheRuntime::HostConditionalRenderingCompareValues(VideoCommon::Looku
     auto driver_id = impl->device.GetDriverID();
     const bool is_gpu_high = Settings::IsGPULevelHigh();
 
-    if ((!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) || driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY || driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP) {
+    if ((!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) || SkipsQueryWriteSync(driver_id)) {
         EndHostConditionalRendering();
         TraceConditionalRendering("driver-bypass", true, object_1.address, object_2.address);
         return true;
