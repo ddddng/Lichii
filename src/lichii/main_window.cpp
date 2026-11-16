@@ -516,6 +516,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             &MainWindow::KeepNextendoSessionAlive);
     nextendo_session_timer.start(std::chrono::minutes{2});
     KeepNextendoSessionAlive();
+    connect(&nextendo_social_timer, &QTimer::timeout, this, &MainWindow::UpdateNextendoSocial);
 
     // Setup content providers.
     QtCommon::SetupContentProviders();
@@ -2549,6 +2550,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         }
     }
     CheckNextendoOnlineStatus();
+    nextendo_social_timer.start(Common::Nextendo::FriendsRefreshInterval);
+    UpdateNextendoSocial();
     OnStartGame();
 }
 
@@ -2764,6 +2767,13 @@ void MainWindow::OnEmulationStopped() {
     }
 
     emulation_running = false;
+
+    nextendo_social_timer.stop();
+    if (Common::Nextendo::OnlinePlayActive()) {
+        void(QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
+            void(Common::Nextendo::UpdatePresence(client_id, 0));
+        }));
+    }
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);
 
@@ -5325,6 +5335,18 @@ void MainWindow::KeepNextendoSessionAlive() {
     nextendo_session_watcher.setFuture(
         QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
             return Common::Nextendo::KeepSessionAlive(client_id);
+        }));
+}
+
+void MainWindow::UpdateNextendoSocial() {
+    if (!Common::Nextendo::OnlinePlayActive() || nextendo_social_watcher.isRunning()) {
+        return;
+    }
+    nextendo_social_watcher.setFuture(
+        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                           program_id = QtCommon::system->GetApplicationProcessProgramID()] {
+            void(Common::Nextendo::RefreshFriends(client_id));
+            void(Common::Nextendo::UpdatePresence(client_id, program_id));
         }));
 }
 

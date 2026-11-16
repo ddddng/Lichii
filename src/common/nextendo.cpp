@@ -4,9 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -19,6 +21,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
@@ -48,6 +51,15 @@ std::string api_base{ApiBase};
 std::deque<std::chrono::steady_clock::time_point> recent_requests;
 std::atomic_bool sign_in_running{false};
 SignOutReason sign_out_reason = SignOutReason::None;
+// Taken after account_mutex when both are held.
+std::mutex social_mutex;
+FriendList friend_cache;
+u64 game_app_id = 0;
+std::string game_app_field;
+std::optional<Presence> last_presence;
+std::chrono::steady_clock::time_point last_presence_time;
+// One presence post at a time, so two can't both decide it is due.
+std::mutex presence_mutex;
 
 std::filesystem::path AccountPath() {
     return FS::GetEdenPath(FS::EdenPath::ConfigDir) / "nextendo_account.json";
@@ -127,6 +139,68 @@ s64 Now() {
 s64 IntField(const nlohmann::json& object, const char* key) {
     const auto it = object.find(key);
     return it != object.end() && it->is_number_integer() ? it->get<s64>() : 0;
+}
+
+// Ids nextendo.network sends as 16 hex digits (title ids, BAAS ids), or as numbers.
+u64 HexField(const nlohmann::json& object, const char* key) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return 0;
+    }
+    if (it->is_number_unsigned()) {
+        return it->get<u64>();
+    }
+    if (!it->is_string()) {
+        return 0;
+    }
+    const auto& text = it->get_ref<const std::string&>();
+    u64 value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+    return error == std::errc{} && end == text.data() + text.size() ? value : 0;
+}
+
+std::string Base64Encode(std::string_view data) {
+    std::string out(4 * ((data.size() + 2) / 3), '\0');
+    const int length = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(out.data()),
+                                       reinterpret_cast<const unsigned char*>(data.data()),
+                                       static_cast<int>(data.size()));
+    out.resize(static_cast<std::size_t>(std::max(length, 0)));
+    return out;
+}
+
+std::string Base64Decode(std::string_view text) {
+    if (text.size() % 4 != 0) {
+        return {};
+    }
+    std::string out(text.size() / 4 * 3, '\0');
+    const int length = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(out.data()),
+                                       reinterpret_cast<const unsigned char*>(text.data()),
+                                       static_cast<int>(text.size()));
+    if (length < 0) {
+        return {};
+    }
+    const auto padding = text.size() - text.find_last_not_of('=') - 1;
+    out.resize(static_cast<std::size_t>(length) - std::min<std::size_t>(padding, 2));
+    return out;
+}
+
+// Scopes may be separated by spaces, commas or plus signs.
+std::vector<std::string_view> ScopeWords(std::string_view scope) {
+    std::vector<std::string_view> words;
+    std::size_t start = 0;
+    while (start < scope.size()) {
+        const std::size_t end = std::min(scope.find_first_of(" ,+", start), scope.size());
+        if (end > start) {
+            words.push_back(scope.substr(start, end - start));
+        }
+        start = end + 1;
+    }
+    return words;
+}
+
+bool HasScope(std::string_view granted, std::string_view scope) {
+    const auto words = ScopeWords(granted);
+    return std::ranges::find(words, scope) != words.end();
 }
 
 // Every request to nextendo.network goes through here, so they all share the per-minute budget.
@@ -230,6 +304,9 @@ void ApplyTokens(Account& account, const TokenResponse& token) {
         account.nex_token = token.nex_token;
         account.nex_expires = 0;
     }
+    if (!token.scope.empty()) {
+        account.scope = token.scope;
+    }
     ApplyIdentity(account, token);
 }
 
@@ -307,6 +384,7 @@ std::optional<Account> LoadAccountLocked() {
         account.refresh_token = StringField(json, "refresh_token");
         account.access_expires = IntField(json, "access_expires");
         account.nex_expires = IntField(json, "nex_expires");
+        account.scope = StringField(json, "scope");
         cached_account = std::move(account);
     } catch (const std::exception& e) {
         LOG_WARNING(Common, "Ignoring an unreadable Nextendo account file: {}", e.what());
@@ -329,6 +407,7 @@ bool WriteAccountLocked(const Account& account) {
         {"refresh_token", account.refresh_token},
         {"access_expires", account.access_expires},
         {"nex_expires", account.nex_expires},
+        {"scope", account.scope},
     }.dump(2);
     const auto path = AccountPath();
     auto temp = path;
@@ -360,6 +439,9 @@ void ClearAccountLocked() {
     cached_account.reset();
     account_loaded = true;
     sign_out_reason = SignOutReason::None;
+    std::scoped_lock lock{social_mutex};
+    friend_cache = {};
+    last_presence.reset();
 }
 
 bool SaveRenewedAccount(const Account& account, u64 generation) {
@@ -384,6 +466,173 @@ void ExpireGameToken(const std::string& nex_token) {
         account->nex_expires = 0;
         void(WriteAccountLocked(*account));
     }
+}
+
+// Hold refresh_mutex.
+bool RenewalBackingOff() {
+    return last_renewal_failure &&
+           std::chrono::steady_clock::now() - *last_renewal_failure < std::chrono::minutes{5};
+}
+
+// Trades the refresh token for a new access token and saves both. Signs out when nextendo.network
+// refuses the refresh token; other failures back off for five minutes. Hold refresh_mutex.
+bool RefreshAccessToken(ApiClient& api, std::string_view client_id, Account& account,
+                        u64 generation, std::string& error) {
+    if (account.refresh_token.empty()) {
+        LOG_WARNING(Common, "The Nextendo session expired; sign in again");
+        ClearRenewedAccount(generation, SignOutReason::SessionExpired);
+        return false;
+    }
+    const httplib::Params form{
+        {"grant_type", "refresh_token"},
+        {"refresh_token", account.refresh_token},
+        {"client_id", std::string{client_id}},
+    };
+    const auto result = api.Post(TokenPath, BaseHeaders(client_id), form);
+    const auto token = ReadReply(result, "token refresh", error);
+    if (!token) {
+        if (result && RefreshTokenRejected(result->body)) {
+            LOG_WARNING(Common, "nextendo.network refused the refresh token; signing out");
+            ClearRenewedAccount(generation, SignOutReason::SessionExpired);
+        } else {
+            last_renewal_failure = std::chrono::steady_clock::now();
+        }
+        return false;
+    }
+    ApplyTokens(account, *token);
+    // The server retires the old refresh token a minute after handing out a new one.
+    if (!SaveRenewedAccount(account, generation) || account.access_token.empty()) {
+        last_renewal_failure = std::chrono::steady_clock::now();
+        return false;
+    }
+    return true;
+}
+
+struct Session {
+    Account account;
+    u64 generation{};
+};
+
+// The stored account, its access token refreshed first when it expires within a minute or is
+// refused, the one a request just got a 401 for. nullopt once signed out.
+std::optional<Session> AccessSession(std::string_view client_id, std::string_view refused = {}) {
+    std::scoped_lock lock{refresh_mutex};
+    std::optional<Session> session;
+    {
+        std::scoped_lock account_lock{account_mutex};
+        if (auto account = LoadAccountLocked()) {
+            session = Session{std::move(*account), account_generation};
+        }
+    }
+    if (!session || client_id.empty()) {
+        return session;
+    }
+    Account& account = session->account;
+    const bool due = account.access_token.empty() || account.access_expires <= Now() + 60 ||
+                     account.access_token == refused;
+    if (!due || RenewalBackingOff()) {
+        return session;
+    }
+    ApiClient api{5};
+    std::string error;
+    if (!RefreshAccessToken(api, client_id, account, session->generation, error) &&
+        !LoadAccount()) {
+        return std::nullopt;
+    }
+    return session;
+}
+
+// nextendo.network refused scope, so Lichii stops asking for it until the player signs in again.
+void DropScope(u64 generation, std::string_view scope) {
+    std::scoped_lock lock{account_mutex};
+    auto account = LoadAccountLocked();
+    if (!account || generation != account_generation) {
+        return;
+    }
+    std::vector<std::string_view> kept = ScopeWords(account->scope);
+    std::erase(kept, scope);
+    account->scope = fmt::format("{}", fmt::join(kept, " "));
+    void(WriteAccountLocked(*account));
+    if (scope == "friends") {
+        std::scoped_lock social_lock{social_mutex};
+        friend_cache = {};
+    }
+}
+
+using SocialSend = std::function<httplib::Result(ApiClient&, const httplib::Headers&)>;
+
+// Sends a request that needs scope with the access token, and again with a new access token after
+// a 401. A 401 with the new token or a 403 means the sign-in lacks the scope.
+SocialResult SendSocial(std::string_view client_id, std::string_view scope, const SocialSend& send,
+                        std::string* body = nullptr) {
+    if (const auto stored = LoadAccount(); !stored || !HasScope(stored->scope, scope)) {
+        return {.status = stored ? SocialStatus::MissingScope : SocialStatus::NotSignedIn};
+    }
+    auto session = AccessSession(client_id);
+    if (!session) {
+        return {.status = SocialStatus::NotSignedIn};
+    }
+    ApiClient api{5};
+    auto result = send(api, BearerHeaders(client_id, session->account.access_token));
+    if (result && result->status == 401) {
+        auto renewed = AccessSession(client_id, session->account.access_token);
+        if (!renewed) {
+            return {.status = SocialStatus::NotSignedIn, .http_status = 401};
+        }
+        if (renewed->account.access_token == session->account.access_token) {
+            return {.status = SocialStatus::Failed, .http_status = 401};
+        }
+        session = std::move(renewed);
+        result = send(api, BearerHeaders(client_id, session->account.access_token));
+    }
+    if (!result) {
+        LOG_WARNING(Common, "Nextendo {} request failed: {}", scope,
+                    httplib::to_string(result.error()));
+        return {.status = SocialStatus::Failed};
+    }
+    const int status = result->status;
+    if (status == 401 || status == 403) {
+        LOG_WARNING(Common,
+                    "nextendo.network refused a {} request (HTTP {}); sign in again to "
+                    "allow it",
+                    scope, status);
+        DropScope(session->generation, scope);
+        return {.status = SocialStatus::MissingScope, .http_status = status};
+    }
+    if (status != 200) {
+        LOG_WARNING(Common, "nextendo.network refused a {} request (HTTP {})", scope, status);
+        return {.status = SocialStatus::Failed, .http_status = status};
+    }
+    if (body) {
+        *body = std::move(result->body);
+    }
+    return {.status = SocialStatus::Ok, .http_status = status};
+}
+
+Friend ReadFriend(const nlohmann::json& entry) {
+    Friend out;
+    if (!entry.is_object()) {
+        return out;
+    }
+    if (const auto it = entry.find("pid"); it != entry.end()) {
+        out.pid = ReadPid(*it);
+    }
+    out.name = StringField(entry, "name");
+    if (out.name.empty()) {
+        out.name = StringField(entry, "username");
+    }
+    out.friend_code = StringField(entry, "friend_code");
+    out.nsa = HexField(entry, "nsa");
+    const s64 badge = IntField(entry, "pf");
+    out.console = badge == 1 || badge == 2 || StringField(entry, "plateforme") == "switch";
+    if (const auto presence = entry.find("presence");
+        presence != entry.end() && presence->is_object()) {
+        out.status = static_cast<s32>(IntField(*presence, "status"));
+        out.app_id = HexField(*presence, "app_id");
+        out.app_detail = StringField(*presence, "app_detail");
+        out.app_field = Base64Decode(StringField(*presence, "app_field"));
+    }
+    return out;
 }
 
 } // namespace
@@ -543,6 +792,7 @@ std::optional<TokenResponse> ParseTokenResponse(std::string_view body) {
     out.access_token = StringField(json, "access_token");
     out.refresh_token = StringField(json, "refresh_token");
     out.expires_in = IntField(json, "expires_in");
+    out.scope = StringField(json, "scope");
     ReadIdentity(json, out.pid, out.username, out.friend_code);
     if (const auto it = json.find("account"); it != json.end()) {
         ReadIdentity(*it, out.pid, out.username, out.friend_code);
@@ -685,6 +935,10 @@ SignInResult SignIn(std::string_view client_id,
 
     Account& account = out.account;
     ApplyTokens(account, *token);
+    // RFC 6749 5.1: the reply leaves the scope out when it grants the one asked for.
+    if (account.scope.empty()) {
+        account.scope = Scopes;
+    }
     if (account.nex_token.empty() &&
         FetchGameToken(api, client_id, account, out.game_token_error) != GameTokenReply::Ok) {
         LOG_WARNING(Common, "Signed in to Nextendo without a game token: {}",
@@ -732,42 +986,14 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
     }
     // A game asks for its id token on the IPC thread, so an unreachable server is retried at most
     // every five minutes and with short timeouts.
-    const auto steady_now = std::chrono::steady_clock::now();
-    if (last_renewal_failure && steady_now - *last_renewal_failure < std::chrono::minutes{5}) {
+    if (RenewalBackingOff()) {
         return account;
     }
 
     ApiClient api{5};
     std::string error;
     const auto refresh = [&] {
-        if (account->refresh_token.empty()) {
-            LOG_WARNING(Common, "The Nextendo session expired; sign in again");
-            ClearRenewedAccount(generation, SignOutReason::SessionExpired);
-            return false;
-        }
-        const httplib::Params form{
-            {"grant_type", "refresh_token"},
-            {"refresh_token", account->refresh_token},
-            {"client_id", std::string{client_id}},
-        };
-        const auto result = api.Post(TokenPath, BaseHeaders(client_id), form);
-        const auto token = ReadReply(result, "token refresh", error);
-        if (!token) {
-            if (result && RefreshTokenRejected(result->body)) {
-                LOG_WARNING(Common, "nextendo.network refused the refresh token; signing out");
-                ClearRenewedAccount(generation, SignOutReason::SessionExpired);
-            } else {
-                last_renewal_failure = steady_now;
-            }
-            return false;
-        }
-        ApplyTokens(*account, *token);
-        // The server retires the old refresh token a minute after handing out a new one.
-        if (!SaveRenewedAccount(*account, generation) || account->access_token.empty()) {
-            last_renewal_failure = steady_now;
-            return false;
-        }
-        return true;
+        return RefreshAccessToken(api, client_id, *account, generation, error);
     };
 
     bool refreshed = false;
@@ -790,7 +1016,7 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
         void(SaveRenewedAccount(*account, generation));
         break;
     case GameTokenReply::Failed:
-        last_renewal_failure = steady_now;
+        last_renewal_failure = std::chrono::steady_clock::now();
         LOG_WARNING(Common, "Could not renew the Nextendo game token: {}", error);
         break;
     case GameTokenReply::Unauthorized:
@@ -878,6 +1104,155 @@ SignOutReason KeepSessionAlive(std::string_view client_id) {
     return ClearRenewedAccount(generation, SignOutReason::SessionRevoked)
                ? SignOutReason::SessionRevoked
                : SignOutReason::None;
+}
+
+bool HasSocialScopes(const Account& account) {
+    return HasScope(account.scope, "friends") && HasScope(account.scope, "presence");
+}
+
+std::optional<FriendList> ParseFriendList(std::string_view body) {
+    try {
+        const auto json = nlohmann::json::parse(body);
+        if (!json.is_object()) {
+            return std::nullopt;
+        }
+        FriendList out;
+        const auto read = [&json](const char* key, std::vector<Friend>& list) {
+            const auto it = json.find(key);
+            if (it == json.end() || !it->is_array()) {
+                return;
+            }
+            for (const auto& entry : *it) {
+                if (auto read_friend = ReadFriend(entry); read_friend.pid != 0) {
+                    list.push_back(std::move(read_friend));
+                }
+            }
+        };
+        read("friends", out.friends);
+        read("requests", out.requests);
+        read("sent", out.sent);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+SocialResult RefreshFriends(std::string_view client_id) {
+    u64 generation;
+    {
+        std::scoped_lock lock{account_mutex};
+        generation = account_generation;
+    }
+    std::string body;
+    const auto result = SendSocial(
+        client_id, "friends",
+        [](ApiClient& api, const httplib::Headers& headers) {
+            return api.Get(fmt::format("{}?images=0", FriendsPath), headers);
+        },
+        &body);
+    if (result.status != SocialStatus::Ok) {
+        return result;
+    }
+    auto list = ParseFriendList(body);
+    if (!list) {
+        LOG_WARNING(Common, "nextendo.network sent an unreadable friend list");
+        return {.status = SocialStatus::Failed, .http_status = result.http_status};
+    }
+    std::scoped_lock lock{account_mutex, social_mutex};
+    if (generation == account_generation) {
+        friend_cache = std::move(*list);
+    }
+    return result;
+}
+
+FriendList CachedFriends() {
+    std::scoped_lock lock{social_mutex};
+    return friend_cache;
+}
+
+SocialResult AddFriend(std::string_view client_id, std::string_view friend_code) {
+    const std::string body = nlohmann::json{{"friend_code", friend_code}}.dump();
+    return SendSocial(client_id, "friends",
+                      [&body](ApiClient& api, const httplib::Headers& headers) {
+                          return api.PostJson(FriendsPath, headers, body);
+                      });
+}
+
+SocialResult AnswerFriend(std::string_view client_id, FriendAction action, u64 pid) {
+    const char* verb = action == FriendAction::Accept    ? "accept"
+                       : action == FriendAction::Decline ? "decline"
+                                                         : "remove";
+    const std::string path = fmt::format("{}/{}", FriendsPath, verb);
+    const std::string body = nlohmann::json{{"pid", pid}}.dump();
+    return SendSocial(client_id, "friends",
+                      [&path, &body](ApiClient& api, const httplib::Headers& headers) {
+                          return api.PostJson(path, headers, body);
+                      });
+}
+
+std::string PresenceBody(const Presence& presence) {
+    nlohmann::json body{
+        {"status", presence.status},
+        {"app_id", presence.app_id == 0 ? std::string{} : fmt::format("{:016X}", presence.app_id)},
+        {"platform", "emulator"},
+    };
+    if (!presence.app_field.empty()) {
+        body["app_field"] = Base64Encode(presence.app_field);
+    }
+    return body.dump();
+}
+
+bool PresenceDue(const std::optional<Presence>& last,
+                 std::chrono::steady_clock::duration since_last, const Presence& next) {
+    // The refresh timer may fire a little before a full interval has passed.
+    constexpr auto slack = std::chrono::seconds{5};
+    if (!last) {
+        return next.status != 0;
+    }
+    if (*last != next) {
+        return next.status == 0 || since_last + slack >= PresenceMinInterval;
+    }
+    return next.status != 0 && since_last + slack >= PresenceInterval;
+}
+
+void SetGameAppField(u64 app_id, std::string app_field) {
+    // An all-zero AppKeyValue breaks the game details consoles show.
+    if (std::ranges::all_of(app_field, [](char c) { return c == '\0'; })) {
+        app_field.clear();
+    }
+    std::scoped_lock lock{social_mutex};
+    game_app_id = app_id;
+    game_app_field = std::move(app_field);
+}
+
+SocialResult UpdatePresence(std::string_view client_id, u64 app_id) {
+    std::scoped_lock send_lock{presence_mutex};
+    Presence next{.status = app_id != 0 ? 2 : 0, .app_id = app_id};
+    std::optional<Presence> last;
+    const auto now = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration since_last;
+    {
+        std::scoped_lock lock{social_mutex};
+        if (app_id != 0 && app_id == game_app_id) {
+            next.app_field = game_app_field;
+        }
+        last = last_presence;
+        since_last = now - last_presence_time;
+    }
+    if (!PresenceDue(last, since_last, next)) {
+        return {.status = SocialStatus::Ok};
+    }
+    const std::string body = PresenceBody(next);
+    const auto result =
+        SendSocial(client_id, "presence", [&body](ApiClient& api, const httplib::Headers& headers) {
+            return api.PostJson(PresencePath, headers, body);
+        });
+    if (result.status == SocialStatus::Ok) {
+        std::scoped_lock lock{social_mutex};
+        last_presence = std::move(next);
+        last_presence_time = now;
+    }
+    return result;
 }
 
 } // namespace Common::Nextendo
