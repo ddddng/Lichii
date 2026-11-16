@@ -30,10 +30,15 @@ public:
 
 private:
     void changeEvent(QEvent*) override;
+    // The Profiles page may have added or deleted users since the picker was filled.
+    void showEvent(QShowEvent*) override;
     void RetranslateUI();
     void SetConfiguration();
     // The profile the Nextendo status, sign-in and sign-out apply to.
     Common::UUID NextendoProfile() const;
+    // Fills the picker with the users there are now, keeping the shown one while it exists.
+    void ShowNextendoProfiles();
+    void SwitchNextendoProfile();
     void SignInToNextendo();
     void RenewNextendoToken();
     void UpdateNextendoStatus(const QString& error = {}, bool signed_in = false);

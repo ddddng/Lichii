@@ -12,6 +12,7 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QPointer>
+#include <QSignalBlocker>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrent>
 #include "common/nextendo.h"
@@ -71,21 +72,7 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
         ui->network_interface->addItem(QString::fromStdString(iface.name));
     ui->nextendo_status->setTextFormat(Qt::PlainText);
     ui->nextendo_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    const auto& profile_manager = system.GetProfileManager();
-    const Common::UUID current = Service::Account::Nextendo::CurrentProfile(system);
-    for (const auto& uuid : profile_manager.GetAllUsers()) {
-        Service::Account::ProfileBase base{};
-        if (!uuid.IsValid() || !profile_manager.GetProfileBase(uuid, base)) {
-            continue;
-        }
-        const QString name = QString::fromStdString(Common::StringFromFixedZeroTerminatedBuffer(
-            reinterpret_cast<const char*>(base.username.data()), base.username.size()));
-        nextendo_profiles.push_back({uuid, name});
-        ui->nextendo_profile->addItem(name);
-        if (uuid == current) {
-            ui->nextendo_profile->setCurrentIndex(ui->nextendo_profile->count() - 1);
-        }
-    }
+    ShowNextendoProfiles();
     RetranslateUI();
     this->SetConfiguration();
 
@@ -99,15 +86,8 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
         }
     }
 
-    connect(ui->nextendo_profile, &QComboBox::currentIndexChanged, this, [this] {
-        nextendo_online.reset();
-        ui->nextendo_friends_status->clear();
-        UpdateNextendoStatus();
-        RenewNextendoToken();
-        if (!ui->nextendo_friends->isHidden()) {
-            RunFriendsRequest(Common::Nextendo::RefreshFriends);
-        }
-    });
+    connect(ui->nextendo_profile, &QComboBox::currentIndexChanged, this,
+            &ConfigureNetwork::SwitchNextendoProfile);
     connect(ui->nextendo_enabled, &QCheckBox::toggled, this, [this](bool enabled) {
         if (enabled) {
             ui->airplane_mode->setChecked(false);
@@ -174,6 +154,7 @@ void ConfigureNetwork::ApplyConfiguration() {
     Settings::values.lan_play = ui->lan_play->isChecked();
     if (!per_game) {
         Settings::values.nextendo_enabled = ui->nextendo_enabled->isChecked();
+        Settings::values.nextendo_sync_profile = ui->nextendo_sync_profile->isChecked();
         Settings::values.nextendo_client_id = NextendoClientId(ui->nextendo_client_id->text());
         Settings::values.online_service_redirect = ui->online_service_redirect->isChecked();
         Settings::values.online_redirect_hosts = ui->redirect_hosts->text().trimmed().toStdString();
@@ -182,6 +163,15 @@ void ConfigureNetwork::ApplyConfiguration() {
         Settings::values.online_redirect_ca = ui->redirect_ca->text().trimmed().toStdString();
         Settings::values.online_redirect_loopback_only = ui->redirect_loopback_only->isChecked();
     }
+}
+
+void ConfigureNetwork::showEvent(QShowEvent* event) {
+    const Common::UUID shown = NextendoProfile();
+    ShowNextendoProfiles();
+    if (!per_game && NextendoProfile() != shown) {
+        SwitchNextendoProfile();
+    }
+    QWidget::showEvent(event);
 }
 
 void ConfigureNetwork::changeEvent(QEvent* event) {
@@ -217,6 +207,7 @@ void ConfigureNetwork::SetConfiguration() {
         Settings::values.online_redirect_loopback_only.GetValue());
     ui->redirect_group->setEnabled(runtime_lock);
     ui->nextendo_enabled->setChecked(Settings::values.nextendo_enabled.GetValue());
+    ui->nextendo_sync_profile->setChecked(Settings::values.nextendo_sync_profile.GetValue());
     ui->nextendo_client_id->setText(
         QString::fromStdString(Settings::values.nextendo_client_id.GetValue()));
     UpdateNextendoStatus();
@@ -226,6 +217,39 @@ Common::UUID ConfigureNetwork::NextendoProfile() const {
     const int index = ui->nextendo_profile->currentIndex();
     return index < 0 ? Common::InvalidUUID
                      : nextendo_profiles[static_cast<std::size_t>(index)].uuid;
+}
+
+void ConfigureNetwork::ShowNextendoProfiles() {
+    const Common::UUID shown = nextendo_profiles.empty()
+                                   ? Service::Account::Nextendo::CurrentProfile(system)
+                                   : NextendoProfile();
+    const QSignalBlocker blocker{ui->nextendo_profile};
+    ui->nextendo_profile->clear();
+    nextendo_profiles.clear();
+    const auto& profile_manager = system.GetProfileManager();
+    for (const auto& uuid : profile_manager.GetAllUsers()) {
+        Service::Account::ProfileBase base{};
+        if (!uuid.IsValid() || !profile_manager.GetProfileBase(uuid, base)) {
+            continue;
+        }
+        const QString name = QString::fromStdString(Common::StringFromFixedZeroTerminatedBuffer(
+            reinterpret_cast<const char*>(base.username.data()), base.username.size()));
+        nextendo_profiles.push_back({uuid, name});
+        ui->nextendo_profile->addItem(name);
+        if (uuid == shown) {
+            ui->nextendo_profile->setCurrentIndex(ui->nextendo_profile->count() - 1);
+        }
+    }
+}
+
+void ConfigureNetwork::SwitchNextendoProfile() {
+    nextendo_online.reset();
+    ui->nextendo_friends_status->clear();
+    UpdateNextendoStatus();
+    RenewNextendoToken();
+    if (!ui->nextendo_friends->isHidden()) {
+        RunFriendsRequest(Common::Nextendo::RefreshFriends);
+    }
 }
 
 void ConfigureNetwork::SignInToNextendo() {
@@ -360,6 +384,7 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in
         }
     }
     ui->nextendo_status->setText(status);
+    ui->nextendo_sync_profile->setEnabled(account && ui->nextendo_enabled->isChecked());
     const bool friends =
         account && Common::Nextendo::HasSocialScopes(*account) && ui->nextendo_enabled->isChecked();
     ui->nextendo_friends->setVisible(friends);

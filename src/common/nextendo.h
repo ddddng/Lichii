@@ -26,7 +26,8 @@ class Client;
 }
 
 // Nextendo Network sign-in and the linked account, ported from citron-nextendo's
-// src/common/nextendo_account.cpp and src/web_service/nextendo_api.cpp (SignInWithBrowser).
+// src/common/nextendo_account.cpp and src/web_service/nextendo_api.cpp (SignInWithBrowser,
+// GetAvatarByPid).
 namespace Common::Nextendo {
 
 constexpr std::string_view ApiBase = "https://nextendo.network";
@@ -298,5 +299,19 @@ bool PresenceDue(const std::optional<Presence>& last,
 void SetGameAppField(u64 app_id, std::string app_field);
 // Sends that the profile plays app_id, or is offline when it is 0, when PresenceDue says so.
 SocialResult UpdatePresence(std::string_view client_id, const Common::UUID& profile, u64 app_id);
+
+// A username as a guest profile nickname: at most size bytes, without a split UTF-8 character.
+std::string ProfileNickname(std::string_view username, std::size_t size);
+
+struct ProfilePull {
+    std::string nickname;
+    // The picture as nextendo.network sent it. Unset when it can't be reached, and when the
+    // picture is the one the last pull for this guest profile returned.
+    std::optional<std::string> avatar;
+};
+// With nextendo_sync_profile on and the guest profile signed in: its account's username and, from
+// the public GET /api/avatar, its picture, even an unchanged one when force is set. nullopt when
+// the profile signed in again or out meanwhile. Blocks on the request.
+std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& profile, bool force);
 
 } // namespace Common::Nextendo

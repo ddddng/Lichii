@@ -49,7 +49,8 @@ struct StoredAccount {
     SignOutReason sign_out_reason = SignOutReason::None;
 };
 
-// The friend list and presence belong to the profile's account that fetched and sent them.
+// The friend list, presence and picture belong to the profile's account that fetched and sent
+// them.
 struct SocialCache {
     FriendList friends;
     // Refreshes started, and the one friends holds, so an older reply can't replace a newer one.
@@ -57,6 +58,8 @@ struct SocialCache {
     u64 friends_refresh = 0;
     std::optional<Presence> last_presence;
     std::chrono::steady_clock::time_point last_presence_time;
+    // The SHA-256 of the picture the last PullProfile returned.
+    std::optional<std::array<u8, SHA256_DIGEST_LENGTH>> avatar_hash;
 };
 
 std::mutex account_mutex;
@@ -525,6 +528,7 @@ void NewAccountGenerationLocked(const Common::UUID& profile) {
     SocialCache& social = social_caches[profile];
     social.friends = {};
     social.last_presence.reset();
+    social.avatar_hash.reset();
 }
 
 void ClearAccountLocked(const Common::UUID& profile) {
@@ -792,6 +796,9 @@ void ClearAccount(const Common::UUID& profile) {
 }
 
 void MigrateAccountFile(const Common::UUID& profile) {
+    if (profile.IsInvalid()) {
+        return;
+    }
     std::scoped_lock lock{account_mutex};
     const auto legacy = LegacyAccountPath();
     const std::string text = FS::ReadStringFromFile(legacy, FS::FileType::TextFile);
@@ -1430,6 +1437,58 @@ SocialResult UpdatePresence(std::string_view client_id, const Common::UUID& prof
         social.last_presence_time = now;
     }
     return result;
+}
+
+std::string ProfileNickname(std::string_view username, std::size_t size) {
+    if (username.size() <= size) {
+        return std::string{username};
+    }
+    while (size > 0 && (static_cast<u8>(username[size]) & 0xC0) == 0x80) {
+        --size;
+    }
+    return std::string{username.substr(0, size)};
+}
+
+std::optional<ProfilePull> PullProfile(std::string_view client_id, const UUID& profile,
+                                       bool force) {
+    if (!OnlinePlayActive() || !Settings::values.nextendo_sync_profile.GetValue()) {
+        return std::nullopt;
+    }
+    std::optional<Account> account;
+    u64 generation;
+    {
+        std::scoped_lock lock{account_mutex};
+        account = LoadAccountLocked(profile);
+        generation = GenerationLocked(profile);
+    }
+    if (!account) {
+        return std::nullopt;
+    }
+    ProfilePull pull{.nickname = account->username};
+    ApiClient api{5};
+    // Public, so the request carries no token.
+    auto result = api.Get(fmt::format("/api/avatar?pid={}", account->pid), BaseHeaders(client_id));
+    if (!result || result->status != 200) {
+        LOG_WARNING(Common, "Could not fetch the Nextendo profile picture: {}",
+                    result ? fmt::format("HTTP {}", result->status)
+                           : httplib::to_string(result.error()));
+    }
+    std::scoped_lock lock{account_mutex, social_mutex};
+    if (generation != GenerationLocked(profile)) {
+        return std::nullopt;
+    }
+    if (!result || result->status != 200) {
+        return pull;
+    }
+    std::array<u8, SHA256_DIGEST_LENGTH> hash;
+    SHA256(reinterpret_cast<const u8*>(result->body.data()), result->body.size(), hash.data());
+    auto& last_hash = social_caches[profile].avatar_hash;
+    if (!force && last_hash == hash) {
+        return pull;
+    }
+    last_hash = hash;
+    pull.avatar = std::move(result->body);
+    return pull;
 }
 
 } // namespace Common::Nextendo
