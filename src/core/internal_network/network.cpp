@@ -15,7 +15,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mstcpip.h>
+#include <mswsock.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -950,7 +950,7 @@ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
         return GetAndLogLastError();
     }
     socket_type = type;
-#ifdef SIO_UDP_CONNRESET
+#ifdef _WIN32
     if (type == Type::DGRAM) {
         // Windows fails the next receive with WSAECONNRESET once a peer answers a send with ICMP
         // port unreachable. The console does not on an unconnected socket, which Pia shares
