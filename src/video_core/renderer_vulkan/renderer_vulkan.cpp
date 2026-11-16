@@ -303,6 +303,8 @@ void AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .shader_translate = &NvnDirectShaders::Translate,
         .shader_free = &NvnDirectShaders::Free,
         .shader_context = &shaders,
+        .scale_up = Settings::values.resolution_info.up_scale,
+        .scale_shift = Settings::values.resolution_info.down_shift,
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];

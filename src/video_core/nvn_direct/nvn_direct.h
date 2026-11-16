@@ -153,7 +153,27 @@ typedef struct nvn_direct_device {
     int (*shader_translate)(void* context, const nvn_direct_shader_source* source, nvn_direct_shader* shader);
     void (*shader_free)(void* context, nvn_direct_shader* shader);
     void* shader_context;
+    /// Lichii's resolution setting (Settings::ResolutionScalingInfo): render targets are made
+    /// scale_up / 2^scale_shift times their size (dotfiles-25x.34). 1 and 0: no scale.
+    uint32_t scale_up, scale_shift;
 } nvn_direct_device;
+
+/// The push constants of a translated stage that Lichii's RescalingPass changed
+/// (Shader::Backend::SPIRV::RescalingLayout): a bit per texture and per image descriptor that is
+/// scaled, then the pixel stage's down factor. A pipeline's stages are translated one by one, so
+/// each stage's descriptors take bits of their own: pixel and compute from bit 0, vertex and mesh
+/// from 64 (textures) / 32 (images), the other stages from 96 / 48.
+#define NVN_DIRECT_SCALE_PUSH_SIZE 32
+#define NVN_DIRECT_SCALE_IMAGES_OFFSET 16
+#define NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET 24
+static inline uint32_t nvn_direct_scale_texture_bit(uint32_t nvn_stage) {
+    return nvn_stage == 1 || nvn_stage == 5 ? 0 : nvn_stage == 0 || nvn_stage == 7 ? 64 : 96;
+}
+static inline uint32_t nvn_direct_scale_texture_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 64 : 32; }
+static inline uint32_t nvn_direct_scale_image_bit(uint32_t nvn_stage) {
+    return nvn_stage == 1 || nvn_stage == 5 ? 0 : nvn_stage == 0 || nvn_stage == 7 ? 32 : 48;
+}
+static inline uint32_t nvn_direct_scale_image_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 32 : 16; }
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.
 /// Called once, after the device exists. Without it the replay has no device: submissions run
@@ -216,7 +236,8 @@ typedef struct nvn_direct_frame {
     VkImage image;
     VkImageView view; ///< 2D, level 0, layer 0, in the image's own format
     VkFormat format;
-    uint32_t width, height;
+    uint32_t width, height;           ///< the texture's size (the crop's units)
+    uint32_t scaled_width, scaled_height; ///< the image's (the render scale's)
     int32_t crop[4]; ///< x, y, width, height the game shows (nvnWindowSetCrop); width 0: all of it
     uint32_t interval; ///< the window's present interval (vblanks per frame)
     uint64_t fence;

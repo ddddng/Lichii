@@ -184,7 +184,8 @@ int nvn_direct_present_take(nvn_direct_frame* out) {
     }
     h->id = id;
     h->im = im;
-    h->frame = (nvn_direct_frame){.id = id, .image = im->img, .view = view, .format = im->f.vk, .width = im->w, .height = im->h, .interval = out->interval, .fence = p.fence};
+    h->frame = (nvn_direct_frame){.id = id, .image = im->img, .view = view, .format = im->f.vk, .width = im->scaled ? im->d.width : im->w, .height = im->scaled ? im->d.height : im->h,
+                                  .scaled_width = im->w, .scaled_height = im->h, .interval = out->interval, .fence = p.fence};
     if (p.has_crop) memcpy(h->frame.crop, p.crop, sizeof p.crop);
     *out = h->frame;
     pthread_mutex_unlock(&g_held_mu);

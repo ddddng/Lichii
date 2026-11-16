@@ -8,6 +8,7 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "nvn_direct_front.h"
+#include "nvn_direct.h"   // Lichii: the render scale's push constants
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include <math.h>
@@ -271,7 +272,13 @@ static struct {
     uint32_t cnl[8], dnl; VkExtent2D cext[8], dext;      // each attachment's layers and level size (clears in the pass must cover what they would outside it)
     int swrite;                                          // a draw of the pass wrote memory (storage buffers or images, raw global stores, a geometry shader's claim)
     int bar_pending;                                     // a game barrier came inside the pass and was taken there (vka_rp_game_barrier): the draws after it are checked (bar_hazard)
+    int scaled;                                          // Lichii (dotfiles-25x.34): its targets are at the render scale: viewports and scissors scaled
 } R;
+// Lichii (dotfiles-25x.34): the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
+// pixel stage's down factor; no image is scaled: vka_tex.c img_unscale), and the last pushed, which stays while every layout has the same push constant range (vka_dyn_invalidate forgets it)
+static struct { uint32_t tex[4], img[2]; float down, pad; } g_scale_push;
+static struct { typeof(g_scale_push) p; int valid; } g_scale_pushed;
+_Static_assert(sizeof g_scale_push == NVN_DIRECT_SCALE_PUSH_SIZE && offsetof(typeof(g_scale_push), img) == NVN_DIRECT_SCALE_IMAGES_OFFSET && offsetof(typeof(g_scale_push), down) == NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET, "RescalingLayout");
 // Clears waiting for the pass of their targets (vka_rp_clear), in order: the next draw over the same targets opens its pass with them (loadOp CLEAR, or vkCmdClearAttachments),
 // anything else does them outside a pass first (pc_flush), as before
 enum { NPC = 16 };
@@ -310,10 +317,21 @@ static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv
     *nl = has_v && v->set_layers && v->nlayers ? v->nlayers : all - (*l0 < all ? *l0 : 0);
     if (*l0 + *nl > all) *nl = *l0 < all ? all - *l0 : 0;
 }
+// Lichii (dotfiles-25x.34): a pass over scaled targets and targets at their own size (beside a small target, or one made at its own size again) draws them all at their own size
+static void rp_scale_targets(const p_set_rt *rt, int has_rt) {
+    if (!has_rt) return;
+    vka_img *ims[9]; int n = 0, scaled = 0;
+    for (int i = 0; i < rt->n && i < 8; i++) if (rt->color[i]) { vka_img *im = vka_tex_get(rt->color[i], g_cb); if (im) { ims[n++] = im; scaled += im->scaled; } }
+    if (rt->depth) { vka_img *im = vka_tex_get(rt->depth, g_cb); if (im) { ims[n++] = im; scaled += im->scaled; } }
+    if (!scaled || scaled == n) return;
+    if (PC.n) pc_flush();   // (their rectangles are in their images' sizes)
+    for (int i = 0; i < n; i++) if (ims[i]->scaled) vka_tex_unscale(ims[i], g_cb, "a pass with targets at their own size");
+}
 // Opens the pass over the bound targets: 0 = it cannot (no target can be an attachment), logged
 static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (R.on) { if (!g_pass_keep || rt_same(rt, has_rt, &R.rt, R.has_rt)) return 1; vka_rp_end(); }   // a new SET_RT of other targets ends the pass at its first draw (exec does not)
     if (PC.n && !rt_same(rt, has_rt, &PC.rt, 1)) pc_flush();                             // clears of other targets: done before
+    if (vka_scale_on()) rp_scale_targets(rt, has_rt);
     VkRenderingAttachmentInfo ca[8], da = {0}, sa; uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0;
     vka_img *fb_im[9]; uint32_t fb_lv[9]; int nfb = 0;   // the attachments' images and levels (vka_tex_feedback)
     memset(&R, 0, sizeof R);
@@ -334,7 +352,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         VkImageView v = vka_view(im, f.view, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, l0, nl, NULL);
         if (!v) continue;
         ca[i].imageView = v; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
-        R.cim[R.nci] = im; R.clv[R.nci] = lv; R.cl0[R.nci++] = l0;
+        R.cim[R.nci] = im; R.clv[R.nci] = lv; R.cl0[R.nci++] = l0; R.scaled |= im->scaled;
         uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
         R.cnl[i] = nl; R.cext[i] = (VkExtent2D){lw, lh};
         if (lw < w) w = lw; if (lh < h) h = lh; if (nl < layers) layers = nl;
@@ -352,7 +370,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
                 da = (VkRenderingAttachmentInfo){VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v, .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
                 if (im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) { dp = &da; R.df = im->f.vk; }
                 if (im->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sp = &da; R.sf = im->f.vk; }
-                samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
+                samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv; R.scaled |= im->scaled;
                 uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
                 R.dnl = nl; R.dext = (VkExtent2D){lw, lh};
                 if (lw < w) w = lw; if (lh < h) h = lh; if (nl < layers) layers = nl;
@@ -776,8 +794,10 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; uint64_t ti_ = g_prof ? cntvct() : 0;
             VkImageView v = VK_NULL_HANDLE; VkSampler s = VK_NULL_HANDLE; VkImageLayout lay = VK_IMAGE_LAYOUT_GENERAL;
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
-                int tid = (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) && !(g_null_tex >> st & 1) ? r[i].tid : 0;
-                if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay);
+                int tid = (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) && !(g_null_tex >> st & 1) ? r[i].tid : 0, scaled = 0;
+                if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay, &scaled);
+                if (scaled && r[i].what == VKA_R_TEX && r[i].binding >= sh->scale_tex_binding && r[i].binding - sh->scale_tex_binding < sh->scale_tex_bits) {   // (the render scale: RescalingPass's bit)
+                    unsigned b = sh->scale_tex_bit + r[i].binding - sh->scale_tex_binding; g_scale_push.tex[b >> 5] |= 1u << (b & 31); }
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
                 // It reads as unbound, zeros, as nvn_mtl.m's zero 3D / zero cube fallback does; noted once. Other mismatches are reported
                 int dd = r[i].dim & DMSH_VK_DIM_MASK, tt = tid && !v ? vka_tex_id_target(tid) : -1;
@@ -966,6 +986,7 @@ static int stage_bind(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], int
 }
 static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0) {
     g_w.n = 0;
+    if (vka_scale_on()) memset(&g_scale_push, 0, sizeof g_scale_push);
     int any_pool = 0;
     const int fs_own = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && lay->set_fs;   // (Lichii: the pixel shader's writes go to its own set, after the others)
     uint64_t t1_ = g_prof ? cntvct() : 0;
@@ -1003,6 +1024,13 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
     if (g_prof) g_ps[2] += cntvct() - t2_;
     if (any_pool && bp == VK_PIPELINE_BIND_POINT_COMPUTE && vka_tex_lazy_pending()) vka_tex_lazy_make(g_cb);   // (Lichii: as make_images does for draws; no pass is open)
     if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
+    if (vka_scale_on()) {   // the render scale's push constants (Lichii's RescalingLayout): every layout has them while it scales (vka_pso.c pipe_layout)
+        g_scale_push.down = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && R.scaled ? (float)(1u << vka_scale_shift) / (float)vka_scale_up : 1.0f;
+        if (!g_scale_pushed.valid || memcmp(&g_scale_pushed.p, &g_scale_push, sizeof g_scale_push)) {
+            vk.vkCmdPushConstants(g_cb, lay->layout, VK_SHADER_STAGE_ALL, 0, sizeof g_scale_push, &g_scale_push);
+            g_scale_pushed.p = g_scale_push; g_scale_pushed.valid = 1;
+        }
+    }
     return 1;
 }
 // Images first used by a draw (from the walk, walk_all), or remade with storage use (vka_tex.c img_storage_upgrade): dry = only whether there is one
@@ -1148,7 +1176,7 @@ static void ib_bind(VkBuffer b, VkDeviceSize o, VkIndexType t) {
     if (IB.valid && g_vb_filter && IB.b == b && IB.o == o && IB.t == t) return;
     vk.vkCmdBindIndexBuffer(g_cb, b, o, t); IB.valid = 1; IB.b = b; IB.o = o; IB.t = t;
 }
-void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; }
+void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; g_scale_pushed.valid = 0; }
 #define PT(i) do { if (g_prof) { uint64_t t_ = cntvct(); if ((i) > 0 && g_pt_ph == (i) - 1) g_pt[(i) > 0 ? (i) - 1 : 0] += t_ - g_pt_last; g_pt_last = t_; g_pt_ph = (i); } } while (0)
 void vka_draw_prof(char *b, size_t n, double draws) {
     if (!g_prof || draws <= 0) { if (n) b[0] = 0; return; }
@@ -1414,6 +1442,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     // Viewport and scissor. The translator writes clip space for Metal (y up, origin upper left): Metal's viewport, flipped for a lower-left window origin as on Metal, then given
     // a negative height, maps it as Metal does (android/SHADERS.md "Depth and Y")
     float vx = d->has_vp ? d->vp[0][0] : 0, vy = d->has_vp ? d->vp[0][1] : 0, vw = d->has_vp ? d->vp[0][2] : (float)R.area.extent.width, vh = d->has_vp ? d->vp[0][3] : (float)R.area.extent.height;
+    if (R.scaled && d->has_vp) { float f = (float)vka_scale_up / (float)(1u << vka_scale_shift); vx *= f; vy *= f; vw *= f; vh *= f; }   // (Lichii, dotfiles-25x.34: the render scale)
     if (vka_origin_ll()) { vy += vh; vh = -vh; }
     { uint32_t sw; memcpy(&sw, d->vp_sw[0], 4);
       if (sw == 0x100) { vy += vh; vh = -vh; }
@@ -1425,6 +1454,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     VkRect2D scr = R.area;
     if (has_sc && !d->rast_discard) {
         int64_t x0 = sc->x < 0 ? 0 : sc->x, y0 = sc->y < 0 ? 0 : sc->y, x1 = (int64_t)sc->x + sc->w, y1 = (int64_t)sc->y + sc->h;
+        if (R.scaled) { x0 = x0 * vka_scale_up >> vka_scale_shift; y0 = y0 * vka_scale_up >> vka_scale_shift; x1 = x1 * vka_scale_up >> vka_scale_shift; y1 = y1 * vka_scale_up >> vka_scale_shift; }
         if (x1 > R.area.extent.width) x1 = R.area.extent.width; if (y1 > R.area.extent.height) y1 = R.area.extent.height;
         if (x1 <= x0 || y1 <= y0) return;   // an empty scissor: nothing drawn
         scr = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};

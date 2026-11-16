@@ -533,6 +533,7 @@ static int scissored(const vka_img *im, uint32_t lv, VkRect2D *rc) {   // 1 = th
     *rc = (VkRect2D){{0, 0}, {w, h}};
     if (!S.has_sc) return 0;
     int64_t x0 = S.sc.x > 0 ? S.sc.x : 0, y0 = S.sc.y > 0 ? S.sc.y : 0, x1 = (int64_t)S.sc.x + S.sc.w, y1 = (int64_t)S.sc.y + S.sc.h;
+    if (im->scaled) { x0 = x0 * vka_scale_up >> vka_scale_shift; y0 = y0 * vka_scale_up >> vka_scale_shift; x1 = x1 * vka_scale_up >> vka_scale_shift; y1 = y1 * vka_scale_up >> vka_scale_shift; }   // (Lichii: the render scale)
     if (x1 > w) x1 = w; if (y1 > h) y1 = h;
     if (x1 <= x0 || y1 <= y0) { rc->extent = (VkExtent2D){0, 0}; return 1; }
     *rc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
@@ -672,9 +673,12 @@ static void clear_tex(const p_clear_tex *c) {
     uint32_t w, h; level_size(im, lv, &w, &h);
     VkClearValue val;
     if (c->is_uint) for (int i = 0; i < 4; i++) val.color.uint32[i] = c->c.u[i]; else val.color = color_value(&f, c->c.f);
-    if (c->r.xoffset == 0 && c->r.yoffset == 0 && (uint32_t)c->r.width >= w && (uint32_t)c->r.height >= h && f.vk == im->f.vk && (!is3d || (!l0 && nl == all))) {
+    int64_t x0 = c->r.xoffset, y0 = c->r.yoffset, x1 = x0 + c->r.width, y1 = y0 + c->r.height;
+    if (im->scaled) { x0 = x0 * vka_scale_up >> vka_scale_shift; y0 = y0 * vka_scale_up >> vka_scale_shift; x1 = x1 * vka_scale_up >> vka_scale_shift; y1 = y1 * vka_scale_up >> vka_scale_shift;   // (Lichii: the render scale)
+                      if (x1 > w) x1 = w; if (y1 > h) y1 = h; if (x1 <= x0 || y1 <= y0) return; }
+    if (x0 == 0 && y0 == 0 && x1 >= w && y1 >= h && f.vk == im->f.vk && (!is3d || (!l0 && nl == all))) {
         VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, is3d ? 0 : l0, is3d ? 1 : nl}; vk.vkCmdClearColorImage(g_cb, im->img, VK_IMAGE_LAYOUT_GENERAL, &val.color, 1, &rg);
-    } else clear_rect(im, f.vk, VK_IMAGE_ASPECT_COLOR_BIT, lv, l0, nl, (VkRect2D){{c->r.xoffset, c->r.yoffset}, {(uint32_t)c->r.width, (uint32_t)c->r.height}}, &val);
+    } else clear_rect(im, f.vk, VK_IMAGE_ASPECT_COLOR_BIT, lv, l0, nl, (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}, &val);
     vka_img_written(im); g_stat_ops++;
     vka_barrier(g_cb);
 }
@@ -694,6 +698,7 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
     if (!im) return;
+    vka_tex_unscale(im, g_cb, to_tex ? "a buffer → texture copy" : "a texture → buffer copy");   // (Lichii, dotfiles-25x.34: the buffer's texels are the texture's size)
     if (to_tex) vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = copy_aspect(im, to_tex ? "buffer → texture copy" : "texture → buffer copy"); if (!asp) return;
     // Lichii (dotfiles-25x.25): an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
@@ -766,23 +771,40 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = s->depth > 1, d3 = d->depth > 1, nz = c->sr.depth > 0 ? c->sr.depth : 1;
     VkImageSubresourceLayers ss = {sa, sl, s3 ? 0 : sz0 + (uint32_t)c->sr.zoffset, s3 ? 1 : (uint32_t)nz}, ds = {sa, dl, d3 ? 0 : dz0 + (uint32_t)c->dr.zoffset, d3 ? 1 : (uint32_t)nz};
     if (ss.baseArrayLayer + ss.layerCount > s->layers || ds.baseArrayLayer + ds.layerCount > d->layers) { VRED_ONCE("texture copy layers out of range"); return; }
+    // Lichii (dotfiles-25x.34): with an image at the render scale the regions are in each image's own texels, and sides that differ in size then are a blit (filtered for
+    // colour formats that filter; integer and depth formats blitted nearest). What neither a copy nor a blit takes (a resolve, mirroring, 3D, other formats, no blits of
+    // the format) has both images made at their own size first
+    const uint32_t mirror = NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT | NVN_COPY_FLAGS_MIRROR_Z_BIT;
+    int32_t sx0 = c->sr.xoffset, sy0 = c->sr.yoffset, sx1 = sx0 + c->sr.width, sy1 = sy0 + c->sr.height, dx0 = c->dr.xoffset, dy0 = c->dr.yoffset, dx1 = dx0 + c->dr.width, dy1 = dy0 + c->dr.height;
+    int scale_blit = 0;
+    if (s->scaled || d->scaled) {
+        #define SC(im, v) ((im)->scaled ? vka_scaled(v) : (v))
+        int same = SC(s, sx1) - SC(s, sx0) == SC(d, dx1) - SC(d, dx0) && SC(s, sy1) - SC(s, sy0) == SC(d, dy1) - SC(d, dy0);
+        VkFormatProperties sp, dp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, s->f.vk, &sp); vk.vkGetPhysicalDeviceFormatProperties(V.pd, d->f.vk, &dp);
+        int copy = same && s->f.bpb == d->f.bpb && s->f.bw == d->f.bw && s->f.bh == d->f.bh;
+        int blit = s->f.kind == d->f.kind && (s->f.kind < 3 || s->f.vk == d->f.vk) && (sp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (dp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+        if ((c->flags & (DM_COPY_RESOLVE | mirror)) || s3 || d3 || s->samples > 1 || d->samples > 1 || (!copy && !blit)) {
+            vka_tex_unscale(s, g_cb, "a texture copy"); vka_tex_unscale(d, g_cb, "a texture copy"); }
+        sx0 = SC(s, sx0); sy0 = SC(s, sy0); sx1 = SC(s, sx1); sy1 = SC(s, sy1); dx0 = SC(d, dx0); dy0 = SC(d, dy0); dx1 = SC(d, dx1); dy1 = SC(d, dy1);
+        scale_blit = (s->scaled || d->scaled) && !copy;
+        #undef SC
+    }
     if (c->flags & DM_COPY_RESOLVE && s->samples > 1 && d->samples == 1) {
         VkImageResolve r = {ss, {c->sr.xoffset, c->sr.yoffset, 0}, ds, {c->dr.xoffset, c->dr.yoffset, 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, 1}};
         if (sa == VK_IMAGE_ASPECT_COLOR_BIT) vk.vkCmdResolveImage(g_cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
         else VRED_ONCE("depth resolve is not on Vulkan yet");
-    } else if (c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT | NVN_COPY_FLAGS_MIRROR_Z_BIT))
-               && s->samples == d->samples && s->f.bpb == d->f.bpb && s->f.bw == d->f.bw && s->f.bh == d->f.bh) {
-        VkImageCopy r = {ss, {c->sr.xoffset, c->sr.yoffset, s3 ? c->sr.zoffset : 0}, ds, {c->dr.xoffset, c->dr.yoffset, d3 ? c->dr.zoffset : 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, s3 ? (uint32_t)nz : 1}};
+    } else if (!scale_blit && sx1 - sx0 == dx1 - dx0 && sy1 - sy0 == dy1 - dy0 && !(c->flags & mirror) && s->samples == d->samples && s->f.bpb == d->f.bpb && s->f.bw == d->f.bw && s->f.bh == d->f.bh) {
+        VkImageCopy r = {ss, {sx0, sy0, s3 ? c->sr.zoffset : 0}, ds, {dx0, dy0, d3 ? c->dr.zoffset : 0}, {(uint32_t)(sx1 - sx0), (uint32_t)(sy1 - sy0), s3 ? (uint32_t)nz : 1}};
         vk.vkCmdCopyImage(g_cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
     } else {   // a scaled, mirrored or format-changing copy: a blit (filtered with LINEAR_FILTER)
-        if (s->f.kind != d->f.kind || (s->f.kind && s->f.kind < 3) || s->f.bw > 1 || d->f.bw > 1 || s->samples > 1 || d->samples > 1) {
+        if (!scale_blit && (s->f.kind != d->f.kind || (s->f.kind && s->f.kind < 3) || s->f.bw > 1 || d->f.bw > 1 || s->samples > 1 || d->samples > 1)) {
             VRED_ONCE("texture copy %#x → %#x needs a draw (integer, compressed, multisampled or depth with scaling)", c->src->d.format, c->dst->d.format); return; }
-        int x0 = c->sr.xoffset, x1 = x0 + c->sr.width, y0 = c->sr.yoffset, y1 = y0 + c->sr.height, t;
+        int x0 = sx0, x1 = sx1, y0 = sy0, y1 = sy1, t;
         if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { t = x0; x0 = x1; x1 = t; }
         if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { t = y0; y0 = y1; y1 = t; }
-        VkImageBlit r = {ss, {{x0, y0, 0}, {x1, y1, 1}}, ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
+        VkImageBlit r = {ss, {{x0, y0, 0}, {x1, y1, 1}}, ds, {{dx0, dy0, 0}, {dx1, dy1, 1}}};
         VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, s->f.vk, &fp);
-        VkFilter fl = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && sa == VK_IMAGE_ASPECT_COLOR_BIT && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        VkFilter fl = ((c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) || scale_blit) && s->f.kind == 0 && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         vk.vkCmdBlitImage(g_cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, fl);
     }
     vka_img_written(d); g_stat_ops++;

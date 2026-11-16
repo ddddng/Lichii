@@ -40,8 +40,13 @@ static void *vram_trace_main(void *a) {
         VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0); }
     return NULL;
 }
+uint32_t vka_scale_up = 1, vka_scale_shift;
 int nvn_direct_adopt_device(const nvn_direct_device *d) {
     pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
+    if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (only Lichii's recompiler reads the scale: library shaders draw at the texture's size)
+        if (vka_rc_mode() == 1) { vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift; }
+        VLOG("render scale %u/%u%s", g_adopt.scale_up, 1u << g_adopt.scale_shift, vka_scale_on() ? "" : ": off, the shader library cannot follow it (EDEN_NX2_NVN_RECOMPILE)");
+    }
     char h[256]; uint64_t u = 0, b = 0;
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();

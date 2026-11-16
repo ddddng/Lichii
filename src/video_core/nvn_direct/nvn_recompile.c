@@ -377,7 +377,9 @@ static void disk_open(void) {
     g_disk_state = -1;
     const char *t = getenv("DM_TEMP"), *e = getenv("EDEN_NX2_NVN_RECOMPILE_CACHE");
     if (!t || !*t || (e && !strcmp(e, "0"))) return;
-    const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion};
+    // (and to the render scale, which RescalingPass bakes into the SPIR-V)
+    const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion ^
+                                                    (vka_scale_on() ? ((uint64_t)vka_scale_up << 8 | vka_scale_shift) * 0x9E3779B97F4A7C15ull : 0)};
     char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
     FILE* f = fopen(path, "rb"); unsigned n = 0; long good = 0, end = 0;
     if (f) {
@@ -505,6 +507,9 @@ static void rc_make(rc_shader* r, uint64_t key, const nvn_direct_shader* o, cons
     r->sh = vka_shader_make(L, key);
     if (!r->sh) return;
     r->sh->nvn2_control = control; g_made++;
+    for (unsigned k = 0; k < o->desc_count; k++) if (o->descs[k].kind == NVN_DIRECT_DESC_TEXTURE) {   // (the descriptors' order is RescalingPass's texture order)
+        r->sh->scale_tex_binding = o->descs[k].binding; r->sh->scale_tex_bit = (uint8_t)nvn_direct_scale_texture_bit((uint32_t)r->st);
+        r->sh->scale_tex_bits = (uint8_t)nvn_direct_scale_texture_bits((uint32_t)r->st); break; }
     for (unsigned k = 0; k < r->sh->e->bind_count; k++) if (r->sh->b[k].kind == VKA_KIND_LOOP_GUARD && !r->sh->loop_guard.buf && vka_static(16, V.sb_align, &r->sh->loop_guard)) {
         memset(r->sh->loop_guard.ptr, 0, 16); guard_add(key, &r->sh->loop_guard); }
 }
