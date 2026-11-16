@@ -134,11 +134,7 @@ s64 IntField(const nlohmann::json& object, const char* key) {
 class ApiClient {
 public:
     explicit ApiClient(time_t timeout_seconds) : client{Base()} {
-        client.set_connection_timeout(timeout_seconds);
-        client.set_read_timeout(timeout_seconds);
-        client.set_write_timeout(timeout_seconds);
-        client.set_follow_location(true);
-        Common::Net::ConfigureCaStore(client);
+        ConfigureClient(client, timeout_seconds);
     }
 
     httplib::Result Get(std::string_view path, const httplib::Headers& headers) {
@@ -168,20 +164,6 @@ private:
     static std::string Base() {
         std::scoped_lock lock{api_mutex};
         return api_base;
-    }
-
-    static bool TakeRequestSlot() {
-        const auto now = std::chrono::steady_clock::now();
-        std::scoped_lock lock{api_mutex};
-        while (!recent_requests.empty() &&
-               now - recent_requests.front() >= std::chrono::minutes{1}) {
-            recent_requests.pop_front();
-        }
-        if (recent_requests.size() >= RequestsPerMinute) {
-            return false;
-        }
-        recent_requests.push_back(now);
-        return true;
     }
 
     static httplib::Result Skipped() {
@@ -405,6 +387,27 @@ void ExpireGameToken(const std::string& nex_token) {
 }
 
 } // namespace
+
+void ConfigureClient(httplib::Client& client, time_t timeout_seconds) {
+    client.set_connection_timeout(timeout_seconds);
+    client.set_read_timeout(timeout_seconds);
+    client.set_write_timeout(timeout_seconds);
+    client.set_follow_location(true);
+    Common::Net::ConfigureCaStore(client);
+}
+
+bool TakeRequestSlot() {
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock{api_mutex};
+    while (!recent_requests.empty() && now - recent_requests.front() >= std::chrono::minutes{1}) {
+        recent_requests.pop_front();
+    }
+    if (recent_requests.size() >= RequestsPerMinute) {
+        return false;
+    }
+    recent_requests.push_back(now);
+    return true;
+}
 
 bool OnlinePlayActive() {
     return Settings::values.nextendo_enabled.GetValue();
