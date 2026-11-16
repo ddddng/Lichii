@@ -1030,6 +1030,18 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         maxwell3d->dirty.flags[Dirty::VertexInput] = true;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    if (mesh_draw) {
+        // Before the transitions, which hold the lender's key
+        if (!mesh_vertex_inputs_seeded) {
+            mesh_vertex_inputs_seeded = true;
+            for (const auto& [key, pipeline] : graphics_cache) {
+                if (pipeline && pipeline->IsMeshPipeline()) {
+                    mesh_vertex_inputs.Add(key);
+                }
+            }
+        }
+        vertex_input_lent |= mesh_vertex_inputs.Lend(graphics_key);
+    }
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -1039,7 +1051,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
             return BuiltPipeline(current_pipeline);
         }
     }
-    return CurrentGraphicsPipelineSlowPath(mesh_draw);
+    return CurrentGraphicsPipelineSlowPath();
 }
 
 ComputePipeline* ComputePipelineCacheEntry::Get(bool native, GPUVAddr address,
@@ -2345,19 +2357,8 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
 }
 } // Anonymous namespace
 
-GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath(bool mesh_draw) {
+GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     namespace StutterTrace = VideoCommon::StutterTrace;
-    if (mesh_draw && !graphics_cache.contains(graphics_key)) {
-        if (!mesh_vertex_inputs_seeded) {
-            mesh_vertex_inputs_seeded = true;
-            for (const auto& [key, pipeline] : graphics_cache) {
-                if (pipeline && pipeline->IsMeshPipeline()) {
-                    mesh_vertex_inputs.Add(key);
-                }
-            }
-        }
-        vertex_input_lent |= mesh_vertex_inputs.Lend(graphics_key);
-    }
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {

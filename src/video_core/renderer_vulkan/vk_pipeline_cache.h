@@ -146,7 +146,7 @@ public:
                            const VideoCore::DiskResourceLoadCallback& callback);
 
 private:
-    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath(bool mesh_draw);
+    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).

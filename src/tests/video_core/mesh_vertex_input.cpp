@@ -72,3 +72,17 @@ TEST_CASE("Mesh keys differing in other state keep their own pipelines",
     REQUIRE_FALSE(inputs.Lend(other_shaders));
     REQUIRE(other_shaders.state.attribute_types == 0xa0);
 }
+
+TEST_CASE("Alternating leftover vertex input always lends the first key",
+          "[video_core][mesh_vertex_input]") {
+    MeshVertexInputs<GraphicsPipelineCacheKey> inputs;
+    GraphicsPipelineCacheKey first = MeshKey(true);
+    first.state.attribute_types = 0x5;
+    REQUIRE_FALSE(inputs.Lend(first));
+    for (const u64 leftover : {u64{0xa0}, u64{0x5}, u64{0x3}, u64{0xa0}}) {
+        GraphicsPipelineCacheKey drawn = MeshKey(true);
+        drawn.state.attribute_types = leftover;
+        REQUIRE(inputs.Lend(drawn) == (leftover != 0x5));
+        REQUIRE(drawn == first);
+    }
+}
