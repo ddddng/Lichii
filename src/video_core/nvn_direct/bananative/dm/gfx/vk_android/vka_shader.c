@@ -309,6 +309,26 @@ int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask) {
     VkShaderModule m = vka_shader_fout_module(s, umask, smask);
     return m && m != vka_shader_module(s, DMSH_VK_MOD_BASE);
 }
+// Lichii (dotfiles-25x.13): a shader of library L made only for a stage library built for the caches (nvn_recompile.c's speculative translations): not in the shader
+// table, its base module only, no c1 bytes; given back with vka_shader_scratch_free. NULL: refused
+vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key) {
+    const dmsh_vk_entry *e = vka_shlib_find(L, key);
+    const dmsh_vk_module *m = e && !refusal(L, e) ? vka_shlib_module(L, e, DMSH_VK_MOD_BASE) : NULL;
+    if (!m) return NULL;
+    vka_shader *s = calloc(1, sizeof *s); if (!s) return NULL;
+    s->key = key; s->lib = L; s->e = e; s->b = vka_shlib_binds(L, e);
+    const char *why = NULL; char err[256] = "";
+    s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
+    if (!s->mods[DMSH_VK_MOD_BASE]) { free(s); return NULL; }
+    return s;
+}
+void vka_shader_scratch_free(vka_shader *s) {
+    if (!s) return;
+    for (int i = 0; i < 4; i++) if (s->mods[i]) vk.vkDestroyShaderModule(V.dev, s->mods[i], NULL);
+    for (struct vka_vinmod *l[2] = {s->vin, s->fout}, **p = l; p < l + 2; p++)
+        for (struct vka_vinmod *v = *p, *n; v; v = n) { n = v->next; if (v->mod != s->mods[DMSH_VK_MOD_BASE]) vk.vkDestroyShaderModule(V.dev, v->mod, NULL); free(v); }
+    free(s);
+}
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
     pthread_mutex_lock(&g_mu);
     shent *h = sh_find(key, L);

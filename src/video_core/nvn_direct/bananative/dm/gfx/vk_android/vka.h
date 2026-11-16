@@ -404,6 +404,9 @@ uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic ou
 vka_shader *vka_rc_by_key(uint64_t key);
 unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' shader keys of NVN stage st (malloc'd)
 void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs
+vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader for a cache-only stage library: not in the shader table, given back with vka_shader_scratch_free
+void vka_shader_scratch_free(vka_shader *s);
+void vka_lib_ahead_shader(vka_shader *s, int part);   // a stage library (1 pre-rasterization, 2 fragment shader) in the most common state, for the caches only
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead);   // graphics pipeline libraries compiled outside the ahead threads (over 20 ms), made ahead
 void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
 void vka_rc_cs_c0(const vka_shader *sh, const vka_bstate *s, uint8_t *d);

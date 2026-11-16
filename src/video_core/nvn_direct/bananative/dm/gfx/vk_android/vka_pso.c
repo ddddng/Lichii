@@ -1248,19 +1248,35 @@ static void cs_ahead_start(void) {
 typedef struct { uint64_t key; uint8_t part; int32_t rec; } ahead_item;   // part 1 pre-rasterization (key: a vertex shader), 2 fragment shader; rec: the prewarm record's offset, -1 default
 static ahead_item *g_la; static uint32_t g_la_n; static _Atomic uint32_t g_la_next, g_la_done; static int g_la_threads; static uint64_t g_la_t0; static _Atomic uint64_t g_la_cpu_ns;
 _Thread_local char vka_crash_note[96];   // (nvn_dispatch.c crash_stack)
+static void lib_default_key(vka_gkey *k) { k->samples = 1; k->gl_depth = 1; k->topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; k->vin_static = !V.vin_dyn; }
+// Made outside the library map and destroyed: only the caches keep it. scratch: s is given back after (vka_shader_scratch), so its layout is not kept by its address
+static void lib_ahead_make(vka_shader *s, int part, const vka_gkey *k, int scratch) {
+    if (!s) return;
+    if (part == 2 && (s->e->flags & DMSH_VK_F_MESH_PRIM)) return;   // (valid only in a mesh pipeline, which is made whole)
+    vka_shader *sh[VKA_NSTAGE] = {0}; sh[part == 1 ? 0 : 1] = s;
+    vka_layout lay; memset(&lay, 0, sizeof lay);
+    if (!(scratch ? layout_slow(sh, 0, &lay) && lay.layout : vka_layout_of(sh, 0, &lay))) return;
+    pstate *P = malloc(sizeof *P);
+    if (P && pstate_fill(P, sh, &lay, k)) { t_ahead = part; gpl_link(P, k); t_ahead = 0; }
+    free(P);
+}
 static void lib_ahead_one(const ahead_item *it) {
     snprintf(vka_crash_note, sizeof vka_crash_note, "making ahead: %s library of %016llx", it->part == 1 ? "pre-rasterization" : "fragment shader", (unsigned long long)it->key);
     vka_gkey k; memset(&k, 0, sizeof k);
     if (it->rec >= 0) { pwrec r; memcpy(&r, g_pw_load + it->rec, sizeof r); if (!pw_rec_ok(&r, g_pw_load + it->rec + sizeof r)) return;
                         memcpy(&k, g_pw_load + it->rec + sizeof r, r.klen < sizeof k ? r.klen : sizeof k); if (k.vin_static != (uint32_t)!V.vin_dyn) return; }
-    else { k.samples = 1; k.gl_depth = 1; k.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; k.vin_static = !V.vin_dyn; }
-    vka_shader *s = vka_shader_by_key(it->key); if (!s) return;
-    if (it->part == 2 && (s->e->flags & DMSH_VK_F_MESH_PRIM)) return;   // (valid only in a mesh pipeline, which is made whole)
-    vka_shader *sh[VKA_NSTAGE] = {0}; sh[it->part == 1 ? 0 : 1] = s;
-    vka_layout lay; if (!vka_layout_of(sh, 0, &lay)) return;
-    pstate *P = malloc(sizeof *P);
-    if (P && pstate_fill(P, sh, &lay, &k)) { t_ahead = it->part; gpl_link(P, &k); t_ahead = 0; }
-    free(P);
+    else lib_default_key(&k);
+    lib_ahead_make(vka_shader_by_key(it->key), it->part, &k, 0);
+}
+// A speculative translation's stage library in the most common state, for the caches only (nvn_recompile.c spec_main): part 1 a vertex shader, 2 a pixel shader;
+// s is a vka_shader_scratch one (not with DM_VK_LIB_AHEAD_KEEP=1: the library map would keep its module's handle)
+void vka_lib_ahead_shader(vka_shader *s, int part) {
+    if (!gpl_on() || lib_ahead_keep()) return;
+    vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
+    snprintf(vka_crash_note, sizeof vka_crash_note, "made speculatively: %s library of %016llx", part == 1 ? "pre-rasterization" : "fragment shader", s ? (unsigned long long)s->key : 0ull);
+    vka_pipeline_notify(0);
+    lib_ahead_make(s, part, &k, 1);
+    vka_pipeline_notify(1);
 }
 static void *lib_ahead_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-libahead");

@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
@@ -81,6 +82,7 @@ static rc_map g_cmp;      // key -> compared (mode 2)
 static uint64_t rc_key(uint64_t k) { return k ? k : 1; }   // (0 marks an empty slot)
 
 static void dump_listed(const prog_t* p, unsigned i, uint64_t key, const uint8_t* control);
+static void spec_add(uint64_t key, uint64_t data, const uint8_t* control);
 // nvnProgramSetShaders (mtl_prog_prefetch): the NVN2 control sections, while they are valid
 void vka_rc_keep(const prog_t* p) {
     if (!vka_rc_mode()) return;
@@ -92,7 +94,7 @@ void vka_rc_keep(const prog_t* p) {
         uint8_t* copy = NULL;
         if (!rc_find(&g_ctl, key)) { copy = malloc(NVN_DIRECT_NVN2_CONTROL_SIZE); if (copy) { memcpy(copy, c, NVN_DIRECT_NVN2_CONTROL_SIZE); rc_put(&g_ctl, key, copy); } }
         pthread_mutex_unlock(&g_mu);
-        if (copy) dump_listed(p, i, key, copy);
+        if (copy) { dump_listed(p, i, key, copy); spec_add(key, p->sd[i].data, copy); }
     }
 }
 static const uint8_t* rc_control(uint64_t key) {
@@ -570,6 +572,58 @@ vka_shader* vka_rc_by_key(uint64_t key) {
     }
     pthread_mutex_unlock(&g_make_mu);
     return r ? r->sh : NULL;
+}
+
+// ---------- Speculative translations ----------
+// Lichii (dotfiles-25x.13): a vertex or pixel shader the game sets (nvnProgramSetShaders) that no earlier run kept is translated on a background thread without a draw's
+// state (constant buffer words read as 0, no textures) and its stage library made in the most common state (vka_lib_ahead_shader), then let go of: only the pipeline cache
+// keeps it. The draw still translates the shader with its own state and makes its own library, so what is drawn is always the draw's own translation; when the two SPIR-V
+// modules are the same (2 in 3 of those made in time in mkw-race: about 2 in 3 vertex and 2 in 5 pixel shaders) that library is a cache hit instead of a compile on
+// the frame path. Newest first: Mario Kart World sets ~4,000 programs and draws ~900, those it set last soonest. First-met content (cold, the NVIDIA disk cache off):
+// libraries compiled on the frame path 0.54 -> 0.41-0.43 per shader made (615 / 596 -> 448-515 a race), frame-path creation 54-56 -> 47-50 s; warm runs unchanged.
+// EDEN_NX2_NVN_SPECULATE=<threads> (default 4, nice 10), 0: off
+typedef struct { uint64_t key, data; const uint8_t* control; } spec_item;
+static spec_item* g_spec; static size_t g_spec_n, g_spec_cap; static int g_spec_up;
+static pthread_mutex_t g_spec_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_spec_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic unsigned g_spec_made, g_spec_skipped, g_spec_failed;
+static void* spec_main(void* a) {
+    (void)a; setpriority(PRIO_PROCESS, 0, 10);
+    for (;;) {
+        pthread_mutex_lock(&g_spec_mu);
+        while (!g_spec_n) pthread_cond_wait(&g_spec_cv, &g_spec_mu);
+        spec_item it = g_spec[--g_spec_n];   // the newest first: the game draws what it set last soonest
+        pthread_mutex_unlock(&g_spec_mu);
+        pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, it.key) || rc_find(&g_sh, it.key); pthread_mutex_unlock(&g_mu);
+        if (known) { g_spec_skipped++; continue; }   // kept from an earlier run (made ahead) or met by a draw already
+        int st = it.control[0x56];
+        prog_t p; memset(&p, 0, sizeof p); p.nstage = 1; p.sd[0].data = it.data;
+        nvn_direct_shader o; uint64_t vin_types; int gl_depth; char why[300]; why[0] = 0;
+        if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; continue; }
+        dmsh_vk_bind* b = rc_binds(&o, st, it.control, why, sizeof why);
+        uint32_t a0 = rd32(it.control, 0x40), c1e = rd32(it.control, 0x44), c1_len = a0 < c1e ? c1e - a0 : 0;
+        const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(it.data) + a0;
+        char err[200]; err[0] = 0;
+        vka_shlib* L = b && !*why ? rc_lib(it.key, rc_vks(st), 0, &o, b, o.desc_count, c1_len ? c1 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
+        free(b); vka_shader_translated_free(&o);
+        vka_shader* s = L ? vka_shader_scratch(L, it.key) : NULL;
+        if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
+        vka_shader_scratch_free(s);
+        if (L) { free((void*)L->base); free(L); }
+        if (!s) { g_spec_failed++; continue; }
+        unsigned n = ++g_spec_made;
+        if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders translated speculatively and their libraries made (%u kept or drawn already, %u not translated without a draw)", n, (unsigned)g_spec_skipped, (unsigned)g_spec_failed);
+    }
+    return NULL;
+}
+static void spec_add(uint64_t key, uint64_t data, const uint8_t* control) {
+    static int on = -1; if (on < 0) { const char* e = getenv("EDEN_NX2_NVN_SPECULATE"); on = vka_rc_mode() != 1 ? 0 : e && *e ? atoi(e) : 4; if (on > 16) on = 16; }
+    if (!on || (control[0x56] != 0 && control[0x56] != 1)) return;
+    pthread_mutex_lock(&g_spec_mu);
+    if (g_spec_n == g_spec_cap) { size_t nc = g_spec_cap ? 2 * g_spec_cap : 1024; spec_item* n = realloc(g_spec, nc * sizeof *n); if (!n) { pthread_mutex_unlock(&g_spec_mu); return; } g_spec = n; g_spec_cap = nc; }
+    g_spec[g_spec_n++] = (spec_item){key, data, control};
+    for (; g_spec_up < on; g_spec_up++) { pthread_t th; if (!pthread_create(&th, NULL, spec_main, NULL)) pthread_detach(th); }
+    pthread_cond_signal(&g_spec_cv);
+    pthread_mutex_unlock(&g_spec_mu);
 }
 
 // Shaders made in this run, and of them the ones an earlier run kept (the rest were translated now: new to this run's DM_TEMP)
