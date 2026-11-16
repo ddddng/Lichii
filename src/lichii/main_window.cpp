@@ -512,10 +512,15 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                     statusBar()->showMessage(message, 30000);
                 }
             });
-    connect(&nextendo_version_watcher,
-            &QFutureWatcher<std::optional<Common::Nextendo::VersionVerdict>>::finished, this,
-            [this] {
-                const auto verdict = nextendo_version_watcher.result();
+    connect(&nextendo_catalog_watcher,
+            &QFutureWatcher<std::optional<Common::Nextendo::GameCatalog>>::finished, this, [this] {
+                const auto catalog = nextendo_catalog_watcher.result();
+                const auto check = std::exchange(nextendo_version_check, std::nullopt);
+                if (!catalog || !check) {
+                    return;
+                }
+                const auto verdict =
+                    Common::Nextendo::CheckGameVersion(*catalog, check->first, check->second);
                 if (!verdict || verdict->kind == Common::Nextendo::VersionVerdict::Kind::Accepted) {
                     return;
                 }
@@ -2780,6 +2785,7 @@ void MainWindow::OnEmulationStopped() {
     }
 
     emulation_running = false;
+    nextendo_version_check.reset();
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);
 
@@ -5355,15 +5361,16 @@ void MainWindow::CheckNextendoOnlineStatus() {
 }
 
 void MainWindow::CheckNextendoGameVersion(u64 title_id, std::string version) {
-    if (!Common::Nextendo::OnlinePlayActive() || nextendo_version_watcher.isRunning()) {
+    if (!Common::Nextendo::OnlinePlayActive()) {
         return;
     }
-    nextendo_version_watcher.setFuture(
-        QtConcurrent::run([title_id, version = std::move(version),
-                           client_id = Settings::values.nextendo_client_id.GetValue()] {
-            const auto catalog = Common::Nextendo::LoadGameCatalog(client_id);
-            return catalog ? Common::Nextendo::CheckGameVersion(*catalog, title_id, version)
-                           : std::nullopt;
+    nextendo_version_check.emplace(title_id, std::move(version));
+    if (nextendo_catalog_watcher.isRunning()) {
+        return;
+    }
+    nextendo_catalog_watcher.setFuture(
+        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
+            return Common::Nextendo::LoadGameCatalog(client_id);
         }));
 }
 
