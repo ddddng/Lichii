@@ -512,6 +512,21 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                     statusBar()->showMessage(message, 30000);
                 }
             });
+    connect(&nextendo_version_watcher,
+            &QFutureWatcher<std::optional<Common::Nextendo::VersionVerdict>>::finished, this,
+            [this] {
+                const auto verdict = nextendo_version_watcher.result();
+                if (!verdict || verdict->kind == Common::Nextendo::VersionVerdict::Kind::Accepted) {
+                    return;
+                }
+                statusBar()->showMessage(
+                    verdict->kind == Common::Nextendo::VersionVerdict::Kind::Disabled
+                        ? tr("Nextendo doesn't offer online play for this game right now.")
+                        : tr("This version of the game can't play online on Nextendo. Update it "
+                             "to %1.")
+                              .arg(QString::fromStdString(verdict->recommended)),
+                    30000);
+            });
     connect(&nextendo_session_timer, &QTimer::timeout, this,
             &MainWindow::KeepNextendoSessionAlive);
     nextendo_session_timer.start(std::chrono::minutes{2});
@@ -2549,6 +2564,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         }
     }
     CheckNextendoOnlineStatus();
+    CheckNextendoGameVersion(title_id, title_version);
     OnStartGame();
 }
 
@@ -5336,6 +5352,17 @@ void MainWindow::CheckNextendoOnlineStatus() {
         QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
             return Common::Nextendo::CheckOnlineStatus(client_id);
         }));
+}
+
+void MainWindow::CheckNextendoGameVersion(u64 title_id, std::string version) {
+    if (!Common::Nextendo::OnlinePlayActive() || nextendo_version_watcher.isRunning()) {
+        return;
+    }
+    nextendo_version_watcher.setFuture(QtConcurrent::run([title_id, version = std::move(version)] {
+        const auto catalog = Common::Nextendo::LoadGameCatalog();
+        return catalog ? Common::Nextendo::CheckGameVersion(*catalog, title_id, version)
+                       : std::nullopt;
+    }));
 }
 
 #ifdef ENABLE_UPDATE_CHECKER
