@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <unistd.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
 #include "bananative/dm/host/plat/plat.h"
@@ -372,21 +374,27 @@ static void disk_open(void) {
     if (!t || !*t || (e && !strcmp(e, "0"))) return;
     const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion};
     char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
-    FILE* f = fopen(path, "rb"); unsigned n = 0;
+    FILE* f = fopen(path, "rb"); unsigned n = 0; long good = 0, end = 0;
     if (f) {
         uint32_t magic = 0; uint64_t had[2] = {0, 0};
         if (fread(&magic, 4, 1, f) == 1 && magic == RC_FILE_MAGIC && fread(had, 8, 2, f) == 2 && had[0] == stamp[0] && had[1] == stamp[1]) {
-            rc_rec r;
+            rc_rec r; good = ftell(f);
             while (fread(&r, sizeof r, 1, f) == 1 && r.magic == RC_REC_MAGIC) {
                 size_t rest = rc_rec_rest(&r);
                 if (r.size != sizeof r + rest) break;
                 uint8_t* m = malloc(sizeof r + rest); if (!m) break;
                 memcpy(m, &r, sizeof r);
                 if (fread(m + sizeof r, 1, rest, f) != rest) { free(m); break; }
-                rc_put(&g_disk, r.slot, m); n++;
+                rc_put(&g_disk, r.slot, m); n++; good = ftell(f);
             }
+            // A run killed while it appended a record leaves part of one at the end: cut there, or this run's records would follow it and never be read
+            fseek(f, 0, SEEK_END); end = ftell(f);
         } else n = ~0u;
         fclose(f);
+        if (n != ~0u && end > good) {
+            VLOG("recompiler: %s ends in %ld bytes of a record not written whole (a run that ended while writing it): cut off", path, end - good);
+            if (truncate(path, good)) VRED("recompiler: %s not cut (errno %d): translations made now are not read back", path, errno);
+        }
     }
     if (n == ~0u || !f) {   // none yet, or another build's translations or device's: started again
         g_disk_f = fopen(path, "wb");
