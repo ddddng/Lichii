@@ -56,8 +56,8 @@ void Pause() {
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
 BackIdleTrace::FrontState WaitState(DrainSite site) {
-    return site == DrainSite::ListWriters || site == DrainSite::ListSync ||
-                   site == DrainSite::ListFlush
+    return site == DrainSite::ListWriters || site == DrainSite::ListCopies ||
+                   site == DrainSite::ListSync || site == DrainSite::ListFlush
                ? BackIdleTrace::FrontState::Writers
                : BackIdleTrace::FrontState::Drain;
 }
@@ -208,6 +208,7 @@ void GpuSplit::Stop() {
     last_writer_position = 0;
     last_sync_position = 0;
     synced_writer_position = 0;
+    queued_sync_release = 0;
     last_entry_start = 0;
     back_entry_start = 0;
     {
@@ -333,7 +334,7 @@ void GpuSplit::Drain(DrainSite site) {
 }
 
 bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListCopies);
 }
 
 bool GpuSplit::WaitForSync() {
@@ -618,11 +619,35 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
+    // A list wait after a sync met by a queued release: its time before and after the back ran
+    // the release, counted apart.
+    const u64 release = g_acquire_counting && (site == DrainSite::ListWriters ||
+                                               site == DrainSite::ListCopies)
+                            ? queued_sync_release
+                            : 0;
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point wait_start = release != 0 ? Clock::now() : Clock::time_point{};
+    std::optional<Clock::time_point> release_ran;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
+        if (release != 0 && !release_ran && consumed_cache >= release) {
+            release_ran = Clock::now();
+        }
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
             Nx2Profile::AddDrain(site, start);
+            if (release != 0) {
+                const auto end = Clock::now();
+                const auto ran = release_ran.value_or(end);
+                const auto ns = [](Clock::duration duration) {
+                    return static_cast<u64>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+                };
+                const auto index = static_cast<size_t>(site);
+                Count(g_acquire_stats.site_queued_waits[index]);
+                Count(g_acquire_stats.site_queued_before_ns[index], ns(ran - wait_start));
+                Count(g_acquire_stats.site_queued_after_ns[index], ns(end - ran));
+            }
             return true;
         }
         Backoff(spins, target);
@@ -1004,9 +1029,19 @@ void GpuSplit::ReportAcquire() {
     for (size_t site = 0; site < drain_site_names.size(); ++site) {
         const u64 count = take(stats.site_drains[site]);
         const u64 ns = take(stats.site_drain_ns[site]);
+        const u64 queued = take(stats.site_queued_waits[site]);
+        const u64 before_ns = take(stats.site_queued_before_ns[site]);
+        const u64 after_ns = take(stats.site_queued_after_ns[site]);
         if (count != 0) {
-            sites += fmt::format("{}{} {} ({:.1f} ms)", sites.empty() ? "" : ", ",
+            sites += fmt::format("{}{} {} ({:.1f} ms", sites.empty() ? "" : ", ",
                                  drain_site_names[site], count, static_cast<double>(ns) / 1e6);
+            if (queued != 0) {
+                sites += fmt::format("; {} after a queued release met an acquire: {:.1f} ms "
+                                     "before the back ran it, {:.1f} ms after",
+                                     queued, static_cast<double>(before_ns) / 1e6,
+                                     static_cast<double>(after_ns) / 1e6);
+            }
+            sites += ')';
         }
     }
     LOG_INFO(HW_GPU,
