@@ -1307,6 +1307,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
+    Profile::AddDrawCount(Profile::BufferCount::DeltaDraws);
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     {
         Profile::Scope scope{Profile::Zone::ReadHandles};

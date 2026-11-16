@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
 
@@ -111,6 +112,8 @@ template <class Runtime, class DeviceMemory>
         // A slot whose bytes change every bind: read straight into its bytes, no compare (from
         // skolvolt 9267908a3d). The bytes stay the last bind's, for keeps and their verify.
         --slot.direct;
+        Nx2Profile::Add(Nx2Profile::BufferCount::UniformDirect);
+        Nx2Profile::Add(Nx2Profile::BufferCount::UniformCopyBytes, size);
         device_memory.ReadBlockUnsafe(device_addr, slot.bytes.data(), size);
         slot.size = size;
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
@@ -124,11 +127,16 @@ template <class Runtime, class DeviceMemory>
 
     const bool same_bytes =
         slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformCompareBytes, size);
     if (same_bytes && slot.tick == runtime.CurrentTick()) {
+        Nx2Profile::Add(Nx2Profile::BufferCount::UniformReused);
         slot.misses = 0;
         runtime.RebindStreamUniform(slot.ref, size);
         return true;
     }
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformCopied);
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformSameCopied, same_bytes ? 1 : 0);
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformCopyBytes, size);
     const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
     std::memcpy(span.data(), scratch, size);
     slot.ref = runtime.LastStreamUniformRef();

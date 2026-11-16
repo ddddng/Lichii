@@ -1600,6 +1600,8 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::UniformAddress};
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformAddresses);
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!device_addr) {
         channel_state->uniform_buffers[stage][index] = NULL_BINDING;
@@ -1625,10 +1627,92 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
+    Nx2Profile::BeginBufferDraw();
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
     } while (channel_state->has_deleted_buffers);
+    if (Nx2Profile::Enabled()) {
+        ProfileDrawBindings(is_indexed);
+    }
+}
+
+template <class P>
+void BufferCache<P>::ProfileDrawBindings(bool is_indexed) {
+    using Nx2Profile::BufferCount;
+    ProfileBindings& last = profile_bindings;
+    const auto& counts = Nx2Profile::t_buffer.counts;
+    const u64 work = counts[static_cast<size_t>(BufferCount::UploadCopies)] +
+                     counts[static_cast<size_t>(BufferCount::WrittenMarks)];
+    if (last.all_same && work == last.work_mark) {
+        Nx2Profile::AddDrawCount(BufferCount::AllSameCleanDraws);
+    }
+    bool all_same = true;
+    u64 same_uniform{}, uniform{}, same_storage{}, storage{}, same_vertex{}, vertex{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const u32 uniform_mask = channel_state->enabled_uniform_buffer_masks[stage];
+        ForEachEnabledBit(uniform_mask, [&](u32 index) {
+            const Binding& binding = channel_state->uniform_buffers[stage][index];
+            const std::pair<DAddr, u32> range{binding.device_addr, binding.size};
+            const bool same = ((last.uniform_mask[stage] >> index) & 1) != 0 &&
+                              last.uniform[stage][index] == range;
+            same_uniform += same ? 1 : 0;
+            ++uniform;
+            all_same &= same;
+            last.uniform[stage][index] = range;
+        });
+        all_same &= uniform_mask == last.uniform_mask[stage];
+        last.uniform_mask[stage] = uniform_mask;
+        const u64 storage_mask = channel_state->enabled_storage_buffers[stage];
+        const u64 written_mask = channel_state->written_storage_buffers[stage];
+        ForEachEnabledBit(storage_mask, [&](u32 index) {
+            const Binding& binding = channel_state->storage_buffers[stage][index];
+            const std::pair<DAddr, u32> range{binding.device_addr, binding.size};
+            const bool same = ((last.storage_mask[stage] >> index) & 1) != 0 &&
+                              last.storage[stage][index] == range;
+            same_storage += same ? 1 : 0;
+            ++storage;
+            all_same &= same;
+            last.storage[stage][index] = range;
+        });
+        all_same &=
+            storage_mask == last.storage_mask[stage] && written_mask == last.written_mask[stage];
+        last.storage_mask[stage] = storage_mask;
+        last.written_mask[stage] = written_mask;
+    }
+    ForEachEnabledBit(enabled_vertex_buffers_mask, [&](u32 index) {
+        const Binding& binding = v_buffer[index];
+        const std::array<u64, 3> key{binding.device_addr, binding.size,
+                                     maxwell3d->regs.vertex_streams[index].stride};
+        const bool same = ((last.vertex_mask >> index) & 1) != 0 && last.vertex[index] == key;
+        same_vertex += same ? 1 : 0;
+        ++vertex;
+        all_same &= same;
+        last.vertex[index] = key;
+    });
+    all_same &= enabled_vertex_buffers_mask == last.vertex_mask;
+    last.vertex_mask = enabled_vertex_buffers_mask;
+    if (is_indexed) {
+        const std::array<u64, 3> key{
+            channel_state->index_buffer.device_addr, channel_state->index_buffer.size,
+            static_cast<u64>(maxwell3d->draw_manager.draw_state.index_buffer.format)};
+        const bool same = last.indexed && last.index == key;
+        Nx2Profile::AddDrawCount(BufferCount::SameIndex, same ? 1 : 0);
+        Nx2Profile::AddDrawCount(BufferCount::IndexBindings);
+        all_same &= same;
+        last.index = key;
+    }
+    all_same &= is_indexed == last.indexed;
+    last.indexed = is_indexed;
+    Nx2Profile::AddDrawCount(BufferCount::SameUniform, same_uniform);
+    Nx2Profile::AddDrawCount(BufferCount::UniformBindings, uniform);
+    Nx2Profile::AddDrawCount(BufferCount::SameStorage, same_storage);
+    Nx2Profile::AddDrawCount(BufferCount::StorageBindings, storage);
+    Nx2Profile::AddDrawCount(BufferCount::SameVertex, same_vertex);
+    Nx2Profile::AddDrawCount(BufferCount::VertexBindings, vertex);
+    Nx2Profile::AddDrawCount(BufferCount::AllSameDraws, all_same ? 1 : 0);
+    last.all_same = all_same;
+    last.work_mark = work;
 }
 
 template <class P>
@@ -1687,6 +1771,7 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
     BindHostVertexBuffers();
     BindHostTransformFeedbackBuffers();
     if (current_draw_indirect) {
+        Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindOther};
         BindHostDrawIndirectBuffers();
     }
 }
@@ -1737,6 +1822,7 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 
 template <class P>
 void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::UniformKeeps};
     UniformKeep& keep = uniform_keep;
     const u64 sync_serial = Nx2FastDraw::SyncSerial();
     const u64 host_serial = gpu_memory != nullptr ? gpu_memory->HostPointerSerial() : 0;
@@ -1835,6 +1921,7 @@ template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
                                                u32 cbuf_offset, bool is_written,
                                                u32 indirect_offset) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::StorageAddress};
     if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
         LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
                   stage, ssbo_index);
@@ -1899,6 +1986,7 @@ template <class P>
 void BufferCache<P>::BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr,
                                                u32 size, PixelFormat format, bool is_written,
                                                bool is_image) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::TextureAddress};
     channel_state->enabled_texture_buffers[stage] |= 1U << tbo_index;
     channel_state->written_texture_buffers[stage] |= (is_written ? 1U : 0U) << tbo_index;
     if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
@@ -2294,6 +2382,8 @@ bool BufferCache<P>::IsRegionCpuModified(DAddr addr, size_t size) {
 
 template <class P>
 void BufferCache<P>::BindHostIndexBuffer() {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindIndex};
+    Nx2Profile::Add(Nx2Profile::BufferCount::IndexBinds);
     Buffer& buffer = slot_buffers[channel_state->index_buffer.buffer_id];
     TouchBuffer(buffer, channel_state->index_buffer.buffer_id);
     const u32 offset = buffer.Offset(channel_state->index_buffer.device_addr);
@@ -2319,6 +2409,8 @@ void BufferCache<P>::BindHostIndexBuffer() {
                 indices = guest_uint8_indices;
             }
             if (!indices.empty()) {
+                Nx2Profile::Add(Nx2Profile::BufferCount::IndexWidened);
+                Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
                 runtime.BindHostUint8IndexBuffer(indices);
                 return;
             }
@@ -2328,6 +2420,7 @@ void BufferCache<P>::BindHostIndexBuffer() {
         SynchronizeGeometryBuffer(NUM_VERTEX_BUFFERS, channel_state->index_buffer.buffer_id,
                                   channel_state->index_buffer.device_addr, size);
     } else {
+        Nx2Profile::Add(Nx2Profile::BufferCount::IndexInline);
         if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
             auto upload_staging = runtime.UploadStagingBuffer(size);
             std::array<BufferCopy, 1> copies{{BufferCopy{.src_offset = upload_staging.offset, .dst_offset = 0, .size = size}}};
@@ -2339,9 +2432,11 @@ void BufferCache<P>::BindHostIndexBuffer() {
     }
     if constexpr (HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
         const u32 new_offset = offset + draw_state.index_buffer.first * u32(draw_state.index_buffer.FormatSizeInBytes());
+        Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
         runtime.BindIndexBuffer(buffer, new_offset, size);
     } else {
         buffer.MarkUsage(offset, size);
+        Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
         runtime.BindIndexBuffer(draw_state.topology, draw_state.index_buffer.format, draw_state.index_buffer.first, draw_state.index_buffer.count, buffer, offset, size);
     }
 }
@@ -2415,6 +2510,7 @@ void BufferCache<P>::RefreshRepackedVertexBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindVertex};
     RefreshRepackedVertexBuffers();
 
 #ifdef __ANDROID__
@@ -2433,6 +2529,8 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 return;
             }
             bindings.max_index = bindings.min_index + static_cast<u32>(bindings.buffers.size());
+            Nx2Profile::Add(Nx2Profile::BufferCount::VertexBindCalls);
+            Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
             runtime.BindVertexBuffers(bindings);
             bindings = HostBindings<Buffer>{};
             last_index = (std::numeric_limits<u32>::max)();
@@ -2444,11 +2542,13 @@ void BufferCache<P>::BindHostVertexBuffers() {
             Buffer& buffer = slot_buffers[binding.buffer_id];
             TouchBuffer(buffer, binding.buffer_id);
             SynchronizeGeometryBuffer(index, binding.buffer_id, binding.device_addr, binding.size);
+            Nx2Profile::Add(Nx2Profile::BufferCount::VertexSlots);
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
             }
             flags[Dirty::VertexBuffer0 + index] = false;
+            Nx2Profile::Add(Nx2Profile::BufferCount::VertexRebinds);
             const u32 stride = maxwell3d->regs.vertex_streams[index].stride;
             const u32 offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, binding.size);
@@ -2521,6 +2621,13 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
+    if (channel_state->enabled_uniform_buffer_masks[stage] == 0) {
+        if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+            channel_state->dirty_uniform_buffers[stage] = 0;
+        }
+        return;
+    }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindUniform};
     u32 dirty = ~0U;
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
         dirty = std::exchange(channel_state->dirty_uniform_buffers[stage], 0);
@@ -2538,12 +2645,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
     ++channel_state->uniform_cache_shots[0];
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformBinds);
     // Bank 24 (root table 0, NVN2's push constants) is read from bank 17, which such games do not
     // bind: stream the table's current words as that buffer.
     if (index == 17 && maxwell3d->root_tables.loaded && channel_state->uniform_buffers[stage][index].size == 0) {
         const auto& words = maxwell3d->root_tables.tables[0];
         const u32 size = (*channel_state->uniform_buffer_sizes)[stage][index];
         const u32 copied = (std::min)(size, static_cast<u32>(sizeof(words)));
+        Nx2Profile::Add(Nx2Profile::BufferCount::UniformRootTable);
+        Nx2Profile::Add(Nx2Profile::BufferCount::UniformCopyBytes, size);
         if constexpr (IS_OPENGL) {
             std::array<u8, sizeof(words)> data{};
             std::memcpy(data.data(), words.data(), copied);
@@ -2596,6 +2706,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
                 channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
                 ++uniform_keep.kept;
+                Nx2Profile::Add(Nx2Profile::BufferCount::UniformKept);
                 return;
             }
         }
@@ -2625,6 +2736,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         }
         const u64 upload_size = (std::min<u64>)(mapped_size, size);
         if (upload_size != 0) {
+            Nx2Profile::Add(Nx2Profile::BufferCount::UniformNativeBank);
             std::array<BufferCopy, 1> copies{BufferCopy{
                 .src_offset = 0,
                 .dst_offset = buffer.Offset(device_addr),
@@ -2657,6 +2769,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
+        Nx2Profile::BufferScope stream_scope{Nx2Profile::BufferPart::UniformStream};
         bool streamed = false;
         if constexpr (!IS_OPENGL && VideoCommon::StreamUniformReusable<Runtime>) {
             // The same bytes as this slot's previous bind, in the same command buffer: bind that
@@ -2673,6 +2786,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             }
         }
         if (!streamed) {
+            Nx2Profile::Add(Nx2Profile::BufferCount::UniformPlain);
+            Nx2Profile::Add(Nx2Profile::BufferCount::UniformCopyBytes, size);
             const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
             device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
             if constexpr (requires { runtime.LastStreamUniformRef().buffer; }) {
@@ -2689,6 +2804,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                   "Uniform keep verify: stage {} slot {} at {:#x}+{:#x} is no longer streamed",
                   stage, index, device_addr, size);
     }
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformCached);
     if (SynchronizeBuffer(buffer, device_addr, size,
                           Tegra::Nx2ListIndirect::OwedReader::GraphicsUniform)) {
         ++channel_state->uniform_cache_hits[0];
@@ -2711,10 +2827,14 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
     }
     buffer.MarkUsage(offset, size);
-    if constexpr (NEEDS_BIND_UNIFORM_INDEX) {
-        runtime.BindUniformBuffer(stage, binding_index, buffer, offset, size);
-    } else {
-        runtime.BindUniformBuffer(buffer, offset, size);
+    Nx2Profile::Add(Nx2Profile::BufferCount::UniformCachedBinds);
+    {
+        Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
+        if constexpr (NEEDS_BIND_UNIFORM_INDEX) {
+            runtime.BindUniformBuffer(stage, binding_index, buffer, offset, size);
+        } else {
+            runtime.BindUniformBuffer(buffer, offset, size);
+        }
     }
     channel_state->fast_bound_uniform_buffers[stage] &= ~(1u << binding_index);
 }
@@ -2742,8 +2862,10 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
-        const VirtualSegments* found =
-            virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
+        const VirtualSegments* found = [&] {
+            Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::VirtualRanges};
+            return virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
+        }();
         if (!found || found->size() < 2) {
             return;
         }
@@ -2813,11 +2935,15 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindStorage};
     u32 binding_index = 0;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         const Binding& binding = channel_state->storage_buffers[stage][index];
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
+        Nx2Profile::Add(Nx2Profile::BufferCount::StorageBinds);
+        Nx2Profile::Add(Nx2Profile::BufferCount::StorageWritten, is_written ? 1 : 0);
         if (BindMultiRangeStorage(binding, is_written, graphics_segments)) {
+            Nx2Profile::Add(Nx2Profile::BufferCount::StorageMultiRange);
             return;
         }
         Buffer& buffer = slot_buffers[binding.buffer_id];
@@ -2832,6 +2958,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 
+        Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
             runtime.BindStorageBuffer(stage, binding_index, buffer, offset, size, is_written);
             ++binding_index;
@@ -2843,7 +2970,9 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindTexture};
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
+        Nx2Profile::Add(Nx2Profile::BufferCount::TextureBufferBinds);
         const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];
         Buffer& buffer = slot_buffers[binding.buffer_id];
         const u32 size = binding.size;
@@ -2857,6 +2986,7 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
         const u32 offset = buffer.Offset(binding.device_addr);
         const PixelFormat format = binding.format;
         buffer.MarkUsage(offset, size);
+        Nx2Profile::BufferScope host_scope{Nx2Profile::BufferPart::HostBind};
         if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
             if (((channel_state->image_texture_buffers[stage] >> index) & 1) != 0) {
                 runtime.BindImageBuffer(buffer, offset, size, format);
@@ -2874,6 +3004,7 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
     if (maxwell3d->regs.transform_feedback_enabled == 0) {
         return;
     }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::BindOther};
     HostBindings<typename P::Buffer> host_bindings;
     for (u32 index = 0; index < NUM_TRANSFORM_FEEDBACK_BUFFERS; ++index) {
         const Binding& binding = channel_state->transform_feedback_buffers[index];
@@ -3047,9 +3178,13 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
             UpdateTextureBuffers(stage);
         }
         if (current_draw_indirect) {
+            Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveOther};
             UpdateDrawIndirect();
         }
-        RefreshMultiRangeSegments(graphics_segments);
+        if (!graphics_segments.empty()) {
+            Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveOther};
+            RefreshMultiRangeSegments(graphics_segments);
+        }
     });
 }
 
@@ -3075,6 +3210,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
         return;
     }
     flags[Dirty::IndexBuffer] = false;
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveIndex};
     if (!draw_state.inline_index_draw_indexes.empty()) [[unlikely]] {
         auto inline_index_size = static_cast<u32>(draw_state.inline_index_draw_indexes.size());
         u32 buffer_size = Common::AlignUp(inline_index_size, CACHING_PAGESIZE);
@@ -3143,6 +3279,7 @@ void BufferCache<P>::UpdateVertexBuffers() {
         return;
     }
     flags[Dirty::VertexBuffers] = false;
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveVertex};
 
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
         UpdateVertexBuffer(index);
@@ -3248,6 +3385,7 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
     if (channel_state->enabled_uniform_buffer_masks[stage] == 0) [[likely]] {
         return;
     }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveUniform};
     ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
         Binding& binding = channel_state->uniform_buffers[stage][index];
         if (binding.buffer_id) {
@@ -3268,6 +3406,7 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     if (channel_state->enabled_storage_buffers[stage] == 0) [[likely]] {
         return;
     }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveStorage};
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
@@ -3283,6 +3422,7 @@ void BufferCache<P>::UpdateTextureBuffers(size_t stage) {
     if (channel_state->enabled_texture_buffers[stage] == 0) [[likely]] {
         return;
     }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveTexture};
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->texture_buffers[stage][index];
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
@@ -3294,6 +3434,7 @@ void BufferCache<P>::UpdateTransformFeedbackBuffers() {
     if (maxwell3d->regs.transform_feedback_enabled == 0) {
         return;
     }
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::ResolveOther};
     for (u32 index = 0; index < NUM_TRANSFORM_FEEDBACK_BUFFERS; ++index) {
         UpdateTransformFeedbackBuffer(index);
     }
@@ -3357,6 +3498,9 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 
 template <class P>
 void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::MarkWritten};
+    Nx2Profile::Add(Nx2Profile::BufferCount::WrittenMarks);
+    Nx2Profile::Add(Nx2Profile::BufferCount::WrittenBytes, size);
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];
@@ -3630,6 +3774,8 @@ void BufferCache<P>::Nx2NoteListHostWrite(DAddr device_addr, u64 size) {
 template <class P>
 BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible,
                                     std::source_location caller) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::FindBuffer};
+    Nx2Profile::Add(Nx2Profile::BufferCount::FindBuffers);
     const u64 page = device_addr >> CACHING_PAGEBITS;
     if (device_addr == 0 || page >= page_table.size()) {
         return NULL_BUFFER_ID;
@@ -3800,6 +3946,8 @@ template <class P>
 BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size, bool sparse_compatible,
                                       std::source_location caller) {
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferCreate};
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::CreateBuffer};
+    Nx2Profile::Add(Nx2Profile::BufferCount::CreatedBuffers);
     const DAddr asked_addr = device_addr;
     const u32 asked_size = wanted_size;
     DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
@@ -3886,6 +4034,7 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
     if (buffer_id != NULL_BUFFER_ID) {
+        Nx2Profile::Add(Nx2Profile::BufferCount::LruTouches);
         lru_cache.Touch(buffer.getLRUID(), frame_tick);
     }
 }
@@ -3893,7 +4042,10 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size,
                                        Tegra::Nx2ListIndirect::OwedReader reader) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::Sync};
+    Nx2Profile::Add(Nx2Profile::BufferCount::Syncs);
     const bool uploaded_nothing = UploadModifiedMemory(buffer, device_addr, size);
+    Nx2Profile::Add(Nx2Profile::BufferCount::SyncsUploaded, uploaded_nothing ? 0 : 1);
     if constexpr (requires { buffer.Handle(); }) {
         const u32 offset = buffer.Offset(device_addr);
         if (Nx2PatchOwed(device_addr, size, buffer.Handle(), offset, reader)) {
@@ -3998,10 +4150,12 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
     // The deletion count keeps a freed and reused buffer id from passing for the scanned one.
     GeometrySync& sync = geometry_syncs[slot];
     ++geometry_stats.syncs;
+    Nx2Profile::Add(Nx2Profile::BufferCount::GeometryScans);
     if (memory_tracker.IsSynchronized(slot) && sync.buffer_id == buffer_id &&
         sync.device_addr == device_addr && sync.size == size &&
         sync.deletions == buffer_deletions) {
         ++geometry_stats.syncs_skipped;
+        Nx2Profile::Add(Nx2Profile::BufferCount::GeometryScansSkipped);
         if (Nx2Perf::Verify() && !SynchronizeBuffer(buffer, device_addr, size)) {
             ++geometry_stats.verify_mismatches;
         }
@@ -4020,6 +4174,9 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
+    Nx2Profile::BufferScope profile_scope{Nx2Profile::BufferPart::Upload};
+    Nx2Profile::Add(Nx2Profile::BufferCount::UploadCopies, copies.size());
+    Nx2Profile::Add(Nx2Profile::BufferCount::UploadBytes, total_size_bytes);
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);
     } else {

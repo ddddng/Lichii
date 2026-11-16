@@ -321,6 +321,306 @@ inline void AddDrain(DrainSite site, u64 start) {
     }
 }
 
+/// EDEN_NX2_GPU_PROFILE: the buffer cache's work for draws, by part, logged as "<thread> buffer
+/// work per second". Parts count their own time (nested parts excluded) and leave the zones as
+/// they are. The parts below FindBuffer are opened by the graphics paths; the others nest in them
+/// and are not counted elsewhere (compute dispatches have the compute zones). Parts are timed in
+/// one draw in EDEN_NX2_BUFFER_PROFILE_EVERY (default 8) and scaled by draws over timed draws;
+/// calls and amounts are counted in every draw.
+enum class BufferPart : u32 {
+    UniformAddress, ///< Constant buffer bind methods: the guest address translation
+    StorageAddress, ///< BindGraphicsStorageBuffer: the cbuf pointer read and its range
+    TextureAddress, ///< BindGraphicsTextureBuffer
+    UniformKeeps,   ///< BeginGraphicsUniforms: which streamed uniform buffers a draw may keep
+    ResolveIndex,   ///< UpdateIndexBuffer
+    ResolveVertex,  ///< UpdateVertexBuffers
+    ResolveUniform, ///< UpdateUniformBuffers
+    ResolveStorage, ///< UpdateStorageBuffers
+    ResolveTexture, ///< UpdateTextureBuffers
+    ResolveOther,   ///< Transform feedback, indirect draw, multi-range refresh
+    BindIndex,      ///< BindHostIndexBuffer
+    BindVertex,     ///< BindHostVertexBuffers
+    BindUniform,    ///< BindHostGraphicsUniformBuffers
+    BindStorage,    ///< BindHostGraphicsStorageBuffers
+    BindTexture,    ///< BindHostGraphicsTextureBuffers
+    BindOther,      ///< Transform feedback and indirect draw buffers
+    FindBuffer,     ///< Page table lookups (CreateBuffer excluded)
+    CreateBuffer,
+    VirtualRanges, ///< Multi-range storage: virtual range queries
+    Sync,          ///< SynchronizeBuffer: the memory tracker's dirty words
+    Upload,        ///< Staging, guest memory reads and copy commands of the uploads
+    MarkWritten,   ///< MarkWrittenBuffer
+    UsageMark,     ///< Buffer::MarkUsage
+    UniformStream, ///< Small uniform buffers read (and compared) into the stream buffer
+    HostBind,      ///< The runtime's binds: descriptor entries, vertex and index buffer binds
+    Count,
+};
+
+inline constexpr size_t FirstNestedBufferPart = static_cast<size_t>(BufferPart::FindBuffer);
+
+inline constexpr std::array<const char*, static_cast<size_t>(BufferPart::Count)> buffer_part_names{
+    "uniform address", "storage address", "texture address", "uniform keeps",   "resolve index",
+    "resolve vertex",  "resolve uniform", "resolve storage", "resolve texture", "resolve other",
+    "bind index",      "bind vertex",     "bind uniform",    "bind storage",    "bind texture",
+    "bind other",      "find buffer",     "create buffer",   "virtual ranges",  "sync",
+    "upload",          "mark written",    "usage mark",      "uniform stream",  "host bind",
+};
+static_assert(buffer_part_names.back() != nullptr);
+
+/// Amounts of the buffer work, per second.
+enum class BufferCount : u32 {
+    Draws,
+    TimedDraws,
+    DeltaDraws, ///< Of Draws: the fast draw delta path (GraphicsPipeline::ConfigureDelta)
+    UniformBinds,
+    UniformKept,       ///< Bound from the previous draw's allocation without reading memory
+    UniformReused,     ///< Same bytes in the same command buffer: allocation bound again
+    UniformCopied,     ///< Compared, then copied into a new allocation
+    UniformSameCopied, ///< Of UniformCopied: same bytes, but another command buffer
+    UniformDirect,     ///< Copied without comparing (slots whose bytes change every bind)
+    UniformPlain,      ///< Streamed without the reuse path
+    UniformCompareBytes,
+    UniformCopyBytes,   ///< Bytes written to the stream buffer
+    UniformRootTable,   ///< Bank 17 streamed from root table 0
+    UniformNativeBank,  ///< 64 KiB native banks uploaded again (first bind in the frame)
+    UniformCached,      ///< Bound from the cached host buffer
+    UniformCachedBinds, ///< Of UniformCached: descriptor bound (others skipped as unchanged)
+    StorageBinds,
+    StorageWritten,
+    StorageMultiRange,
+    TextureBufferBinds,
+    VertexSlots,   ///< Enabled vertex buffers seen per draw
+    VertexRebinds, ///< Of VertexSlots: dirty, so bound to the host again
+    VertexBindCalls,
+    IndexBinds,
+    IndexWidened, ///< 8-bit indices widened on the host
+    IndexInline,
+    GeometryScans, ///< SynchronizeGeometryBuffer calls
+    GeometryScansSkipped,
+    Syncs,
+    SyncsUploaded,
+    UploadCopies,
+    UploadBytes,
+    WrittenMarks,
+    WrittenBytes,
+    UsageMarks,
+    FindBuffers,
+    CreatedBuffers,
+    LruTouches,       ///< TouchBuffer calls on cached buffers
+    UniformAddresses, ///< Constant buffer bind methods
+    SameUniform,      ///< Of the draw's uniform bindings, those the previous draw also had
+    UniformBindings,
+    SameStorage,
+    StorageBindings,
+    SameVertex,
+    VertexBindings,
+    SameIndex,
+    IndexBindings,
+    AllSameDraws,      ///< Draws whose buffer bindings were all the previous draw's
+    AllSameCleanDraws, ///< Of AllSameDraws: nothing uploaded or marked written
+    Count,
+};
+
+struct BufferData {
+    std::array<u64, static_cast<size_t>(BufferPart::Count)> ticks{};
+    std::array<u64, static_cast<size_t>(BufferPart::Count)> calls{};
+    std::array<u64, static_cast<size_t>(BufferCount::Count)> counts{};
+    u64 timed_scopes{};
+    u64 child{};
+    u32 depth{};
+    bool timed{};
+    u64 draw_index{};
+};
+
+inline thread_local BufferData t_buffer;
+
+/// EDEN_NX2_BUFFER_PROFILE_EVERY: time the buffer parts in one draw in this many.
+inline u64 BufferTimingInterval() {
+    static const u64 interval = [] {
+        const char* const value = std::getenv("EDEN_NX2_BUFFER_PROFILE_EVERY");
+        const u64 parsed = value != nullptr ? std::strtoull(value, nullptr, 10) : 8;
+        return parsed == 0 ? u64{1} : parsed;
+    }();
+    return interval;
+}
+
+/// A draw begins its buffer work: whether its parts are timed.
+inline void BeginBufferDraw() {
+    if (!g_enabled) {
+        return;
+    }
+    auto& data = t_buffer;
+    // A scrambled draw index: a fixed stride would follow a frame's repeating draw order.
+    u64 x = ++data.draw_index * 0x9E3779B97F4A7C15ULL;
+    x ^= x >> 29;
+    data.timed = x % BufferTimingInterval() == 0;
+    ++data.counts[static_cast<size_t>(BufferCount::Draws)];
+    data.counts[static_cast<size_t>(BufferCount::TimedDraws)] += data.timed ? 1 : 0;
+}
+
+/// Counts an amount of graphics buffer work (inside a part: compute's own calls stay out).
+inline void Add(BufferCount counter, u64 amount = 1) {
+    if (g_enabled && t_buffer.depth != 0) {
+        t_buffer.counts[static_cast<size_t>(counter)] += amount;
+    }
+}
+
+/// Counts an amount outside the parts (per draw).
+inline void AddDrawCount(BufferCount counter, u64 amount = 1) {
+    if (g_enabled) {
+        t_buffer.counts[static_cast<size_t>(counter)] += amount;
+    }
+}
+
+class BufferScope {
+public:
+    explicit BufferScope(BufferPart part_) : part{part_} {
+        auto& data = t_buffer;
+        enabled =
+            g_enabled && (static_cast<size_t>(part) < FirstNestedBufferPart || data.depth != 0);
+        if (!enabled) {
+            return;
+        }
+        ++data.depth;
+        ++data.calls[static_cast<size_t>(part)];
+        timed = data.timed;
+        if (!timed) {
+            return;
+        }
+        parent_child = data.child;
+        data.child = 0;
+        start = Ticks();
+    }
+
+    ~BufferScope() {
+        if (!enabled) {
+            return;
+        }
+        auto& data = t_buffer;
+        --data.depth;
+        if (!timed) {
+            return;
+        }
+        const u64 elapsed = Ticks() - start;
+        data.ticks[static_cast<size_t>(part)] += elapsed - data.child;
+        data.child = data.depth == 0 ? 0 : parent_child + elapsed;
+        ++data.timed_scopes;
+    }
+
+    BufferScope(const BufferScope&) = delete;
+    BufferScope& operator=(const BufferScope&) = delete;
+
+private:
+    BufferPart part;
+    bool enabled{};
+    bool timed{};
+    u64 start{};
+    u64 parent_child{};
+};
+
+/// Ticks one BufferScope's two timer reads cost.
+inline u64 BufferScopeCost() {
+    static const u64 cost = [] {
+        u64 best = ~u64{0};
+        for (int round = 0; round < 16; ++round) {
+            const u64 begin = Ticks();
+            for (int i = 0; i < 256; ++i) {
+                (void)Ticks();
+            }
+            best = (std::min)(best, (Ticks() - begin) / 256);
+        }
+        return best * 2;
+    }();
+    return cost;
+}
+
+inline void ReportBuffers(const char* thread_name, u64 window, u64 window_ticks) {
+    auto& data = t_buffer;
+    const auto count = [&](BufferCount counter) {
+        return data.counts[static_cast<size_t>(counter)];
+    };
+    const u64 draws = count(BufferCount::Draws);
+    if (draws == 0) {
+        data.counts = {};
+        data.calls = {};
+        data.ticks = {};
+        data.timed_scopes = 0;
+        return;
+    }
+    const auto per_second = [&](u64 amount) { return static_cast<double>(amount) * 1e9 / window; };
+    const auto kib = [&](u64 bytes) { return per_second(bytes) / 1024.0; };
+    const auto c = [&](BufferCount counter) { return per_second(count(counter)); };
+    const u64 timed_draws = (std::max<u64>)(count(BufferCount::TimedDraws), 1);
+    const double scale = static_cast<double>(draws) / timed_draws;
+    const auto ms = [&](u64 ticks) {
+        return static_cast<double>(ticks) * scale * 1000.0 / window_ticks;
+    };
+    std::string line;
+    u64 total{};
+    for (size_t i = 0; i < data.ticks.size(); ++i) {
+        total += data.ticks[i];
+        if (data.calls[i] != 0) {
+            line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", buffer_part_names[i],
+                                ms(data.ticks[i]), per_second(data.calls[i]));
+        }
+    }
+    const double scope_ns = static_cast<double>(BufferScopeCost()) * window / window_ticks;
+    line += fmt::format(" | parts {:.1f} ms, timers about {:.1f} ms ({:.0f} ns a part, timed 1 "
+                        "draw in {:.1f})",
+                        ms(total), ms(data.timed_scopes * BufferScopeCost()), scope_ns, scale);
+    line += fmt::format(" | draws {:.0f} ({:.0f} delta)", c(BufferCount::Draws),
+                        c(BufferCount::DeltaDraws));
+    line += fmt::format(
+        " | uniform binds {:.0f}: {:.0f} kept, {:.0f} reused, {:.0f} copied ({:.0f} same bytes), "
+        "{:.0f} direct, {:.0f} plain, {:.0f} root table, {:.0f} cached ({:.0f} bound); "
+        "{:.0f} KiB compared, {:.0f} KiB copied; {:.0f} native bank uploads; {:.0f} cbuf "
+        "address binds",
+        c(BufferCount::UniformBinds), c(BufferCount::UniformKept), c(BufferCount::UniformReused),
+        c(BufferCount::UniformCopied), c(BufferCount::UniformSameCopied),
+        c(BufferCount::UniformDirect), c(BufferCount::UniformPlain),
+        c(BufferCount::UniformRootTable), c(BufferCount::UniformCached),
+        c(BufferCount::UniformCachedBinds), kib(count(BufferCount::UniformCompareBytes)),
+        kib(count(BufferCount::UniformCopyBytes)), c(BufferCount::UniformNativeBank),
+        c(BufferCount::UniformAddresses));
+    line += fmt::format(" | storage binds {:.0f} ({:.0f} written, {:.0f} multi-range) | texture "
+                        "buffer binds {:.0f}",
+                        c(BufferCount::StorageBinds), c(BufferCount::StorageWritten),
+                        c(BufferCount::StorageMultiRange), c(BufferCount::TextureBufferBinds));
+    line += fmt::format(" | vertex slots {:.0f} ({:.0f} rebound, {:.0f} bind calls) | index binds "
+                        "{:.0f} ({:.0f} widened, {:.0f} inline) | geometry scans {:.0f} ({:.0f} "
+                        "skipped)",
+                        c(BufferCount::VertexSlots), c(BufferCount::VertexRebinds),
+                        c(BufferCount::VertexBindCalls), c(BufferCount::IndexBinds),
+                        c(BufferCount::IndexWidened), c(BufferCount::IndexInline),
+                        c(BufferCount::GeometryScans), c(BufferCount::GeometryScansSkipped));
+    line += fmt::format(
+        " | syncs {:.0f} ({:.0f} uploaded, {:.0f} copies, {:.0f} KiB) | written "
+        "marks {:.0f} ({:.0f} KiB) | usage marks {:.0f} | LRU touches {:.0f} | find "
+        "buffer {:.0f} ({:.0f} created)",
+        c(BufferCount::Syncs), c(BufferCount::SyncsUploaded), c(BufferCount::UploadCopies),
+        kib(count(BufferCount::UploadBytes)), c(BufferCount::WrittenMarks),
+        kib(count(BufferCount::WrittenBytes)), c(BufferCount::UsageMarks),
+        c(BufferCount::LruTouches), c(BufferCount::FindBuffers), c(BufferCount::CreatedBuffers));
+    line += fmt::format(" | same as the previous draw: uniform {:.0f} of {:.0f}, storage {:.0f} of "
+                        "{:.0f}, vertex {:.0f} of {:.0f}, index {:.0f} of {:.0f}; draws all same "
+                        "{:.0f} ({:.0f} with nothing uploaded or written)",
+                        c(BufferCount::SameUniform), c(BufferCount::UniformBindings),
+                        c(BufferCount::SameStorage), c(BufferCount::StorageBindings),
+                        c(BufferCount::SameVertex), c(BufferCount::VertexBindings),
+                        c(BufferCount::SameIndex), c(BufferCount::IndexBindings),
+                        c(BufferCount::AllSameDraws), c(BufferCount::AllSameCleanDraws));
+    LOG_INFO(HW_GPU, "{} buffer work per second:{}", thread_name, line);
+    const u32 depth = data.depth;
+    const u64 child = data.child;
+    const bool timed = data.timed;
+    const u64 draw_index = data.draw_index;
+    data = {};
+    data.depth = depth;
+    data.child = child;
+    data.timed = timed;
+    data.draw_index = draw_index;
+}
+
 /// Called by the GPU thread (and the split's back thread) between commands: logs and resets
 /// the totals every 10 s.
 /// `report_all_contention`: also log (and reset) every thread's spin mutex contention.
@@ -429,6 +729,7 @@ inline void Report(const char* thread_name = "GPU thread", bool report_all_conte
     if (const std::string reads = TopMethods(t_dma_reads, nullptr, window); !reads.empty()) {
         LOG_INFO(HW_GPU, "{} MME DMA reads per second by macro:{}", thread_name, reads);
     }
+    ReportBuffers(thread_name, window, window_ticks);
     t_method_count = {};
     t_method_same = {};
     t_dma_reads = {};
