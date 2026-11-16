@@ -26,7 +26,8 @@ struct RoomBinding {
     const ProxySocket* owner;
     Protocol protocol;
     SockAddrIn endpoint;
-    bool reuse;
+    bool reuse_addr;
+    bool reuse_port;
     bool local_identity;
 };
 // Always acquired after the owning socket's packets_mutex; never calls a socket.
@@ -198,7 +199,8 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
             return binding.protocol == binding_protocol && binding.endpoint.portno == port &&
                    ((local_bind && binding.local_identity) || Wildcard(addr.ip) ||
                     Wildcard(binding.endpoint.ip) || addr.ip == binding.endpoint.ip) &&
-                   (automatic || !reuse_addr || !binding.reuse);
+                   (automatic || !((reuse_addr && binding.reuse_addr) ||
+                                   (reuse_port && binding.reuse_port)));
         });
     };
     const u16 requested_port = addr.portno;
@@ -219,7 +221,7 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
     } else if (occupied(addr.portno, false)) {
         return Errno::ADDRINUSE;
     }
-    registry.entries.push_back({this, binding_protocol, addr, reuse_addr, local_bind});
+    registry.entries.push_back({this, binding_protocol, addr, reuse_addr, reuse_port, local_bind});
     local_endpoint = addr;
     room_local_bind = local_bind;
     is_bound = true;
@@ -440,7 +442,7 @@ Errno ProxySocket::SetReuseAddr(bool enable) {
             std::lock_guard registry_guard(registry.mutex);
             for (auto& binding : registry.entries) {
                 if (binding.owner == this) {
-                    binding.reuse = enable;
+                    binding.reuse_addr = enable;
                 }
             }
         }
@@ -451,6 +453,15 @@ Errno ProxySocket::SetReuseAddr(bool enable) {
 Errno ProxySocket::SetReusePort(bool enable) {
     std::lock_guard guard(packets_mutex);
     reuse_port = enable;
+    if (is_bound) {
+        auto& registry = GetBindings();
+        std::lock_guard registry_guard(registry.mutex);
+        for (auto& binding : registry.entries) {
+            if (binding.owner == this) {
+                binding.reuse_port = enable;
+            }
+        }
+    }
     return Errno::SUCCESS;
 }
 
