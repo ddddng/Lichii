@@ -237,6 +237,7 @@ add_executable(tests
     core/bsd_sockopt_ipc.cpp
     core/numeric_name_info.cpp
     core/numeric_name_info_ipc.cpp
+    core/nifm_request.cpp
     core/cmif_out_buffer.cpp
     core/time_zone_fallback.cpp
     video_core/memory_tracker.cpp
