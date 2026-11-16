@@ -54,6 +54,9 @@ SignOutReason sign_out_reason = SignOutReason::None;
 // Taken after account_mutex when both are held.
 std::mutex social_mutex;
 FriendList friend_cache;
+// Refreshes started, and the one friend_cache holds, so an older reply can't replace a newer one.
+u64 friend_refreshes = 0;
+u64 friend_cache_refresh = 0;
 u64 game_app_id = 0;
 std::string game_app_field;
 std::optional<Presence> last_presence;
@@ -1251,9 +1254,11 @@ std::optional<FriendList> ParseFriendList(std::string_view body) {
 
 SocialResult RefreshFriends(std::string_view client_id) {
     u64 generation;
+    u64 refresh;
     {
-        std::scoped_lock lock{account_mutex};
+        std::scoped_lock lock{account_mutex, social_mutex};
         generation = account_generation;
+        refresh = ++friend_refreshes;
     }
     std::string body;
     const auto result = SendSocial(
@@ -1272,9 +1277,11 @@ SocialResult RefreshFriends(std::string_view client_id) {
     }
     std::scoped_lock lock{account_mutex, social_mutex};
     // A sign-in, or a 403 that dropped the scope, while the list was on its way.
-    if (const auto account = LoadAccountLocked();
-        generation == account_generation && account && HasScope(account->scope, "friends")) {
+    if (const auto account = LoadAccountLocked(); generation == account_generation && account &&
+                                                  HasScope(account->scope, "friends") &&
+                                                  refresh > friend_cache_refresh) {
         friend_cache = std::move(*list);
+        friend_cache_refresh = refresh;
     }
     return result;
 }

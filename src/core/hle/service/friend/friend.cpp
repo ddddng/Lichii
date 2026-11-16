@@ -426,7 +426,7 @@ private:
         for (std::size_t i = offset;
              i < friends.size() && list.size() < ctx.GetWriteBufferNumElements<FriendImpl>(); ++i) {
             list.push_back(
-                MakeFriend(friends[i], AdvertisedId(friends[i], want_nsa), program_id, nullptr));
+                MakeFriend(friends[i], AdvertisedId(friends[i], want_nsa), program_id, &uuid));
         }
         if (!list.empty()) {
             ctx.WriteBuffer(list);
@@ -494,7 +494,8 @@ private:
         for (std::size_t i = 0; i < profiles.size(); ++i) {
             const u64 id = ids[i];
             const auto* entry = FindFriend(friends, id);
-            const bool own = account && account->pid != 0 && account->pid == id;
+            // Animal Crossing knows the account by its BAAS id (NetworkServiceAccountId).
+            const bool own = account && id != 0 && (account->pid == id || account->baas_nsa == id);
             if (!own && !entry) {
                 continue;
             }
@@ -504,10 +505,11 @@ private:
             // The address a console gets for the picture; Nextendo's host redirect serves it.
             constexpr std::string_view host =
                 "https://cdn-image-e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1";
-            CopyString(profile.image_url,
-                       !own && entry->nsa != 0
-                           ? fmt::format("{}/fr_{:016x}?pid={}", host, entry->nsa, entry->pid)
-                           : fmt::format("{}/pid_{}?pid={}", host, id, own ? id : entry->pid));
+            CopyString(
+                profile.image_url,
+                !own && entry->nsa != 0
+                    ? fmt::format("{}/fr_{:016x}?pid={}", host, entry->nsa, entry->pid)
+                    : fmt::format("{}/pid_{}?pid={}", host, id, own ? account->pid : entry->pid));
             profile.is_valid = 1;
             ++resolved;
         }
