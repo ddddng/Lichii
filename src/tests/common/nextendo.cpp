@@ -25,6 +25,7 @@
 #include "common/nextendo.h"
 #include "common/nextendo_game_catalog.h"
 #include "common/settings.h"
+#include "tests/common/restore_eden_path.h"
 
 namespace Nextendo = Common::Nextendo;
 
@@ -219,8 +220,8 @@ public:
         Nextendo::ClearAccount(Profile);
         Nextendo::ClearAccount(OtherProfile);
         Nextendo::SetApiBaseForTests(std::string{Nextendo::ApiBase});
-        Common::FS::SetEdenPath(Common::FS::EdenPath::ConfigDir, previous_config);
-        Common::FS::SetEdenPath(Common::FS::EdenPath::CacheDir, previous_cache);
+        Tests::RestoreEdenPath(Common::FS::EdenPath::ConfigDir, previous_config);
+        Tests::RestoreEdenPath(Common::FS::EdenPath::CacheDir, previous_cache);
         std::error_code ec;
         std::filesystem::remove_all(directory, ec);
     }
