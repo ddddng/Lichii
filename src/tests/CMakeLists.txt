@@ -36,6 +36,7 @@ add_executable(tests
     core/service_auto_stub.cpp
     core/key_derivation.cpp
     core/eticket_title_key.cpp
+    core/keyblob_cmac.cpp
     core/aes_xts.cpp
     common/display_hdr.cpp
     common/dkb_cpu_trace.cpp
@@ -48,6 +49,7 @@ add_executable(tests
     video_core/ampere_starfox_test10.cpp
     video_core/ampere_yoshi_title.cpp
     video_core/ampere_yoshi_compute.cpp
+    video_core/scaled_image_fits.cpp
     video_core/texture_rect_descriptor.cpp
     video_core/join_whole_copy.cpp
     video_core/padded_square.cpp
@@ -82,6 +84,7 @@ add_executable(tests
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
     core/kip_ini.cpp
+    core/add_on_application_id.cpp
     core/ncz_cache.cpp
     core/kip_truncated.cpp
     core/ncz_decompressor.cpp
@@ -234,8 +237,10 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
+    core/bsd_sockopt_ipc.cpp
     core/numeric_name_info.cpp
     core/numeric_name_info_ipc.cpp
+    core/nifm_request.cpp
     core/cmif_out_buffer.cpp
     core/time_zone_fallback.cpp
     video_core/memory_tracker.cpp

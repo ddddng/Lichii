@@ -48,6 +48,8 @@ constexpr std::string_view PresencePath = "/api/presence";
 // Public, signed with GameCatalogKey (nextendo_game_catalog.h).
 constexpr std::string_view GameCatalogPath = "/service-catalog/v1/game-catalog";
 constexpr std::string_view Scopes = "identity game.matchmaking friends presence";
+// What a sign-in asks for after nextendo.network refuses the social scopes for the app.
+constexpr std::string_view OnlineScopes = "identity game.matchmaking";
 constexpr u16 CallbackPort = 47823;
 
 // nextendo.network allows 20 API calls a minute per client; Lichii keeps to fewer.
@@ -83,6 +85,9 @@ struct Account {
     std::string scope;
     // The account's BAAS user id ("nsa" from /api/me), the account id a Switch has. 0 when unknown.
     u64 baas_nsa{};
+    // The sign-in asked for friends and presence and nextendo.network didn't grant them to the
+    // app, so signing in again doesn't help.
+    bool social_unavailable{};
 };
 
 // True when the sign-in granted friends and presence. Older sign-ins didn't and need a new one;
@@ -139,13 +144,16 @@ std::optional<Pkce> MakePkce();
 
 std::string RedirectUri(u16 port);
 std::string BuildAuthorizeUrl(std::string_view client_id, std::string_view state,
-                              std::string_view challenge, u16 port);
+                              std::string_view challenge, u16 port,
+                              std::string_view scope = Scopes);
 
 struct Callback {
     // False when the request doesn't carry this sign-in's state, so it is not its answer.
     bool matched{};
     std::string code;
     std::string error;
+    // The error is about the scope asked for, not the player's answer.
+    bool scope_rejected{};
 };
 
 // Checks the loopback callback's query against the state the authorize request carried.

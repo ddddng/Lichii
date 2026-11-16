@@ -296,7 +296,10 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in
         } else if (nextendo_online && !nextendo_online->allow) {
             status += QLatin1Char(' ') + OnlineRefusal(nextendo_online->reason);
         }
-        if (!Common::Nextendo::HasSocialScopes(*account)) {
+        if (account->social_unavailable) {
+            status += QLatin1Char(' ') +
+                      tr("Friends and presence aren't available for Lichii on Nextendo right now.");
+        } else if (!Common::Nextendo::HasSocialScopes(*account)) {
             status += QLatin1Char(' ') + tr("Sign in again to add friends and show them what you "
                                             "play. Online play keeps working until then.");
         }

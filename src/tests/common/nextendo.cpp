@@ -6,11 +6,13 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <random>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
@@ -461,6 +463,104 @@ TEST_CASE("Nextendo: sign-in takes a free port when the callback port is busy", 
     REQUIRE(fake.Authorization("/api/online-status") == "Bearer nx2.new");
     REQUIRE(result.online_status.has_value());
     REQUIRE(result.online_status->reason == "discord_unlinked");
+}
+
+namespace {
+
+// Answers each authorize URL a sign-in opens with the next callback query, as the browser would.
+class FakeBrowser {
+public:
+    explicit FakeBrowser(std::vector<std::string> queries_) : queries{std::move(queries_)} {}
+
+    ~FakeBrowser() {
+        for (auto& thread : threads) {
+            thread.join();
+        }
+    }
+
+    std::function<void(const std::string&)> Opener() {
+        return [this](const std::string& url) {
+            const auto field = [&url](std::string_view key) {
+                const auto start = url.find(key) + key.size();
+                return url.substr(start, url.find('&', start) - start);
+            };
+            const std::string redirect = field("&redirect_uri=http%3A%2F%2F127.0.0.1%3A");
+            const int port = std::stoi(redirect.substr(0, redirect.find('%')));
+            const std::string query = queries.at(scopes.size());
+            scopes.push_back(field("&scope="));
+            threads.emplace_back([port, query, state = field("&state=")] {
+                httplib::Client client{"127.0.0.1", port};
+                void(client.Get("/callback?" + query + "&state=" + state));
+            });
+        };
+    }
+
+    // The scope each authorize URL asked for, percent-encoded.
+    std::vector<std::string> scopes;
+
+private:
+    std::vector<std::string> queries;
+    std::vector<std::thread> threads;
+};
+
+constexpr const char* FullScope = "identity%20game.matchmaking%20friends%20presence";
+constexpr const char* OnlineScope = "identity%20game.matchmaking";
+
+} // namespace
+
+TEST_CASE("Nextendo: a sign-in refused the social scopes signs in without them", "[common]") {
+    FakeNextendo fake;
+    fake.Answer(NexTokenPath, 200, NewGameToken);
+    SECTION("when the authorize step refuses them") {
+        fake.Answer(TokenPath, 200, NewAccessToken);
+        FakeBrowser browser{{"error=invalid_scope", "code=abc"}};
+        const auto result = Nextendo::SignIn(ClientId, browser.Opener(), {});
+        INFO(result.error);
+        REQUIRE(result.ok);
+        REQUIRE(browser.scopes == std::vector<std::string>{FullScope, OnlineScope});
+        REQUIRE(fake.Hits(TokenPath) == 1);
+    }
+    SECTION("when the token exchange refuses them") {
+        fake.Answer(TokenPath, 400,
+                    R"({"error":"invalid_request","error_description":"scope)"
+                    R"( friends is not allowed for this client"})");
+        fake.Answer(TokenPath, 200, NewAccessToken);
+        FakeBrowser browser{{"code=abc", "code=def"}};
+        const auto result = Nextendo::SignIn(ClientId, browser.Opener(), {});
+        INFO(result.error);
+        REQUIRE(result.ok);
+        REQUIRE(browser.scopes == std::vector<std::string>{FullScope, OnlineScope});
+        REQUIRE(fake.Hits(TokenPath) == 2);
+        REQUIRE(fake.Param(TokenPath, "code") == "def");
+    }
+
+    const auto account = Nextendo::LoadAccount();
+    REQUIRE(account->scope == Nextendo::OnlineScopes);
+    REQUIRE(account->social_unavailable);
+    REQUIRE_FALSE(Nextendo::HasSocialScopes(*account));
+    REQUIRE(account->nex_token == "nx2.new");
+    const int hits = fake.TotalHits();
+    REQUIRE(Nextendo::RefreshFriends(ClientId).status == Nextendo::SocialStatus::MissingScope);
+    REQUIRE(Nextendo::UpdatePresence(ClientId, 0x0100152000022000).status ==
+            Nextendo::SocialStatus::MissingScope);
+    REQUIRE(fake.TotalHits() == hits);
+
+    FakeBrowser again{{"code=ghi"}};
+    REQUIRE(Nextendo::SignIn(ClientId, again.Opener(), {}).ok);
+    REQUIRE(again.scopes == std::vector<std::string>{FullScope});
+    REQUIRE(Nextendo::HasSocialScopes(*Nextendo::LoadAccount()));
+    REQUIRE_FALSE(Nextendo::LoadAccount()->social_unavailable);
+}
+
+TEST_CASE("Nextendo: a declined sign-in is not asked again", "[common]") {
+    FakeNextendo fake;
+    FakeBrowser browser{
+        {"error=access_denied&error_description=The%20player%20declined%20the%20scopes"}};
+    const auto result = Nextendo::SignIn(ClientId, browser.Opener(), {});
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.error == "access_denied: The player declined the scopes");
+    REQUIRE(browser.scopes == std::vector<std::string>{FullScope});
+    REQUIRE(fake.TotalHits() == 0);
 }
 
 TEST_CASE("Nextendo: the BAAS user id is the account id only in Animal Crossing", "[common]") {
