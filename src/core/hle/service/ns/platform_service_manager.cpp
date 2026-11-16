@@ -94,12 +94,19 @@ void EncryptSharedFont(const std::vector<u32>& input, std::vector<u8>& output, s
 
 class INx2FontService final : public ServiceFramework<INx2FontService> {
 public:
-    explicit INx2FontService(Core::System& system_, std::vector<FontRegion> regions_)
-        : ServiceFramework{system_, "nx2:pl:font"}, regions{std::move(regions_)} {
+    explicit INx2FontService(Core::System& system_, Kernel::KTransferMemory* memory_,
+                             std::vector<FontRegion> regions_)
+        : ServiceFramework{system_, "nx2:pl:font"}, memory{memory_}, regions{std::move(regions_)} {
+        memory->Open(kernel);
         static const FunctionInfo functions[] = {
             {0, &INx2FontService::GetFontData, "GetFontData"},
+            {1, &INx2FontService::GetFontDataSet, "GetFontDataSet"},
         };
         RegisterHandlers(functions);
+    }
+
+    ~INx2FontService() override {
+        memory->Close(kernel);
     }
 
 private:
@@ -118,6 +125,34 @@ private:
         rb.Push<u32>(region.size);
     }
 
+    struct Descriptor {
+        u32_le flags{};
+        u32_le offset{};
+        u32_le size{};
+    };
+    static_assert(sizeof(Descriptor) == 12);
+
+    void GetFontDataSet(HLERequestContext& ctx) {
+        const auto types = ctx.ReadBuffer();
+        const auto capacity = ctx.GetWriteBufferSize() / sizeof(Descriptor);
+        std::vector<Descriptor> descriptors;
+        for (const auto type : types) {
+            if (descriptors.size() == capacity) {
+                break;
+            }
+            if (type < regions.size() && regions[type].size != 0) {
+                descriptors.push_back({0, regions[type].offset, regions[type].size});
+            }
+        }
+        ctx.WriteBuffer(descriptors);
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(descriptors.empty() ? 0 : 1);
+        rb.Push<u32>(static_cast<u32>(descriptors.size()));
+    }
+
+    // The SDK closes its copy handle after OpenFont. Keep the transferred pages alive.
+    Kernel::KTransferMemory* memory;
     std::vector<FontRegion> regions;
 };
 
@@ -284,7 +319,7 @@ void IPlatformServiceManager::RequestLoadNxFont(HLERequestContext& ctx) {
                                     impl->builtin_font_regions.end()};
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(ResultSuccess);
-    rb.PushIpcInterface<INx2FontService>(ctx, system, std::move(regions));
+    rb.PushIpcInterface<INx2FontService>(ctx, system, transfer, std::move(regions));
 }
 
 // Switch 2: the shared memory GetBuiltInFontData offsets point into (copy handle, u32 size); the
