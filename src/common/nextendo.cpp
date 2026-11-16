@@ -117,6 +117,31 @@ void ReadIdentity(const nlohmann::json& object, u64& pid, std::string& username,
     friend_code = StringField(object, "friend_code", friend_code);
 }
 
+// An OAuth error about the scope asked for. access_denied is the player's answer, even when its
+// description mentions scopes.
+bool ScopeRejected(std::string_view error, std::string_view description) {
+    const auto mentions_scope = [](std::string_view text) {
+        std::string lower{text};
+        std::ranges::transform(lower, lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return lower.find("scope") != std::string::npos;
+    };
+    return error != "access_denied" && (mentions_scope(error) || mentions_scope(description));
+}
+
+bool TokenScopeRejected(const httplib::Result& result) {
+    if (!result || result->status == 200) {
+        return false;
+    }
+    try {
+        const auto json = nlohmann::json::parse(result->body);
+        return json.is_object() &&
+               ScopeRejected(StringField(json, "error"), StringField(json, "error_description"));
+    } catch (...) {
+        return false;
+    }
+}
+
 std::string ServerError(const std::string& body) {
     try {
         const auto json = nlohmann::json::parse(body);
@@ -409,6 +434,10 @@ std::optional<Account> LoadAccountLocked() {
         account.nex_expires = IntField(json, "nex_expires");
         account.scope = StringField(json, "scope");
         account.baas_nsa = ParseBaasNsa(StringField(json, "nsa"));
+        const auto social_unavailable = json.find("social_unavailable");
+        account.social_unavailable = social_unavailable != json.end() &&
+                                     social_unavailable->is_boolean() &&
+                                     social_unavailable->get<bool>();
         cached_account = std::move(account);
     } catch (const std::exception& e) {
         LOG_WARNING(Common, "Ignoring an unreadable Nextendo account file: {}", e.what());
@@ -434,6 +463,7 @@ bool WriteAccountLocked(const Account& account) {
         {"nex_expires", account.nex_expires},
         {"scope", account.scope},
         {"nsa", nsa},
+        {"social_unavailable", account.social_unavailable},
     }.dump(2);
     const auto path = AccountPath();
     auto temp = path;
@@ -792,12 +822,12 @@ std::string RedirectUri(u16 port) {
 }
 
 std::string BuildAuthorizeUrl(std::string_view client_id, std::string_view state,
-                              std::string_view challenge, u16 port) {
+                              std::string_view challenge, u16 port, std::string_view scope) {
     return fmt::format("{}{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}"
                        "&code_challenge={}&code_challenge_method=S256",
                        ApiBase, AuthorizePath, PercentEncode(client_id),
-                       PercentEncode(RedirectUri(port)), PercentEncode(Scopes),
-                       PercentEncode(state), PercentEncode(challenge));
+                       PercentEncode(RedirectUri(port)), PercentEncode(scope), PercentEncode(state),
+                       PercentEncode(challenge));
 }
 
 Callback ParseCallback(const std::multimap<std::string, std::string>& params,
@@ -812,7 +842,8 @@ Callback ParseCallback(const std::multimap<std::string, std::string>& params,
     if (const std::string error = get("error"); !error.empty()) {
         const std::string description = get("error_description");
         return {.matched = true,
-                .error = description.empty() ? error : fmt::format("{}: {}", error, description)};
+                .error = description.empty() ? error : fmt::format("{}: {}", error, description),
+                .scope_rejected = ScopeRejected(error, description)};
     }
     std::string code = get("code");
     if (code.empty()) {
@@ -879,15 +910,10 @@ SignInResult SignIn(std::string_view client_id,
         }
     } running;
 
-    const auto pkce = MakePkce();
-    const auto state = RandomToken();
-    if (!pkce || !state) {
-        out.error = "Lichii could not generate a random sign-in key.";
-        return out;
-    }
-
     std::mutex mutex;
     std::condition_variable_any cv;
+    // The current attempt's state, and the browser's answer to it.
+    std::string state;
     std::optional<Callback> callback;
 
     const auto make_server = [&] {
@@ -905,7 +931,8 @@ SignInResult SignIn(std::string_view client_id,
                                      httplib::Response& response) {
             const std::multimap<std::string, std::string> params(request.params.begin(),
                                                                  request.params.end());
-            Callback parsed = ParseCallback(params, *state);
+            std::scoped_lock lock{mutex};
+            Callback parsed = ParseCallback(params, state);
             if (!parsed.matched) {
                 response.status = 400;
                 response.set_content(parsed.error, "text/plain; charset=utf-8");
@@ -916,11 +943,8 @@ SignInResult SignIn(std::string_view client_id,
                                        "to Lichii."
                                      : "Nextendo sign-in failed: " + parsed.error,
                                  "text/plain; charset=utf-8");
-            {
-                std::scoped_lock lock{mutex};
-                if (!callback) {
-                    callback = std::move(parsed);
-                }
+            if (!callback) {
+                callback = std::move(parsed);
             }
             cv.notify_all();
         });
@@ -942,37 +966,75 @@ SignInResult SignIn(std::string_view client_id,
     }
     const u16 callback_port = static_cast<u16>(port);
     std::thread listener{[&server] { void(server->listen_after_bind()); }};
+    struct Listening {
+        ~Listening() {
+            server.stop();
+            thread.join();
+        }
+        httplib::Server& server;
+        std::thread& thread;
+    } listening{*server, listener};
     // stop() is a no-op until the listener runs, so a cancel before then would never end it.
     server->wait_until_ready();
 
-    open_url(BuildAuthorizeUrl(client_id, *state, pkce->challenge, callback_port));
-    {
-        std::unique_lock lock{mutex};
-        cv.wait_for(lock, stop, std::chrono::minutes{5},
-                    [&callback] { return callback.has_value(); });
-    }
-    server->stop();
-    listener.join();
-
-    if (!callback) {
-        out.error = stop.stop_requested() ? "Sign-in was cancelled." : "Sign-in timed out.";
-        return out;
-    }
-    if (!callback->error.empty()) {
-        out.error = callback->error;
-        return out;
-    }
-
     ApiClient api{15};
-    const httplib::Params form{
-        {"grant_type", "authorization_code"}, {"code", callback->code},
-        {"client_id", std::string{client_id}}, {"redirect_uri", RedirectUri(callback_port)},
-        {"code_verifier", pkce->verifier},
-    };
-    const auto token = ReadReply(api.Post(TokenPath, BaseHeaders(client_id), form), "sign-in",
-                                 out.error);
-    if (!token) {
-        return out;
+    // When nextendo.network refuses the social scopes for the app, signs in once more without
+    // them, so online play works whether the app offers them or not.
+    std::string_view scope = Scopes;
+    std::optional<TokenResponse> token;
+    while (!token) {
+        const auto pkce = MakePkce();
+        auto next_state = RandomToken();
+        if (!pkce || !next_state) {
+            out.error = "Lichii could not generate a random sign-in key.";
+            return out;
+        }
+        std::string url;
+        {
+            std::scoped_lock lock{mutex};
+            state = std::move(*next_state);
+            callback.reset();
+            url = BuildAuthorizeUrl(client_id, state, pkce->challenge, callback_port, scope);
+        }
+        open_url(url);
+        std::optional<Callback> answer;
+        {
+            std::unique_lock lock{mutex};
+            cv.wait_for(lock, stop, std::chrono::minutes{5},
+                        [&callback] { return callback.has_value(); });
+            answer = callback;
+        }
+        if (!answer) {
+            out.error = stop.stop_requested() ? "Sign-in was cancelled." : "Sign-in timed out.";
+            return out;
+        }
+        const bool can_fall_back = scope == Scopes;
+        if (!answer->error.empty()) {
+            if (!answer->scope_rejected || !can_fall_back) {
+                out.error = answer->error;
+                return out;
+            }
+            LOG_WARNING(Common, "nextendo.network refused friends and presence for this app; "
+                                "signing in without them");
+            scope = OnlineScopes;
+            continue;
+        }
+        const httplib::Params form{
+            {"grant_type", "authorization_code"},  {"code", answer->code},
+            {"client_id", std::string{client_id}}, {"redirect_uri", RedirectUri(callback_port)},
+            {"code_verifier", pkce->verifier},
+        };
+        const auto result = api.Post(TokenPath, BaseHeaders(client_id), form);
+        if (can_fall_back && TokenScopeRejected(result)) {
+            LOG_WARNING(Common, "nextendo.network refused the sign-in's friends and presence "
+                                "scopes; signing in without them");
+            scope = OnlineScopes;
+            continue;
+        }
+        token = ReadReply(result, "sign-in", out.error);
+        if (!token) {
+            return out;
+        }
     }
     out.token_fields = token->fields;
     if (token->access_token.empty() && token->nex_token.empty()) {
@@ -984,8 +1046,9 @@ SignInResult SignIn(std::string_view client_id,
     ApplyTokens(account, *token);
     // RFC 6749 5.1: the reply leaves the scope out when it grants the one asked for.
     if (account.scope.empty()) {
-        account.scope = Scopes;
+        account.scope = scope;
     }
+    account.social_unavailable = !HasSocialScopes(account);
     if (account.nex_token.empty() &&
         FetchGameToken(api, client_id, account, out.game_token_error) != GameTokenReply::Ok) {
         LOG_WARNING(Common, "Signed in to Nextendo without a game token: {}",
