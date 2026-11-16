@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -86,6 +88,22 @@ void PatchFragCoord(IR::Block& block, IR::Inst& inst) {
     const IR::F32 frag_coord{ir.GetAttribute(inst.Arg(0).Attribute())};
     const IR::F32 downscaled_frag_coord{ir.FPMul(frag_coord, down_factor)};
     inst.ReplaceUsesWith(downscaled_frag_coord);
+}
+
+bool ScaleDerivatives() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_RESCALE_DERIVATIVES");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void PatchDerivative(IR::Block& block, IR::Inst& inst) {
+    const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
+    IR::IREmitter ir{block, it};
+    IR::Inst* const derivative{&*block.PrependNewInst(it, inst)};
+    const IR::F32 up_factor{ir.FPRecip(ir.ResolutionDownFactor())};
+    inst.ReplaceUsesWith(ir.FPMul(IR::F32{IR::Value{derivative}}, up_factor));
 }
 
 void PatchPointSize(IR::Block& block, IR::Inst& inst) {
@@ -316,6 +334,14 @@ void Visit(const IR::Program& program, IR::Block& block, IR::Inst& inst) {
         }
         break;
     }
+    case IR::Opcode::DPdxFine:
+    case IR::Opcode::DPdyFine:
+    case IR::Opcode::DPdxCoarse:
+    case IR::Opcode::DPdyCoarse:
+        if (is_fragment_shader && ScaleDerivatives()) {
+            PatchDerivative(block, inst);
+        }
+        break;
     case IR::Opcode::ImageQueryDimensions:
         PatchImageQueryDimensions(block, inst);
         break;
