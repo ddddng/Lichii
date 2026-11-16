@@ -2535,6 +2535,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (metadata.first != nullptr) {
         title_version = metadata.first->GetVersionString();
         title_name = metadata.first->GetApplicationName();
+    } else if (FileSys::NACP control; QtCommon::system->GetAppLoader().ReadControlData(control) ==
+                                      Loader::ResultStatus::Success) {
+        title_version = control.GetVersionString();
     }
     if (res != Loader::ResultStatus::Success || title_name.empty()) {
         title_name = Common::FS::PathToUTF8String(
@@ -5509,6 +5512,7 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 
     UpdateWindowTitle(title_name, title_version,
                       QtCommon::system->GPU().Renderer().GetDeviceVendor());
+    CheckNextendoGameVersion(program_id, std::move(title_version));
 
     // Switch to record playtime for the running program
     if (play_time_manager)

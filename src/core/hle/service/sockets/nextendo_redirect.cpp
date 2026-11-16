@@ -8,6 +8,7 @@
 #include <array>
 #include <charconv>
 #include <mutex>
+#include <ranges>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -131,10 +132,15 @@ std::vector<HostsEntry> ReadHostsFile() {
     for (std::string line; std::getline(lines, line);) {
         line.resize(std::min(line.find('#'), line.size()));
         std::istringstream words{line};
-        std::string address;
-        if (!(words >> address) || !ParseIPv4(address)) {
+        std::string text;
+        if (!(words >> text)) {
             continue;
         }
+        const auto ip = ParseIPv4(text);
+        if (!ip) {
+            continue;
+        }
+        const auto address = fmt::format("{}.{}.{}.{}", (*ip)[0], (*ip)[1], (*ip)[2], (*ip)[3]);
         for (std::string name; words >> name;) {
             entries.push_back({Common::ReplaceAll(Common::ToLower(name), "%", "lp1"), address});
         }
@@ -144,13 +150,13 @@ std::vector<HostsEntry> ReadHostsFile() {
 
 std::optional<std::string> ExactHostsEntry(const std::vector<HostsEntry>& entries,
                                            std::string_view host) {
-    const auto it = std::ranges::find_if(entries, [host](const HostsEntry& entry) {
+    const auto it = std::ranges::find_if(entries | std::views::reverse, [host](const auto& entry) {
         return entry.pattern.find('*') == std::string::npos && entry.pattern == host;
     });
-    return it == entries.end() ? std::nullopt : std::optional{it->address};
+    return it == entries.rend() ? std::nullopt : std::optional{it->address};
 }
 
-// The most specific match: the fewest wildcards, then the longest pattern, then the first.
+// The most specific match: the fewest wildcards, then the longest pattern, then the last.
 std::optional<std::string> WildcardHostsEntry(const std::vector<HostsEntry>& entries,
                                               std::string_view host) {
     const HostsEntry* best = nullptr;
@@ -162,7 +168,7 @@ std::optional<std::string> WildcardHostsEntry(const std::vector<HostsEntry>& ent
             continue;
         }
         if (best == nullptr || stars(entry) < stars(*best) ||
-            (stars(entry) == stars(*best) && entry.pattern.size() > best->pattern.size())) {
+            (stars(entry) == stars(*best) && entry.pattern.size() >= best->pattern.size())) {
             best = &entry;
         }
     }

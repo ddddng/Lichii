@@ -84,7 +84,11 @@ TEST_CASE("Nextendo: the hosts file and built-in rules resolve in the wiki's ord
                                           "198.51.100.3 *.cdn.example.org\n"
                                           "198.51.100.4 *a*.cdn.example.org\n"
                                           "not-an-ip broken.example.org\n"
-                                          "198.51.100.5 MiXeD.example.com\n") > 0);
+                                          "198.51.100.5 MiXeD.example.com\n"
+                                          "198.51.100.6 mixed.example.com\n"
+                                          "198.51.100.7 *.tie.example.org\n"
+                                          "198.51.100.8 *.tie.example.org\n"
+                                          "010.000.000.001 octal.example.org\n") > 0);
     Settings::values.nextendo_enabled = true;
     Settings::values.nextendo_server_ip = "192.0.2.1";
 
@@ -93,7 +97,9 @@ TEST_CASE("Nextendo: the hosts file and built-in rules resolve in the wiki's ord
     REQUIRE(Nextendo::RedirectAddress("a.b.example.org") == "198.51.100.2");
     REQUIRE(Nextendo::RedirectAddress("x.cdn.example.org") == "198.51.100.3");
     REQUIRE(Nextendo::RedirectAddress("abc.cdn.example.org") == "198.51.100.3");
-    REQUIRE(Nextendo::RedirectAddress("mixed.example.com") == "198.51.100.5");
+    REQUIRE(Nextendo::RedirectAddress("mixed.example.com") == "198.51.100.6");
+    REQUIRE(Nextendo::RedirectAddress("x.tie.example.org") == "198.51.100.8");
+    REQUIRE(Nextendo::RedirectAddress("octal.example.org") == "10.0.0.1");
     REQUIRE_FALSE(Nextendo::RedirectAddress("broken.example.org.net").has_value());
     REQUIRE_FALSE(Nextendo::RedirectAddress("203.0.113.9").has_value());
 
