@@ -1554,7 +1554,6 @@ VkImageView TextureCacheRuntime::ResolveColorFeedback(const ImageView& sampled,
     const VkImage src = sampled.ImageHandle();
     const VkImageSubresourceRange src_range =
         MakeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, sampled.range);
-    scheduler.RequestOutsideRenderPassOperationContext();
 
     ColorFeedbackSnapshot* snapshot{};
     const VkComponentMapping swizzle = sampled.Swizzle();
@@ -1569,7 +1568,7 @@ VkImageView TextureCacheRuntime::ResolveColorFeedback(const ImageView& sampled,
     }
     if (!snapshot) {
         ColorFeedbackSnapshot created{
-            .image = memory_allocator.CreateImage(VkImageCreateInfo{
+            .image = memory_allocator.TryCreateImage(VkImageCreateInfo{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                 .imageType = VK_IMAGE_TYPE_2D,
                 .format = format,
@@ -1586,6 +1585,10 @@ VkImageView TextureCacheRuntime::ResolveColorFeedback(const ImageView& sampled,
             .size = sampled.size,
             .swizzle = swizzle,
         };
+        // Out of memory: sample the attachment as before rather than an unbacked copy.
+        if (!created.image || created.image.IsUnbacked()) {
+            return VK_NULL_HANDLE;
+        }
         created.view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .image = *created.image,
@@ -1597,6 +1600,7 @@ VkImageView TextureCacheRuntime::ResolveColorFeedback(const ImageView& sampled,
         color_feedback_snapshots.push_back(std::move(created));
         snapshot = &color_feedback_snapshots.back();
     }
+    scheduler.RequestOutsideRenderPassOperationContext();
     snapshot->used_this_frame = true;
     snapshot->unused_frames = 0;
     const VkImage dst = *snapshot->image;
