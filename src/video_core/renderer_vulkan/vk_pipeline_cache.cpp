@@ -72,6 +72,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache_file.h"
@@ -1021,6 +1022,13 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         current_pipeline = nullptr;
         return nullptr;
     }
+    const bool mesh_draw =
+        maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled();
+    if (vertex_input_lent && !mesh_draw) {
+        // Refresh keeps the key's vertex input until the registers change it.
+        vertex_input_lent = false;
+        maxwell3d->dirty.flags[Dirty::VertexInput] = true;
+    }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
 
     if (current_pipeline) {
@@ -1031,7 +1039,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
             return BuiltPipeline(current_pipeline);
         }
     }
-    return CurrentGraphicsPipelineSlowPath();
+    return CurrentGraphicsPipelineSlowPath(mesh_draw);
 }
 
 ComputePipeline* ComputePipelineCacheEntry::Get(bool native, GPUVAddr address,
@@ -2337,8 +2345,19 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
 }
 } // Anonymous namespace
 
-GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
+GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath(bool mesh_draw) {
     namespace StutterTrace = VideoCommon::StutterTrace;
+    if (mesh_draw && !graphics_cache.contains(graphics_key)) {
+        if (!mesh_vertex_inputs_seeded) {
+            mesh_vertex_inputs_seeded = true;
+            for (const auto& [key, pipeline] : graphics_cache) {
+                if (pipeline && pipeline->IsMeshPipeline()) {
+                    mesh_vertex_inputs.Add(key);
+                }
+            }
+        }
+        vertex_input_lent |= mesh_vertex_inputs.Lend(graphics_key);
+    }
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
