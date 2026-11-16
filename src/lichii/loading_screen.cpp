@@ -8,6 +8,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QIODevice>
 #include <QImage>
+#include <QLabel>
 #include <QPainter>
 #include <QPixmap>
 #include <QPropertyAnimation>
@@ -107,6 +108,14 @@ LoadingScreen::LoadingScreen(QWidget* parent)
         VideoCommon::ShaderWarm::RequestSkipWarm();
         skip_button->setEnabled(false);
     });
+
+    debugger_notice = new QLabel(this);
+    debugger_notice->setStyleSheet(
+        QStringLiteral("background-color: black; color: #ffd75e; font: 13pt \"Arial\";"));
+    debugger_notice->setAlignment(Qt::AlignCenter);
+    debugger_notice->setWordWrap(true);
+    debugger_notice->hide();
+    ui->verticalLayout->insertWidget(3, debugger_notice);
     qRegisterMetaType<VideoCore::LoadCallbackStage>();
 
     stage_translations = {
@@ -155,6 +164,11 @@ void LoadingScreen::Prepare(Loader::AppLoader& loader) {
 
 void LoadingScreen::OnLoadComplete() {
     fadeout_animation->start(QPropertyAnimation::KeepWhenStopped);
+}
+
+void LoadingScreen::SetDebuggerNotice(const QString& text) {
+    debugger_notice->setText(text);
+    debugger_notice->setVisible(!text.isEmpty());
 }
 
 void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size_t value,
@@ -229,6 +243,7 @@ void LoadingScreen::paintEvent(QPaintEvent* event) {
 }
 
 void LoadingScreen::Clear() {
+    SetDebuggerNotice({});
 #ifndef LICHII_QT_MOVIE_MISSING
     animation.reset();
     backing_buf.reset();

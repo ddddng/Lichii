@@ -424,6 +424,10 @@ public:
     /// Tells if the system debugger is enabled.
     [[nodiscard]] bool DebuggerEnabled() const;
 
+    /// Tells if the GDB stub holds the guest at boot until a debugger continues it.
+    [[nodiscard]] bool IsWaitingForDebugger() const;
+    void SetWaitingForDebugger(bool waiting);
+
     /// Runs a server instance until shutdown.
     void RunServer(std::unique_ptr<Service::ServerManager>&& server_manager);
 

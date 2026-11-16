@@ -314,6 +314,7 @@ private:
     template <typename Callback>
     void MarkResumed(Callback&& cb) {
         stopped = false;
+        system.SetWaitingForDebugger(false);
         cb();
     }
 

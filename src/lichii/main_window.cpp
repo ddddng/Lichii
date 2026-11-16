@@ -2726,6 +2726,7 @@ void MainWindow::OnEmulationStopped() {
     render_window->hide();
     loading_screen->hide();
     loading_screen->Clear();
+    message_label->clear();
     if (game_list->IsEmpty()) {
         game_list_placeholder->show();
     } else {
@@ -5498,6 +5499,18 @@ void MainWindow::UpdateStatusBar() {
     if (QtCommon::emu_thread == nullptr || !QtCommon::system->IsPoweredOn()) {
         status_bar_update_timer.stop();
         return;
+    }
+
+    if (QtCommon::system->IsWaitingForDebugger()) {
+        const QString notice =
+            tr("Waiting for a debugger on port %1 (Emulation > Configure > Debug > Enable GDB "
+               "Stub). Turn it off to play.")
+                .arg(Settings::values.gdbstub_port.GetValue());
+        message_label->setText(notice);
+        loading_screen->SetDebuggerNotice(notice);
+    } else if (!message_label->text().isEmpty()) {
+        message_label->clear();
+        loading_screen->SetDebuggerNotice({});
     }
 
     if (Settings::values.tas_enable)

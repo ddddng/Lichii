@@ -675,6 +675,7 @@ struct System::Impl {
         perf_stats.reset();
         cpu_manager.Shutdown();
         debugger.reset();
+        waiting_for_debugger = false;
         {
             // The general channel's event is a kernel object made on first use. Left for ~Impl,
             // it closed at exit() on a kernel already shut down (SIGSEGV in KAutoObject::Close).
@@ -784,6 +785,7 @@ struct System::Impl {
     std::atomic_bool is_paused{};
     std::atomic_bool is_shutting_down{};
     std::atomic_bool is_powered_on{};
+    std::atomic_bool waiting_for_debugger{};
     bool is_multicore : 1 = false;
     Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
     bool exit_locked : 1 = false;
@@ -1191,6 +1193,14 @@ bool System::IsMulticore() const {
 
 bool System::DebuggerEnabled() const {
     return Settings::values.use_gdbstub.GetValue();
+}
+
+bool System::IsWaitingForDebugger() const {
+    return impl->waiting_for_debugger.load(std::memory_order::relaxed);
+}
+
+void System::SetWaitingForDebugger(bool waiting) {
+    impl->waiting_for_debugger.store(waiting, std::memory_order::relaxed);
 }
 
 Core::Debugger& System::GetDebugger() {

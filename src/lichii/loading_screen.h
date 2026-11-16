@@ -30,6 +30,7 @@ enum class LoadCallbackStage;
 class QBuffer;
 class QByteArray;
 class QGraphicsOpacityEffect;
+class QLabel;
 class QMovie;
 class QPropertyAnimation;
 class QPushButton;
@@ -56,6 +57,9 @@ public:
     /// Hides the LoadingScreen with a fade out effect
     void OnLoadComplete();
 
+    /// Shows a notice under the progress bar, or hides it when the text is empty
+    void SetDebuggerNotice(const QString& text);
+
     // In order to use a custom widget with a stylesheet, you need to override the paintEvent
     // See https://wiki.qt.io/How_to_Change_the_Background_Color_of_QWidget
     void paintEvent(QPaintEvent* event) override;
@@ -78,6 +82,7 @@ private:
 
     QGraphicsOpacityEffect* opacity_effect = nullptr;
     QPushButton* skip_button = nullptr;
+    QLabel* debugger_notice = nullptr;
     std::unique_ptr<QPropertyAnimation> fadeout_animation;
 
     // Definitions for the differences in text and styling for each stage
