@@ -300,9 +300,17 @@ public:
     bool LoadProgram(const std::vector<CheatEntry>& cheats);
     void Execute(const CheatProcessMetadata& metadata);
 
-    // The main module ranges, [begin, end) offsets, the cheat's static stores write whatever its
-    // conditions, up to its first instruction that can change a register.
-    static std::vector<std::pair<u64, u64>> MainStaticStores(const CheatEntry& cheat);
+    struct MainStore {
+        std::size_t cheat;
+        u64 begin;
+        u64 end;
+    };
+    // The main module ranges, [begin, end) offsets, the enabled cheats' static stores write
+    // whatever their conditions, with the index of the cheat each comes from. The cheats run as
+    // one program, so a register one cheat loads offsets the stores of the next: stores whose
+    // offset register an earlier instruction may have changed, and stores inside loops, are left
+    // out.
+    static std::vector<MainStore> MainStaticStores(const std::vector<CheatEntry>& cheats);
 
 private:
     std::unique_ptr<Callbacks> callbacks;

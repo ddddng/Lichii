@@ -601,19 +601,27 @@ LICHII_NO_INLINE std::optional<u64> GetParentApplicationId(const ContentProvider
 std::vector<BuiltinCheatOverlap> FindBuiltinCheatOverlaps(
     u64 title_id, std::span<const std::string_view> applied_patches,
     std::span<const Core::Memory::CheatEntry> cheats) {
+    const auto stores =
+        Core::Memory::DmntCheatVm::MainStaticStores({cheats.begin(), cheats.end()});
     std::vector<BuiltinCheatOverlap> overlaps;
-    for (const auto& cheat : cheats) {
-        if (!cheat.enabled) {
-            continue;
-        }
-        auto stores = Core::Memory::DmntCheatVm::MainStaticStores(cheat);
-        std::ranges::sort(stores);
+    for (std::size_t index = 0; index < cheats.size(); ++index) {
+        const auto& cheat = cheats[index];
         std::vector<std::pair<u64, u64>> ranges;
         for (const auto& store : stores) {
-            if (!ranges.empty() && store.first <= ranges.back().second) {
-                ranges.back().second = std::max(ranges.back().second, store.second);
+            if (store.cheat == index) {
+                ranges.emplace_back(store.begin, store.end);
+            }
+        }
+        if (ranges.empty()) {
+            continue;
+        }
+        std::ranges::sort(ranges);
+        std::vector<std::pair<u64, u64>> merged;
+        for (const auto& range : ranges) {
+            if (!merged.empty() && range.first <= merged.back().second) {
+                merged.back().second = std::max(merged.back().second, range.second);
             } else {
-                ranges.push_back(store);
+                merged.push_back(range);
             }
         }
         const std::string name{cheat.definition.readable_name.data(),
@@ -625,7 +633,7 @@ std::vector<BuiltinCheatOverlap> FindBuiltinCheatOverlaps(
                 continue;
             }
             const auto check = [&](u64 begin, u64 end, bool state) {
-                for (const auto& [cheat_begin, cheat_end] : ranges) {
+                for (const auto& [cheat_begin, cheat_end] : merged) {
                     if (cheat_begin < end && begin < cheat_end) {
                         overlaps.push_back({name, patch.name, state, cheat_begin, cheat_end, begin,
                                             end});

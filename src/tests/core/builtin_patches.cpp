@@ -1056,13 +1056,13 @@ TEST_CASE("Built-in patch overlap check names the cheat, the patch and both rang
                                         "04100000 03C46900 00000000\n"
                                         "[Elsewhere in main]\n"
                                         "04000000 00100000 00000000\n"
-                                        "[Offset from a loaded register]\n"
-                                        "40000000 00000000 00000010\n"
-                                        "04000000 03C46900 00000000\n"
                                         "[On ZL]\n"
                                         "80000100\n"
                                         "04000000 03C46B60 D503201F\n"
-                                        "20000000\n";
+                                        "20000000\n"
+                                        "[Offset from a loaded register]\n"
+                                        "40000000 00000000 00000010\n"
+                                        "04000000 03C46900 00000000\n";
 
     const auto overlaps = CheatOverlaps(Cheats, {FpsUnlock});
     REQUIRE(overlaps.size() == 3);
@@ -1088,6 +1088,21 @@ TEST_CASE("Built-in patch overlap check names the cheat, the patch and both rang
     // Only applied built-ins count: Dynamic FPS has neither range, and nothing applied has none.
     CHECK(CheatOverlaps(Cheats, {DynamicFps}).empty());
     CHECK(CheatOverlaps(Cheats, {}).empty());
+}
+
+TEST_CASE("Built-in patch overlap check follows registers from earlier cheats",
+          "[patch_manager]") {
+    // The enabled cheats run as one program, so the register the first loads offsets the
+    // second's store to main+0x3C46B60.
+    constexpr std::string_view Cheats = "[Load offset]\n"
+                                        "40000000 00000000 00000160\n"
+                                        "[Store]\n"
+                                        "04000000 03C46A00 D503201F\n";
+    CHECK(CheatOverlaps(Cheats, {FpsUnlock}).empty());
+    CHECK(CheatOverlaps("[Store]\n04000000 03C46A00 D503201F\n", {FpsUnlock}).empty());
+    const auto overlaps = CheatOverlaps("[Store]\n04000000 03C46B60 D503201F\n", {FpsUnlock});
+    REQUIRE(overlaps.size() == 1);
+    CHECK(overlaps[0].cheat == "Store");
 }
 
 TEST_CASE("Built-in patches stay clear of the known code-patching cheats (#1873)",

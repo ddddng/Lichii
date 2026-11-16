@@ -197,8 +197,9 @@ Cheat "No damage" writes main+0x3c46a00..0x3c46a34, which built-in patch "FPS Un
 uses for its code at main+0x3c46a00..0x3c46a3c. ...
 ```
 
-The cheat still runs. Stores whose address comes from a register are not followed: the scan of
-a cheat stops at its first instruction that can change a register.
+The cheat still runs. The enabled cheats run as one program, so the scan reads them in that order
+and a register one cheat sets carries into the next. Stores whose offset register may have
+changed by then, and stores inside loops, are not followed.
 
 ## FPS Unlock movie frame count
 
