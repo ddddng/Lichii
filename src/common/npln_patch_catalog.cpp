@@ -220,8 +220,9 @@ void DownloadTitleIndex(State& state, Clock::time_point deadline) {
              index.revision, index.titles.size());
 }
 
-// Returns once the server answered for this build: a verified patch, unchanged, or none.
-void Download(State& state, u64 title_id, const std::string& build_id,
+// Returns once the server answered for this build: true for a verified patch, new or unchanged,
+// and false when the build has none.
+bool Download(State& state, u64 title_id, const std::string& build_id,
               Clock::time_point deadline) {
     std::string tag;
     {
@@ -231,9 +232,11 @@ void Download(State& state, u64 title_id, const std::string& build_id,
     const auto response = Get(
         fmt::format("/service-catalog/v1/npln-patches/{:016x}/{}", title_id, build_id), tag,
         deadline);
-    if (response && (response->status == 404 ||
-                     (response->status == 304 && !tag.empty() && response->etag == tag))) {
-        return;
+    if (response && response->status == 404) {
+        return false;
+    }
+    if (response && response->status == 304 && !tag.empty() && response->etag == tag) {
+        return true;
     }
     if (!response || response->status != 200) {
         throw std::runtime_error("patch download unavailable");
@@ -255,19 +258,23 @@ void Download(State& state, u64 title_id, const std::string& build_id,
                  response->body);
     LOG_INFO(WebService, "Nextendo: NPLN patch {} v{} verified for build {}",
              manifest.patches[0].id, manifest.patches[0].version, build_id);
+    return true;
 }
 
-// Whether this build was last answered RefreshInterval ago, here or in an earlier run.
-bool RefreshDue(State& state, const std::string& target) {
+// Whether this build was last answered RefreshInterval ago, here or in an earlier run. An earlier
+// run's answer that had a patch only counts when that patch is cached, so a patch whose save
+// failed is downloaded again.
+bool RefreshDue(State& state, const std::string& target, bool patch_cached) {
     const auto now = Clock::now();
     if (!state.next_refresh.contains(target)) {
         std::ifstream last_check(CacheDir() / "checks" / (target + ".txt"));
         s64 checked_at{};
+        int had_patch{};
         const s64 wall_now = Now();
         const s64 interval =
             std::chrono::duration_cast<std::chrono::seconds>(RefreshInterval).count();
-        if (last_check >> checked_at && checked_at > 0 && checked_at <= wall_now &&
-            wall_now - checked_at < interval) {
+        if (last_check >> checked_at >> had_patch && (had_patch == 0 || patch_cached) &&
+            checked_at > 0 && checked_at <= wall_now && wall_now - checked_at < interval) {
             state.next_refresh[target] =
                 now + std::chrono::seconds(interval - (wall_now - checked_at));
         }
@@ -275,7 +282,7 @@ bool RefreshDue(State& state, const std::string& target) {
     return now >= state.next_refresh[target];
 }
 
-void RecordCheck(State& state, const std::string& target) {
+void RecordCheck(State& state, const std::string& target, bool has_patch) {
     {
         std::scoped_lock lock(state.mutex);
         state.next_refresh[target] = Clock::now() + RefreshInterval;
@@ -284,7 +291,7 @@ void RecordCheck(State& state, const std::string& target) {
     std::error_code error;
     std::filesystem::create_directories(checks.parent_path(), error);
     std::ofstream last_check(checks, std::ios::trunc);
-    last_check << Now() << '\n';
+    last_check << Now() << ' ' << (has_patch ? 1 : 0) << '\n';
 }
 
 void Prepare(State& state, u64 title_id,
@@ -327,12 +334,11 @@ void Prepare(State& state, u64 title_id,
     {
         std::scoped_lock lock(state.mutex);
         const auto cached = state.patches.Cached(title_id, *build_id);
-        refresh = !(cached && cached->final) && RefreshDue(state, target);
+        refresh = !(cached && cached->final) && RefreshDue(state, target, cached != nullptr);
     }
     if (refresh) {
         try {
-            Download(state, title_id, *build_id, deadline);
-            RecordCheck(state, target);
+            RecordCheck(state, target, Download(state, title_id, *build_id, deadline));
         } catch (const std::exception& error) {
             LOG_WARNING(WebService, "Nextendo: NPLN patch refresh for {} failed, keeping verified "
                                     "patches: {}",

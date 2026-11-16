@@ -625,7 +625,7 @@ ResultStatus AppLoader_DeconstructedRomDirectory::ReadMainBuildId(
         }
         const FileSys::PatchManager manager(program_id, system.GetFileSystemController(),
                                             system.GetContentProvider());
-        exefs = manager.PatchExeFS(exefs);
+        exefs = manager.PatchExeFS(exefs, apply_installed_update);
     }
     const auto main = exefs ? exefs->GetFile("main") : nullptr;
     if (!main) {
