@@ -544,14 +544,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             });
     connect(&nextendo_status_watcher,
             &QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>>::finished, this, [this] {
-                // The profile can't change while a game runs, so the reply is still its own.
-                if (!QtCommon::system->IsPoweredOn()) {
+                // A reply for the user before a profile switch isn't this user's.
+                if (nextendo_status_profile !=
+                    Service::Account::Nextendo::CurrentProfile(*QtCommon::system)) {
                     return;
                 }
                 const auto status = nextendo_status_watcher.result();
                 QString message;
-                if (!Common::Nextendo::LoadAccount(
-                        Service::Account::Nextendo::CurrentProfile(*QtCommon::system))) {
+                if (!Common::Nextendo::LoadAccount(nextendo_status_profile)) {
                     message = tr("Nextendo online play is on, but you aren't signed in. Sign in "
                                  "in Configure > Network.");
                 } else if (status && !status->allow) {
@@ -5506,9 +5506,10 @@ void MainWindow::CheckNextendoOnlineStatus() {
     if (!Common::Nextendo::OnlinePlayActive() || nextendo_status_watcher.isRunning()) {
         return;
     }
-    nextendo_status_watcher.setFuture(QtConcurrent::run(
-        [client_id = Settings::values.nextendo_client_id.GetValue(),
-         profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system)] {
+    nextendo_status_profile = Service::Account::Nextendo::CurrentProfile(*QtCommon::system);
+    nextendo_status_watcher.setFuture(
+        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                           profile = nextendo_status_profile] {
             return Common::Nextendo::CheckOnlineStatus(client_id, profile);
         }));
 }
