@@ -94,6 +94,25 @@ TEST_CASE("Network::ReusePortSharesUdpPort", "[core][sockets]") {
     CHECK(without_option.Bind(address) != Network::Errno::SUCCESS);
 }
 
+TEST_CASE("Network::ReuseOptionsStayIndependent", "[core][sockets]") {
+    Network::NetworkInstance network_instance;
+    Network::Socket socket;
+    REQUIRE(socket.Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                              Network::Protocol::UDP) == Network::Errno::SUCCESS);
+    constexpr std::pair set{true, Network::Errno::SUCCESS};
+    constexpr std::pair unset{false, Network::Errno::SUCCESS};
+
+    REQUIRE(socket.SetReuseAddr(true) == Network::Errno::SUCCESS);
+    CHECK(socket.GetReusePort() == unset);
+    REQUIRE(socket.SetReusePort(false) == Network::Errno::SUCCESS);
+    CHECK(socket.GetReuseAddr() == set);
+
+    REQUIRE(socket.SetReusePort(true) == Network::Errno::SUCCESS);
+    REQUIRE(socket.SetReuseAddr(false) == Network::Errno::SUCCESS);
+    CHECK(socket.GetReusePort() == set);
+    CHECK(socket.GetReuseAddr() == unset);
+}
+
 TEST_CASE("Network::UnconnectedUdpIgnoresPortUnreachable", "[core][sockets]") {
     using namespace std::chrono_literals;
     Network::NetworkInstance network_instance;

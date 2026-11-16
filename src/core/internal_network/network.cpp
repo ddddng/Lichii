@@ -913,6 +913,11 @@ Socket::~Socket() {
 Socket::Socket(Socket&& rhs) noexcept {
     fd = std::exchange(rhs.fd, INVALID_SOCKET);
     socket_type = rhs.socket_type;
+#ifdef _WIN32
+    std::scoped_lock lock{rhs.reuse_mutex};
+    reuse_addr = rhs.reuse_addr;
+    reuse_port = rhs.reuse_port;
+#endif
 }
 
 template <typename T>
@@ -1295,23 +1300,55 @@ std::pair<Errno, Errno> Socket::GetPendingError() {
     return {TranslateNativeError(pending_err), getsockopt_err};
 }
 
+#ifdef _WIN32
+std::pair<bool, Errno> Socket::GetReuseAddr() {
+    std::scoped_lock lock{reuse_mutex};
+    return {reuse_addr, Errno::SUCCESS};
+}
+
+std::pair<bool, Errno> Socket::GetReusePort() {
+    std::scoped_lock lock{reuse_mutex};
+    return {reuse_port, Errno::SUCCESS};
+}
+
+Errno Socket::SetReuseAddr(bool enable) {
+    std::scoped_lock lock{reuse_mutex};
+    const Errno result =
+        SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable || reuse_port ? 1 : 0);
+    if (result == Errno::SUCCESS) {
+        reuse_addr = enable;
+    }
+    return result;
+}
+
+Errno Socket::SetReusePort(bool enable) {
+    std::scoped_lock lock{reuse_mutex};
+    const Errno result =
+        SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable || reuse_addr ? 1 : 0);
+    if (result == Errno::SUCCESS) {
+        reuse_port = enable;
+    }
+    return result;
+}
+#else
 std::pair<bool, Errno> Socket::GetReuseAddr() {
     const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR);
     return {value != 0, getsockopt_err};
 }
 
-// Windows has no SO_REUSEPORT. Its SO_REUSEADDR lets sockets share a port as the guest's
-// SO_REUSEPORT does.
-#ifdef SO_REUSEPORT
-constexpr int NativeReusePort = SO_REUSEPORT;
-#else
-constexpr int NativeReusePort = SO_REUSEADDR;
-#endif
-
 std::pair<bool, Errno> Socket::GetReusePort() {
-    const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, NativeReusePort);
+    const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEPORT);
     return {value != 0, getsockopt_err};
 }
+
+Errno Socket::SetReuseAddr(bool enable) {
+    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable ? 1 : 0);
+}
+
+Errno Socket::SetReusePort(bool enable) {
+    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEPORT, enable ? 1 : 0);
+}
+#endif
 
 std::pair<bool, Errno> Socket::GetNoDelay() {
     const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, IPPROTO_TCP, TCP_NODELAY);
@@ -1320,14 +1357,6 @@ std::pair<bool, Errno> Socket::GetNoDelay() {
 
 Errno Socket::SetLinger(bool enable, u32 linger) {
     return SetSockOpt(fd, SOL_SOCKET, SO_LINGER, MakeLinger(enable, linger));
-}
-
-Errno Socket::SetReuseAddr(bool enable) {
-    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable ? 1 : 0);
-}
-
-Errno Socket::SetReusePort(bool enable) {
-    return SetSockOpt<u32>(fd, SOL_SOCKET, NativeReusePort, enable ? 1 : 0);
 }
 
 Errno Socket::SetKeepAlive(bool enable) {
