@@ -182,7 +182,8 @@ public:
     }
 
     /// The vertex shader is the last pre-rasterization stage and puts every vertex on the far
-    /// plane, and depth bias enable and depth clamp enable are dynamic states
+    /// plane, and depth bias enable is a dynamic state. Without a dynamic depth clamp enable the
+    /// pipeline clamps depth.
     bool OnFarPlane() const noexcept {
         return on_far_plane;
     }
