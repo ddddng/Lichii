@@ -846,10 +846,15 @@ void RasterizerOpenGL::SyncViewport() {
         // (translate_z at the near or far value), which needs a depth range below 0. Without
         // GL_NV_depth_buffer_float that range is clamped to [0, 1] and squeezes all depth into
         // [0.5, 1], so use ZeroToOne with the same mapping. Ported from Ryujinx 30b7aaef (#2754).
+        // Only when viewport 0's range really goes below 0, so an untouched viewport 0
+        // (scale_z = 0) never changes the clip volume of the others.
         const auto& transform = regs.viewport_transform[0];
         const auto& viewport = regs.viewports[0];
+        const bool range_below_zero =
+            std::min(transform.translate_z - transform.scale_z,
+                     transform.translate_z + transform.scale_z) < 0.0f;
         const bool zero_to_one_mapping =
-            viewport.depth_range_near != viewport.depth_range_far &&
+            range_below_zero && viewport.depth_range_near != viewport.depth_range_far &&
             (transform.translate_z == viewport.depth_range_near ||
              transform.translate_z == viewport.depth_range_far);
         const bool is_zero_to_one =
