@@ -433,15 +433,20 @@ bool WriteAccountLocked(const Account& account) {
     return true;
 }
 
-void ClearAccountLocked() {
+// The friend list and presence belong to the account that fetched and sent them.
+void NewAccountGenerationLocked() {
     ++account_generation;
-    void(FS::RemoveFile(AccountPath()));
-    cached_account.reset();
-    account_loaded = true;
     sign_out_reason = SignOutReason::None;
     std::scoped_lock lock{social_mutex};
     friend_cache = {};
     last_presence.reset();
+}
+
+void ClearAccountLocked() {
+    NewAccountGenerationLocked();
+    void(FS::RemoveFile(AccountPath()));
+    cached_account.reset();
+    account_loaded = true;
 }
 
 bool SaveRenewedAccount(const Account& account, u64 generation) {
@@ -625,6 +630,8 @@ Friend ReadFriend(const nlohmann::json& entry) {
     out.nsa = HexField(entry, "nsa");
     const s64 badge = IntField(entry, "pf");
     out.console = badge == 1 || badge == 2 || StringField(entry, "plateforme") == "switch";
+    const auto favorite = entry.find("favorite");
+    out.favorite = favorite != entry.end() && favorite->is_boolean() && favorite->get<bool>();
     if (const auto presence = entry.find("presence");
         presence != entry.end() && presence->is_object()) {
         out.status = static_cast<s32>(IntField(*presence, "status"));
@@ -679,8 +686,7 @@ std::optional<Account> LoadAccount() {
 
 void SaveAccount(const Account& account) {
     std::scoped_lock lock{account_mutex};
-    ++account_generation;
-    sign_out_reason = SignOutReason::None;
+    NewAccountGenerationLocked();
     void(WriteAccountLocked(account));
 }
 

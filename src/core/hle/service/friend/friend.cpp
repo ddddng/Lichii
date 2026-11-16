@@ -377,10 +377,28 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    // The cached friends that pass filter. Play history isn't kept, so the played-application
+    // conditions don't narrow the list.
+    std::vector<Common::Nextendo::Friend> FilteredFriends(const SizedFriendFilter& filter) {
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        auto friends = Friends();
+        std::erase_if(friends, [&filter, program_id](const Common::Nextendo::Friend& entry) {
+            const bool presence =
+                filter.presence == PresenceFilter::Online               ? entry.status == 1
+                : filter.presence == PresenceFilter::OnlinePlay         ? entry.status == 2
+                : filter.presence == PresenceFilter::OnlineOrOnlinePlay ? entry.status != 0
+                                                                        : true;
+            return !presence || (filter.is_favorite && !entry.favorite) ||
+                   (filter.same_app && (entry.status == 0 || entry.app_id != program_id));
+        });
+        return friends;
+    }
+
     void GetFriendListIds(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto offset = rp.Pop<u32>();
-        const auto friends = Friends();
+        [[maybe_unused]] const auto uuid = rp.PopRaw<Common::UUID>();
+        const auto friends = FilteredFriends(rp.PopRaw<SizedFriendFilter>());
         const bool want_nsa = WantsNsaIds(system);
         std::vector<u64> ids;
         for (std::size_t i = offset;
@@ -401,8 +419,7 @@ private:
         IPC::RequestParser rp{ctx};
         const auto offset = rp.Pop<u32>();
         const auto uuid = rp.PopRaw<Common::UUID>();
-        [[maybe_unused]] const auto filter = rp.PopRaw<SizedFriendFilter>();
-        const auto friends = Friends();
+        const auto friends = FilteredFriends(rp.PopRaw<SizedFriendFilter>());
         const bool want_nsa = WantsNsaIds(system);
         const u64 program_id = system.GetApplicationProcessProgramID();
         std::vector<FriendImpl> list;

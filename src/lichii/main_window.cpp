@@ -2770,9 +2770,17 @@ void MainWindow::OnEmulationStopped() {
 
     nextendo_social_timer.stop();
     if (Common::Nextendo::OnlinePlayActive()) {
-        void(QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
-            void(Common::Nextendo::UpdatePresence(client_id, 0));
-        }));
+        const auto post_offline = [client_id = Settings::values.nextendo_client_id.GetValue()] {
+            void(QtConcurrent::run(
+                [client_id] { void(Common::Nextendo::UpdatePresence(client_id, 0)); }));
+        };
+        // A refresh still running would post playing after the offline one.
+        if (nextendo_social_watcher.isRunning()) {
+            connect(&nextendo_social_watcher, &QFutureWatcher<void>::finished, this, post_offline,
+                    Qt::SingleShotConnection);
+        } else {
+            post_offline();
+        }
     }
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);

@@ -204,6 +204,7 @@ struct Friend {
     // The account's BAAS id (nsa), which consoles and NPLN titles go by. 0 when not sent.
     u64 nsa{};
     bool console{};
+    bool favorite{};
     // nn::friends PresenceStatus: 0 offline, 1 online, 2 playing.
     s32 status{};
     u64 app_id{};

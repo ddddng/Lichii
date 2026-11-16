@@ -460,7 +460,7 @@ constexpr const char* FriendsPath = "/api/friends";
 constexpr const char* PresencePath = "/api/presence";
 constexpr const char* Friends =
     R"({"friends":[{"pid":11,"username":"amy","name":"Amy","friend_code":"SW-1111-1111-1111",)"
-    R"("nsa":"00000000000000AB","pf":1,"presence":{"status":2,"app_id":"0100152000022000",)"
+    R"("nsa":"00000000000000AB","pf":1,"favorite":true,"presence":{"status":2,"app_id":"0100152000022000",)"
     R"("app_detail":"Racing","app_field":"S2V5AFZhbHVl"}},)"
     R"({"pid":12,"username":"bob","presence":{"status":0}}],)"
     R"("requests":[{"pid":13,"name":"Cat"}],"sent":[{"pid":14,"name":"Dan"},{"pid":0}]})";
@@ -483,6 +483,7 @@ TEST_CASE("Nextendo: friend list", "[common]") {
     REQUIRE(amy.friend_code == "SW-1111-1111-1111");
     REQUIRE(amy.nsa == 0xAB);
     REQUIRE(amy.console);
+    REQUIRE(amy.favorite);
     REQUIRE(amy.status == 2);
     REQUIRE(amy.app_id == 0x0100152000022000);
     REQUIRE(amy.app_detail == "Racing");
@@ -523,6 +524,15 @@ TEST_CASE("Nextendo: friends refresh with the access token", "[common]") {
         REQUIRE(fake.Param(FriendsPath, "images") == "0");
         REQUIRE(Nextendo::CachedFriends().friends.size() == 2);
         Nextendo::ClearAccount();
+        REQUIRE(Nextendo::CachedFriends().friends.empty());
+    }
+    SECTION("and are dropped when another sign-in replaces the account") {
+        FakeNextendo fake;
+        fake.Answer(FriendsPath, 200, Friends);
+
+        Nextendo::SaveAccount(SocialSignedIn());
+        REQUIRE(Nextendo::RefreshFriends(ClientId).status == Nextendo::SocialStatus::Ok);
+        Nextendo::SaveAccount(SignedIn(2 * 60 * 60, 30 * 60));
         REQUIRE(Nextendo::CachedFriends().friends.empty());
     }
     SECTION("refreshing an access token about to expire") {
