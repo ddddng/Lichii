@@ -483,9 +483,11 @@ bool WritePrivateFile(const std::filesystem::path& path, const std::string& text
                                  std::filesystem::perms::owner_read |
                                      std::filesystem::perms::owner_write,
                                  std::filesystem::perm_options::replace, ec);
-    // Close reports a write the buffer held back and the disk then refused.
+    // Close reports a write the buffer held back and the disk then refused. It also has to come
+    // before the removal below, which Windows refuses while the file is open.
     FS::IOFile file{temp, FS::FileAccessMode::Write, FS::FileType::BinaryFile};
-    if (file.WriteString(text) != text.size() || !file.Close()) {
+    const bool written = file.WriteString(text) == text.size();
+    if (!file.Close() || !written) {
         LOG_ERROR(Common, "Could not write the Nextendo account file");
         void(FS::RemoveFile(temp));
         return false;
