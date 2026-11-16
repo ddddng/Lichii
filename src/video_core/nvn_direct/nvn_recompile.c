@@ -362,12 +362,15 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const uint8_t*
 // keeps the shader's NVN2 control section and its own constants (c1, inside the code the key hashes), so a later run makes the shader
 // before the game sets it: the prewarm list's pipelines are made at boot from these (vka_rc_by_key).
 // Records: magic, size of the rest, slot, the shader key and the pixel shader's per-primitive inputs it was made for, gl_depth, per-primitive outputs,
-// vertex input types, the nvn_direct_shader fields, c1's size, descriptors, SPIR-V, control section, c1
+// vertex input types, the nvn_direct_shader fields, c1's size, descriptors, SPIR-V, control section, c1. Lichii: also "LRCS" records, the header alone (key set, the rest 0):
+// a shader translated speculatively (spec_main) in an earlier run, not done again
 #define RC_FILE_MAGIC 0x3343524cu   // "LRC3"
 #define RC_REC_MAGIC 0x5243524cu    // "LRCR"
+#define RC_SPEC_MAGIC 0x5343524cu   // "LRCS"
 typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, desc_count, spirv_words, c1_len; } rc_rec;
 static size_t rc_rec_rest(const rc_rec* r) { return (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4 + NVN_DIRECT_NVN2_CONTROL_SIZE + r->c1_len; }
 static rc_map g_disk;      // slot -> rc_rec + its descriptors, SPIR-V, control section and c1 (malloc'd, kept)
+static rc_map g_spec_done; // key -> 1: translated speculatively in an earlier run or this one
 static FILE* g_disk_f; static int g_disk_state;   // 0 not opened, 1 open, -1 none
 static void disk_open(void) {
     if (g_disk_state) return;
@@ -380,8 +383,9 @@ static void disk_open(void) {
     if (f) {
         uint32_t magic = 0; uint64_t had[2] = {0, 0};
         if (fread(&magic, 4, 1, f) == 1 && magic == RC_FILE_MAGIC && fread(had, 8, 2, f) == 2 && had[0] == stamp[0] && had[1] == stamp[1]) {
-            rc_rec r; good = ftell(f);
-            while (fread(&r, sizeof r, 1, f) == 1 && r.magic == RC_REC_MAGIC) {
+            rc_rec r; good = ftell(f); unsigned ns = 0;
+            while (fread(&r, sizeof r, 1, f) == 1 && (r.magic == RC_REC_MAGIC || r.magic == RC_SPEC_MAGIC)) {
+                if (r.magic == RC_SPEC_MAGIC) { if (r.size != sizeof r) break; rc_put(&g_spec_done, rc_key(r.key), (void*)1); ns++; good = ftell(f); continue; }
                 size_t rest = rc_rec_rest(&r);
                 if (r.size != sizeof r + rest) break;
                 uint8_t* m = malloc(sizeof r + rest); if (!m) break;
@@ -389,6 +393,7 @@ static void disk_open(void) {
                 if (fread(m + sizeof r, 1, rest, f) != rest) { free(m); break; }
                 rc_put(&g_disk, r.slot, m); n++; good = ftell(f);
             }
+            if (ns) VLOG("recompiler: %u shaders translated speculatively in earlier runs (not done again)", ns);
             // A run killed while it appended a record leaves part of one at the end: cut there, or this run's records would follow it and never be read
             fseek(f, 0, SEEK_END); end = ftell(f);
         } else n = ~0u;
@@ -431,6 +436,13 @@ static void disk_put(uint64_t slot, uint64_t key, uint32_t prim_inputs, const nv
         fwrite(&r, sizeof r, 1, g_disk_f); fwrite(o->descs, sizeof *o->descs, o->desc_count, g_disk_f); fwrite(o->spirv, 4, o->spirv_words, g_disk_f);
         fwrite(control, 1, NVN_DIRECT_NVN2_CONTROL_SIZE, g_disk_f); if (c1_len) fwrite(c1, 1, c1_len, g_disk_f); fflush(g_disk_f);
     }
+    pthread_mutex_unlock(&g_mu);
+}
+// A shader translated speculatively (made or not): marked in the file, so later runs leave it
+static void disk_spec_done(uint64_t key) {
+    rc_rec r; memset(&r, 0, sizeof r); r.magic = RC_SPEC_MAGIC; r.size = sizeof r; r.key = key;
+    pthread_mutex_lock(&g_mu); disk_open(); rc_put(&g_spec_done, rc_key(key), (void*)1);
+    if (g_disk_f) { fwrite(&r, sizeof r, 1, g_disk_f); fflush(g_disk_f); }
     pthread_mutex_unlock(&g_mu);
 }
 // The kept translations' shader keys of NVN stage st (not the pixel shaders' per-primitive variants, valid only in mesh pipelines), malloc'd into *out: how many
@@ -581,7 +593,8 @@ vka_shader* vka_rc_by_key(uint64_t key) {
 // modules are the same (2 in 3 of those made in time in mkw-race: about 2 in 3 vertex and 2 in 5 pixel shaders) that library is a cache hit instead of a compile on
 // the frame path. Newest first: Mario Kart World sets ~4,000 programs and draws ~900, those it set last soonest. First-met content (cold, the NVIDIA disk cache off):
 // libraries compiled on the frame path 0.54 -> 0.41-0.43 per shader made (615 / 596 -> 448-515 a race), frame-path creation 54-56 -> 47-50 s; warm runs unchanged.
-// EDEN_NX2_NVN_SPECULATE=<threads> (default 4, nice 10), 0: off
+// Each shader done is marked in vk_recompiled.bin (disk_spec_done), so a warm run does not translate again the ones the game sets and never draws.
+// EDEN_NX2_NVN_SPECULATE=<threads> (default an eighth of the host's threads, 1 to 4; nice 10), 0: off
 typedef struct { uint64_t key, data; const uint8_t* control; } spec_item;
 static spec_item* g_spec; static size_t g_spec_n, g_spec_cap; static int g_spec_up;
 static pthread_mutex_t g_spec_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_spec_cv = PTHREAD_COND_INITIALIZER;
@@ -593,12 +606,12 @@ static void* spec_main(void* a) {
         while (!g_spec_n) pthread_cond_wait(&g_spec_cv, &g_spec_mu);
         spec_item it = g_spec[--g_spec_n];   // the newest first: the game draws what it set last soonest
         pthread_mutex_unlock(&g_spec_mu);
-        pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, it.key) || rc_find(&g_sh, it.key); pthread_mutex_unlock(&g_mu);
-        if (known) { g_spec_skipped++; continue; }   // kept from an earlier run (made ahead) or met by a draw already
+        pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, it.key) || rc_find(&g_sh, it.key) || rc_find(&g_spec_done, it.key); pthread_mutex_unlock(&g_mu);
+        if (known) { g_spec_skipped++; continue; }   // kept from an earlier run (made ahead), met by a draw already, or done speculatively in an earlier run
         int st = it.control[0x56];
         prog_t p; memset(&p, 0, sizeof p); p.nstage = 1; p.sd[0].data = it.data;
         nvn_direct_shader o; uint64_t vin_types; int gl_depth; char why[300]; why[0] = 0;
-        if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; continue; }
+        if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; disk_spec_done(it.key); continue; }
         dmsh_vk_bind* b = rc_binds(&o, st, it.control, why, sizeof why);
         uint32_t a0 = rd32(it.control, 0x40), c1e = rd32(it.control, 0x44), c1_len = a0 < c1e ? c1e - a0 : 0;
         const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(it.data) + a0;
@@ -609,6 +622,7 @@ static void* spec_main(void* a) {
         if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
         vka_shader_scratch_free(s);
         if (L) { free((void*)L->base); free(L); }
+        disk_spec_done(it.key);
         if (!s) { g_spec_failed++; continue; }
         unsigned n = ++g_spec_made;
         if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders translated speculatively and their libraries made (%u kept or drawn already, %u not translated without a draw)", n, (unsigned)g_spec_skipped, (unsigned)g_spec_failed);
@@ -616,7 +630,11 @@ static void* spec_main(void* a) {
     return NULL;
 }
 static void spec_add(uint64_t key, uint64_t data, const uint8_t* control) {
-    static int on = -1; if (on < 0) { const char* e = getenv("EDEN_NX2_NVN_SPECULATE"); on = vka_rc_mode() != 1 ? 0 : e && *e ? atoi(e) : 4; if (on > 16) on = 16; }
+    static int on = -1;
+    if (on < 0) {   // threads: an eighth of the host's (the desktop's 32: 4, the Deck's 8: 1), 1 to 4
+        long hw = sysconf(_SC_NPROCESSORS_ONLN); int d = hw >= 32 ? 4 : hw >= 16 ? (int)(hw / 8) : 1;
+        const char* e = getenv("EDEN_NX2_NVN_SPECULATE"); on = vka_rc_mode() != 1 ? 0 : e && *e ? atoi(e) : d; if (on > 16) on = 16;
+    }
     if (!on || (control[0x56] != 0 && control[0x56] != 1)) return;
     pthread_mutex_lock(&g_spec_mu);
     if (g_spec_n == g_spec_cap) { size_t nc = g_spec_cap ? 2 * g_spec_cap : 1024; spec_item* n = realloc(g_spec, nc * sizeof *n); if (!n) { pthread_mutex_unlock(&g_spec_mu); return; } g_spec = n; g_spec_cap = nc; }
