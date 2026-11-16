@@ -642,35 +642,51 @@ typedef struct { uint64_t key, data; const rc_control* control; } spec_item;
 static spec_item* g_spec; static size_t g_spec_n, g_spec_cap; static int g_spec_up;
 static pthread_mutex_t g_spec_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_spec_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic unsigned g_spec_made, g_spec_skipped, g_spec_failed;
+static _Atomic int g_spec_busy;
+// One speculative translation (g_spec_busy counts it while it runs)
+static void spec_one(spec_item it) {
+    pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, it.key) || rc_find(&g_sh, it.key) || rc_find(&g_spec_done, it.key); pthread_mutex_unlock(&g_mu);
+    if (known) { g_spec_skipped++; return; }   // kept from an earlier run (made ahead), met by a draw already, or done speculatively in an earlier run
+    int st = (int)it.control->stage;
+    prog_t p; memset(&p, 0, sizeof p); p.nstage = 1; p.sd[0].data = it.data;
+    nvn_direct_shader o; uint64_t vin_types; int gl_depth; char why[300]; why[0] = 0;
+    if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; disk_spec_done(it.key); return; }
+    dmsh_vk_bind* b = rc_binds(&o, st, it.control, why, sizeof why);
+    uint32_t a0, c1e; rc_c1_range(it.control, &a0, &c1e); uint32_t c1_len = a0 < c1e ? c1e - a0 : 0;
+    const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(it.data) + a0;
+    char err[200]; err[0] = 0;
+    vka_shlib* L = b && !*why ? rc_lib(it.key, rc_vks(st), 0, &o, b, o.desc_count, c1_len ? c1 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
+    free(b); vka_shader_translated_free(&o);
+    vka_shader* s = L ? vka_shader_scratch(L, it.key) : NULL;
+    if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
+    vka_shader_scratch_free(s);
+    if (L) { free((void*)L->base); free(L); }
+    disk_spec_done(it.key);
+    if (!s) { g_spec_failed++; return; }
+    unsigned n = ++g_spec_made;
+    if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders translated speculatively and their libraries made (%u kept or drawn already, %u not translated without a draw)", n, (unsigned)g_spec_skipped, (unsigned)g_spec_failed);
+}
+// The emulator shuts down (vka_stop): the threads drop what is queued and end, as what they use (the game's memory, Lichii's recompiler and device) goes away
 static void* spec_main(void* a) {
     (void)a; setpriority(PRIO_PROCESS, 0, 10);
     for (;;) {
         pthread_mutex_lock(&g_spec_mu);
-        while (!g_spec_n) pthread_cond_wait(&g_spec_cv, &g_spec_mu);
+        while (!g_spec_n && !vka_stopping()) pthread_cond_wait(&g_spec_cv, &g_spec_mu);
+        if (vka_stopping()) { g_spec_n = 0; pthread_mutex_unlock(&g_spec_mu); return NULL; }
         spec_item it = g_spec[--g_spec_n];   // the newest first: the game draws what it set last soonest
+        atomic_fetch_add(&g_spec_busy, 1);
         pthread_mutex_unlock(&g_spec_mu);
-        pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, it.key) || rc_find(&g_sh, it.key) || rc_find(&g_spec_done, it.key); pthread_mutex_unlock(&g_mu);
-        if (known) { g_spec_skipped++; continue; }   // kept from an earlier run (made ahead), met by a draw already, or done speculatively in an earlier run
-        int st = (int)it.control->stage;
-        prog_t p; memset(&p, 0, sizeof p); p.nstage = 1; p.sd[0].data = it.data;
-        nvn_direct_shader o; uint64_t vin_types; int gl_depth; char why[300]; why[0] = 0;
-        if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; disk_spec_done(it.key); continue; }
-        dmsh_vk_bind* b = rc_binds(&o, st, it.control, why, sizeof why);
-        uint32_t a0, c1e; rc_c1_range(it.control, &a0, &c1e); uint32_t c1_len = a0 < c1e ? c1e - a0 : 0;
-        const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(it.data) + a0;
-        char err[200]; err[0] = 0;
-        vka_shlib* L = b && !*why ? rc_lib(it.key, rc_vks(st), 0, &o, b, o.desc_count, c1_len ? c1 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
-        free(b); vka_shader_translated_free(&o);
-        vka_shader* s = L ? vka_shader_scratch(L, it.key) : NULL;
-        if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
-        vka_shader_scratch_free(s);
-        if (L) { free((void*)L->base); free(L); }
-        disk_spec_done(it.key);
-        if (!s) { g_spec_failed++; continue; }
-        unsigned n = ++g_spec_made;
-        if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders translated speculatively and their libraries made (%u kept or drawn already, %u not translated without a draw)", n, (unsigned)g_spec_skipped, (unsigned)g_spec_failed);
+        spec_one(it);
+        atomic_fetch_sub(&g_spec_busy, 1);
     }
     return NULL;
+}
+// nvn_direct_park (after vka_stop): wakes the speculative threads and waits (bounded) until none translates. 1 = none does
+int vka_rc_park(uint64_t timeout_ns) {
+    pthread_mutex_lock(&g_spec_mu); pthread_cond_broadcast(&g_spec_cv); pthread_mutex_unlock(&g_spec_mu);
+    const uint64_t t0 = now_ns();
+    while (atomic_load(&g_spec_busy) && now_ns() - t0 < timeout_ns) usleep(1000);
+    return !atomic_load(&g_spec_busy);
 }
 static void spec_add(uint64_t key, uint64_t data, const rc_control* control) {
     static int on = -1;

@@ -10,8 +10,8 @@
 //   nothing more is replayed or submitted and every fence reads as done.
 // - nvn_direct_park, before Lichii's device and the renderer objects the replay calls back into
 //   (the ASTC decode) are destroyed: the replay worker finishes what it holds, pipeline builds
-//   stop, and the pipeline cache is saved a last time. None of the replay's threads uses the
-//   device after that.
+//   and speculative shader translations stop, and the pipeline cache is saved a last time. None
+//   of the replay's threads uses the device after that.
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -22,6 +22,7 @@
 #include "nvn_direct.h"
 
 void nvn_direct_present_wake(void); // nvn_present.c
+int vka_rc_park(uint64_t timeout_ns); // nvn_recompile.c
 
 static _Atomic int g_parked;
 
@@ -60,8 +61,9 @@ void nvn_direct_park(void) {
     const uint64_t t0 = now_ns();
     const int worker = vka_worker_idle(bound);
     const int builds = vka_pso_park(bound);
+    const int translations = vka_rc_park(bound);
     const double ms = (now_ns() - t0) / 1e6;
-    if (worker && builds) VLOG("parked for the shutdown in %.0f ms: the replay worker is idle, no pipeline is being built, the pipeline cache is saved", ms);
-    else VRED("parked for the shutdown in %.0f ms: the replay worker %s, pipeline builds %s; the device may still be in use", ms, worker ? "is idle" : "is still replaying",
-              builds ? "stopped" : "still running");
+    if (worker && builds && translations) VLOG("parked for the shutdown in %.0f ms: the replay worker is idle, no pipeline is being built or shader translated, the pipeline cache is saved", ms);
+    else VRED("parked for the shutdown in %.0f ms: the replay worker %s, pipeline builds %s, speculative translations %s; the device may still be in use", ms,
+              worker ? "is idle" : "is still replaying", builds ? "stopped" : "still running", translations ? "stopped" : "still running");
 }

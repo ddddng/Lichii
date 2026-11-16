@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// NVN2 direct renderer (dotfiles-25x, lab): with EDEN_NX2_NVN_DIRECT=1 an NVN2 game's NVN calls
-// run in Banana Native's NVN front end (bananative/dm/gfx/nvn/hle_nvn.c: objects and command
+// NVN direct renderer (dotfiles-25x): with the nvn_direct_renderer setting (or
+// EDEN_NX2_NVN_DIRECT=1) a game's NVN calls run in Banana Native's NVN front end (bananative/dm/gfx/nvn/hle_nvn.c: objects and command
 // records in the game's own memory) and its NVN -> Vulkan replay (bananative/dm/gfx/vk_android),
 // not in the game's NVN driver and Lichii's Maxwell GPU path. This is the C interface between
 // them and Lichii; the replay's own headers stay out of C++.
 //
 // One launch per process: the front end and the replay keep process-lifetime state (globals,
-// detached threads), so direct mode is decided once (Core::NvnHook::Install) and a second game
-// launched in the same process cannot use it.
+// detached threads), so a later game in the same process falls back to Lichii's GPU emulation
+// (Core::NvnHook::Install, RendererChoice::EarlierBoot).
 
 #pragma once
 
