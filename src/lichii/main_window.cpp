@@ -536,6 +536,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             &MainWindow::KeepNextendoSessionAlive);
     nextendo_session_timer.start(std::chrono::minutes{2});
     KeepNextendoSessionAlive();
+    connect(&nextendo_social_timer, &QTimer::timeout, this, &MainWindow::UpdateNextendoSocial);
 
     // Setup content providers.
     QtCommon::SetupContentProviders();
@@ -2573,6 +2574,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     CheckNextendoOnlineStatus();
     CheckNextendoGameVersion(title_id, title_version);
+    nextendo_social_timer.start(Common::Nextendo::FriendsRefreshInterval);
+    UpdateNextendoSocial();
     OnStartGame();
 }
 
@@ -2789,6 +2792,21 @@ void MainWindow::OnEmulationStopped() {
 
     emulation_running = false;
     nextendo_version_check.reset();
+
+    nextendo_social_timer.stop();
+    if (Common::Nextendo::OnlinePlayActive()) {
+        const auto post_offline = [client_id = Settings::values.nextendo_client_id.GetValue()] {
+            void(QtConcurrent::run(
+                [client_id] { void(Common::Nextendo::UpdatePresence(client_id, 0)); }));
+        };
+        // A refresh still running would post playing after the offline one.
+        if (nextendo_social_watcher.isRunning()) {
+            connect(&nextendo_social_watcher, &QFutureWatcher<void>::finished, this, post_offline,
+                    Qt::SingleShotConnection);
+        } else {
+            post_offline();
+        }
+    }
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);
 
@@ -5350,6 +5368,18 @@ void MainWindow::KeepNextendoSessionAlive() {
     nextendo_session_watcher.setFuture(
         QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue()] {
             return Common::Nextendo::KeepSessionAlive(client_id);
+        }));
+}
+
+void MainWindow::UpdateNextendoSocial() {
+    if (!Common::Nextendo::OnlinePlayActive() || nextendo_social_watcher.isRunning()) {
+        return;
+    }
+    nextendo_social_watcher.setFuture(
+        QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                           program_id = QtCommon::system->GetApplicationProcessProgramID()] {
+            void(Common::Nextendo::RefreshFriends(client_id));
+            void(Common::Nextendo::UpdatePresence(client_id, program_id));
         }));
 }
 

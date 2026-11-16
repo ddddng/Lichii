@@ -485,6 +485,8 @@ private slots:
     // When a game boots with online play on: says when the signed game catalogue doesn't accept
     // its version.
     void CheckNextendoGameVersion(u64 title_id, std::string version);
+    // While a game runs: refreshes the friend list the friend service reads and sends presence.
+    void UpdateNextendoSocial();
 
 private:
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
@@ -574,6 +576,8 @@ private:
     QFutureWatcher<std::optional<Common::Nextendo::OnlineStatus>> nextendo_status_watcher;
     QFutureWatcher<std::optional<Common::Nextendo::GameCatalog>> nextendo_catalog_watcher;
     std::optional<std::pair<u64, std::string>> nextendo_version_check;
+    QTimer nextendo_social_timer;
+    QFutureWatcher<void> nextendo_social_watcher;
     OverlayDialog* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
