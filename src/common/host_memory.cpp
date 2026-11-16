@@ -1120,7 +1120,11 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 
 void HostMemory::HintCold(size_t physical_offset, size_t length,
                           std::optional<size_t> virtual_offset) const {
-    if (length == 0 || backing_base == nullptr) {
+    static const bool no_cold_hint = [] {
+        const char* const v = std::getenv("EDEN_NX2_EXP_NO_COLD_HINT");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (no_cold_hint || length == 0 || backing_base == nullptr) {
         return;
     }
     const auto hint = [length](u8* address) {

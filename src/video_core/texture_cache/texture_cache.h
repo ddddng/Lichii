@@ -14,12 +14,14 @@
 #include <tuple>
 #include <optional>
 #include <bit>
+#include <latch>
 #include <string>
 #include <utility>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/div_ceil.h"
 #include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -42,6 +44,7 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/decoders.h"
+#include "video_core/textures/workers.h"
 
 namespace VideoCommon {
 
@@ -2791,6 +2794,37 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
     const auto read_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+    static const bool prefault = [] {
+        const char* const v = std::getenv("EDEN_NX2_EXP_PREFAULT");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (prefault && swizzle_data.size() >= 1_MiB) {
+        const std::span<const u8> source{swizzle_data.data(), swizzle_data.size()};
+        const auto touch = [](std::span<const u8> range) {
+            u8 sum = 0;
+            for (size_t offset = 0; offset < range.size(); offset += 4_KiB) {
+                sum += static_cast<const volatile u8&>(range[offset]);
+            }
+            static_cast<volatile u8&>(sum) = sum;
+        };
+        constexpr size_t Parts = 5;
+        const size_t part = Common::AlignUp(Common::DivCeil(source.size(), Parts), 4_KiB);
+        std::latch done{static_cast<std::ptrdiff_t>(Parts - 1)};
+        auto& workers = Tegra::Texture::GetThreadWorkers();
+        for (size_t i = 1; i < Parts; ++i) {
+            const size_t begin = (std::min)(i * part, source.size());
+            const auto range = source.subspan(begin, (std::min)(part, source.size() - begin));
+            if (!workers.TryQueueWork([&done, touch, range] {
+                    touch(range);
+                    done.count_down();
+                })) {
+                touch(range);
+                done.count_down();
+            }
+        }
+        touch(source.first((std::min)(part, source.size())));
+        done.wait();
+    }
     const auto untile_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
     const auto trace_untile = [&] {
         if (tc_trace) {
