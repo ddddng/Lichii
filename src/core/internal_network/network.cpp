@@ -15,6 +15,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -940,12 +941,22 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int level, int option, T value) {
 
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
-    if (fd != INVALID_SOCKET) {
-        socket_type = type;
-        return Errno::SUCCESS;
+    if (fd == INVALID_SOCKET) {
+        return GetAndLogLastError();
     }
-
-    return GetAndLogLastError();
+    socket_type = type;
+#ifdef SIO_UDP_CONNRESET
+    if (type == Type::DGRAM) {
+        // Windows fails the next receive with WSAECONNRESET once a peer answers a send with ICMP
+        // port unreachable. The console does not on an unconnected socket, which Pia shares
+        // among its peers, so one peer that left would read as the network failing.
+        BOOL report_reset = FALSE;
+        DWORD bytes_returned = 0;
+        WSAIoctl(fd, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0,
+                 &bytes_returned, nullptr, nullptr);
+    }
+#endif
+    return Errno::SUCCESS;
 }
 
 std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
@@ -1289,6 +1300,19 @@ std::pair<bool, Errno> Socket::GetReuseAddr() {
     return {value != 0, getsockopt_err};
 }
 
+// Windows has no SO_REUSEPORT. Its SO_REUSEADDR lets sockets share a port as the guest's
+// SO_REUSEPORT does.
+#ifdef SO_REUSEPORT
+constexpr int NativeReusePort = SO_REUSEPORT;
+#else
+constexpr int NativeReusePort = SO_REUSEADDR;
+#endif
+
+std::pair<bool, Errno> Socket::GetReusePort() {
+    const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, NativeReusePort);
+    return {value != 0, getsockopt_err};
+}
+
 std::pair<bool, Errno> Socket::GetNoDelay() {
     const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, IPPROTO_TCP, TCP_NODELAY);
     return {value != 0, getsockopt_err};
@@ -1300,6 +1324,10 @@ Errno Socket::SetLinger(bool enable, u32 linger) {
 
 Errno Socket::SetReuseAddr(bool enable) {
     return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable ? 1 : 0);
+}
+
+Errno Socket::SetReusePort(bool enable) {
+    return SetSockOpt<u32>(fd, SOL_SOCKET, NativeReusePort, enable ? 1 : 0);
 }
 
 Errno Socket::SetKeepAlive(bool enable) {

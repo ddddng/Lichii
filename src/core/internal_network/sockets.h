@@ -85,6 +85,8 @@ public:
 
     virtual Errno SetReuseAddr(bool enable) = 0;
 
+    virtual Errno SetReusePort(bool enable) = 0;
+
     virtual Errno SetKeepAlive(bool enable) = 0;
 
     virtual Errno SetBroadcast(bool enable) = 0;
@@ -104,6 +106,8 @@ public:
     virtual std::pair<Errno, Errno> GetPendingError() = 0;
 
     virtual std::pair<bool, Errno> GetReuseAddr() = 0;
+
+    virtual std::pair<bool, Errno> GetReusePort() = 0;
 
     virtual std::pair<bool, Errno> GetNoDelay() = 0;
 
@@ -170,6 +174,8 @@ public:
 
     Errno SetReuseAddr(bool enable) override;
 
+    Errno SetReusePort(bool enable) override;
+
     Errno SetKeepAlive(bool enable) override;
 
     Errno SetBroadcast(bool enable) override;
@@ -192,6 +198,8 @@ public:
     std::pair<Errno, Errno> GetPendingError() override;
 
     std::pair<bool, Errno> GetReuseAddr() override;
+
+    std::pair<bool, Errno> GetReusePort() override;
 
     std::pair<bool, Errno> GetNoDelay() override;
 
