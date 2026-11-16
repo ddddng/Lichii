@@ -844,9 +844,9 @@ std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id) {
     return FetchOnlineStatus(api, client_id, account->nex_token);
 }
 
-std::optional<std::string> FetchGameCatalog() {
+std::optional<std::string> FetchGameCatalog(std::string_view client_id) {
     ApiClient api{5};
-    const auto result = api.Get(GameCatalogPath, {{"User-Agent", "Lichii"}});
+    const auto result = api.Get(GameCatalogPath, BaseHeaders(client_id));
     if (!result || result->status != 200) {
         LOG_WARNING(Common, "Nextendo game catalogue request failed (HTTP {})",
                     result ? result->status : 0);

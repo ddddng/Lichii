@@ -188,7 +188,7 @@ std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id);
 
 // The game catalogue's signed envelope, not yet verified. nullopt when nextendo.network can't be
 // reached. Blocks on the request.
-std::optional<std::string> FetchGameCatalog();
+std::optional<std::string> FetchGameCatalog(std::string_view client_id);
 
 // Ends a signed-out session's tokens on nextendo.network. Blocks on the request.
 void RevokeToken(std::string_view client_id, const std::string& refresh_token);

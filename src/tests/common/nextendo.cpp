@@ -618,11 +618,11 @@ TEST_CASE("Nextendo: the game catalogue is cached until it expires", "[common]")
 
     fake.Answer("/service-catalog/v1/game-catalog", 200, "not signed");
     fake.Answer("/service-catalog/v1/game-catalog", 200, signer.Sign(CatalogPayload(Now() + 3600)));
-    REQUIRE_FALSE(Nextendo::LoadGameCatalog(signer.PublicKey()).has_value());
-    REQUIRE(Nextendo::LoadGameCatalog(signer.PublicKey())->revision == 3);
-    REQUIRE(Nextendo::LoadGameCatalog(signer.PublicKey())->revision == 3);
+    REQUIRE_FALSE(Nextendo::LoadGameCatalog(ClientId, signer.PublicKey()).has_value());
+    REQUIRE(Nextendo::LoadGameCatalog(ClientId, signer.PublicKey())->revision == 3);
+    REQUIRE(Nextendo::LoadGameCatalog(ClientId, signer.PublicKey())->revision == 3);
     REQUIRE(fake.Hits("/service-catalog/v1/game-catalog") == 2);
 
     Settings::values.nextendo_enabled = false;
-    REQUIRE_FALSE(Nextendo::LoadGameCatalog(signer.PublicKey()).has_value());
+    REQUIRE_FALSE(Nextendo::LoadGameCatalog(ClientId, signer.PublicKey()).has_value());
 }

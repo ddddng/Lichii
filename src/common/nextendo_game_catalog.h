@@ -44,7 +44,8 @@ std::optional<GameCatalog> ParseGameCatalog(const std::string& envelope,
 
 // While online play is on: the verified catalogue from the cache until it expires (a day after
 // it was issued), else downloaded from nextendo.network and cached. Blocks on the request.
-std::optional<GameCatalog> LoadGameCatalog(std::string_view public_key = GameCatalogKey);
+std::optional<GameCatalog> LoadGameCatalog(std::string_view client_id,
+                                           std::string_view public_key = GameCatalogKey);
 
 // Dotted numbers compare by value, so 4.0.1 equals 4.0.1.0; anything else must match exactly.
 bool SameVersion(std::string_view a, std::string_view b);

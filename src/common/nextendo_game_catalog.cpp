@@ -90,7 +90,8 @@ std::optional<GameCatalog> ParseGameCatalog(const std::string& envelope,
     }
 }
 
-std::optional<GameCatalog> LoadGameCatalog(std::string_view public_key) {
+std::optional<GameCatalog> LoadGameCatalog(std::string_view client_id,
+                                           std::string_view public_key) {
     if (!OnlinePlayActive()) {
         return std::nullopt;
     }
@@ -99,7 +100,7 @@ std::optional<GameCatalog> LoadGameCatalog(std::string_view public_key) {
                                        public_key, Now())) {
         return cached;
     }
-    const auto envelope = FetchGameCatalog();
+    const auto envelope = FetchGameCatalog(client_id);
     if (!envelope) {
         return std::nullopt;
     }

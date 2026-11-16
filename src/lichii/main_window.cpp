@@ -5358,11 +5358,13 @@ void MainWindow::CheckNextendoGameVersion(u64 title_id, std::string version) {
     if (!Common::Nextendo::OnlinePlayActive() || nextendo_version_watcher.isRunning()) {
         return;
     }
-    nextendo_version_watcher.setFuture(QtConcurrent::run([title_id, version = std::move(version)] {
-        const auto catalog = Common::Nextendo::LoadGameCatalog();
-        return catalog ? Common::Nextendo::CheckGameVersion(*catalog, title_id, version)
-                       : std::nullopt;
-    }));
+    nextendo_version_watcher.setFuture(
+        QtConcurrent::run([title_id, version = std::move(version),
+                           client_id = Settings::values.nextendo_client_id.GetValue()] {
+            const auto catalog = Common::Nextendo::LoadGameCatalog(client_id);
+            return catalog ? Common::Nextendo::CheckGameVersion(*catalog, title_id, version)
+                           : std::nullopt;
+        }));
 }
 
 #ifdef ENABLE_UPDATE_CHECKER
