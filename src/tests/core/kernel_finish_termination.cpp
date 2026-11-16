@@ -52,6 +52,8 @@ TEST_CASE("A thread destroyed by its termination waits for its process's locks",
                 .IsSuccess());
     Kernel::KProcess::Register(kernel, process);
 
+    const u32 process_references = process->GetReferenceCount();
+
     // Its only reference is the one termination closes, as once the process closed its handle.
     Kernel::KScopedResourceReservation reservation(kernel, process,
                                                    Kernel::LimitableResource::ThreadCountMax);
@@ -76,10 +78,13 @@ TEST_CASE("A thread destroyed by its termination waits for its process's locks",
         CHECK(listed);
     }
 
+    // The thread's destruction ends with KThread::PostDestroy closing its process reference.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (InThreadList(kernel, *process, thread) && std::chrono::steady_clock::now() < deadline) {
+    while (process->GetReferenceCount() != process_references &&
+           std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
+    REQUIRE(process->GetReferenceCount() == process_references);
     CHECK_FALSE(InThreadList(kernel, *process, thread));
 
     process->Close(kernel);
