@@ -307,9 +307,9 @@ public:
     };
     // The main module ranges, [begin, end) offsets, the enabled cheats' static stores write
     // whatever their conditions, with the index of the cheat each comes from. The cheats run as
-    // one program, so a register one cheat loads offsets the stores of the next: stores whose
-    // offset register an earlier instruction may have changed, and stores inside loops, are left
-    // out.
+    // one program, so a register one cheat loads offsets the stores of the next. A store's offset
+    // register is followed through unconditional static loads; stores whose offset register
+    // anything else may have changed, and stores inside loops, are left out.
     static std::vector<MainStore> MainStaticStores(const std::vector<CheatEntry>& cheats);
 
 private:

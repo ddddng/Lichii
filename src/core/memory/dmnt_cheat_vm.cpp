@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <optional>
 
 #include "common/assert.h"
 #include "common/scope_exit.h"
@@ -749,10 +750,12 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
     }
 
     std::vector<MainStore> stores;
-    std::array<bool, NumRegisters> changed{};
+    std::array<std::optional<u64>, NumRegisters> values;
+    values.fill(0);
     std::size_t loop_depth = 0;
+    std::size_t conditional_depth = 0;
     std::size_t position = 0;
-    const auto change = [&](u32 reg) { changed[reg & 0xF] = true; };
+    const auto change = [&](u32 reg) { values[reg & 0xF].reset(); };
     const auto restores = [](SaveRestoreRegisterOpType type) {
         return type == SaveRestoreRegisterOpType::Restore ||
                type == SaveRestoreRegisterOpType::ClearRegs;
@@ -767,16 +770,28 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
             ++position;
         }
         if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
-            if (store->mem_type == MemoryAccessType::MainNso && loop_depth == 0 &&
-                !changed[store->offset_register & 0xF] && position < ends.size()) {
-                stores.push_back({ends[position].second, store->rel_address,
-                                  store->rel_address + store->bit_width});
+            const auto offset = values[store->offset_register & 0xF];
+            if (store->mem_type == MemoryAccessType::MainNso && loop_depth == 0 && offset &&
+                position < ends.size()) {
+                const u64 begin = store->rel_address + *offset;
+                stores.push_back({ends[position].second, begin, begin + store->bit_width});
+            }
+        } else if (std::holds_alternative<BeginConditionalOpcode>(opcode.opcode) ||
+                   std::holds_alternative<BeginKeypressConditionalOpcode>(opcode.opcode) ||
+                   std::holds_alternative<BeginRegisterConditionalOpcode>(opcode.opcode)) {
+            ++conditional_depth;
+        } else if (const auto* end_cond = std::get_if<EndConditionalOpcode>(&opcode.opcode)) {
+            if (!end_cond->is_else && conditional_depth) {
+                --conditional_depth;
             }
         } else if (const auto* loop = std::get_if<ControlLoopOpcode>(&opcode.opcode)) {
             change(loop->reg_index);
             loop_depth = loop->start_loop ? loop_depth + 1 : (loop_depth ? loop_depth - 1 : 0);
         } else if (const auto* load = std::get_if<LoadRegisterStaticOpcode>(&opcode.opcode)) {
             change(load->reg_index);
+            if (loop_depth == 0 && conditional_depth == 0) {
+                values[load->reg_index & 0xF] = load->value;
+            }
         } else if (const auto* read = std::get_if<LoadRegisterMemoryOpcode>(&opcode.opcode)) {
             change(read->reg_index);
         } else if (const auto* math = std::get_if<PerformArithmeticStaticOpcode>(&opcode.opcode)) {

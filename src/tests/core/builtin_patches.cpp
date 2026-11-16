@@ -1065,7 +1065,7 @@ TEST_CASE("Built-in patch overlap check names the cheat, the patch and both rang
                                         "04000000 03C46900 00000000\n";
 
     const auto overlaps = CheatOverlaps(Cheats, {FpsUnlock});
-    REQUIRE(overlaps.size() == 3);
+    REQUIRE(overlaps.size() == 4);
     CHECK(overlaps[0].cheat == "HUD stub");
     CHECK(overlaps[0].patch == FpsUnlock);
     CHECK_FALSE(overlaps[0].state);
@@ -1084,6 +1084,10 @@ TEST_CASE("Built-in patch overlap check names the cheat, the patch and both rang
     CHECK(overlaps[2].cheat_begin == 0x3C46B60);
     CHECK(overlaps[2].patch_begin == 0x3C46B60);
     CHECK(overlaps[2].patch_end == 0x3C46B9C);
+    CHECK(overlaps[3].cheat == "Offset from a loaded register");
+    CHECK(overlaps[3].cheat_begin == 0x3C46910);
+    CHECK(overlaps[3].cheat_end == 0x3C46914);
+    CHECK(overlaps[3].patch_begin == 0x3C46900);
 
     // Only applied built-ins count: Dynamic FPS has neither range, and nothing applied has none.
     CHECK(CheatOverlaps(Cheats, {DynamicFps}).empty());
@@ -1098,11 +1102,24 @@ TEST_CASE("Built-in patch overlap check follows registers from earlier cheats",
                                         "40000000 00000000 00000160\n"
                                         "[Store]\n"
                                         "04000000 03C46A00 D503201F\n";
-    CHECK(CheatOverlaps(Cheats, {FpsUnlock}).empty());
-    CHECK(CheatOverlaps("[Store]\n04000000 03C46A00 D503201F\n", {FpsUnlock}).empty());
-    const auto overlaps = CheatOverlaps("[Store]\n04000000 03C46B60 D503201F\n", {FpsUnlock});
+    const auto overlaps = CheatOverlaps(Cheats, {FpsUnlock});
     REQUIRE(overlaps.size() == 1);
     CHECK(overlaps[0].cheat == "Store");
+    CHECK(overlaps[0].cheat_begin == 0x3C46B60);
+    CHECK(overlaps[0].cheat_end == 0x3C46B64);
+    CHECK(overlaps[0].patch_begin == 0x3C46B60);
+
+    // Without the load the store stays at 0x3C46A00, which nothing built-in uses now. A load on
+    // a key press may or may not run, so the store's address is unknown and it is left out.
+    CHECK(CheatOverlaps("[Store]\n04000000 03C46A00 D503201F\n", {FpsUnlock}).empty());
+    CHECK(CheatOverlaps("[Load on ZL]\n"
+                        "80000100\n"
+                        "40000000 00000000 00000160\n"
+                        "20000000\n"
+                        "[Store]\n"
+                        "04000000 03C46A00 D503201F\n",
+                        {FpsUnlock})
+              .empty());
 }
 
 TEST_CASE("Built-in patches stay clear of the known code-patching cheats (#1873)",

@@ -198,8 +198,9 @@ uses for its code at main+0x3c46a00..0x3c46a3c. ...
 ```
 
 The cheat still runs. The enabled cheats run as one program, so the scan reads them in that order
-and a register one cheat sets carries into the next. Stores whose offset register may have
-changed by then, and stores inside loops, are not followed.
+and a register one cheat sets carries into the next. A store's offset register is followed
+through unconditional static loads (`40000000`). Stores whose offset register anything else may
+have changed, and stores inside loops, are not followed.
 
 ## FPS Unlock movie frame count
 
