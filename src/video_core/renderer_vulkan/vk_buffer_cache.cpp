@@ -153,6 +153,9 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
 }
 
 void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
+    namespace Profile = VideoCommon::Nx2Profile;
+    Profile::BufferScope profile_scope{Profile::BufferPart::UsageMark};
+    Profile::Add(Profile::BufferCount::UsageMarks);
     tracker.Track(offset, size);
     last_usage_tick = scheduler->CurrentTick();
 }

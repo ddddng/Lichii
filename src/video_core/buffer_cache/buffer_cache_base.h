@@ -368,6 +368,9 @@ public:
 
     void UpdateGraphicsBuffers(bool is_indexed);
 
+    /// EDEN_NX2_GPU_PROFILE: counts the draw's bindings that are the previous draw's.
+    void ProfileDrawBindings(bool is_indexed);
+
     void UpdateComputeBuffers();
 
     void BindHostGeometryBuffers(bool is_indexed);
@@ -907,6 +910,21 @@ private:
         u32 large_logged{};
         std::chrono::steady_clock::time_point last{};
     } create_trace;
+    /// The previous draw's buffer bindings (EDEN_NX2_GPU_PROFILE, ProfileDrawBindings).
+    struct ProfileBindings {
+        std::array<std::array<std::pair<DAddr, u32>, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
+            uniform{};
+        std::array<u32, NUM_STAGES> uniform_mask{};
+        std::array<std::array<std::pair<DAddr, u32>, NUM_STORAGE_BUFFERS>, NUM_STAGES> storage{};
+        std::array<u64, NUM_STAGES> storage_mask{};
+        std::array<u64, NUM_STAGES> written_mask{};
+        std::array<std::array<u64, 3>, 32> vertex{};
+        u32 vertex_mask{};
+        std::array<u64, 3> index{};
+        bool indexed{};
+        bool all_same{};
+        u64 work_mark{}; ///< Uploads and written marks when the previous draw began binding
+    } profile_bindings;
     struct GeometryStats {
         u64 syncs{};
         u64 syncs_skipped{};
