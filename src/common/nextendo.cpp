@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -289,6 +290,29 @@ std::optional<OnlineStatus> FetchOnlineStatus(ApiClient& api, std::string_view c
     return ParseOnlineStatus(result->body);
 }
 
+// /api/me: the identity when the token replies lacked it, and the BAAS user id.
+void FetchUserInfo(ApiClient& api, std::string_view client_id, Account& account) {
+    const auto info = api.Get(UserInfoPath, BearerHeaders(client_id, account.access_token));
+    if (!info || info->status != 200) {
+        LOG_WARNING(Common, "Nextendo user info request failed (HTTP {})", info ? info->status : 0);
+        return;
+    }
+    try {
+        const auto json = nlohmann::json::parse(info->body);
+        const bool needs_identity = account.pid == 0;
+        for (const auto& object : {json, json.value("account", nlohmann::json{})}) {
+            if (needs_identity) {
+                ReadIdentity(object, account.pid, account.username, account.friend_code);
+            }
+            if (const u64 nsa = object.is_object() ? ParseBaasNsa(StringField(object, "nsa")) : 0;
+                nsa != 0) {
+                account.baas_nsa = nsa;
+            }
+        }
+    } catch (...) {
+    }
+}
+
 std::optional<Account> LoadAccountLocked() {
     if (account_loaded) {
         return cached_account;
@@ -307,6 +331,7 @@ std::optional<Account> LoadAccountLocked() {
         account.refresh_token = StringField(json, "refresh_token");
         account.access_expires = IntField(json, "access_expires");
         account.nex_expires = IntField(json, "nex_expires");
+        account.baas_nsa = ParseBaasNsa(StringField(json, "nsa"));
         cached_account = std::move(account);
     } catch (const std::exception& e) {
         LOG_WARNING(Common, "Ignoring an unreadable Nextendo account file: {}", e.what());
@@ -320,6 +345,7 @@ std::optional<Account> LoadAccountLocked() {
 bool WriteAccountLocked(const Account& account) {
     cached_account = account;
     account_loaded = true;
+    const std::string nsa = account.baas_nsa != 0 ? fmt::format("{:016x}", account.baas_nsa) : "";
     const std::string text = nlohmann::json{
         {"pid", account.pid},
         {"username", account.username},
@@ -329,6 +355,7 @@ bool WriteAccountLocked(const Account& account) {
         {"refresh_token", account.refresh_token},
         {"access_expires", account.access_expires},
         {"nex_expires", account.nex_expires},
+        {"nsa", nsa},
     }.dump(2);
     const auto path = AccountPath();
     auto temp = path;
@@ -443,6 +470,17 @@ void ClearAccount() {
 SignOutReason LastSignOutReason() {
     std::scoped_lock lock{account_mutex};
     return sign_out_reason;
+}
+
+u64 NetworkServiceAccountId(u64 program_id, const Account& account) {
+    return program_id == AnimalCrossingNewHorizons && account.baas_nsa != 0 ? account.baas_nsa
+                                                                            : account.pid;
+}
+
+u64 ParseBaasNsa(std::string_view text) {
+    u64 nsa = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), nsa, 16);
+    return text.size() == 16 && ec == std::errc{} && end == text.data() + text.size() ? nsa : 0;
 }
 
 bool RefreshTokenRejected(std::string_view body) {
@@ -694,20 +732,8 @@ SignInResult SignIn(std::string_view client_id,
         out.online_status = FetchOnlineStatus(api, client_id, account.nex_token);
     }
 
-    if (account.pid == 0 && !account.access_token.empty()) {
-        if (const auto info = api.Get(UserInfoPath, BearerHeaders(client_id, account.access_token));
-            info && info->status == 200) {
-            try {
-                const auto json = nlohmann::json::parse(info->body);
-                ReadIdentity(json, account.pid, account.username, account.friend_code);
-                ReadIdentity(json.value("account", nlohmann::json{}), account.pid,
-                             account.username, account.friend_code);
-            } catch (...) {
-            }
-        } else {
-            LOG_WARNING(Common, "Nextendo user info request failed (HTTP {})",
-                        info ? info->status : 0);
-        }
+    if (!account.access_token.empty()) {
+        FetchUserInfo(api, client_id, account);
     }
 
     SaveAccount(account);
@@ -787,6 +813,9 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
     }
     switch (reply) {
     case GameTokenReply::Ok:
+        if (account->baas_nsa == 0) {
+            FetchUserInfo(api, client_id, *account);
+        }
         void(SaveRenewedAccount(*account, generation));
         break;
     case GameTokenReply::Failed:
@@ -813,6 +842,17 @@ std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id) {
     }
     ApiClient api{5};
     return FetchOnlineStatus(api, client_id, account->nex_token);
+}
+
+std::optional<std::string> FetchGameCatalog(std::string_view client_id) {
+    ApiClient api{5};
+    const auto result = api.Get(GameCatalogPath, BaseHeaders(client_id));
+    if (!result || result->status != 200) {
+        LOG_WARNING(Common, "Nextendo game catalogue request failed (HTTP {})",
+                    result ? result->status : 0);
+        return std::nullopt;
+    }
+    return result->body;
 }
 
 void RevokeToken(std::string_view client_id, const std::string& refresh_token) {

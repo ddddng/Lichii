@@ -39,6 +39,8 @@ constexpr std::string_view OnlineStatusPath = "/api/online-status";
 constexpr std::string_view NexSessionPath = "/api/nex-session";
 constexpr std::string_view SessionStatusPath = "/api/session-status";
 constexpr std::string_view RevokePath = "/api/oauth/revoke";
+// Public, signed with GameCatalogKey (nextendo_game_catalog.h).
+constexpr std::string_view GameCatalogPath = "/service-catalog/v1/game-catalog";
 constexpr std::string_view Scopes = "identity game.matchmaking";
 constexpr u16 CallbackPort = 47823;
 
@@ -66,7 +68,18 @@ struct Account {
     // Unix times; the access token lasts an hour and the game token a day.
     s64 access_expires{};
     s64 nex_expires{};
+    // The account's BAAS user id ("nsa" from /api/me), the account id a Switch has. 0 when unknown.
+    u64 baas_nsa{};
 };
+
+constexpr u64 AnimalCrossingNewHorizons = 0x01006F8002326000;
+
+// The network service account id a title sees: the pid the game token proves, except Animal
+// Crossing: New Horizons, which matches players with their console friends by the BAAS user id.
+u64 NetworkServiceAccountId(u64 program_id, const Account& account);
+
+// /api/me's "nsa": 16 hex digits, else 0.
+u64 ParseBaasNsa(std::string_view text);
 
 std::optional<Account> LoadAccount();
 void SaveAccount(const Account& account);
@@ -172,6 +185,10 @@ std::optional<Account> EnsureGameToken(std::string_view client_id);
 // Whether the signed-in account may play online, and why not. nullopt without a game token or
 // when nextendo.network can't be reached.
 std::optional<OnlineStatus> CheckOnlineStatus(std::string_view client_id);
+
+// The game catalogue's signed envelope, not yet verified. nullopt when nextendo.network can't be
+// reached. Blocks on the request.
+std::optional<std::string> FetchGameCatalog(std::string_view client_id);
 
 // Ends a signed-out session's tokens on nextendo.network. Blocks on the request.
 void RevokeToken(std::string_view client_id, const std::string& refresh_token);
