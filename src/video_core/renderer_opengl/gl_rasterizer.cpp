@@ -1352,10 +1352,9 @@ void RasterizerOpenGL::SyncPolygonOffset() {
         oglEnable(GL_POLYGON_OFFSET_FILL, true);
         oglEnable(GL_POLYGON_OFFSET_LINE, true);
         oglEnable(GL_POLYGON_OFFSET_POINT, true);
-        glPolygonOffsetClamp(0.0f,
-                             regs.viewport_transform[0].scale_z < 0.0f ? -FAR_PLANE_DEPTH_BIAS
-                                                                        : FAR_PLANE_DEPTH_BIAS,
-                             0.0f);
+        const bool reversed =
+            regs.viewport_scale_offset_enabled && regs.viewport_transform[0].scale_z < 0.0f;
+        glPolygonOffsetClamp(0.0f, reversed ? -FAR_PLANE_DEPTH_BIAS : FAR_PLANE_DEPTH_BIAS, 0.0f);
         return;
     }
     oglEnable(GL_POLYGON_OFFSET_FILL, regs.polygon_offset_fill_enable);

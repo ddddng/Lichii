@@ -4545,8 +4545,9 @@ void RasterizerVulkan::UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs) {
     float clamp = regs.depth_bias_clamp;
     float factor = regs.slope_scale_depth_bias;
     if (far_plane_draw) {
-        units = regs.viewport_transform[0].scale_z < 0.0f ? -FAR_PLANE_DEPTH_BIAS
-                                                           : FAR_PLANE_DEPTH_BIAS;
+        const bool reversed =
+            regs.viewport_scale_offset_enabled && regs.viewport_transform[0].scale_z < 0.0f;
+        units = reversed ? -FAR_PLANE_DEPTH_BIAS : FAR_PLANE_DEPTH_BIAS;
         clamp = 0.0f;
         factor = 0.0f;
     }
