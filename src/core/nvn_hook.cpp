@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -32,6 +33,7 @@
 #include "core/arm/symbols.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
+#include "core/nvn_direct_choice.h"
 #include "core/nvn_hook.h"
 #include "core/nvn_trace.h"
 #include "core/hle/service/nx2_present.h"
@@ -133,6 +135,19 @@ constexpr u32 ComputeStage = 5;
 constexpr u32 TaskStage = 8; ///< the driver's other special case besides compute
 
 struct State {
+    ~State() {
+        for (Counters* thread_counters : counters) {
+            delete thread_counters;
+        }
+        if (out != nullptr) {
+            std::fclose(out);
+        }
+        if (driver_file != nullptr) {
+            std::fclose(driver_file);
+        }
+    }
+
+    u64 boot{}; ///< which boot of the process this state is (LocalCounters)
     bool direct{}; ///< DirectMode()
     u64 program_id{}; ///< DirectProgramId()
     bool emitted{};
@@ -191,11 +206,30 @@ bool EnvIsOne(const char* name) {
     return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
-State* Create() {
-    if (!EnvIsOne("EDEN_NX2_NVN_HOOK") && !EnvIsOne("EDEN_NX2_NVN_DIRECT")) {
-        return nullptr;
+/// EDEN_NX2_NVN_DIRECT=0/1: the lab's override of the nvn_direct_renderer setting.
+std::optional<bool> DirectOverride() {
+    const char* const value = std::getenv("EDEN_NX2_NVN_DIRECT");
+    if (value == nullptr || (std::strcmp(value, "0") != 0 && std::strcmp(value, "1") != 0)) {
+        return std::nullopt;
     }
-    auto* state = new State;
+    return value[0] == '1';
+}
+
+/// Whether this boot asks for the direct renderer (it may still fall back: Install).
+bool DirectAsked() {
+    return DirectOverride().value_or(Settings::values.nvn_direct_renderer.GetValue());
+}
+
+/// The boot's state, from Install to Uninstall (none while the hook is off for the boot).
+std::unique_ptr<State> g_state;
+u64 g_boots{};
+/// A boot of this process ran the direct renderer: its replay starts once per process.
+bool g_direct_ran{};
+RendererChoice g_choice{RendererChoice::SettingOff};
+
+std::unique_ptr<State> Create() {
+    auto state = std::make_unique<State>();
+    state->boot = ++g_boots;
     if (const char* path = std::getenv("EDEN_NX2_NVN_OUT")) {
         state->out = std::fopen(path, "w");
     }
@@ -220,14 +254,15 @@ State* Create() {
 }
 
 State* Get() {
-    static State* const state = Create();
-    return state;
+    return g_state.get();
 }
 
 Counters& LocalCounters(State& state) {
     static thread_local Counters* counters = nullptr;
-    if (counters == nullptr) {
+    static thread_local u64 counters_boot = 0;
+    if (counters == nullptr || counters_boot != state.boot) {
         counters = new Counters;
+        counters_boot = state.boot;
         if (state.emitted) {
             counters->emitted_headers.resize(1u << 16);
         }
@@ -251,7 +286,11 @@ bool IsDriverEntry(const State& state, u64 address) {
 }
 
 BlockEntryHook HookOf(u64 pc) {
-    const State& state = *Get();
+    const State* const state_pointer = Get();
+    if (state_pointer == nullptr) {
+        return BlockEntryHook::None;
+    }
+    const State& state = *state_pointer;
     if (IsBootstrap(state, pc)) {
         // Direct mode: nvnBootstrapLoader is answered here and the driver's never runs.
         return state.direct ? BlockEntryHook::Thunk : BlockEntryHook::Call;
@@ -751,12 +790,11 @@ void StopDirect() {
 #endif
 }
 
-void Install(Core::System& system, Kernel::KProcess& process) {
-    State* const state_pointer = Get();
-    if (state_pointer == nullptr) {
-        return;
-    }
-    State& state = *state_pointer;
+namespace {
+
+/// The NVN driver's exports in the process's modules, the game's SDK and the synthetic
+/// addresses' range.
+void ScanModules(Core::System& system, Kernel::KProcess& process, State& state) {
     auto& memory = process.GetMemory();
     const auto modules = Core::FindModules(&process);
     for (const auto& [base, module] : modules) {
@@ -813,11 +851,46 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     }
     state.process = &process;
     state.host_memory = &system.DeviceMemory().buffer;
-#ifdef LICHII_NVN_DIRECT
-    // One launch per process: the direct renderer's state lives as long as the process does.
-    state.direct = EnvIsOne("EDEN_NX2_NVN_DIRECT") && !state.bootstrap_entries.empty();
     state.program_id = process.GetProgramId();
+}
+
+} // namespace
+
+void Install(Core::System& system, Kernel::KProcess& process) {
+#ifdef LICHII_NVN_DIRECT
+    constexpr bool built = true;
+#else
+    constexpr bool built = false;
 #endif
+    g_state.reset();
+    const bool hook = EnvIsOne("EDEN_NX2_NVN_HOOK");
+    const bool asked = DirectAsked();
+    // The hook's block entries are A64 only (ArmDynarmic64): a 32-bit game gets no state.
+    std::unique_ptr<State> state_owner =
+        (hook || (built && asked)) && process.Is64Bit() ? Create() : nullptr;
+    if (state_owner != nullptr) {
+        ScanModules(system, process, *state_owner);
+    }
+    g_choice = ChooseRenderer({
+        .built = built,
+        .override_ = DirectOverride(),
+        .setting = Settings::values.nvn_direct_renderer.GetValue(),
+        .vulkan = Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan,
+        .is_64bit = process.Is64Bit(),
+        .has_nvn = state_owner != nullptr && !state_owner->bootstrap_entries.empty(),
+        .direct_ran_before = g_direct_ran,
+    });
+    if (built || IsFallback(g_choice)) {
+        LOG_INFO(Core, "Renderer: {} ({})",
+                 IsDirect(g_choice) ? "NVN direct renderer" : "GPU emulation",
+                 Describe(g_choice));
+    }
+    if (state_owner == nullptr || (!hook && !IsDirect(g_choice))) {
+        return;
+    }
+    State& state = *state_owner;
+    state.direct = IsDirect(g_choice);
+    g_direct_ran |= state.direct;
     if (state.direct) {
         InstallDirect(state);
     } else if (!state.driver_file_path.empty()) {
@@ -829,10 +902,21 @@ void Install(Core::System& system, Kernel::KProcess& process) {
              "synthetic addresses from {:#x}",
              state.bootstrap_entries.size(), state.sdk_major, state.private0_address,
              state.private0_size, state.synthetic_base);
+    g_state = std::move(state_owner);
+}
+
+void Uninstall() {
+    g_state.reset();
+}
+
+RendererChoice Choice() {
+    return g_choice;
 }
 
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc) {
-    return Get() != nullptr ? &HookOf : nullptr;
+    // Asked for when the process's JIT is made, before Install decides: HookOf answers nothing
+    // while the boot has no state.
+    return EnvIsOne("EDEN_NX2_NVN_HOOK") || DirectAsked() ? &HookOf : nullptr;
 }
 
 bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,

@@ -11,7 +11,8 @@
 // and returns to the caller. The same boundary nxnative (seedds, MIT) and Switch2Recomp's census
 // hook stand at; this code is Lichii's own.
 //
-// Off unless EDEN_NX2_NVN_HOOK=1 or EDEN_NX2_NVN_DIRECT=1. Output to the file EDEN_NX2_NVN_OUT names:
+// Off unless EDEN_NX2_NVN_HOOK=1 or the boot runs the direct renderer. Output to the file
+// EDEN_NX2_NVN_OUT names:
 //   "n <slot> <driver address> <synthetic address> <name>" once per name the game resolved;
 //   every EDEN_NX2_NVN_EVERY presents (default 300): "t <present> <steady ns>", then
 //   cumulative "c <present> <slot> <calls>" for each slot called, and with
@@ -30,8 +31,10 @@
 // EDEN_NX2_NVN_DRIVER_FILE=<path>: in pass-through the driver's entry point per name ("e <name>
 // <module> <offset>") and its nvnDeviceGetInteger answers ("i <item> <value>") are written there;
 // direct mode reads them back (dotfiles-25x.3).
-// EDEN_NX2_NVN_DIRECT=1 (dotfiles-25x): NVN2 direct mode. Every NVN name the game looks up
-// resolves to the direct renderer's front end (video_core/nvn_direct) and the driver never runs:
+// NVN direct mode (dotfiles-25x), chosen per boot by Install from the nvn_direct_renderer
+// setting (EDEN_NX2_NVN_DIRECT=0/1 overrides it; see nvn_direct_choice.h). Every NVN name the
+// game looks up resolves to the direct renderer's front end (video_core/nvn_direct) and the
+// driver never runs:
 // nvnBootstrapLoader is answered here, the driver's entry points from the capture are watched
 // (logged if entered), names the front end lacks get a stub that answers 0. Calls that may block
 // halt the JIT and run from the kernel (RunHaltedCall). Every 600 presents a line counts the
@@ -42,6 +45,7 @@
 #include <array>
 
 #include "common/common_types.h"
+#include "core/nvn_direct_choice.h"
 
 namespace Dynarmic::A64 {
 class Jit;
@@ -68,9 +72,9 @@ namespace Core::NvnHook {
 
 [[nodiscard]] bool Enabled();
 
-/// NVN2 direct mode (dotfiles-25x): the game's NVN calls run in the direct renderer
-/// (video_core/nvn_direct), not in its NVN driver. Decided once per process by Install
-/// (EDEN_NX2_NVN_DIRECT=1, an NVN2 game); read by the Vulkan device, created after Install.
+/// NVN direct mode (dotfiles-25x): the game's NVN calls run in the direct renderer
+/// (video_core/nvn_direct), not in its NVN driver. Decided once per boot by Install; read by
+/// the Vulkan device, created after Install.
 [[nodiscard]] bool DirectMode();
 
 /// Direct mode's title (0 otherwise): the direct renderer keeps its caches per title
@@ -82,8 +86,15 @@ namespace Core::NvnHook {
 /// suspended (System::Pause, ShutdownMainProcess). Nothing otherwise.
 void StopDirect();
 
-/// Finds the NVN driver's exports in the application's modules (after they are loaded).
+/// Decides the boot's renderer (Choice) and, when the hook is on for it, finds the NVN driver's
+/// exports in the application's modules (after they are loaded). Logs the decision.
 void Install(Core::System& system, Kernel::KProcess& process);
+
+/// The boot is over (the end of System::ShutdownMainProcess): its hook state goes.
+void Uninstall();
+
+/// The renderer Install chose for the current (or last) boot.
+[[nodiscard]] RendererChoice Choice();
 
 /// UserConfig::block_entry_hook (null when the hook is off).
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc);

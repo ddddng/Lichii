@@ -16,6 +16,7 @@ add_library(core STATIC
     constants.h
     core.cpp
     core.h
+    nvn_direct_choice.h
     nvn_hook.cpp
     nvn_hook.h
     nvn_trace.cpp

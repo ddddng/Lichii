@@ -669,6 +669,7 @@ struct System::Impl {
         cpu_manager.Shutdown();
         debugger.reset();
         kernel.Shutdown();
+        Core::NvnHook::Uninstall();
         stop_event = {};
         Network::RestartSocketOperations();
 
