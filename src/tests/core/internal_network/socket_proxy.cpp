@@ -18,6 +18,7 @@
 #include "network/network.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "common/socket_types.h"
 #include "core/hle/service/sockets/sockets_translate.h"
@@ -367,13 +368,15 @@ TEST_CASE("Destroying a room socket releases its reserved endpoint", "[core][soc
 }
 
 TEST_CASE("Exhausted automatic port space fails and a released reservation is reusable",
-          "[core][sockets][ephemeral]") {
+          "[core][sockets][ephemeral][reuse-port]") {
+    const bool reuse_port = GENERATE(false, true);
     std::vector<std::unique_ptr<Network::ProxySocket>> sockets;
     sockets.reserve(16384);
     for (u32 port = 49152; port <= 65535; ++port) {
         auto socket = std::make_unique<Network::ProxySocket>();
         REQUIRE(socket->Initialize(Network::Domain::INET, Network::Type::DGRAM,
                                    Network::Protocol::UDP) == Network::Errno::SUCCESS);
+        REQUIRE(socket->SetReusePort(reuse_port) == Network::Errno::SUCCESS);
         REQUIRE(socket->Bind({Network::Domain::INET, {}, static_cast<u16>(port)}) ==
                 Network::Errno::SUCCESS);
         sockets.push_back(std::move(socket));
@@ -381,6 +384,7 @@ TEST_CASE("Exhausted automatic port space fails and a released reservation is re
     Network::ProxySocket extra;
     REQUIRE(extra.Initialize(Network::Domain::INET, Network::Type::DGRAM, Network::Protocol::UDP) ==
             Network::Errno::SUCCESS);
+    REQUIRE(extra.SetReusePort(reuse_port) == Network::Errno::SUCCESS);
     CHECK(static_cast<u32>(
               Service::Sockets::Translate(extra.Bind({Network::Domain::INET, {}, 0}))) == 98);
     CHECK(extra.GetSockName().first.portno == 0);
@@ -604,6 +608,63 @@ TEST_CASE("Room sockets accept only packets for their port and protocol", "[core
 TEST_CASE("Native sockets accept no room packets", "[core][sockets]") {
     Network::Socket socket;
     REQUIRE_FALSE(socket.AcceptsProxyPacket(MakePacket(Network::Protocol::UDP)));
+}
+
+TEST_CASE("Room port reuse requires the same explicit permission on both sockets",
+          "[core][sockets][room-endpoint][reuse-port]") {
+    Network::ProxySocket first;
+    Network::ProxySocket second;
+    REQUIRE(first.Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                             Network::Protocol::UDP) == Network::Errno::SUCCESS);
+    REQUIRE(second.Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                              Network::Protocol::UDP) == Network::Errno::SUCCESS);
+    const Network::SockAddrIn endpoint{Network::Domain::INET, {}, 35709};
+
+    SECTION("both sockets explicitly permit port reuse") {
+        REQUIRE(first.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(second.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::SUCCESS);
+    }
+    SECTION("only the first socket permits port reuse") {
+        REQUIRE(first.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::ADDRINUSE);
+    }
+    SECTION("only the second socket permits port reuse") {
+        REQUIRE(second.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::ADDRINUSE);
+    }
+    SECTION("different reuse options do not grant a shared permission") {
+        REQUIRE(first.SetReuseAddr(true) == Network::Errno::SUCCESS);
+        REQUIRE(second.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::ADDRINUSE);
+    }
+}
+
+TEST_CASE("Bound room sockets update their port reuse reservation",
+          "[core][sockets][room-endpoint][reuse-port]") {
+    Network::ProxySocket first;
+    Network::ProxySocket second;
+    REQUIRE(first.Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                             Network::Protocol::UDP) == Network::Errno::SUCCESS);
+    REQUIRE(second.Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                              Network::Protocol::UDP) == Network::Errno::SUCCESS);
+    const Network::SockAddrIn endpoint{Network::Domain::INET, {}, 35709};
+    REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
+    REQUIRE(second.SetReusePort(true) == Network::Errno::SUCCESS);
+
+    SECTION("enabling reuse after bind permits an opted-in peer") {
+        REQUIRE(first.SetReusePort(true) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::SUCCESS);
+    }
+    SECTION("disabling reuse after bind prevents a new peer") {
+        REQUIRE(first.SetReusePort(true) == Network::Errno::SUCCESS);
+        REQUIRE(first.SetReusePort(false) == Network::Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Network::Errno::ADDRINUSE);
+    }
 }
 
 TEST_CASE("Room socket names preserve independent bound endpoints",
