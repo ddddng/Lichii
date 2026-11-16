@@ -197,6 +197,7 @@ enum class OptName : u32 {
     KEEPALIVE = 0x8,
     BROADCAST = 0x20,
     LINGER = 0x80,
+    REUSEPORT = 0x200,
     SNDBUF = 0x1001,
     RCVBUF = 0x1002,
     SNDTIMEO = 0x1005,

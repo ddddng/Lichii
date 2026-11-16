@@ -107,9 +107,15 @@ public:
 
     u64 GetDeviceMemoryBudget() const;
 
+    u64 GetDeviceHeapMemoryBudget() const;
+
     u64 GetDeviceMemorySlack() const;
 
     bool CanReportMemoryUsage() const;
+
+    /// The largest width and height a scaled image may take: the device's 2D image and
+    /// framebuffer limits (16384 on AMD).
+    u32 GetMaxScaledExtent() const noexcept;
 
     /// Images that did not fit the device memory budget so far (see MemoryAllocator).
     u32 MemoryPressureEvents() const noexcept {
@@ -118,6 +124,11 @@ public:
 
     u32 FailedImages() const noexcept {
         return memory_allocator.FailedImages();
+    }
+
+    /// Device-local bytes placed in host memory since the last call (see MemoryAllocator).
+    u64 TakeSpilledBytes() const noexcept {
+        return memory_allocator.TakeSpilledBytes();
     }
 
     void LogMemoryStatistics() const;
@@ -155,8 +166,8 @@ public:
 
     /// Records a health check of a game's DLSS network output against its input (both sampled in
     /// the GENERAL layout) and returns an earlier check's result once the GPU has finished it.
-    [[nodiscard]] std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(ImageView& input,
-                                                                              ImageView& output);
+    [[nodiscard]] std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
+        ImageView& input, ImageView& output, std::optional<std::array<u32, 2>> input_region);
 
     void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
 
