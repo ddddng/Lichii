@@ -408,13 +408,13 @@ public:
     }
 
 private:
-    // With Nextendo online play, a submitted request follows the network from then on, like on
-    // hardware. Splatoon 3's NPLN worker waits on the request's events and never asks again.
+    // While Nextendo online play is on, a submitted request follows the network, like on hardware.
+    // Splatoon 3's NPLN worker waits on the request's events and never asks again.
     void Submit(HLERequestContext& ctx) {
         LOG_DEBUG(Service_NIFM, "called");
 
         std::scoped_lock lk{state_lock};
-        if (follows_network) {
+        if (Common::Nextendo::OnlinePlayActive()) {
             UpdateState(NetworkRequestState());
             if (!state_poll_event) {
                 state_poll_event = Core::Timing::CreateEvent(
@@ -422,6 +422,9 @@ private:
                     [this](s64,
                            std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                         std::scoped_lock poll_lk{state_lock};
+                        if (!Common::Nextendo::OnlinePlayActive()) {
+                            return std::nullopt;
+                        }
                         if (const auto new_state = NetworkRequestState(); new_state != state) {
                             UpdateState(new_state);
                         }
@@ -542,7 +545,7 @@ private:
         state = new_state;
         event1->Signal(system.Kernel());
         // What the second event means is unknown. Splatoon 3 waits on it for the request state.
-        if (follows_network) {
+        if (Common::Nextendo::OnlinePlayActive()) {
             event2->Signal(system.Kernel());
         }
     }
@@ -551,7 +554,6 @@ private:
 
     KernelHelpers::ServiceContext service_context;
 
-    const bool follows_network = Common::Nextendo::OnlinePlayActive();
     std::mutex state_lock;
     std::shared_ptr<Core::Timing::EventType> state_poll_event;
     RequestState state;

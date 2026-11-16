@@ -138,6 +138,17 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
         CHECK(event1->IsSignaled(kernel));
         CHECK(event2->IsSignaled(kernel));
     }
+    SECTION("turning Nextendo on after the request was created applies from its submit") {
+        Settings::values.nextendo_enabled.SetValue(false);
+        const auto request = create();
+        const auto [event1, event2] = events(*request);
+        Settings::values.nextendo_enabled.SetValue(true);
+        Settings::values.airplane_mode.SetValue(true);
+        REQUIRE(result(call(*request, Submit)) == ResultSuccess.raw);
+        CHECK(state(*request) == StateInvalid);
+        CHECK(event1->IsSignaled(kernel));
+        CHECK(event2->IsSignaled(kernel));
+    }
     SECTION("with Nextendo a submitted request follows a network change by itself") {
         if (!Network::GetHostIPv4Address()) {
             SKIP("The host has no IPv4 address");
