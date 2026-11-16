@@ -336,7 +336,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         generated->present_spacing = spacing;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(*generated->render_ready);
+        scheduler.Flush(SemaphoreValue{*generated->render_ready}, frame_gen.TakeGeneratedWait());
         present_manager.Present(generated);
     }
 #endif
