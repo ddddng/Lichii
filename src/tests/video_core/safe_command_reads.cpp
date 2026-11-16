@@ -157,7 +157,7 @@ TEST_CASE("Safe command list reads on the split see an image the back registers 
     const bool ampere = Tegra::g_nx2_ampere.exchange(true);
     const auto backend = Settings::values.renderer_backend.GetValue();
     Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Vulkan);
-    split.MaybeStart(system);
+    split.MaybeStart(system, nullptr);
     SCOPE_EXIT {
         split.Stop();
         Settings::values.renderer_backend.SetValue(backend);

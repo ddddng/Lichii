@@ -30,6 +30,7 @@
 #include "core/core.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
@@ -147,7 +148,7 @@ void GpuSplit::CheckOwner(const char* where) {
 
 GpuSplit GpuSplit::instance;
 
-void GpuSplit::MaybeStart(Core::System& system_) {
+void GpuSplit::MaybeStart(Core::System& system_, Tegra::GPU* gpu_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
         return value != nullptr ? value[0] : '2';
@@ -174,6 +175,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     started_accuracy = accuracy;
     system = &system_;
+    gpu = gpu_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
     const char* const verify = std::getenv("EDEN_NX2_ACQUIRE_VERIFY");
     g_acquire_verify = verify != nullptr && verify[0] == '1';
@@ -911,6 +913,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         u64 last_store = read_position;
         // Before any entry runs, so a front that sees these entries consumed also sees this.
         back_quiet.store(false, std::memory_order_seq_cst);
+        u64 last_read_tick = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             back_entry_start = read_position;
@@ -922,6 +925,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }
+            if (read_position - last_read_tick >= 1024 && gpu != nullptr) {
+                last_read_tick = read_position;
+                gpu->TickCpuReads();
+            }
             // Hand ring space back now and then while working through a long batch, and at once
             // when the front waits for this position (WaitForWriters).
             if ((read_position - last_store >= 4096 ||
@@ -932,6 +939,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 last_store = read_position;
                 NotifyFront();
             }
+        }
+        if (gpu != nullptr) {
+            gpu->TickCpuReads();
         }
         SealFencedEntries(read_position);
         consumed.store(read_position, std::memory_order_seq_cst);

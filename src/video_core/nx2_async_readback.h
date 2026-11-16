@@ -92,6 +92,8 @@ struct Counters {
     std::array<std::atomic<u64>, static_cast<size_t>(Read::Count)> read_ns{};
     /// The GPU thread's time in the reads' flushes
     std::atomic<u64> flush_ns{};
+    /// Read flushes the split's back ran before the work queued ahead of them (TickCpuReads)
+    std::atomic<u64> early_flushes{};
     /// Reading threads whose download the host GPU had not run yet
     std::atomic<u64> reader_waits{};
     std::atomic<u64> reader_wait_ns{};
@@ -216,6 +218,7 @@ inline void MaybeReport() {
         read_ns[i] = take(c.read_ns[i]);
     }
     const u64 flush_ns = take(c.flush_ns);
+    const u64 early_flushes = take(c.early_flushes);
     const u64 reader_waits = take(c.reader_waits);
     const u64 reader_wait_ns = take(c.reader_wait_ns);
     const u64 reader_max_wait_ns = take(c.reader_max_wait_ns);
@@ -237,26 +240,27 @@ inline void MaybeReport() {
     const u64 back_wait_ns = take(c.back_wait_ns);
     constexpr auto async = static_cast<size_t>(Read::Async);
     constexpr auto in_flight = static_cast<size_t>(Read::InFlight);
-    LOG_INFO(HW_GPU,
-             "Async read-back per second: reads {:.0f} async ({:.1f} ms), {:.0f} only waited for a "
-             "download on its way ({:.1f} ms) | GPU thread in read flushes {:.1f} ms | readers "
-             "waited on their fence "
-             "{:.0f} times, {:.1f} ms (longest {:.2f} ms) | GPU-side writes fell back to a host "
-             "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
-             "split's back ({:.1f} ms), {:.0f} drained it | GPU thread landed read downloads before "
-             "writes guest memory doesn't hold {:.0f} times, {:.0f} waited for the host GPU "
-             "({:.1f} ms) | split's back ran {:.0f} macros that read memory ({:.1f} ms), their DMA "
-             "reads {:.0f}, {:.0f} flushed GPU-modified words ({:.1f} ms writing caches out) | "
-             "front waited for them {:.0f} times ({:.1f} ms)",
-             per_second(reads[async]), ms_per_second(read_ns[async]),
-             per_second(reads[in_flight]), ms_per_second(read_ns[in_flight]),
-             ms_per_second(flush_ns), per_second(reader_waits), ms_per_second(reader_wait_ns),
-             static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),
-             ms_per_second(gpu_side_wait_ns), per_second(dma_reads), per_second(dma_waited),
-             ms_per_second(dma_wait_ns), per_second(dma_drained), per_second(clear_landings),
-             per_second(clear_waits), ms_per_second(clear_wait_ns), per_second(back_macros),
-             ms_per_second(back_macro_ns), per_second(back_dma_reads), per_second(back_dma_flushes),
-             ms_per_second(back_dma_flush_ns), per_second(back_waits), ms_per_second(back_wait_ns));
+    LOG_INFO(
+        HW_GPU,
+        "Async read-back per second: reads {:.0f} async ({:.1f} ms), {:.0f} only waited for a "
+        "download on its way ({:.1f} ms) | GPU thread in read flushes {:.1f} ms, {:.0f} run "
+        "before queued work | readers waited on their fence {:.0f} times, {:.1f} ms (longest "
+        "{:.2f} ms) | GPU-side writes fell back to a host "
+        "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
+        "split's back ({:.1f} ms), {:.0f} drained it | GPU thread landed read downloads before "
+        "writes guest memory doesn't hold {:.0f} times, {:.0f} waited for the host GPU "
+        "({:.1f} ms) | split's back ran {:.0f} macros that read memory ({:.1f} ms), their DMA "
+        "reads {:.0f}, {:.0f} flushed GPU-modified words ({:.1f} ms writing caches out) | "
+        "front waited for them {:.0f} times ({:.1f} ms)",
+        per_second(reads[async]), ms_per_second(read_ns[async]), per_second(reads[in_flight]),
+        ms_per_second(read_ns[in_flight]), ms_per_second(flush_ns), per_second(early_flushes),
+        per_second(reader_waits), ms_per_second(reader_wait_ns),
+        static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),
+        ms_per_second(gpu_side_wait_ns), per_second(dma_reads), per_second(dma_waited),
+        ms_per_second(dma_wait_ns), per_second(dma_drained), per_second(clear_landings),
+        per_second(clear_waits), ms_per_second(clear_wait_ns), per_second(back_macros),
+        ms_per_second(back_macro_ns), per_second(back_dma_reads), per_second(back_dma_flushes),
+        ms_per_second(back_dma_flush_ns), per_second(back_waits), ms_per_second(back_wait_ns));
 }
 
 } // namespace VideoCore::AsyncReadback

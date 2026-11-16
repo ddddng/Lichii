@@ -172,7 +172,9 @@ public:
     [[nodiscard]] u64 RequestFlush(DAddr addr, std::size_t size);
 
     /// Runs an action on the GPU thread between command lists (returns its sync fence).
-    u64 RunOnGpuThread(std::function<void()>&& action);
+    /// cpu_read: the action serves a guest CPU read, and the split's back may run it before the
+    /// work queued ahead of it (TickCpuReads).
+    u64 RunOnGpuThread(std::function<void()>&& action, bool cpu_read = false);
 
     /// Obtains current flush request fence id.
     [[nodiscard]] u64 CurrentSyncRequestFence() const;
@@ -183,6 +185,10 @@ public:
 
     /// Tick pending requests within the GPU.
     void TickWork();
+
+    /// Runs the guest CPU reads' flushes queued at the head of the requests, from the split's
+    /// back between entries.
+    void TickCpuReads();
 
     /// Gets a mutable reference to the Host1x interface
     [[nodiscard]] Host1x::Host1x& Host1x();

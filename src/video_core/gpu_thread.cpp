@@ -95,7 +95,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         using FrontState = BackIdleTrace::FrontState;
         while (!stop_token.stop_requested()) {
             Profile::Report();
-            split.MaybeStart(system);
+            split.MaybeStart(system, &system.GPU());
             if (VideoCommon::g_acquire_counting) {
                 split.ReportAcquire();
             }

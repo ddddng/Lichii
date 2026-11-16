@@ -27,6 +27,7 @@ class System;
 }
 
 namespace Tegra {
+class GPU;
 class MemoryManager;
 }
 
@@ -214,7 +215,7 @@ public:
 
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
     /// Vulkan). Called by the front between commands.
-    void MaybeStart(Core::System& system);
+    void MaybeStart(Core::System& system, Tegra::GPU* gpu);
     void Stop();
 
     /// What the sender of an entry tells about the guest memory the back writes running it, for
@@ -732,6 +733,8 @@ private:
     size_t Execute(const u64* entry, size_t words);
 
     Core::System* system{};
+    /// Runs guest CPU reads' flushes between entries (GPU::TickCpuReads); null without a GPU
+    Tegra::GPU* gpu{};
     bool active{};
     u32 starts{};
     bool front_macros{};

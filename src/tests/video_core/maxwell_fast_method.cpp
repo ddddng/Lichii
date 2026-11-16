@@ -59,8 +59,9 @@ struct GpuSplitTestAccess {
         return split.write_position;
     }
 
-    static void Start(GpuSplit& split, Core::System& system) {
+    static void Start(GpuSplit& split, Core::System& system, Tegra::GPU* gpu = nullptr) {
         Initialize(split, system);
+        split.gpu = gpu;
         ++split.starts;
         split.active = true;
         split.back_thread = std::jthread([&split](std::stop_token stop) { split.BackLoop(stop); });
@@ -1016,6 +1017,53 @@ TEST_CASE("Split consumption does not complete deferred downstream callbacks",
         deferred.clear();
     });
     REQUIRE(output == std::array<u32, 3>{1, 2, 3});
+}
+
+TEST_CASE("Split back runs a guest CPU read's flush before the work queued ahead of it",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    std::atomic<bool> release{};
+    Access::Start(split, f.system, &f.gpu);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    SCOPE_EXIT {
+        release = true;
+    };
+    // The back stays in the first entry until the requests are queued, then has thousands to run.
+    constexpr u32 Entries = 4096;
+    u32 entries_run = 0;
+    split.Defer([&release] {
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    for (u32 i = 0; i < Entries; ++i) {
+        split.Defer([counter = &entries_run] { ++*counter; });
+    }
+    split.Publish();
+    u32 read_at = ~0U;
+    bool other_ran = false;
+    bool later_read_ran = false;
+    const u64 read = f.gpu.RunOnGpuThread([&] { read_at = entries_run; }, true);
+    (void)f.gpu.RunOnGpuThread([&] { other_ran = true; });
+    const u64 later_read = f.gpu.RunOnGpuThread([&] { later_read_ran = true; }, true);
+    release = true;
+    f.gpu.WaitForSyncOperation(read);
+    REQUIRE(read_at < Entries);
+    // Another request keeps its place, and so does a read queued behind it.
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(entries_run == Entries);
+    REQUIRE(f.gpu.CurrentSyncRequestFence() == read);
+    REQUIRE_FALSE(other_ran);
+    REQUIRE_FALSE(later_read_ran);
+    f.gpu.TickWork();
+    REQUIRE(f.gpu.CurrentSyncRequestFence() == later_read);
+    REQUIRE(other_ran);
+    REQUIRE(later_read_ran);
 }
 
 TEST_CASE("Split remembers the semaphore writes its back has not run yet",

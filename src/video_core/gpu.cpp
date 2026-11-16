@@ -185,12 +185,14 @@ struct GPU::Impl {
         Settings::UpdateGPUAccuracy();
     }
 
-    /// Request a host GPU memory flush from the CPU.
+    /// Request a host GPU memory flush from the CPU. cpu_read: the flush of a guest CPU read,
+    /// which the split's back may run before the work queued ahead of it (TickCpuReads).
     template <typename Func>
-    [[nodiscard]] u64 RequestSyncOperation(Func&& action) {
+    [[nodiscard]] u64 RequestSyncOperation(Func&& action, bool cpu_read = false) {
         std::unique_lock lck{sync_request_mutex};
         const u64 fence = ++last_sync_fence;
-        sync_requests.emplace_back(std::forward<Func>(action));
+        sync_requests.push_back({std::forward<Func>(action), cpu_read});
+        cpu_read_first.store(sync_requests.front().cpu_read, std::memory_order_relaxed);
         return fence;
     }
 
@@ -214,18 +216,39 @@ struct GPU::Impl {
         WaitForSyncOperation(fence);
     }
 
-    /// Tick pending requests within the GPU.
-    void TickWork() {
+    /// Tick pending requests within the GPU. cpu_reads_only: only the guest CPU reads' flushes
+    /// at the head of the queue (TickCpuReads); the first other request keeps its place.
+    void TickWork(bool cpu_reads_only = false) {
         std::unique_lock lck{sync_request_mutex};
-        while (!sync_requests.empty()) {
-            auto request = std::move(sync_requests.front());
+        while (!sync_requests.empty() && (!cpu_reads_only || sync_requests.front().cpu_read)) {
+            auto request = std::move(sync_requests.front().action);
             sync_requests.pop_front();
+            cpu_read_first.store(!sync_requests.empty() && sync_requests.front().cpu_read,
+                                 std::memory_order_relaxed);
             sync_request_mutex.unlock();
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::TickWork);
             request();
+            if (cpu_reads_only) {
+                namespace AsyncReadback = VideoCore::AsyncReadback;
+                AsyncReadback::Add(AsyncReadback::g_counters.early_flushes, 1);
+            }
             current_sync_fence.fetch_add(1, std::memory_order_release);
             sync_request_mutex.lock();
             sync_request_cv.notify_all();
+        }
+    }
+
+    /// Runs the flushes of guest CPU reads queued at the head of the requests now, from the
+    /// split's back between its entries (GpuSplit::BackLoop), instead of after every command list
+    /// queued before them: most of each title-load read's wait in Mario Kart World. The read sees
+    /// all the GPU work its thread waited for: a syncpoint or semaphore release becomes visible
+    /// to the guest when the back runs it (fast fences) or once the host GPU ran it (delayed
+    /// fences, High accuracy), never before the back ran it, and the flush downloads after what
+    /// the back ran. Later work the guest did not wait for may or may not be in the read, as on
+    /// hardware.
+    void TickCpuReads() {
+        if (cpu_read_first.load(std::memory_order_relaxed)) {
+            TickWork(true);
         }
     }
 
@@ -287,6 +310,7 @@ struct GPU::Impl {
             // may refer to their waiters' frames, and release the waiters.
             std::scoped_lock requests_lock{sync_request_mutex};
             sync_requests.clear();
+            cpu_read_first.store(false, std::memory_order_relaxed);
             sync_requests_dropped = true;
         }
         sync_request_cv.notify_all();
@@ -357,15 +381,17 @@ struct GPU::Impl {
         const u64 area_size = raster_area.end_address - raster_area.start_address;
         // In flight: an earlier read's downloads cover the area, only FinishRead is left.
         if (!raster_area.in_flight) {
-            const u64 fence = RequestSyncOperation([this, raster_area, area_size]() {
-                const u64 start = AsyncReadback::Now();
-                // Apply collected guest writes before downloading GPU data over guest memory.
-                InvalidateGPUCache();
-                renderer->ReadRasterizer()->FlushRegionForRead(raster_area.start_address,
-                                                               area_size);
-                AsyncReadback::Add(AsyncReadback::g_counters.flush_ns,
-                                   AsyncReadback::Now() - start);
-            });
+            const u64 fence = RequestSyncOperation(
+                [this, raster_area, area_size]() {
+                    const u64 start = AsyncReadback::Now();
+                    // Apply collected guest writes before downloading GPU data over guest memory.
+                    InvalidateGPUCache();
+                    renderer->ReadRasterizer()->FlushRegionForRead(raster_area.start_address,
+                                                                   area_size);
+                    AsyncReadback::Add(AsyncReadback::g_counters.flush_ns,
+                                       AsyncReadback::Now() - start);
+                },
+                true);
             gpu_thread.TickGPU(is_async);
             WaitForSyncOperation(fence);
         }
@@ -498,7 +524,13 @@ struct GPU::Impl {
 
     std::condition_variable sync_cv;
 
-    std::list<std::function<void()>> sync_requests;
+    struct SyncRequest {
+        std::function<void()> action;
+        bool cpu_read; ///< A guest CPU read's flush (TickCpuReads)
+    };
+    std::list<SyncRequest> sync_requests;
+    /// The first queued request is a guest CPU read's flush
+    std::atomic<bool> cpu_read_first{};
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
     mutable std::atomic<s8> legacy_timestamps{-1};
@@ -599,8 +631,8 @@ u64 GPU::RequestFlush(DAddr addr, std::size_t size) {
     });
 }
 
-u64 GPU::RunOnGpuThread(std::function<void()>&& action) {
-    return impl->RequestSyncOperation(std::move(action));
+u64 GPU::RunOnGpuThread(std::function<void()>&& action, bool cpu_read) {
+    return impl->RequestSyncOperation(std::move(action), cpu_read);
 }
 
 u64 GPU::CurrentSyncRequestFence() const {
@@ -613,6 +645,10 @@ void GPU::WaitForSyncOperation(u64 fence) {
 
 void GPU::TickWork() {
     impl->TickWork();
+}
+
+void GPU::TickCpuReads() {
+    impl->TickCpuReads();
 }
 
 /// Gets a mutable reference to the Host1x interface
