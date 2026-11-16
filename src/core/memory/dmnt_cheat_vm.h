@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <utility>
 #include <variant>
 #include <vector>
 #include <memory>
@@ -298,6 +299,10 @@ public:
 
     bool LoadProgram(const std::vector<CheatEntry>& cheats);
     void Execute(const CheatProcessMetadata& metadata);
+
+    // The main module ranges, [begin, end) offsets, the cheat's static stores write whatever its
+    // conditions, up to its first instruction that can change a register.
+    static std::vector<std::pair<u64, u64>> MainStaticStores(const CheatEntry& cheat);
 
 private:
     std::unique_ptr<Callbacks> callbacks;

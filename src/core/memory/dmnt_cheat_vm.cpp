@@ -728,6 +728,29 @@ bool DmntCheatVm::LoadProgram(const std::vector<CheatEntry>& entries) {
     return true;
 }
 
+std::vector<std::pair<u64, u64>> DmntCheatVm::MainStaticStores(const CheatEntry& cheat) {
+    DmntCheatVm vm{nullptr};
+    CheatEntry entry = cheat;
+    entry.enabled = true;
+    vm.LoadProgram({entry});
+    vm.ResetState();
+
+    std::vector<std::pair<u64, u64>> stores;
+    CheatVmOpcode opcode{};
+    while (vm.DecodeNextOpcode(opcode)) {
+        if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
+            if (store->mem_type == MemoryAccessType::MainNso) {
+                stores.emplace_back(store->rel_address, store->rel_address + store->bit_width);
+            }
+        } else if (!std::holds_alternative<BeginConditionalOpcode>(opcode.opcode) &&
+                   !std::holds_alternative<EndConditionalOpcode>(opcode.opcode) &&
+                   !std::holds_alternative<BeginKeypressConditionalOpcode>(opcode.opcode)) {
+            break;
+        }
+    }
+    return stores;
+}
+
 void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {
     CheatVmOpcode cur_opcode{};
 
