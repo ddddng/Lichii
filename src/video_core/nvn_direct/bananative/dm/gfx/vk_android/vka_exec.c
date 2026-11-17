@@ -727,14 +727,13 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
         if (to_tex) vka_barrier(g_cb);
         row = wb; img = wb * rows;
     }
-    VkBufferImageCopy rg[64]; int n = 0;
-    for (int z = 0; z < (is3d ? 1 : nz) && n < 64; z++)
-        rg[n++] = (VkBufferImageCopy){(bounce ? s.off : o) + (is3d ? 0 : z * img), (uint32_t)(row / f->bpb * f->bw), (uint32_t)(img / row * f->bh),
-            {asp, lv, is3d ? 0 : l0 + (uint32_t)c->r.zoffset + (uint32_t)z, 1}, {c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset : 0}, {(uint32_t)c->r.width, (uint32_t)c->r.height, is3d ? (uint32_t)nz : 1}};
-    if (to_tex) { vk.vkCmdCopyBufferToImage(g_cb, bounce ? s.buf : b, im->img, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)n, rg); vka_img_written(im); }
+    // One region: array layers lie bufferRowLength × bufferImageHeight texels apart (img bytes), as 3D slices do
+    const VkBufferImageCopy rg = {bounce ? s.off : o, (uint32_t)(row / f->bpb * f->bw), (uint32_t)(img / row * f->bh),
+        {asp, lv, is3d ? 0 : l0 + (uint32_t)c->r.zoffset, is3d ? 1 : (uint32_t)nz}, {c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset : 0}, {(uint32_t)c->r.width, (uint32_t)c->r.height, is3d ? (uint32_t)nz : 1}};
+    if (to_tex) { vk.vkCmdCopyBufferToImage(g_cb, bounce ? s.buf : b, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg); vka_img_written(im); }
     else {
         vka_tex_gw_opaque(c->src, span);
-        vk.vkCmdCopyImageToBuffer(g_cb, im->img, VK_IMAGE_LAYOUT_GENERAL, bounce ? s.buf : b, (uint32_t)n, rg);
+        vk.vkCmdCopyImageToBuffer(g_cb, im->img, VK_IMAGE_LAYOUT_GENERAL, bounce ? s.buf : b, 1, &rg);
         if (bounce) {
             vka_barrier(g_cb);
             size_t wb = row, srow = S.copy_stride ? (size_t)S.copy_stride : wb, simg = S.copy_img_stride ? (size_t)S.copy_img_stride : srow * rows;
