@@ -634,10 +634,6 @@ private:
 
     void UpdateVertexBuffer(u32 index);
 
-    /// EDEN_NX2_PERF_VERIFY: logs a resolve memo hit that resolving again does not give.
-    void CheckResolveMemo(const char* kind, u32 index, const Binding& kept,
-                          const Binding& resolved);
-
     void UpdateDrawIndirect();
 
     void UpdateUniformBuffers(size_t stage);
@@ -897,18 +893,6 @@ private:
     std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
     u64 buffer_deletions = 0;
-    /// A vertex stream's or the index buffer's last resolution, made in the address space `owner`
-    /// names (its GetID() + 1; 0 never matches) under its MapSerial and buffer_deletions.
-    struct ResolveMemo {
-        size_t owner{};
-        u64 map_serial{};
-        u64 deletions{};
-        GPUVAddr begin{};
-        GPUVAddr end{}; ///< Vertex streams only
-        Binding binding{};
-    };
-    std::array<ResolveMemo, NUM_VERTEX_BUFFERS> vertex_memos{};
-    ResolveMemo index_memo{};
     /// EDEN_NX2_BUFFER_TRACE: buffers created (with the buffers they joined) and collected, logged
     /// every 10 s, and each creation of 64 MiB or more with the line that asked for it.
     struct CreateTrace {
