@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -873,9 +874,13 @@ TEST_CASE("A prebuild reports what became of its builds once all have ended",
     REQUIRE(outcome->failed == 2);
     REQUIRE(outcome->taken_unfinished == 1);
     REQUIRE(outcome->unclaimed == 1);
-    // Pipelines 0 and 2 reached the driver; 2 failed there
-    REQUIRE(outcome->driver_builds.Summary().starts_with(
-        "2 under 10 ms, 0 10-100 ms, 0 over 100 ms"));
+    // Pipelines 0 and 2 reached the driver (2 failed there), in whichever range a loaded host
+    // put them
+    size_t fast{}, medium{}, slow{};
+    REQUIRE(std::sscanf(outcome->driver_builds.Summary().c_str(),
+                        "%zu under 10 ms, %zu 10-100 ms, %zu over 100 ms", &fast, &medium,
+                        &slow) == 3);
+    REQUIRE(fast + medium + slow == 2);
 
     // Taken once built: no wait to report
     std::optional<std::chrono::steady_clock::duration> no_wait;
