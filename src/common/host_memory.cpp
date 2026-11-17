@@ -923,9 +923,10 @@ public:
         if (fd >= 0) {
             unlink(template_path);
         }
-#elif defined(MFD_ALLOW_SEALING)
+#elif defined(MFD_ALLOW_SEALING) && !defined(__ANDROID__)
         // Sealable: sealed against shrinking below, because udmabuf takes only such memfds (the
-        // NVN direct renderer's pool imports on amdgpu, vka_mem.c import_seg)
+        // NVN direct renderer's pool imports on amdgpu, vka_mem.c import_seg). Android has no
+        // direct renderer.
         fd = memfd_create("HostMemory", MFD_ALLOW_SEALING);
 #else
         fd = memfd_create("HostMemory", 0);
@@ -942,7 +943,7 @@ public:
                 LOG_WARNING(Common_Memory, "ftruncate: {} (likely out-of-emory)", strerror(errno));
                 use_anon = true;
             }
-#if defined(__linux__) && defined(F_SEAL_SHRINK)
+#if defined(__linux__) && !defined(__ANDROID__) && defined(F_SEAL_SHRINK)
             if (!use_anon && fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
                 LOG_WARNING(Common_Memory, "F_SEAL_SHRINK: {}", strerror(errno));
             }
