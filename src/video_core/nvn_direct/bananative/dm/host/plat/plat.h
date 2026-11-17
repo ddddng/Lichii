@@ -15,12 +15,20 @@
 #include <sys/ucontext.h>
 #define PLAT_APPLE 1
 #define PLAT_ANDROID 0
+#define PLAT_WINDOWS 0
 #define PLAT_MAC TARGET_OS_OSX
 #define PLAT_IOS TARGET_OS_IPHONE
+#elif defined(_WIN32)   // Lichii: Windows (plat_windows.c; the POSIX calls the rest of the code makes come from bananative/shim/win32)
+#define PLAT_APPLE 0
+#define PLAT_ANDROID 0
+#define PLAT_WINDOWS 1
+#define PLAT_MAC 0
+#define PLAT_IOS 0
 #elif defined(__ANDROID__)   // dotfiles-o72.4: also the x86-64 Linux harness (__ANDROID__ defined there, no Bionic)
 #include <ucontext.h>
 #define PLAT_APPLE 0
 #define PLAT_ANDROID 1
+#define PLAT_WINDOWS 0
 #define PLAT_MAC 0
 #define PLAT_IOS 0
 #else
@@ -37,6 +45,8 @@
 // A table the host collects at load time (hle.h HLE_FORCE, the swhle and swnvn tables): a Mach-O section in __DATA, an ELF section bounded by __start_ / __stop_
 #if PLAT_APPLE
 #define PLAT_TABLE(name) __attribute__((used, section("__DATA," #name)))
+#elif defined(_WIN32)   // a COFF grouped section: the linker sorts name$a, name$m, name$z into one section, and plat_windows.c bounds the table by markers in $a and $z
+#define PLAT_TABLE(name) __attribute__((used, section(#name "$m")))
 #else
 #define PLAT_TABLE(name) __attribute__((used, retain, section(#name)))
 #endif
@@ -154,6 +164,10 @@ PLAT_FN void plat_sem_signal(plat_sem_t *s);
 PLAT_FN int plat_sem_wait_ns(plat_sem_t *s, int64_t ns);   // 0 = taken; ns < 0 waits for ever
 PLAT_FN void plat_sem_destroy(plat_sem_t *s);
 PLAT_FN int plat_cond_timedwait_rel(pthread_cond_t *cv, pthread_mutex_t *mu, const struct timespec *rel);   // pthread_cond_timedwait for a relative time
+#if PLAT_WINDOWS   // Lichii: what the futex does elsewhere (WaitOnAddress): wait while *a is v, for at most ms (0, or -1 with errno ETIMEDOUT); wake one waiter
+int plat_addr_wait(_Atomic uint32_t *a, uint32_t v, uint32_t ms);
+void plat_addr_wake_one(_Atomic uint32_t *a);
+#endif
 // A serial work queue: jobs run one after another on a host thread, in the order they were queued
 typedef struct plat_queue plat_queue_t;
 PLAT_FN plat_queue_t *plat_queue_create(const char *name);

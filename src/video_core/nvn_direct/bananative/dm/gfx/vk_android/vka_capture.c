@@ -14,12 +14,15 @@
 #include "../../host/plat/plat.h"
 #include <errno.h>
 #include <math.h>
-#include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <zlib.h>
+#if defined(_WIN32)   // Lichii
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+#endif
 
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))

@@ -10,11 +10,13 @@
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
 // ways unchanged.
 
+#if !defined(_WIN32)
 #include <signal.h>
 #include <execinfo.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#endif
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -166,6 +168,10 @@ static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, uint64_t
 }
 static const dispatch_entry g_empty = {"(empty)", d_empty, 0};
 
+#if defined(_WIN32)
+// Windows: Lichii's own handler reports a crash with the faulting thread's stack (the Host crash line and eden_crash.dmp)
+static void crash_stack_install(void) {}
+#else
 // Lab (DM_VK_CRASH_STACK=1, dotfiles-25x.16): a crash outside the JIT writes the faulting thread's stack to stderr (addresses as eden-cli(+offset), for
 // llvm-symbolizer). The handler before it (dynarmic's, when it was there first) runs first and decides: a fastmem fault it handles returns as before
 static struct sigaction g_crash_old;
@@ -198,6 +204,7 @@ static void crash_stack_install(void) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &g_crash_old);
 }
+#endif
 
 // The game's NVN (nvn_direct_init): the front end and the replay choose NVN2's behaviour by
 // dm_sdk_ounce and NVN1's API version by dm_sdk_major (upstream's loader.c reads both from the sdk).

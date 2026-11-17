@@ -62,8 +62,10 @@
 #include "video_core/nvn_direct/nvn_direct.h"
 #include <chrono>
 #include <mutex>
+#ifndef _WIN32
 #include <dlfcn.h>
 #include <unistd.h>
+#endif
 #endif
 namespace Vulkan {
 namespace {
@@ -156,6 +158,20 @@ VkSurfaceFormatKHR ChooseOutputFormat(const vk::PhysicalDevice& physical, VkSurf
 }
 
 #ifdef LICHII_NVN_DIRECT
+#ifdef _WIN32
+// Under WDDM NVML has no figure for a process (nvml.h: usedGpuMemory is NVML_VALUE_NOT_AVAILABLE
+// there, as Windows' kernel driver manages the memory): the memory budget extension's
+class NvmlProcessMemory {
+public:
+    explicit NvmlProcessMemory(const Device&) {
+        LOG_INFO(Render_Vulkan, "NVN2 direct mode: VRAM use from the memory budget extension (NVML "
+                                "has no per-process figure under WDDM)");
+    }
+    u64 Get() {
+        return 0;
+    }
+};
+#else
 /// NVN2 direct mode (dotfiles-25x.8): NVML's figure for this process's video memory on the
 /// device (NVIDIA only; 0 elsewhere or when NVML has no entry for it). VK_EXT_memory_budget's heap
 /// usage leaves out what the driver keeps for itself: Mario Kart World's race showed 8.8 GiB of
@@ -249,6 +265,8 @@ private:
     u64 value{};
 };
 
+#endif
+
 struct NvnDirectMemory {
     const Device* device;
     NvmlProcessMemory nvml;
@@ -322,7 +340,11 @@ bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
             dir /= fmt::format("{:016x}", title);
         }
         if (Common::FS::CreateDirs(dir)) {
+#ifdef _WIN32
+            _putenv_s("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str()); // (getenv's environment)
+#else
             setenv("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str(), 0);
+#endif
         }
     }
     const bool up = nvn_direct_adopt_device(&adopted) != 0;
