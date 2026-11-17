@@ -184,8 +184,8 @@ void AppendLanded(Landed& landed, DAddr cpu_addr, u64 size, u64 tick, const Keep
 
 /// Takes out of the write-back records (begin, end, tick) of the page [page_begin, page_end) the
 /// bytes a write-back of [begin, end) at modification tick `tick` wrote, leaving the merged
-/// `keep` ranges as they were: of each record no newer and within it, only its parts in the kept
-/// ranges on the page stay, as they were otherwise. Those bytes still hold that record's data, at
+/// `keep` ranges as they were: each older record keeps its outside portions and its parts in the
+/// kept ranges on the page. Those bytes still hold that record's data, at
 /// its tick, also when that is older (the write-back kept a smaller image's that was written back
 /// after its own image loaded).
 template <typename Records, typename Keep>
@@ -193,18 +193,23 @@ void TrimOverwritten(Records& records, DAddr begin, DAddr end, u64 tick, const K
                      DAddr page_begin, DAddr page_end) {
     Records trimmed;
     for (const auto& record : records) {
-        if (record.tick > tick || record.begin < begin || end < record.end) {
+        if (record.tick > tick || record.end <= begin || end <= record.begin) {
             trimmed.push_back(record);
             continue;
         }
-        for (const auto& [keep_begin, keep_end] : keep) {
+        const auto preserve = [&](DAddr part_begin, DAddr part_end) {
             auto part = record;
-            part.begin = (std::max)({record.begin, keep_begin, page_begin});
-            part.end = (std::min)({record.end, keep_end, page_end});
+            part.begin = (std::max)({record.begin, part_begin, page_begin});
+            part.end = (std::min)({record.end, part_end, page_end});
             if (part.begin < part.end) {
                 trimmed.push_back(part);
             }
+        };
+        preserve(record.begin, begin);
+        for (const auto& [keep_begin, keep_end] : keep) {
+            preserve((std::max)(begin, keep_begin), (std::min)(end, keep_end));
         }
+        preserve(end, record.end);
     }
     records = std::move(trimmed);
 }

@@ -289,7 +289,10 @@ TEST_CASE("A write-back's records leave the bytes it kept to their data's tick",
     CHECK(has(0x1400, 0x1500, 9));
     CHECK_FALSE(has(0x1800, 0x1900, 4));
     CHECK(has(0x1c00, 0x1d00, 30));
-    CHECK(has(0x0800, 0x1100, 3));
+    CHECK_FALSE(has(0x0800, 0x1100, 3));
+    CHECK(std::ranges::none_of(records, [](const SourcedRecord& record) {
+        return record.tick == 3;
+    }));
     CHECK(has(0x1000, 0x1400, 20));
     CHECK(has(0x1500, 0x1c00, 20));
     CHECK(has(0x1d00, 0x2000, 20));
@@ -325,6 +328,29 @@ TEST_CASE("A write-back without kept bytes supersedes every older record within 
     CHECK(records.front().tick == 20);
 }
 
+TEST_CASE("A partial overwrite removes the old small source's ownership",
+          "[video_core][texture_cache][writeback]") {
+    constexpr DAddr base = 0x1000;
+    std::vector<SourcedRecord> records{{base, base + 100, 20, false, base, base + 100}};
+    NoteWriteback(records, base + 50, base + 250, 30, {});
+    const auto old = std::ranges::find_if(records, [](const SourcedRecord& record) {
+        return record.tick == 20;
+    });
+    REQUIRE(old != records.end());
+    CHECK(old->begin == base);
+    CHECK(old->end == base + 50);
+    CHECK(old->source_begin == base);
+    CHECK(old->source_end == base + 100);
+    std::vector<Range> keep;
+    for (const auto& record : records) {
+        if (!record.lost && record.tick > 10 && record.source_end - record.source_begin < 180) {
+            keep.emplace_back((std::max)(record.begin, base),
+                              (std::min)(record.end, base + 180));
+        }
+    }
+    CHECK(keep == std::vector<Range>{{base, base + 50}});
+}
+
 TEST_CASE("An older record the write-back kept part of keeps that part",
           "[video_core][texture_cache][writeback]") {
     // [0x1300, 0x1480) at tick 8, lost, of an image over [0x1300, 0x1480); the write-back at tick
@@ -342,6 +368,29 @@ TEST_CASE("An older record the write-back kept part of keeps that part",
     CHECK(part->source_begin == 0x1300);
     CHECK(part->source_end == 0x1480);
     CHECK(std::ranges::count_if(records, [](const SourcedRecord& r) { return r.tick == 8; }) == 1);
+}
+
+TEST_CASE("A partial overwrite preserves both outside portions and kept intersections",
+          "[video_core][texture_cache][writeback]") {
+    const SourcedRecord source{0x1020, 0x1200, 20, true, 0x1020, 0x1200};
+    std::vector<SourcedRecord> records{source};
+    const std::vector<Range> keep{{0x1040, 0x1080}, {0x1130, 0x1160}};
+    TrimOverwritten(records, 0x1050, 0x1150, 30, keep, 0x1000, 0x2000);
+    REQUIRE(records.size() == 4);
+    CHECK(records[0].begin == 0x1020);
+    CHECK(records[0].end == 0x1050);
+    CHECK(records[1].begin == 0x1050);
+    CHECK(records[1].end == 0x1080);
+    CHECK(records[2].begin == 0x1130);
+    CHECK(records[2].end == 0x1150);
+    CHECK(records[3].begin == 0x1150);
+    CHECK(records[3].end == 0x1200);
+    for (const auto& part : records) {
+        CHECK(part.tick == source.tick);
+        CHECK(part.lost == source.lost);
+        CHECK(part.source_begin == source.source_begin);
+        CHECK(part.source_end == source.source_end);
+    }
 }
 
 TEST_CASE("An older record over two pages keeps on each only its kept part there",
