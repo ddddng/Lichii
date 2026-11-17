@@ -1178,7 +1178,7 @@ static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind |
 #if defined(__ANDROID__)
 // NVN2 mesh draw: count task workgroups (or mesh workgroups when the program has no task shader) from first, with the bound program's task and mesh shaders. A draw like the
 // others (it opens and joins render passes the same way); the Vulkan replay draws it with vkCmdDrawMeshTasksEXT (vka_draw.c). The signature is the game's calls' (switch2mac
-// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). The indirect, 3D and multi-draw variants keep the unimplemented stub (a red line when one is called)
+// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). The indirect, 3D and multi-draw variants are at the end of the file (s3-tex)
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){NVN_PRIM_MESH, first, count, 1, 0, 0}); }
 // Depth bounds test (Mario Kart World sets it ~1,300 times a frame): the Vulkan replay applies it as dynamic state (vka_draw.c); the Mac host keeps it empty (g_nops)
 NVN(nvnCommandBufferSetDepthBounds, void, NVNcommandBuffer *c, uint32_t en, float lo, float hi) { *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){(en & 0xff) != 0, lo, hi}; }
@@ -2345,3 +2345,85 @@ int nvn_host_signal_sync(void *nvnsync) {
     o->fence = 0; o->fenced = 1; return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush
+
+// ---------- s3-tex: mesh draws, texture clears / resolves / readback, descriptor table writes, views ----------
+// Signatures and meanings of the NVN2-only calls are derived from the NVN2 driver in OoT's sdk NSO (functions at sdk+0x..., nvn_protos.h)
+#if defined(__ANDROID__)
+// The other mesh draws, recorded as DrawMeshTasks is (nvn_obj.h NVN_PRIM_MESH / NVN_PRIM_MESH_3D) and drawn with vkCmdDrawMeshTasks*EXT (vka_draw.c). An indirect draw's
+// records are written by the GPU earlier in the frame: {count, first} for the one-dimensional draws (the words DrawMeshTasks writes, sdk+0x681470), {x, y, z} for the 3D ones
+NVN(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){NVN_PRIM_MESH, 0, 0, 1, 0, ind}); }
+NVN(nvnCommandBufferDrawMeshTasks3D, void, NVNcommandBuffer *c, int x, int y, int z) { rec_draw(c, (p_draw){NVN_PRIM_MESH_3D, 0, x, y, z}); }
+NVN(nvnCommandBufferDrawMeshTasks3DIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){NVN_PRIM_MESH_3D, 0, 0, 1, 0, ind}); }
+// Multi-draws: n records stride bytes apart, at most the u32 at cnt of them for the Count forms; one record for the whole call
+static void rec_mesh_multi(NVNcommandBuffer *c, int prim, NVNbufferAddress ind, NVNbufferAddress cnt, int n, ptrdiff_t stride) {
+    if (n <= 0) return;
+    if (stride <= 0 || stride > INT32_MAX) { ONCE_LOG("[RED] mesh multi-draw with stride %td: dropped", stride); return; }
+    rec_draw(c, (p_draw){prim, 0, 0, 1, 0, ind, cnt, 0, n, (int32_t)stride});
+}
+NVN(nvnCommandBufferMultiDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind, int n, ptrdiff_t stride) { rec_mesh_multi(c, NVN_PRIM_MESH, ind, 0, n, stride); }
+NVN(nvnCommandBufferMultiDrawMeshTasksIndirectCount, void, NVNcommandBuffer *c, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) { rec_mesh_multi(c, NVN_PRIM_MESH, ind, cnt, max, stride); }
+NVN(nvnCommandBufferMultiDrawMeshTasks3DIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind, int n, ptrdiff_t stride) { rec_mesh_multi(c, NVN_PRIM_MESH_3D, ind, 0, n, stride); }
+NVN(nvnCommandBufferMultiDrawMeshTasks3DIndirectCount, void, NVNcommandBuffer *c, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) { rec_mesh_multi(c, NVN_PRIM_MESH_3D, ind, cnt, max, stride); }
+#endif
+// A clear with signed integer values: their bits, as ClearTextureui's (the replay's clear_tex puts them in the clear value as they are)
+NVN(nvnCommandBufferClearTexturei, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const int *rgba, int mask) {
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, nvn_caller()); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 2; memcpy(o->c.u, rgba, 16);
+}
+// The tiled cache's multisample resolve (sdk+0x698a00: the plain form passes the view arguments as null into the view form's resolve): the same resolve as Downsample
+NVN(nvnCommandBufferTiledDownsample, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtexture *d) { rec_downsample(c, s, NULL, d, NULL, nvn_caller()); }
+NVN(nvnCommandBufferTiledDownsampleTextureView, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNtexture *d, const NVNtextureView *dv) {
+    rec_downsample(c, s, sv, d, dv, nvn_caller());
+}
+// The driver sends one method, DECOMPRESS_ZETA_SURFACE = 1 (sdk+0x684fa0: 3D method 0x11fc): the bound depth buffer's compressed tiles are expanded in place, its values unchanged.
+// The host's depth images have no compression the game can see, so their content already is the expanded one
+NVN(nvnCommandBufferResolveDepthBuffer, void, NVNcommandBuffer *c) { (void)c; }
+// Whether two views select the same thing: the same parts set, each set part equal (sdk+0x66b0b0 compares the set bits first, then each set field). After nxnative (MIT)
+NVN(nvnTextureViewCompare, NVNboolean, const NVNtextureView *a, const NVNtextureView *b) {
+    const view_t *x = (const view_t *)a, *y = (const view_t *)b;
+    return x->set_levels == y->set_levels && x->set_layers == y->set_layers && x->set_format == y->set_format && x->set_target == y->set_target && x->set_swizzle == y->set_swizzle && x->set_dsmode == y->set_dsmode
+        && (!x->set_levels || (x->base_level == y->base_level && x->nlevels == y->nlevels)) && (!x->set_layers || (x->min_layer == y->min_layer && x->nlayers == y->nlayers))
+        && (!x->set_format || x->format == y->format) && (!x->set_target || x->target == y->target) && (!x->set_swizzle || !memcmp(x->swz, y->swz, sizeof x->swz)) && (!x->set_dsmode || x->dsmode == y->dsmode);
+}
+NVN(nvnTextureBuilderSetGLTextureName, void, NVNtextureBuilder *b, uint32_t name) { TB(b)->gl_name = name; }   // (sdk+0x66a730 stores it for its getter)
+// Raw descriptor words (sdk+0x66c760 / 0x6682e0): n bytes from words into the pool's memory at entry id's 32 bytes + off, as the driver copies them. The sampler pool's entries
+// they reach are decoded as an Ampere TSC and registered as SamplerPoolRegisterSampler registers a sampler; texture headers (TIC) are not decoded: the IDs keep what was registered
+static int desc_write(const dpool_t *p, int id, ptrdiff_t off, size_t n, const void *words, const char *kind, int *first, int *last) {
+    const uint64_t at = (uint64_t)id * 32 + (uint64_t)off;
+    if (id < 0 || off < 0 || (n & 3) || at + n > (uint64_t)p->n * 32 || !p->pool || !p->pool->mem) {
+        ONCE_LOG("[RED] %sPoolWriteDescriptorTableData: id %d offset %td, %zu bytes outside the pool's %d entries (or no storage): not written", kind, id, off, n, p->n); return 0; }
+    if (!n) return 0;
+    uint8_t *dst = p->pool->mem + p->off + at;
+    dm_guest_write_prepare(dst, n); memcpy(dst, words, n);
+    *first = (int)(at / 32); *last = (int)((at + n - 1) / 32);
+    return 1;
+}
+NVN(nvnTexturePoolWriteDescriptorTableData, void, const NVNtexturePool *tp, int id, ptrdiff_t off, size_t n, const void *words) {
+    int first, last;
+    if (desc_write((const dpool_t *)tp, id, off, n, words, "Texture", &first, &last))
+        ONCE_LOG("[RED] TexturePoolWriteDescriptorTableData: raw texture headers are written to the pool's memory, not decoded (no Ampere TIC to NVN format table): IDs %d-%d keep what was registered", first, last);
+}
+static samp_par tsc_decode(const uint32_t w[8]) {   // an Ampere TSC entry (the base renderer's Tegra::Texture::TSCEntry)
+    static const uint8_t wrap[8] = {NVN_WRAP_MODE_REPEAT, NVN_WRAP_MODE_MIRRORED_REPEAT, NVN_WRAP_MODE_CLAMP_TO_EDGE, NVN_WRAP_MODE_CLAMP_TO_BORDER, NVN_WRAP_MODE_CLAMP,
+                                    NVN_WRAP_MODE_MIRROR_CLAMP_TO_EDGE, NVN_WRAP_MODE_MIRROR_CLAMP_TO_BORDER, NVN_WRAP_MODE_MIRROR_CLAMP};
+    static const float aniso[8] = {1, 2, 4, 6, 8, 10, 12, 16};
+    samp_par o; memset(&o, 0, sizeof o);
+    o.ws = wrap[w[0] & 7]; o.wt = wrap[w[0] >> 3 & 7]; o.wr = wrap[w[0] >> 6 & 7];
+    o.cmp_mode = w[0] >> 9 & 1 ? NVN_COMPARE_MODE_COMPARE_R_TO_TEXTURE : NVN_COMPARE_MODE_NONE; o.cmp_func = (uint8_t)((w[0] >> 10 & 7) + NVN_COMPARE_FUNC_NEVER);
+    o.aniso = aniso[w[0] >> 20 & 7];
+    const unsigned mag = w[1] & 3, min = w[1] >> 4 & 3, mip = w[1] >> 6 & 3;   // filters: 1 nearest, 2 linear; mip: 1 none, 2 nearest, 3 linear
+    o.magf = mag == 2 ? NVN_MAG_FILTER_LINEAR : NVN_MAG_FILTER_NEAREST;
+    o.minf = (uint8_t)((mip == 3 ? NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR : mip == 2 ? NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST : NVN_MIN_FILTER_NEAREST) + (min == 2 ? 1 : 0));
+    o.reduction = (uint8_t)(w[1] >> 10 & 3);
+    o.lod_bias = (float)((int32_t)(w[1] << 7) >> 19) / 256.0f;   // 13 bits from bit 12, signed
+    o.lod_min = (float)(w[2] & 0xfff) / 256.0f; o.lod_max = (float)(w[2] >> 12 & 0xfff) / 256.0f;
+    memcpy(o.border, &w[4], 16);
+    return o;
+}
+NVN(nvnSamplerPoolWriteDescriptorTableData, void, const NVNsamplerPool *sp, int id, ptrdiff_t off, size_t n, const void *words) {
+    const dpool_t *p = (const dpool_t *)sp; int first, last;
+    if (!desc_write(p, id, off, n, words, "Sampler", &first, &last)) return;
+    for (int i = first; i <= last; i++) {
+        uint32_t w[8]; memcpy(w, p->pool->mem + p->off + (uint64_t)i * 32, 32);
+        samp_par s = tsc_decode(w); mtl_reg_samp(dpool_base(g_spb, g_nspb, sp) + i, &s);
+    }
+}

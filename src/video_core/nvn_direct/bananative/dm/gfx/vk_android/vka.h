@@ -48,6 +48,7 @@
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) \
+    X(vkCmdDrawMeshTasksIndirectEXT) X(vkCmdDrawMeshTasksIndirectCountEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds) \
     X(vkGetMemoryHostPointerPropertiesEXT) X(vkGetMemoryFdPropertiesKHR)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
     X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */
@@ -94,11 +95,11 @@ typedef struct {
     void *perf_hint;                                // vkQueueSetPerfHintQCOM (VK_QCOM_queue_perf_hint), NULL without it: vka_gpu_floor
     // The draw path's device facts: push descriptors (and how many a set may hold), vertex input dynamic state, robustness2's null descriptors, 8-bit indices,
     // instance-rate divisors, logic operations, dual-source blending, geometry and tessellation stages, depth clamp, fill mode lines, wide lines
-    int push_desc, vin_dyn, null_desc, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, fill_lines, depth_bias_clamp, multi_vp, a2c, depth_bounds, draw_indirect_count;
+    int push_desc, vin_dyn, null_desc, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, fill_lines, depth_bias_clamp, multi_vp, a2c, depth_bounds, draw_indirect_count, multi_draw_indirect;
     // NVN2 task and mesh programs (VK_EXT_mesh_shader: mesh = meshShader, task = taskShader too; DM_VK_MESH=0 leaves it off): their shaders are refused without it (vka_shader.c refusal)
     // and their draws skipped. mesh_inv / task_inv: the largest workgroup (maxMeshWorkGroupInvocations / maxTaskWorkGroupInvocations); mesh_out_v / mesh_out_p: the most vertices /
-    // primitives a mesh workgroup may output; task_payload: maxTaskPayloadSize; task_groups / mesh_groups: maxTaskWorkGroupCount[0] / maxMeshWorkGroupCount[0] (a draw's count)
-    int mesh, task; uint32_t mesh_inv, task_inv, mesh_out_v, mesh_out_p, task_payload, task_groups, mesh_groups;
+    // primitives a mesh workgroup may output; task_payload: maxTaskPayloadSize; task_groups / mesh_groups: maxTaskWorkGroupCount / maxMeshWorkGroupCount (a draw's counts, per dimension)
+    int mesh, task; uint32_t mesh_inv, task_inv, mesh_out_v, mesh_out_p, task_payload, task_groups[3], mesh_groups[3];
     int gpl;                                        // graphics pipeline libraries with fast linking (VK_EXT_graphics_pipeline_library): a pipeline the cache lacks is linked from stage libraries at once, the optimized one made in the background (vka_pso.c)
     uint32_t max_push, max_vin_bindings, subgroup_size, subgroup_min, subgroup_max, subgroup_stages;   // subgroup_stages: VkShaderStageFlags with subgroup operations
     uint32_t subgroup_req_stages;                   // VkShaderStageFlags a pipeline may pin the subgroup size in (requiredSubgroupSizeStages; 0 without subgroupSizeControl)

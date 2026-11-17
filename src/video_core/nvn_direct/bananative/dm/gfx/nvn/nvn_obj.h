@@ -33,6 +33,7 @@ typedef struct {
     const void *pkg_data;                // TextureBuilderSetPackagedTextureData: copied into the storage at TextureInitialize (13 Sentinels)
     uint8_t set_swz : 1, stencil : 1; uint16_t swz;   // TextureBuilderSetSwizzle: r | g << 3 | b << 6 | a << 9 (NVN and Metal channel enums have the same values: 0 zero 1 one 2 R 3 G 4 B 5 A);
                                          // stencil: TextureBuilderSetDepthStencilMode STENCIL (the texture reads the stencil of its depth-stencil storage, as a stencil-mode view does)
+    uint32_t gl_name;                    // TextureBuilderSetGLTextureName: kept for its getter (there is no GL)
 } tex_builder_t;                                                                             FITS(tex_builder_t, NVNtextureBuilder);
 // Field order packed to 0x80: newer SDKs (SMBW, NVN 55) allocate NVNtexture as 0x80 bytes (allocated from main 0x978c3c, initialized at 0x978cd4);
 // the former 0x88 wrote past the object's end and corrupted the adjacent heap block's free list. has_layout sits in the alignment gap after d, layout and serial fill up to 0x80.
@@ -173,6 +174,9 @@ typedef struct { float factor, units, clamp; } p_poly_offset;
 // p_draw.prim of an NVN2 nvnCommandBufferDrawMeshTasks (first, count: task workgroups, or mesh workgroups for a program without a task shader): outside NVN's primitives.
 // Recorded on Android only, where the Vulkan replay draws it through a mesh pipeline (vka_draw.c); the Mac host keeps the unimplemented stub (after switch2mac, MIT)
 #define NVN_PRIM_MESH 0x100
+// Lichii: the other mesh draws (hle_nvn.c, lane s3). Indirect: ind = the records, {count, first} for NVN_PRIM_MESH, {x, y, z} for NVN_PRIM_MESH_3D; a multi-draw is one record
+// with mdi_max draws mdi_stride bytes apart and mdi_cnt the u32 count's address (0: all mdi_max), mdi_i 0. NVN_PRIM_MESH_3D direct: x, y, z in count, instances, base_instance
+#define NVN_PRIM_MESH_3D 0x101
 typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i, mdi_max, mdi_stride, pad; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw of at most mdi_max records mdi_stride bytes apart (drawn only while mdi_i < the u32 at mdi_cnt)
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf, ind; uint64_t mdi_cnt; int32_t mdi_i, mdi_max, mdi_stride, pad; } p_draw_idx;   // ind != 0: DrawElementsIndirect, {count, instances, first index, base vertex, base instance} read by the GPU from that address; mdi_cnt: as in p_draw
 // A draw record stops before ind unless it is an indirect draw or a multi-draw (hle_nvn.c rec_draw); read it with draw_rec / draw_idx_rec, which give the missing fields as 0.
