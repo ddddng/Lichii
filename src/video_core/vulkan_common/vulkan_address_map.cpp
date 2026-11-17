@@ -34,9 +34,7 @@ AddressMap& AddressMap::Get() {
 void AddressMap::Bind(u64 base, u64 size, const char* type, u64 handle, bool internal,
                       Clock::time_point now) {
     std::scoped_lock lock{mutex};
-    if (live_per_handle[handle]++ == 0) {
-        names.erase(handle);
-    }
+    ++live_per_handle[handle];
     live.emplace(base, Binding{base, size, handle, type, internal, now, {}, {}});
 }
 
@@ -56,6 +54,7 @@ void AddressMap::Unbind(u64 base, u64 size, u64 handle, Clock::time_point now) {
         if (const auto count = live_per_handle.find(handle);
             count != live_per_handle.end() && --count->second == 0) {
             live_per_handle.erase(count);
+            names.erase(handle);
         }
         unbound.push_back(std::move(binding));
         if (unbound.size() > MaxUnbound) {
@@ -67,7 +66,9 @@ void AddressMap::Unbind(u64 base, u64 size, u64 handle, Clock::time_point now) {
 
 void AddressMap::Name(u64 handle, std::string name) {
     std::scoped_lock lock{mutex};
-    names[handle] = std::move(name);
+    if (live_per_handle.contains(handle)) {
+        names[handle] = std::move(name);
+    }
 }
 
 size_t AddressMap::LiveCount() const {
@@ -75,9 +76,9 @@ size_t AddressMap::LiveCount() const {
     return live.size();
 }
 
-std::string AddressMap::Label(const Binding& binding) const {
+std::string AddressMap::Label(const Binding& binding, bool is_live) const {
     std::string name = binding.name;
-    if (name.empty()) {
+    if (is_live) {
         if (const auto it = names.find(binding.handle); it != names.end()) {
             name = it->second;
         }
@@ -94,8 +95,9 @@ std::string AddressMap::Describe(u64 address, Clock::time_point now) const {
     const Binding* above = nullptr;
     for (const auto& [base, binding] : live) {
         if (base <= address && address - base < binding.size) {
-            parts.push_back(fmt::format("in live {} at +{:#x}, bound {} ms before", Label(binding),
-                                        address - base, Milliseconds(now - binding.bound)));
+            parts.push_back(fmt::format("in live {} at +{:#x}, bound {} ms before",
+                                        Label(binding, true), address - base,
+                                        Milliseconds(now - binding.bound)));
         } else if (base + binding.size <= address) {
             if (!below || base + binding.size > below->base + below->size) {
                 below = &binding;
@@ -110,7 +112,7 @@ std::string AddressMap::Describe(u64 address, Clock::time_point now) const {
     for (auto it = unbound.rbegin(); it != unbound.rend() && parts.size() < 3; ++it) {
         if (it->base <= address && address - it->base < it->size) {
             parts.push_back(fmt::format("in freed {} at +{:#x}, unbound {} ms before after {} ms bound",
-                                        Label(*it), address - it->base,
+                                        Label(*it, false), address - it->base,
                                         Milliseconds(now - it->unbound),
                                         Milliseconds(it->unbound - it->bound)));
         }
@@ -121,10 +123,11 @@ std::string AddressMap::Describe(u64 address, Clock::time_point now) const {
     std::string text = "in no binding the driver reported";
     if (below) {
         text += fmt::format(", {:#x} bytes past the end of live {}",
-                            address - (below->base + below->size), Label(*below));
+                            address - (below->base + below->size), Label(*below, true));
     }
     if (above) {
-        text += fmt::format(", {:#x} bytes below live {}", above->base - address, Label(*above));
+        text +=
+            fmt::format(", {:#x} bytes below live {}", above->base - address, Label(*above, true));
     }
     return text;
 }

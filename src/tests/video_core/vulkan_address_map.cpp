@@ -35,6 +35,18 @@ TEST_CASE("AddressMap names the freed binding that held a fault address", "[vide
     REQUIRE(text.find("unbound 5 ms before after 1000 ms bound") != std::string::npos);
 }
 
+TEST_CASE("AddressMap keeps a freed unnamed binding unnamed when its handle is reused",
+          "[video_core]") {
+    AddressMap map;
+    map.Bind(0x4000, 0x1000, "buffer", 0x77, false);
+    map.Unbind(0x4000, 0x1000, 0x77);
+    map.Bind(0x9000, 0x1000, "image", 0x77, false);
+    map.Name(0x77, "Image 0x500000");
+    const std::string text = map.Describe(0x4800);
+    REQUIRE(text.find("in freed buffer 0x77 [0x4000, 0x5000)") == 0);
+    REQUIRE(text.find("Image 0x500000") == std::string::npos);
+}
+
 TEST_CASE("AddressMap lists every live binding over an address", "[video_core]") {
     AddressMap map;
     map.Bind(0x200000000, 0x100000, "device memory", 0x1, false);

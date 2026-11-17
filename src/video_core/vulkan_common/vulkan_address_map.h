@@ -30,7 +30,7 @@ public:
     void Bind(u64 base, u64 size, const char* type, u64 handle, bool internal,
               Clock::time_point now = Clock::now());
     void Unbind(u64 base, u64 size, u64 handle, Clock::time_point now = Clock::now());
-    /// Debug name of an object, set after its memory is bound.
+    /// Debug name of a bound object (names are set after binding), kept until its last unbind.
     void Name(u64 handle, std::string name);
 
     /// What the map knows about the GPU address: the live bindings that hold it, else the latest
@@ -50,7 +50,7 @@ private:
         std::string name;
     };
 
-    [[nodiscard]] std::string Label(const Binding& binding) const;
+    [[nodiscard]] std::string Label(const Binding& binding, bool is_live) const;
 
     mutable std::mutex mutex;
     std::multimap<u64, Binding> live;
