@@ -989,7 +989,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // NVN2 direct mode (dotfiles-25x.2): what the replay (nvn_direct/bananative/dm/gfx/vk_android)
     // needs beyond the emulator's device: dynamic rendering (it refuses to start without),
     // graphics pipeline libraries, host memory import for the guest's memory pools, and up to
-    // four queues of the graphics family: one per NVN queue plus its own work on queue 0, which
+    // 16 queues of the graphics family: one per NVN queue plus its own work on queue 0, which
     // is Lichii's. robustBufferAccess stays on (Lichii requires it; the replay turns it off on
     // its own device).
     VkPhysicalDeviceDynamicRenderingFeatures direct_dynamic_rendering{

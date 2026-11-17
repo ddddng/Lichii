@@ -1395,7 +1395,7 @@ private:
     vk::PhysicalDevice physical; ///< Physical device.
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
-    static constexpr u32 NvnDirectMaxQueues = 4;
+    static constexpr u32 NvnDirectMaxQueues = 16; ///< NVN_DIRECT_MAX_QUEUES (nvn_direct.h)
     bool nvn_direct{};                                        ///< NVN2 direct mode
     std::array<VkQueue, NvnDirectMaxQueues> nvn_direct_queues{}; ///< NVN2 direct mode
     u32 nvn_direct_queue_count{};                             ///< NVN2 direct mode

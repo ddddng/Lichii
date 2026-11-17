@@ -184,8 +184,9 @@ static int init_once(void) {
     V.bda = f12.bufferDeviceAddress; V.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound && f12.runtimeDescriptorArray;
     V.placed = placed && fmp.memoryMapPlaced; V.placed_range = placed && fmp.memoryMapRangePlaced; V.unmap_reserve = placed && fmp.memoryUnmapReserve;
     float prio = 1.f;
-    // One Vulkan queue per NVN queue (up to 4 of the family's; DM_VK_MULTIQUEUE=0: one queue, every NVN queue in its FIFO as before)
-    V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 1) ? (int)(fam_queues < 4 ? fam_queues : 4) : 1; if (V.nq < 1) V.nq = 1;
+    // One Vulkan queue per NVN queue (DM_VK_MULTIQUEUE=0: one queue, every NVN queue in its FIFO as before). Lichii: every queue of the family Lichii made, up to
+    // NVN_DIRECT_MAX_QUEUES (four until 2026-11-17, enough for Mario Kart World's three NVN queues; Ocarina of Time keeps six)
+    V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 1) ? (int)(fam_queues < NVN_DIRECT_MAX_QUEUES ? fam_queues : NVN_DIRECT_MAX_QUEUES) : 1; if (V.nq < 1) V.nq = 1;
     float prios[4] = {1.f, 1.f, 1.f, 1.f}; (void)prio;
     (void)prios; (void)dext; (void)ndext;
     V.dev = g_adopt.device;   // Lichii's device (see above)
@@ -455,7 +456,7 @@ static void post_run_one(uint64_t f) {
 // Returns the fences that completed in this pass (*pending: the first one not done yet, 0 = none)
 static int multi_pass(uint64_t done, uint64_t sub, uint64_t *pending) {
     static struct { int q; uint64_t qv; } fq[POST_RING];   // (at most POST_RING fences are pending: vka_fence_post)
-    uint64_t qc[4] = {0}; int n = 0; *pending = 0;
+    uint64_t qc[NVN_DIRECT_MAX_QUEUES] = {0}; int n = 0; *pending = 0;
     if (sub - done > POST_RING) sub = done + POST_RING;
     for (int i = 0; i < V.nq; i++) vk.vkGetSemaphoreCounterValue(V.dev, V.qtl[i], &qc[i]);
     vka_qlock();
@@ -473,7 +474,7 @@ static int multi_pass(uint64_t done, uint64_t sub, uint64_t *pending) {
     return n;
 }
 static void multi_wait(void) {   // until any NVN queue's timeline moves (or 0.5 s)
-    VkSemaphore sems[4]; uint64_t vals[4]; uint32_t n = 0;
+    VkSemaphore sems[NVN_DIRECT_MAX_QUEUES]; uint64_t vals[NVN_DIRECT_MAX_QUEUES]; uint32_t n = 0;
     for (int i = 0; i < V.nq - 1; i++) { uint64_t c = 0; vk.vkGetSemaphoreCounterValue(V.dev, V.qtl[i], &c); if (V.qseq[i] > c) { sems[n] = V.qtl[i]; vals[n++] = c + 1; } }
     if (!n) { struct timespec ts = {0, 200000}; nanosleep(&ts, NULL); return; }   // (a fence handed to the queue but not recorded yet)
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .flags = VK_SEMAPHORE_WAIT_ANY_BIT, .semaphoreCount = n, .pSemaphores = sems, .pValues = vals};

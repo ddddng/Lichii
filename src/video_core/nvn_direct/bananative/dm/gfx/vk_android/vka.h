@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include "../nvn/nvn_obj.h"
 #include "../../host/dm.h"
+#include "nvn_direct.h"   // Lichii: NVN_DIRECT_MAX_QUEUES
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
 #define VRED(...) LOG("[RED] vk: " __VA_ARGS__)
@@ -110,7 +111,7 @@ typedef struct {
     VkSemaphore tl;                                 // the timeline: value n = submission n has completed
     // NVN queues as Vulkan queues (dotfiles-25x.4/.14, DM_VK_MULTIQUEUE): qs[0] = q; with multi, each submission signals its queue's timeline qtl[i] and the completion thread
     // signals tl in fence order once the queue's value is reached (submissions on different queues complete in any order; tl stays in order for everything that waits on it)
-    VkQueue qs[4]; VkSemaphore qtl[4]; uint64_t qseq[4]; int nq, multi;
+    VkQueue qs[NVN_DIRECT_MAX_QUEUES]; VkSemaphore qtl[NVN_DIRECT_MAX_QUEUES]; uint64_t qseq[NVN_DIRECT_MAX_QUEUES]; int nq, multi;
     pthread_mutex_t qmu;                            // the queue is shared by the submit and present threads
     int sparse_res;                                 // sparse residency images can be made (vka_sparse.c): binding on the queue, 2D residency, standard block shape, strict non-resident reads
     uint64_t tl_queued;                             // the highest timeline value a vkQueueSubmit so far signals (under qmu): what a later submission on the queue may wait for

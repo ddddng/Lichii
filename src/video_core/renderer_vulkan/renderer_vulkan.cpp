@@ -255,7 +255,7 @@ struct NvnDirectMemory {
 };
 
 /// NVN2 direct mode (dotfiles-25x.2): the replay runs on this device. Its NVN queues take the
-/// graphics family's queues 1-3, its own work (uploads, sparse binds) queue 0 with Lichii; every
+/// graphics family's queues from 1 on, its own work (uploads, sparse binds) queue 0 with Lichii; every
 /// submission of the replay holds the scheduler's submit lock. Returns whether the replay is up.
 bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
                     Scheduler& scheduler, NvnDirectAstc* astc, NvnDirectShaders& shaders,

@@ -22,8 +22,9 @@
 extern "C" {
 #endif
 
-/// At most this many queues of the graphics family are handed to the replay.
-#define NVN_DIRECT_MAX_QUEUES 4
+/// At most this many queues of the graphics family are handed to the replay (NVIDIA's family has
+/// 16): one per NVN queue the game keeps alive, plus the replay's own work.
+#define NVN_DIRECT_MAX_QUEUES 16
 
 /// One level of one layer of an ASTC texture on a device without ASTC (dotfiles-25x.8): its
 /// block-linear ASTC blocks as the game stored them, decoded and re-compressed to BC on the GPU

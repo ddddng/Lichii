@@ -81,9 +81,11 @@ void vka_rp_queue_activate(uint64_t serial) {
     for (i = 0; i < g_nqs; i++) if (g_qs[i].serial == serial) { S = g_qs[i]; return; }
     memset(&S, 0, sizeof S); S.serial = serial;
 }
+static void queue_drop(uint64_t serial);
 void vka_rp_queue_forget(uint64_t serial) {
     for (int i = 0; i < g_nqs; i++) if (g_qs[i].serial == serial) { g_qs[i] = g_qs[--g_nqs]; break; }
     if (S.serial == serial) memset(&S, 0, sizeof S);
+    queue_drop(serial);   // (its Vulkan queue goes to the next NVN queue made: work of it still there runs first, in queue order)
 }
 
 static void post(pop o) {
@@ -271,16 +273,27 @@ typedef struct { uint32_t nw, ns; VkSemaphore ws[PWS], ss[PWS]; uint64_t wv[PWS]
 typedef struct { VkCommandBuffer cb; uint32_t q; int queue; part_sync sy; } part_arg;   // q: the part's bottom (part_submit) or top (part_begin) timestamp query, UINT32_MAX = none; queue: its Vulkan queue
 static part_sync g_psy;   // the part being recorded
 static int g_qi;          // the submission's Vulkan queue (vka_rp_sub_begin: its NVN queue's)
-// The Vulkan queue of an NVN queue (V.multi): queues in the order they first submit; past the last Vulkan queue they share it (Lichii: g_qshared, a bit per shared one)
-static unsigned g_qshared;
-static int queue_of(uint64_t serial) {
-    static uint64_t ser[16]; static int n;
-    if (!V.multi) return 0;
-    for (int i = 0; i < n; i++) if (ser[i] == serial) return i % (V.nq - 1);
-    if (n >= V.nq - 1) g_qshared |= 1u << (n < 16 ? n % (V.nq - 1) : 0);
-    if (n < 16) { ser[n] = serial; VLOG("NVN queue %llu on Vulkan queue %d", (unsigned long long)serial, n % (V.nq - 1)); return n++ % (V.nq - 1); }
-    return 0;
+// The Vulkan queue of an NVN queue (V.multi), given at its first submission. Lichii: the one the fewest live NVN queues use (one of its own while the family has enough), given
+// back when the NVN queue is finalized (vka_rp_queue_forget); NVN queues past the Vulkan queues share them. g_qshared: a bit per Vulkan queue more than one live NVN queue uses
+enum { NQT = 32 };
+static struct { uint64_t serial; int q; } g_qt[NQT];   // the live NVN queues (serial 0: a free entry)
+static unsigned g_qshared; static int g_qt_full;       // full: an NVN queue found no entry, so any Vulkan queue may be shared
+static void qt_shared(void) {
+    int n[NVN_DIRECT_MAX_QUEUES] = {0}; g_qshared = g_qt_full ? ~0u : 0;
+    for (int i = 0; i < NQT; i++) if (g_qt[i].serial && ++n[g_qt[i].q] > 1) g_qshared |= 1u << g_qt[i].q;
 }
+static int queue_of(uint64_t serial) {
+    if (!V.multi) return 0;
+    int n[NVN_DIRECT_MAX_QUEUES] = {0}, f = -1, q = 0;
+    for (int i = 0; i < NQT; i++) { if (g_qt[i].serial == serial) return g_qt[i].q; if (g_qt[i].serial) n[g_qt[i].q]++; else if (f < 0) f = i; }
+    for (int i = 1; i < V.nq - 1; i++) if (n[i] < n[q]) q = i;
+    if (f < 0) { g_qt_full = 1; VRED_ONCE("more than %d live NVN queues: Vulkan queues are taken as shared from now on", NQT); }
+    else { g_qt[f].serial = serial; g_qt[f].q = q; }
+    qt_shared();
+    VLOG("NVN queue %llu on Vulkan queue %d%s", (unsigned long long)serial, q, n[q] ? " (shared)" : "");
+    return q;
+}
+static void queue_drop(uint64_t serial) { for (int i = 0; i < NQT; i++) if (g_qt[i].serial == serial) { g_qt[i].serial = 0; qt_shared(); } }
 void vka_rp_sub_begin(void) {
     uint64_t t_o72b = now_ns();
     vka_perf_thread(0); vka_ctl_sub();
