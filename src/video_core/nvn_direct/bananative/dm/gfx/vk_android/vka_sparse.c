@@ -8,11 +8,20 @@
 // per tile of its tiled levels a 64 KiB slot of a 64 MiB tile block is bound while the page table has any page of the tile mapped, and unbound when it has none (strict
 // non-resident reads: an unbound tile reads 0, as an unmapped page reads on the Switch). Levels Vulkan tiles but NVN packs into its mip tail are bound whole, and the mip tail too.
 // Order: binds are queued here and go to the queue with vkQueueBindSparse right before the next submission of the replay or of an upload batch (vks_queue_locked, under V.qmu).
-// A bind batch waits for every submission handed to the queue before it (none still reads a tile it unbinds or rebinds): an empty vkQueueSubmit first signals the sparse
-// timeline at a value of its own, which by queue order covers everything submitted before (replay parts that signal nothing, upload batches, framegen), after the batch before
-// it; the bind waits for that value only and signals the next. Every later submission of the replay and of the upload batches waits for the bind's value, so the tiles are
-// bound before the copies that fill them and the draws that read them. A batch that fails keeps its binds (and the slots its unbinds free) for the next one. A slot unbound is reused only by a later batch; a tile block is freed once empty and the batch that emptied it has run. No aliasing (a slot is one tile of one image):
-// the phone has no sparseResidencyAliased.
+// A bind batch waits for every submission handed to the host's queue (V.q) before it (none still reads a tile it unbinds or rebinds): an empty vkQueueSubmit first signals
+// the sparse timeline at a value of its own, which by queue order covers everything submitted there before (with one queue: every replay part, upload batch and framegen),
+// after the batch before it; the bind waits for that value only and signals the next. Every later submission of the replay and of the upload batches waits for the bind's
+// value, so the tiles are bound before the copies that fill them and the draws that read them. A batch that fails keeps its binds (and the slots its unbinds free) for the
+// next one. A slot unbound is reused only by a later batch; a tile block is freed once empty and the batch that emptied it has run. No aliasing (a slot is one tile of one
+// image): the phone has no sparseResidencyAliased.
+// Lichii: with the NVN queues as Vulkan queues (V.multi) a batch does not wait for the replay's earlier submissions on those queues. nvnMemoryPoolMapVirtual takes effect at
+// once on the CPU, and the replay binds what the page table holds when it prepares the next submission that uses the texture. A game may only remap a page once it knows
+// the GPU work that reads it is done, and what it can know that from is published only after the host GPU ran that work: a fence reads as done once its queue's timeline
+// got there and its CPU-side effects ran (vka_dev.c multi_pass), and GPU event signals and counter reports are written by those effects. Exceptions, which break more than
+// this anyway: a report's counter word written at replay (vka_exec.c rc_counter), and the [RED] let-throughs (a gate signalled by the host at a stall or as the shared-queue
+// stopgap, every fence done after a GPU hang or at shutdown). Waiting would instead deadlock what the console allows: queue B waits for event E and then samples sparse
+// texture X, the CPU maps new tiles of X, and queue A uploads and signals E: the batch would wait for B's work, A's next part waits for the batch, and E never comes.
+// Vulkan lets other ranges of a sparse image be used while a bind runs
 // DM_VK_SPARSE_RES=0: dense images as before (read once)
 #if defined(__ANDROID__)
 #include "vka.h"
