@@ -231,8 +231,11 @@ void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memor
 void nvn_direct_cpu_written(uint64_t address, uint64_t size);
 
 /// The guest unmaps [address, address + size): the pool memory imported over it is given back
-/// first (after the GPU is done with it), so no import keeps pages the guest reuses.
+/// first (after the GPU is done with it), so no import keeps pages the guest reuses. Then the
+/// replay's readers of guest memory wait until nvn_direct_guest_unmap_done, which the caller
+/// calls once the pages are unmapped: a reader that found a page mapped reads it before.
 void nvn_direct_guest_unmap(uint64_t address, uint64_t size);
+void nvn_direct_guest_unmap_done(void);
 int nvn_direct_name_count(void);
 const char* nvn_direct_name(int slot);
 /// Whether the front end implements the slot's function (else the hook's stub answers 0).

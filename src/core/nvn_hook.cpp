@@ -1243,17 +1243,25 @@ void OnDirectCpuWrite(u64 address, u64 size) {
 #endif
 }
 
-void OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size) {
+bool OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size) {
 #ifdef LICHII_NVN_DIRECT
     const State* const state = Get();
     if (state != nullptr && state->direct_ready &&
         &page_table == &state->process->GetPageTable().GetImpl()) {
         nvn_direct_guest_unmap(address, size);
+        return true;
     }
 #else
     (void)page_table;
     (void)address;
     (void)size;
+#endif
+    return false;
+}
+
+void OnGuestUnmapDone() {
+#ifdef LICHII_NVN_DIRECT
+    nvn_direct_guest_unmap_done();
 #endif
 }
 

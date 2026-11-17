@@ -28,13 +28,19 @@ void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed);
 /// backing_fd) and the page's offset in it (*offset); -1 when there is no file or the guest has
 /// not mapped the page.
 int nvn_direct_backing_file(uint64_t address, uint64_t* offset);
+/// Maps the guest memory at host (an arena pointer) at to, for size bytes (both page aligned),
+/// replacing what was mapped there: the same pages, read-write, as a virtual pool's range maps
+/// its physical pool's. Pages with no guest memory behind them are made inaccessible. Returns
+/// those pages' bytes.
+uint64_t nvn_direct_alias_pages(void* to, uint64_t host, uint64_t size);
 /// Where the host writes a value into guest memory at host (an arena pointer or the game's
 /// address): its backing memory, which write tracking never protects. Anything else (a host
 /// segment): unchanged. The value must not cross a page.
 void* nvn_direct_writable(uint64_t host);
 /// Where the replay reads guest memory at host (an arena pointer): its backing memory, which a
 /// guest unmap never takes away, NULL when the guest has not mapped the page (the arena's page is
-/// then inaccessible). Anything else (a host segment): unchanged. The read must not cross a page.
+/// then inaccessible). In a virtual pool's range: unchanged, NULL where nothing is mapped.
+/// Anything else (a host segment): unchanged. The read must not cross a page.
 const void* nvn_direct_readable(uint64_t host);
 /// The front end writes [mem, mem + size) of a pool in place from now on (command memory): its
 /// pages are never write-tracked (a host write to a tracked page would fault outside the JIT).

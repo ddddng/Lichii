@@ -951,8 +951,11 @@ int vka_mem_release(uintptr_t lo, uintptr_t hi) {
     return 0;
 }
 // Lichii: the guest unmaps memory (Core::Memory::UnmapRegion): imports over it are given back before its pages can be reused (a hole punched under a live import leaves
-// the GPU with the old pages: dotfiles-25x.1)
-void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); }
+// the GPU with the old pages: dotfiles-25x.1). Then the replay's readers of guest storage (nvn_pool_use: texture uploads, which check that pages are mapped and then read
+// them in place) are kept out until the pages are gone (nvn_direct_guest_unmap_done)
+void nvn_pool_unmap(int on);   // hle_nvn.c
+void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); nvn_pool_unmap(1); }
+void nvn_direct_guest_unmap_done(void) { nvn_pool_unmap(0); }
 
 // The segments this thread found, by address block (the draws look up their vertex and uniform buffers, ~10 lookups a draw): valid while g_sg_gen stands.
 // A segment is unplaced only after the last fence reserved has completed (unplace), so one still in a cache that the generation has not caught yet is not freed under

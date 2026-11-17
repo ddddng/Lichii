@@ -256,7 +256,8 @@ static void unref_locked(vka_img *im) {
     for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; memidx_del(im); break; }
     for (int i = 0; i < g_nbig; i++) if (g_big[i] == im) { g_big[i] = g_big[--g_nbig]; break; }
     g_img_bytes -= im->bytes;
-    vka_after(vka_fence_last(), img_destroy, im);
+    // (inline replay: after the submission another thread may be recording, whose fence is not reserved yet; TextureFinalize and a present's drop come from other threads)
+    vka_after(vka_fence_last() + !vka_worker_on(), img_destroy, im);
 }
 
 // Textures of one memory and shape share an image (one storage, many texture objects: a clear through one and a present through another meet), and so do ones of another
@@ -886,7 +887,7 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
         else {   // a copy: its source as the GPU will read it, which an earlier pending write over the source would change (then the write lands later: re-uploaded)
             const uint8_t *s = (const uint8_t *)(uintptr_t)(w->src + (lo - w->lo));
             for (int j = 0; j < i; j++) { const gw_t *x = &g_gw[j]; if ((!x->fence || x->fence > done) && x->lo < w->src + (hi - w->lo) && x->hi > w->src + (lo - w->lo)) { if (w->seq - 1 < cap) cap = w->seq - 1; break; } }
-            memmove(c + (lo - a), s, hi - lo);
+            dm_guest_read_mapped(c + (lo - a), (uintptr_t)s, hi - lo);   // (Lichii: never in place: the source may be guest memory no pool holds, which the guest may unmap)
         }
     }
     *seen = cap;
@@ -895,9 +896,9 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
 // Guest bytes [addr, addr + n) as the GPU will read them after what was recorded so far (pending copies, fills and inline updates applied, gw_content): 1 = out has them
 // (dotfiles-25x.15: a uniform buffer bound as a copy taken at recording, DM_VK_UBO_SNAPSHOT)
 int vka_tex_gpu_bytes(uint64_t addr, void *out, size_t n) {
-    pthread_mutex_lock(&g_tmu);
+    nvn_pool_use(1); pthread_mutex_lock(&g_tmu);
     uint64_t seen; uint8_t *c = gw_content((const uint8_t *)(uintptr_t)addr, n, &seen);
-    pthread_mutex_unlock(&g_tmu);
+    pthread_mutex_unlock(&g_tmu); nvn_pool_use(0);
     if (!c) return 0;
     memcpy(out, c, n); free(c); return 1;
 }
@@ -1474,7 +1475,7 @@ static void astc_bc1(const tex_t *t, vka_fmt *f) {   // caller holds g_tmu
 static int astc_reformat(vka_img *im, uint8_t bpb, VkCommandBuffer cb);
 // A texture copy between ASTC textures (vka_exec.c copy_t2t): the two take one block size, kept for their storage from now on. 1: they do
 int vka_tex_astc_copy(vka_img *s, vka_img *d, VkCommandBuffer cb) {
-    pthread_mutex_lock(&g_tmu);
+    nvn_pool_use(1); pthread_mutex_lock(&g_tmu);   // (astc_storage_opaque and the remade images' uploads read guest storage)
     if (d->vpool) g_arr_src[s->f.bpb == 8 ? 0 : astc_storage_opaque(s) ? 1 : 2]++;
     uint8_t bpb = d->f.bpb; int ok = 1;
     if (s->f.bpb != d->f.bpb) {
@@ -1486,7 +1487,7 @@ int vka_tex_astc_copy(vka_img *s, vka_img *d, VkCommandBuffer cb) {
         ok = (s->f.bpb == bpb || astc_reformat(s, bpb, cb)) && (d->f.bpb == bpb || astc_reformat(d, bpb, cb));
     }
     acopy_set((uintptr_t)s->mem, bpb); acopy_set((uintptr_t)d->mem, bpb);
-    pthread_mutex_unlock(&g_tmu);
+    pthread_mutex_unlock(&g_tmu); nvn_pool_use(0);
     return ok;
 }
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
@@ -1494,6 +1495,9 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = map_get(t->serial);
     if (e) { vka_img *im = e->im; if (im) im->used = g_tick; pthread_mutex_unlock(&g_tmu); return im; }
+    pthread_mutex_unlock(&g_tmu);
+    nvn_pool_use(1); pthread_mutex_lock(&g_tmu);   // (a new image reads its storage: taken before g_tmu, as write_tex does)
+    if ((e = map_get(t->serial))) { vka_img *im = e->im; if (im) im->used = g_tick; pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return im; }
     vka_fmt f; vka_img *im = NULL; int throttle = 0;
     if (vka_fmt_of(t->d.format, &f)) {
         astc_bc1(t, &f);
@@ -1521,7 +1525,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     }
     if (im) im->used = g_tick;
     map_put(t->serial, im);
-    pthread_mutex_unlock(&g_tmu);
+    pthread_mutex_unlock(&g_tmu); nvn_pool_use(0);
     if (throttle) vka_up_throttle();
     return im;
 }

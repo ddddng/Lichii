@@ -122,8 +122,11 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args);
 void OnDirectCpuWrite(u64 address, u64 size);
 
 /// The guest unmaps [address, address + size) of a page table (Core::Memory::UnmapRegion): in
-/// direct mode the application's pool memory imported there is given back first.
-void OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size);
+/// direct mode the application's pool memory imported there is given back first, and the
+/// replay's readers of guest memory wait until OnGuestUnmapDone. Returns whether the caller
+/// must call OnGuestUnmapDone once the pages are unmapped.
+bool OnGuestUnmap(const Common::PageTable& page_table, u64 address, u64 size);
+void OnGuestUnmapDone();
 
 /// A present (nx2:vi2), numbered from 1.
 void OnPresent(u64 present);
