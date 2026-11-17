@@ -3,8 +3,9 @@
 
 # NVN2 direct renderer (lab, dotfiles-25x): Banana Native's NVN front end and Vulkan replay (MIT,
 # bananative/) as a C library, built the way the lab's x86-64 port builds them (__ANDROID__
-# selects their Linux code paths; the Android headers they include come from bananative/shim).
-# Linux x86-64 only.
+# selects their Vulkan replay; the Android headers they include come from bananative/shim).
+# Linux x86-64, and Windows x86-64 with clang-cl (the code is GNU C: cl.exe does not take it), where
+# plat_windows.c and the headers in bananative/shim/win32 stand in for the POSIX calls.
 
 set(BN ${CMAKE_CURRENT_SOURCE_DIR}/bananative/dm)
 
@@ -49,9 +50,13 @@ add_library(nvn_direct STATIC
     ${BN}/gfx/vk_android/vka_spvpatch.c
     ${BN}/gfx/vk_android/vka_tex.c
     ${BN}/gfx/vk_android/vka_worker.c
-    ${BN}/host/plat/plat_android.c
     ${BN}/host/plat/plat_portable.c
 )
+if (WIN32)
+    target_sources(nvn_direct PRIVATE ${BN}/host/plat/plat_windows.c)
+else()
+    target_sources(nvn_direct PRIVATE ${BN}/host/plat/plat_android.c)
+endif()
 
 # The recompiler translations' stamp (nvn_recompile.c, recompile_stamp.cmake): the shader
 # recompiler, its NVN2 entry and the code that feeds it
@@ -73,6 +78,7 @@ target_sources(nvn_direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/nvn_recompile_stam
 
 target_include_directories(nvn_direct PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
+    $<$<AND:$<BOOL:${WIN32}>,$<COMPILE_LANGUAGE:C>>:${CMAKE_CURRENT_SOURCE_DIR}/bananative/shim/win32>
     bananative/shim
     gen
     .
@@ -81,9 +87,19 @@ target_include_directories(nvn_direct PRIVATE
     ${BN}/gfx/nvn
     ${BN}/host
 )
-set_target_properties(nvn_direct PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
 target_compile_definitions(nvn_direct PRIVATE __ANDROID__ _GNU_SOURCE)
 # Upstream's code is kept as it is: its warnings are not Lichii's to fix.
 target_compile_options(nvn_direct PRIVATE -w)
 target_compile_definitions(nvn_direct INTERFACE LICHII_NVN_DIRECT)
-target_link_libraries(nvn_direct PUBLIC Vulkan::Headers PRIVATE common zstd::zstd ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS} m)
+target_link_libraries(nvn_direct PUBLIC Vulkan::Headers PRIVATE common zstd::zstd ZLIB::ZLIB)
+if (MSVC)
+    # clang-cl knows GNU C only as gnu17 (its /std:c17 has no typeof), and the POSIX additions to the C
+    # library's headers (shim/win32/posix.h) come ahead of every file
+    target_compile_options(nvn_direct PRIVATE $<$<COMPILE_LANGUAGE:C>:/clang:-std=gnu17>
+        $<$<COMPILE_LANGUAGE:C>:/FI${CMAKE_CURRENT_SOURCE_DIR}/bananative/shim/win32/posix.h>)
+    target_compile_definitions(nvn_direct PRIVATE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
+    target_link_libraries(nvn_direct PRIVATE synchronization)
+else()
+    set_target_properties(nvn_direct PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    target_link_libraries(nvn_direct PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
