@@ -1037,9 +1037,13 @@ void TextureCache<P>::ForEachWrittenRange(const ImageBase& image, Func&& func) {
         return;
     }
     // As ForEachSparseSegment: each mapped segment is one range of guest memory.
+    const auto memory = WriteBackMemory(image);
+    if (!memory) {
+        return;
+    }
     for (const auto& [gpu_addr, size] :
-         gpu_memory->GetSubmappedRange(image.gpu_addr, image.guest_size_bytes)) {
-        if (const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+         memory->GetSubmappedRange(image.gpu_addr, image.guest_size_bytes)) {
+        if (const std::optional<DAddr> cpu_addr = memory->GpuToCpuAddress(gpu_addr)) {
             func(*cpu_addr, *cpu_addr + size);
         }
     }
