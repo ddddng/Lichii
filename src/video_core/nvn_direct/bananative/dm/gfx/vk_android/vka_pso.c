@@ -244,8 +244,9 @@ static void save_now(void) {
         if (d) {
             char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pc_path);
             FILE *f = fopen(tmp, "wb");
-            if (f && fwrite(d, 1, n, f) == n && !fclose(f) && !rename(tmp, g_pc_path)) g_saved_at = made;
-            else { if (f) fclose(f); unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); d = NULL; n = 0; }
+            int ok = f && fwrite(d, 1, n, f) == n; if (f && fclose(f)) ok = 0;   // (closed once, whatever failed)
+            if (ok && !rename(tmp, g_pc_path)) g_saved_at = made;
+            else { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); d = NULL; n = 0; }
         }
     }
     int keys = pw_save();
@@ -913,8 +914,9 @@ static int pw_save(void) {   // the saver thread or a forced save: the list when
     pwhdr2 h; memset(&h, 0, sizeof h); memcpy(h.magic, PW_MAGIC2, 8); h.gkey_size = sizeof(vka_gkey); h.n = n; h.layout = gkey_layout(); memcpy(out, &h, sizeof h);
     char tmp[1200]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pw_path);
     FILE *f = fopen(tmp, "wb");
-    int ok = f && fwrite(out, 1, sizeof h + len, f) == sizeof h + len && !fclose(f) && !rename(tmp, g_pw_path);
-    if (!ok) { if (f) fclose(f); unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("prewarm list not written to %s", g_pw_path); pthread_mutex_lock(&g_pw_mu); g_pw_dirty = 1; pthread_mutex_unlock(&g_pw_mu); }
+    int ok = f && fwrite(out, 1, sizeof h + len, f) == sizeof h + len; if (f && fclose(f)) ok = 0;   // (closed once, whatever failed)
+    ok = ok && !rename(tmp, g_pw_path);
+    if (!ok) { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("prewarm list not written to %s", g_pw_path); pthread_mutex_lock(&g_pw_mu); g_pw_dirty = 1; pthread_mutex_unlock(&g_pw_mu); }
     free(out);
     return ok ? (int)n : -1;
 }
