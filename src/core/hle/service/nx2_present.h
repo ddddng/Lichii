@@ -268,7 +268,7 @@ private:
         const std::string path =
             fmt::format("{}/nx2-frame-{:05}.tga", directory, presents);
         auto pending = m_capture_pending; // the screenshot callback can outlive the session
-        system.GPU().Renderer().RequestScreenshot(
+        const bool requested = system.GPU().Renderer().RequestScreenshot(
             pixels->data(),
             [pixels, layout, path, pending](bool invert_y) {
                 std::array<u8, 18> header{};
@@ -288,6 +288,11 @@ private:
                 pending->store(false);
             },
             layout);
+        if (!requested) {
+            // Another screenshot (the frontend's, the debug server's) holds the renderer: this
+            // capture is skipped, and its callback never runs to clear the flag.
+            m_capture_pending->store(false);
+        }
     }
 
     Core::System& system;
