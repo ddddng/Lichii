@@ -799,7 +799,7 @@ private:
     };
     std::deque<AsyncOverlapDownload> async_overlap_downloads;
     /// The GPU memory of an address space the cache has seen, or null.
-    [[nodiscard]] Tegra::MemoryManager* AddressSpaceMemory(size_t as_id);
+    [[nodiscard]] std::shared_ptr<Tegra::MemoryManager> AddressSpaceMemory(size_t as_id);
     void FinishAsyncOverlapDownloads(bool wait_all);
     /// After a write-back of [cpu_addr, cpu_addr + size) at modification tick `tick` landed,
     /// waiting or not: images over it the GPU did not write, with contents no newer, load it again.
@@ -849,7 +849,7 @@ private:
     /// Swizzles a downloaded image into guest memory through WriteBackMemory's memory manager and
     /// clears its stale pages. False, writing nothing, when there is none.
     bool WriteBackImage(const ImageBase& image, std::span<const BufferImageCopy> copies,
-                        std::span<const u8> data);
+                        std::span<const u8> data, const KeepRanges& keep = {});
     /// Clears every device range [gpu_addr, gpu_addr + size) maps to in memory.
     void ClearStaleGpu(Tegra::MemoryManager& memory, GPUVAddr gpu_addr, size_t size);
     StalePages stale_pages;

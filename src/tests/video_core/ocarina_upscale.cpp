@@ -79,15 +79,12 @@ TEST_CASE("OoT upscale passes are recognised by native program key", "[video_cor
 
 TEST_CASE("OoT's 1440p program at 1:1 is the full-size pass", "[video_core][ocarina]") {
     using enum VideoCommon::OcarinaUpscalePass;
-    using VideoCommon::OcarinaPassForTarget;
-    // Handheld with Max Resolution: 1920x1080 scene into a 1920x1080 target.
-    CHECK(OcarinaPassForTarget(Pass1440p, 1920, 1080, 1920, 1080) == FullSize);
-    // Docked: any 16:9 scene up to 2560x1440 into the 2560x1440 target stays the 1440p pass.
-    CHECK(OcarinaPassForTarget(Pass1440p, 2560, 1440, 1920, 1080) == Pass1440p);
-    CHECK(OcarinaPassForTarget(Pass1440p, 2560, 1440, 2560, 1440) == Pass1440p);
-    // A scaled scene into 1920x1080 is not 1:1.
-    CHECK(OcarinaPassForTarget(Pass1440p, 1920, 1080, 1440, 810) == Pass1440p);
-    CHECK(OcarinaPassForTarget(ThreeQuarter, 1920, 1080, 1920, 1080) == ThreeQuarter);
-    CHECK(OcarinaPassForTarget(FullSize, 1920, 1080, 1920, 1080) == FullSize);
-    CHECK(OcarinaPassForTarget(None, 1920, 1080, 1920, 1080) == None);
+    using VideoCommon::FindOcarinaUpscalePass;
+    CHECK(FindOcarinaUpscalePass(0xda6df3e54c716df2ULL, 0x6bd913e1f34e83ebULL) == OneToOne);
+    CHECK(FindOcarinaUpscalePass(0xda6df3e54c716df2ULL, 0) == OneToOne);
+    CHECK(FindOcarinaUpscalePass(0xd8efd9f0c95abd80ULL, 0) == Scaled);
+    CHECK(FindOcarinaUpscalePass(0xe4cda162ff6009e2ULL, 0) == Scaled);
+    CHECK(FindOcarinaUpscalePass(0x6f9367bd41dc0b58ULL, 0) == ThreeQuarter);
+    CHECK(FindOcarinaUpscalePass(0, 0xc033c3ddc9f0897bULL) == OneToOne);
+    CHECK(FindOcarinaUpscalePass(0, 0) == None);
 }
