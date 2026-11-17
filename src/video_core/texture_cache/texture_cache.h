@@ -534,6 +534,10 @@ void TextureCache<P>::SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_
                                      const ImageInfo& info,
                                      std::span<const BufferImageCopy> copies,
                                      std::span<const u8> data, const KeepRanges& keep) {
+    if (!OverlapWritebacksEnabled()) {
+        SwizzleImage(memory, gpu_addr, info, copies, data, swizzle_data_buffer);
+        return;
+    }
     boost::container::small_vector<WritebackRanges::Segment, 4> segments;
     DAddr landing_begin = ~DAddr{0};
     DAddr landing_end = 0;
@@ -547,6 +551,20 @@ void TextureCache<P>::SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_
     if (segments.empty()) {
         return;
     }
+    swizzle_keep_buffer.resize_destructive(size);
+    memory.ReadBlockUnsafe(gpu_addr, swizzle_keep_buffer.data(), size);
+    swizzle_keep_written.clear();
+    SwizzleImageTo(std::span(swizzle_keep_buffer.data(), size), info, copies, data,
+                   memory.UsesNativeTiling(), swizzle_keep_written);
+    WritebackRanges::MergeRanges(swizzle_keep_written);
+    for (const auto& [begin, end] : swizzle_keep_written) {
+        Tegra::Nx2BackSparseWrite(gpu_addr + begin, end - begin,
+                                 swizzle_keep_buffer.data() + begin);
+    }
+    WritebackRanges::ForEachLandedPart(
+        segments, swizzle_keep_written, KeepRanges{}, [&](DAddr device, u64, u64 part_size) {
+            memory.FinishReadsBefore(device, part_size, true);
+        });
     // As the buffer cache's downloads (WriteDownloadedMemory): guest CPU writes collected and not
     // yet applied are newer than the GPU's data and keep their bytes, and those collected from
     // now on store them once this has landed. Bytes kept are never written: restoring them after
@@ -560,17 +578,7 @@ void TextureCache<P>::SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_
             }
         });
     }
-    if (skip.empty()) {
-        SwizzleImage(memory, gpu_addr, info, copies, data, swizzle_data_buffer);
-        return;
-    }
     WritebackRanges::MergeRanges(skip);
-    swizzle_keep_buffer.resize_destructive(size);
-    memory.ReadBlockUnsafe(gpu_addr, swizzle_keep_buffer.data(), size);
-    swizzle_keep_written.clear();
-    SwizzleImageTo(std::span(swizzle_keep_buffer.data(), size), info, copies, data,
-                   memory.UsesNativeTiling(), swizzle_keep_written);
-    WritebackRanges::MergeRanges(swizzle_keep_written);
     WritebackRanges::ForEachLandedPart(
         segments, swizzle_keep_written, skip, [&](DAddr device, u64 offset, u64 part_size) {
             device_memory.WriteBlockUnsafe(device, swizzle_keep_buffer.data() + offset, part_size);
