@@ -311,7 +311,7 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
                             4u << 16 | OpVariable, p_priv_bool, gvar, SCPrivate};
             if (!put_n(o, x, sizeof x / 4)) FAIL("out of memory");
         }
-        if (op == OpFunction) { in_fn = 1; in_main_entry = w[i + 2] == main_fn ? 1 : 0; }
+        if (op == OpFunction) { in_fn = 1; in_main_entry = w[i + 2] == main_fn ? 1 : 0; cur = cur_orig = 0; }
         else if (op == OpFunctionEnd) in_fn = 0;
         if (op == OpLabel) { cur = cur_orig = w[i + 1]; if (!put_n(o, in, len)) FAIL("out of memory"); i += len; continue; }
         if (in_main_entry == 1 && op != OpVariable && cur) {   // the claim, after the entry block's variables
