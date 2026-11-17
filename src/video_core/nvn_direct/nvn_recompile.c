@@ -657,6 +657,8 @@ vka_shader* vka_rc_by_key(uint64_t key, int gl_depth) {
 // the frame path. Newest first: Mario Kart World sets ~4,000 programs and draws ~900, those it set last soonest. First-met content (cold, the NVIDIA disk cache off):
 // libraries compiled on the frame path 0.54 -> 0.41-0.43 per shader made (615 / 596 -> 448-515 a race), frame-path creation 54-56 -> 47-50 s; warm runs unchanged.
 // Each shader done is marked in vk_recompiled.bin (disk_spec_done), so a warm run does not translate again the ones the game sets and never draws.
+// A compute shader gets its pipeline made the same way (vka_cs_ahead_shader): a dispatch is never skipped, so the first one of a program compiled its pipeline on the
+// frame path even with asynchronous pipelines on.
 // EDEN_NX2_NVN_SPECULATE=<threads> (default an eighth of the host's threads, 1 to 4; nice 10), 0: off
 typedef struct { uint64_t key, data; const rc_control* control; } spec_item;
 static spec_item* g_spec; static size_t g_spec_n, g_spec_cap; static int g_spec_up;
@@ -678,7 +680,8 @@ static void spec_one(spec_item it) {
     vka_shlib* L = b && !*why ? rc_lib(it.key, rc_vks(st), 0, &o, b, o.desc_count, c1_len ? c1 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
     free(b); vka_shader_translated_free(&o);
     vka_shader* s = L ? vka_shader_scratch(L, it.key) : NULL;
-    if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
+    if (s && st == 5) vka_cs_ahead_shader(s);
+    else if (s) vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
     vka_shader_scratch_free(s);
     if (L) { free((void*)L->base); free(L); }
     disk_spec_done(it.key);
@@ -714,7 +717,7 @@ static void spec_add(uint64_t key, uint64_t data, const rc_control* control) {
         long hw = sysconf(_SC_NPROCESSORS_ONLN); int d = hw >= 32 ? 4 : hw >= 16 ? (int)(hw / 8) : 1;
         const char* e = getenv("EDEN_NX2_NVN_SPECULATE"); on = vka_rc_mode() != 1 ? 0 : e && *e ? atoi(e) : d; if (on > 16) on = 16;
     }
-    if (!on || control->stage > 1) return;
+    if (!on || (control->stage > 1 && control->stage != 5)) return;   // vertex, pixel and compute shaders
     pthread_mutex_lock(&g_spec_mu);
     if (g_spec_n == g_spec_cap) { size_t nc = g_spec_cap ? 2 * g_spec_cap : 1024; spec_item* n = realloc(g_spec, nc * sizeof *n); if (!n) { pthread_mutex_unlock(&g_spec_mu); return; } g_spec = n; g_spec_cap = nc; }
     g_spec[g_spec_n++] = (spec_item){key, data, control};

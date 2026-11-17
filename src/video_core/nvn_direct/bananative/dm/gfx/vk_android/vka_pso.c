@@ -1211,6 +1211,20 @@ VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *
 }
 
 // ---------- Compute pipelines ----------
+// Compute program cs's pipeline in layout lay (cs_obtain, vka_cs_ahead_shader)
+static VkResult cs_create(vka_shader *cs, const vka_layout *lay, const char *what, VkPipeline *p) {
+    uint32_t pin = (cs->e->flags & DMSH_VK_F_SUBGROUP) ? vka_shader_sg_pin(DMSH_VK_STAGE_CS) : 0;
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
+    int spill = 0;   // shared memory in the spill buffer (vka_draw.c spill_dispatch): dispatched in parts with a base workgroup
+    for (unsigned i = 0; i < cs->e->bind_count; i++) if (cs->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) spill = 1;
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = (spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0) | pipe_stats_flag(), .layout = lay->layout,
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
+    int bs = build_begin(what, cs->key, 0);
+    VkResult r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, p);
+    build_end(bs);
+    if (!r) pipe_stats(*p, what, cs->key, 0);
+    return r;
+}
 typedef struct { vka_shader *cs; VkPipelineLayout layout; } ckey;
 static kmap g_cs = {.klen = sizeof(ckey)};
 static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made) {
@@ -1228,12 +1242,6 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     pthread_mutex_unlock(&g_mu);
     pc_open();
     uint64_t t0 = now_ns();
-    uint32_t pin = (cs->e->flags & DMSH_VK_F_SUBGROUP) ? vka_shader_sg_pin(DMSH_VK_STAGE_CS) : 0;
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
-    int spill = 0;   // shared memory in the spill buffer (vka_draw.c spill_dispatch): dispatched in parts with a base workgroup
-    for (unsigned i = 0; i < cs->e->bind_count; i++) if (cs->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) spill = 1;
-    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0, .layout = lay->layout,
-        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's
@@ -1243,7 +1251,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     if (smax && cs->e->shared > smax && !VKA_ENV("DM_VK_CS_SHARED_OVER", 0)) {
         r = VK_ERROR_FEATURE_NOT_PRESENT; over = 1;
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute program %016llx takes %u bytes of shared memory, the device at most %u: not made, its dispatches are skipped (the first 16 are logged; the count is in the pipeline line)", (unsigned long long)cs->key, cs->e->shared, smax);
-    } else { int bs = build_begin("compute pipeline", cs->key, 0); ci.flags |= pipe_stats_flag(); r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p); build_end(bs); if (!r) pipe_stats(p, "compute pipeline", cs->key, 0); }
+    } else r = cs_create(cs, lay, "compute pipeline", &p);
     pthread_mutex_lock(&g_mu);
     if (over) { p = VK_NULL_HANDLE; g_ncs_over++; } else if (r) { p = VK_NULL_HANDLE; g_nfail++; } else { g_ncs++; g_made++; if (!prewarm) g_frame_made++; }
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
@@ -1327,6 +1335,22 @@ static void lib_ahead_one(const ahead_item *it) {
 }
 // A speculative translation's stage library in the most common state, for the caches only (nvn_recompile.c spec_main): part 1 a vertex shader, 2 a pixel shader;
 // s is a vka_shader_scratch one (not with DM_VK_LIB_AHEAD_KEEP=1: the library map would keep its module's handle)
+// Lichii: a speculative translation's compute pipeline, for the caches only (nvn_recompile.c spec_one): made and destroyed, so the first dispatch of the program makes
+// its own from the pipeline and driver caches instead of compiling on the frame path when the two translations are the same. s is a vka_shader_scratch one
+void vka_cs_ahead_shader(vka_shader *s) {
+    if (!s) return;
+    const uint32_t smax = V.props.limits.maxComputeSharedMemorySize;
+    if (smax && s->e->shared > smax) return;   // (not made at its dispatch either: cs_obtain)
+    vka_shader *sh[VKA_NSTAGE] = {0}; sh[5] = s;
+    vka_layout lay; memset(&lay, 0, sizeof lay);
+    if (!layout_slow(sh, 1, &lay) || !lay.layout) return;
+    snprintf(vka_crash_note, sizeof vka_crash_note, "made speculatively: compute pipeline of %016llx", (unsigned long long)s->key);
+    vka_pipeline_notify(0);
+    pc_open();
+    VkPipeline p = VK_NULL_HANDLE;
+    if (cs_create(s, &lay, "compute pipeline (speculative)", &p) == VK_SUCCESS) vk.vkDestroyPipeline(V.dev, p, NULL);
+    vka_pipeline_notify(1);
+}
 void vka_lib_ahead_shader(vka_shader *s, int part) {
     if (!gpl_on() || lib_ahead_keep()) return;
     vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);

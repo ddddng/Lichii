@@ -440,6 +440,7 @@ unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' 
 void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs
 vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader for a cache-only stage library: not in the shader table, given back with vka_shader_scratch_free
 void vka_shader_scratch_free(vka_shader *s);
+void vka_cs_ahead_shader(vka_shader *s);   // Lichii: a compute program's pipeline, for the caches only
 void vka_lib_ahead_shader(vka_shader *s, int part);   // a stage library (1 pre-rasterization, 2 fragment shader) in the most common state, for the caches only
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead);   // graphics pipeline libraries compiled outside the ahead threads (over 20 ms), made ahead
 void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
