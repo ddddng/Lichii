@@ -160,6 +160,7 @@ int vka_stopping(void);
 void vka_worker_wake(void);                         // vka_worker.c: the game's waits for room in the worker's queue see the stop
 int vka_worker_idle(uint64_t timeout_ns);           // the worker has replayed every job queued (1), or timed out (0)
 int vka_complete_stop(uint64_t timeout_ns);         // vka_dev.c (Lichii): the completion thread has run what was submitted and left (1), or timed out (0)
+void vka_vram_trace_stop(void);                     // vka_dev.c (Lichii): the DM_VK_VRAM_TRACE thread has left
 void vka_bindless_init(void);                       // vka_tex.c: the bindless set and its layout (every pipeline layout holds it)
 void vka_pso_start(void);                           // vka_pso.c: the pipeline cache opened, the prewarm and the compute pipelines made ahead started
 int vka_pso_park(uint64_t timeout_ns);              // vka_pso.c: no pipeline built from now on, the last save made; 1 = no build was in progress at the end

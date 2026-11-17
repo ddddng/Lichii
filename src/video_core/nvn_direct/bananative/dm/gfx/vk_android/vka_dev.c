@@ -33,12 +33,23 @@ void vka_qlock(void) { uint64_t t0 = now_ns(); if (g_adopt.queue_lock) g_adopt.q
 void vka_qunlock(void) { if (g_adopt.queue_unlock) g_adopt.queue_unlock(g_adopt.queue_context); else pthread_mutex_unlock(&V.qmu); }
 // Lab (DM_VK_VRAM_TRACE=1, dotfiles-25x.8): the host's use (NVML) beside the driver's heaps and the replay's imports and images, every second
 uint64_t vka_mem_placed_nolock(void); uint64_t vka_tex_mem_nolock(int *n);
+static pthread_t g_vram_th; static int g_vram_up, g_vram_stop; static pthread_mutex_t g_vram_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_vram_cv = PTHREAD_COND_INITIALIZER;   // Lichii: vka_vram_trace_stop
 static void *vram_trace_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-vramtrace");
-    for (;;) { struct timespec ts = {1, 0}; nanosleep(&ts, NULL);
+    pthread_mutex_lock(&g_vram_mu);
+    while (!g_vram_stop) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1; pthread_cond_timedwait(&g_vram_cv, &g_vram_mu, &ts);
+        if (g_vram_stop) break;
+        pthread_mutex_unlock(&g_vram_mu);
         char h[256]; vka_heap_line(h, sizeof h); uint64_t u = g_adopt.memory_usage(g_adopt.memory_context); int ni;
-        VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0); }
+        VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0);
+        pthread_mutex_lock(&g_vram_mu); }
+    pthread_mutex_unlock(&g_vram_mu);
     return NULL;
+}
+void vka_vram_trace_stop(void) {
+    if (!g_vram_up) return;
+    pthread_mutex_lock(&g_vram_mu); g_vram_stop = 1; pthread_cond_broadcast(&g_vram_cv); pthread_mutex_unlock(&g_vram_mu);
+    pthread_join(g_vram_th, NULL); g_vram_up = 0;
 }
 int vka_async_pipelines(void) { return g_adopt.async_pipelines; }
 uint32_t vka_scale_up = 1, vka_scale_shift;
@@ -58,7 +69,7 @@ int nvn_direct_adopt_device(const nvn_direct_device *d) {
     char h[256]; uint64_t u = 0, b = 0;
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();
-    if (ok && g_adopt.memory_usage && VKA_ENV("DM_VK_VRAM_TRACE", 0)) { pthread_t th; if (!pthread_create(&th, NULL, vram_trace_main, NULL)) pthread_detach(th); }
+    if (ok && g_adopt.memory_usage && VKA_ENV("DM_VK_VRAM_TRACE", 0)) g_vram_up = !pthread_create(&g_vram_th, NULL, vram_trace_main, NULL);
     if (ok && g_adopt.memory_usage) { vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); (void)b; VLOG("VRAM after the replay started: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     return ok;
 }

@@ -58,6 +58,7 @@ void nvn_direct_park(void) {
     nvn_direct_stop();
     atomic_store(&g_parked, 1);
     if (!vka_ok()) return;
+    vka_vram_trace_stop();
     // Bounded: a thread stuck in the driver must not keep the emulator from shutting down. The
     // device's own wait for idle follows (RendererVulkan's destructor).
     const uint64_t bound = 3000000000ull;
