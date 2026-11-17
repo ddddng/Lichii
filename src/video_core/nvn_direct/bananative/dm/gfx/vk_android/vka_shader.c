@@ -369,8 +369,8 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
 }
 
 // A shader of the game's library by key, the library loaded if it is not yet (the prewarm threads, vka_pso.c); NULL = no library, not in it, or refused
-vka_shader *vka_shader_by_key(uint64_t key) {
-    if (vka_rc_mode() == 1) return vka_rc_by_key(key);   // Lichii: recompiled shaders only (nvn_recompile.c): those translated so far
+vka_shader *vka_shader_by_key(uint64_t key, int gl_depth) {
+    if (vka_rc_mode() == 1) return vka_rc_by_key(key, gl_depth);   // Lichii: recompiled shaders only (nvn_recompile.c): those translated so far
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
     vka_shlib_check_pending();
     return ok ? vka_shader_make(&g_lib, key) : NULL;
@@ -458,21 +458,23 @@ void mtl_prog_release(prog_t *p) {
 }
 void mtl_prog_prefetch(const prog_t *p) { vka_rc_keep(p); }   // modules are made at the program's first draw (vka_prog_shaders); Lichii: the recompiler's copies of the control sections
 
+int vka_progsh_current(const vka_progsh *ps) { return !ps->depth || ps->depth == 1 + !vka_depth_zero(); }
 int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
     memset(out, 0, sizeof *out);
     if (!p || !p->serial) return 0;
-    pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); if (e) *out = e->ps; pthread_mutex_unlock(&g_mu);
-    if (e) return 1;
+    pthread_mutex_lock(&g_mu); prent *e = pr_find(p->serial); int hit = e && vka_progsh_current(&e->ps); if (hit) *out = e->ps; pthread_mutex_unlock(&g_mu);
+    if (hit) return 1;
     if (vka_rc_mode() == 1) {   // Lichii: every stage from the recompiler (nvn_recompile.c), translated with the draw's state
         // The pixel stage last: drawn after the program's mesh shader, it reads that shader's per-primitive outputs as such (vka_rc_shader prim_inputs)
-        uint32_t prim = 0;
+        // Lichii: the pre-rasterization stages in the depth mode now (resolved again for the program after a switch: the other mode's translations stay kept)
+        uint32_t prim = 0; const int gl_depth = !vka_depth_zero(); out->depth = (uint8_t)(1 + gl_depth);
         for (int pass = 0; pass < 2; pass++)
             for (unsigned i = 0; i < p->nstage && i < 6; i++) {
                 uint8_t md[8];
                 if (!prog_key(p, i, md)) continue;
                 uint64_t key = vka_shlib_key(md); int st = vka_rc_stage(key);
                 if ((st == 1) != (pass == 1)) continue;
-                vka_shader *sh = vka_rc_shader(p, i, key, st == 1 ? prim : 0, &st);
+                vka_shader *sh = vka_rc_shader(p, i, key, st == 1 ? prim : 0, gl_depth, &st);
                 if (st < 0 || st >= VKA_NSTAGE) { out->bad |= VKA_BAD_MISSING; missing_key(key, i); continue; }
                 if (st == 7) prim = vka_rc_prim(key);
                 out->sh[st] = sh;

@@ -2032,9 +2032,16 @@ public:
             {358, &INx2Vi2Session::StubReplyZeroed, "Unknown358"},
             {359, &INx2Vi2Session::StubReplyZeroed, "Unknown359"},
         });
+        std::scoped_lock lk{g_nx2_hdr_change_checks.mutex};
+        g_nx2_hdr_change_checks.checks.emplace_back(this, [this] { NotifyHdrChange(); });
     }
 
     ~INx2Vi2Session() override {
+        {
+            std::scoped_lock lk{g_nx2_hdr_change_checks.mutex};
+            std::erase_if(g_nx2_hdr_change_checks.checks,
+                          [this](const auto& check) { return check.first == this; });
+        }
         // A service fiber can be discarded during shutdown without unwinding its stack.
         // Remove or join its callback before closing the session-owned event.
         m_frame_wait_action.reset();
@@ -2762,6 +2769,7 @@ private:
         std::optional<Common::DisplayHdrInfo> display;
         const auto output = ResolveHostHdrOutput(display);
         const u64 logged = HdrOutputKey(output);
+        std::scoped_lock lk{m_hdr_mutex};
         if (logged != m_logged_hdr_output) {
             m_logged_hdr_output = logged;
             LOG_INFO(Service,
@@ -2780,10 +2788,12 @@ private:
     // Fires the slots bound to the HDR status and paper white events once the monitor's state
     // changed what the game was last told (Windows HDR toggled, the window moved to another
     // monitor, a new HDR calibration or SDR content brightness), so it queries again and switches
-    // between SDR and HDR images. Runs at every present; costs an atomic load while nothing
-    // changes.
+    // between SDR and HDR images. Runs at every present, on this session's thread for its own
+    // presents and on the game's for NVN direct mode's (Nx2NotifyHdrChange); costs an atomic load
+    // and a lock while nothing changes.
     void NotifyHdrChange() {
         const u64 generation = Common::DisplayHdrMonitor::Instance().Generation();
+        std::scoped_lock lk{m_hdr_mutex};
         if (generation == m_hdr_generation) {
             return;
         }
@@ -2937,6 +2947,7 @@ private:
         LOG_INFO(Service, "nx2:vi2 261 native event {} -> vsync", index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, true);
+            std::scoped_lock lk{m_hdr_mutex};
             m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
@@ -2954,6 +2965,7 @@ private:
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
             const u32 command = ctx.GetCommand();
+            std::scoped_lock lk{m_hdr_mutex};
             if (command == 265 || command == 267) {
                 m_hdr_change_slots |= 1U << index;
             } else {
@@ -2970,6 +2982,7 @@ private:
         LOG_INFO(Service, "nx2:vi2 {} native event {} unbound", ctx.GetCommand(), index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
+            std::scoped_lock lk{m_hdr_mutex};
             m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
@@ -2978,7 +2991,12 @@ private:
     void ReplyNativeEvent(HLERequestContext& ctx, u32 index) {
         auto*& event = m_native_events[index];
         if (!event) {
-            event = m_context.CreateEvent(fmt::format("nx2:vi2:Native{}", index));
+            Kernel::KEvent* const created =
+                m_context.CreateEvent(fmt::format("nx2:vi2:Native{}", index));
+            {
+                std::scoped_lock lk{m_hdr_mutex};
+                event = created;
+            }
             m_events.push_back(event);
             SetVsyncSlot(index, true);
             StartVsyncTimer();
@@ -3070,6 +3088,9 @@ private:
     u64 m_presents{};
     std::array<std::optional<u64>, 15> m_recorded_ticks{}; ///< 53's recorders, by present word 18
     u64 m_shown_layout{}; // image and crop size last logged
+    // m_logged_hdr_output, m_hdr_generation, m_hdr_change_slots and the m_native_events entries
+    // NotifyHdrChange reads from the game's thread (Nx2NotifyHdrChange).
+    std::mutex m_hdr_mutex;
     u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
     u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
     u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white

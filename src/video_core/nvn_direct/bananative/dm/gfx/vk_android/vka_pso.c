@@ -246,7 +246,7 @@ static void save_now(void) {
             FILE *f = fopen(tmp, "wb");
             int ok = f && fwrite(d, 1, n, f) == n; if (f && fclose(f)) ok = 0;   // (closed once, whatever failed)
             if (ok && !rename(tmp, g_pc_path)) g_saved_at = made;
-            else { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); d = NULL; n = 0; }
+            else { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); free(d); d = NULL; n = 0; }
         }
     }
     int keys = pw_save();
@@ -978,16 +978,16 @@ static void *pw_main(void *a) {
         pwrec r; memcpy(&r, g_pw_load + offs[i], sizeof r);
         const uint8_t *kb = g_pw_load + offs[i] + sizeof r;
         vka_shader *sh[VKA_NSTAGE]; memset(sh, 0, sizeof sh); int bad = !pw_rec_ok(&r, kb);
+        vka_gkey k; memset(&k, 0, sizeof k); if (!bad && r.kind != 1) memcpy(&k, kb, r.klen < sizeof k ? r.klen : sizeof k);
         if (bad) {}
-        else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0]))) bad = 1; }
-        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+        else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0], 1))) bad = 1; }
+        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s], k.gl_depth))) bad = 1;   // (Lichii: recompiled in the record's depth mode)
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == 1, &lay)) bad = 1;
         int made = 0;
         if (bad) { atomic_fetch_add(&g_pw_bad, 1); pw_mark_bad(offs[i]); }
         else if (r.kind == 1) { cs_obtain(sh[5], &lay, 1, &made); }
         else {
-            vka_gkey k; memset(&k, 0, sizeof k); memcpy(&k, kb, r.klen < sizeof k ? r.klen : sizeof k);
             if (k.vin_static != (uint32_t)!V.vin_dyn) { atomic_fetch_add(&g_pw_bad, 1); }   // a list from a device with the other vertex input (not this one's keys)
             else {
                 gkey_full fk; memset(&fk, 0, sizeof fk); memcpy(fk.sh, sh, sizeof fk.sh); fk.layout = lay.layout; fk.k = k;
@@ -1242,7 +1242,7 @@ static void *cs_ahead_main(void *a) {
         if (i >= g_ca_n) break;
         vka_pipeline_notify(0);
         vka_shader *sh[VKA_NSTAGE] = {0}; vka_layout lay; int made = 0;
-        if ((sh[5] = vka_shader_by_key(g_ca_keys[i])) && vka_layout_of(sh, 1, &lay)) cs_obtain(sh[5], &lay, 1, &made);
+        if ((sh[5] = vka_shader_by_key(g_ca_keys[i], 1)) && vka_layout_of(sh, 1, &lay)) cs_obtain(sh[5], &lay, 1, &made);
         if (made) atomic_fetch_add(&g_ca_made, 1);
         vka_pipeline_notify(1);
         setpriority(PRIO_PROCESS, 0, 10);   // back under the game's threads if a waiting frame path raised it (busy_wait)
@@ -1294,7 +1294,7 @@ static void lib_ahead_one(const ahead_item *it) {
     if (it->rec >= 0) { pwrec r; memcpy(&r, g_pw_load + it->rec, sizeof r); if (!pw_rec_ok(&r, g_pw_load + it->rec + sizeof r)) return;
                         memcpy(&k, g_pw_load + it->rec + sizeof r, r.klen < sizeof k ? r.klen : sizeof k); if (k.vin_static != (uint32_t)!V.vin_dyn) return; }
     else lib_default_key(&k);
-    lib_ahead_make(vka_shader_by_key(it->key), it->part, &k, 0);
+    lib_ahead_make(vka_shader_by_key(it->key, k.gl_depth), it->part, &k, 0);
 }
 // A speculative translation's stage library in the most common state, for the caches only (nvn_recompile.c spec_main): part 1 a vertex shader, 2 a pixel shader;
 // s is a vka_shader_scratch one (not with DM_VK_LIB_AHEAD_KEEP=1: the library map would keep its module's handle)

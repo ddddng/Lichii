@@ -22,6 +22,9 @@
 //   'S' u64 address, u32 length, bytes             pool contents (window start; zero pages left out)
 //   'D' u64 address, u32 length, bytes             pool pages the frame changed (window, by page hash),
 //                                                   written before the frame's 'P': apply before its calls
+//                                                   (a page written again between two submits of the
+//                                                   frame has only its bytes at the present: the
+//                                                   frame's earlier submits replay with them)
 //   'W' u8 0 begin / 1 end                         the window
 //   'E'                                             the end of the file
 

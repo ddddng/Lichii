@@ -30,9 +30,24 @@
 
 // ---------- One-off GPU work ----------
 static VkCommandPool g_ocp; static VkCommandBuffer g_ocb; static pthread_mutex_t g_omu = PTHREAD_MUTEX_INITIALIZER;
+// Lichii: a submission whose fence was not reached in 30 s keeps its command pool, staging buffer and image (a reference) until the fence is reached (checked at each
+// vcap_cb_begin); the GPU may still run it. The next one-off work gets a new pool. At most VCAP_LATE stay pending: one-off work stops while they all do
+#define VCAP_LATE 4
+typedef struct { VkFence f; VkCommandPool cp; vcap_hbuf h; vka_img *im; } vcap_late;
+static vcap_late g_olate[VCAP_LATE]; static int g_nolate;
+static void vcap_late_reap(void) {
+    for (int i = 0; i < g_nolate;) {
+        vcap_late *l = &g_olate[i];
+        if (vk.vkWaitForFences(V.dev, 1, &l->f, VK_TRUE, 0) != VK_SUCCESS) { i++; continue; }
+        vk.vkDestroyFence(V.dev, l->f, NULL); vk.vkDestroyCommandPool(V.dev, l->cp, NULL); vcap_hbuf_free(&l->h); vka_tex_drop(l->im);
+        *l = g_olate[--g_nolate];
+    }
+}
 VkCommandBuffer vcap_cb_begin(void) {
     if (!vka_init()) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_omu);
+    vcap_late_reap();
+    if (g_nolate == VCAP_LATE) { pthread_mutex_unlock(&g_omu); return VK_NULL_HANDLE; }
     if (!g_ocp) {
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
@@ -44,7 +59,7 @@ VkCommandBuffer vcap_cb_begin(void) {
     vka_barrier(g_ocb);   // after everything submitted before it
     return g_ocb;         // g_omu stays held until vcap_cb_run
 }
-int vcap_cb_run(VkCommandBuffer cb) {
+int vcap_cb_run(VkCommandBuffer cb, vcap_hbuf *h, vka_img *im) {
     vka_barrier(cb);
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -54,7 +69,12 @@ int vcap_cb_run(VkCommandBuffer cb) {
         vka_qlock(); VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, f); vka_qunlock();
         ok = !r && !vk.vkWaitForFences(V.dev, 1, &f, VK_TRUE, 30000000000ull);
         if (!ok) LOG("[RED] vk: capture / replay copy: submit %d, fence not reached in 30 s", r);
-        if (ok || r) vk.vkDestroyFence(V.dev, f, NULL);   // a fence the GPU may still signal is left alone
+        if (ok || r) vk.vkDestroyFence(V.dev, f, NULL);
+        else {   // the GPU may still run it: its pool, staging buffer and image wait for the fence (vcap_late_reap); the caller's vcap_hbuf_free then frees nothing
+            vcap_late *l = &g_olate[g_nolate++]; *l = (vcap_late){f, g_ocp, {0}, vka_tex_ref(im)};
+            if (h) { l->h = *h; memset(h, 0, sizeof *h); }
+            g_ocp = VK_NULL_HANDLE; g_ocb = VK_NULL_HANDLE;
+        }
     }
     pthread_mutex_unlock(&g_omu);
     return ok;
@@ -118,7 +138,7 @@ uint8_t *vcap_img_level0(vka_img *im, size_t *n) {
     cap_tsub s = all[0]; free(all);   // plane 0, level 0, layer 0
     vcap_hbuf h; if (!vcap_hbuf_make(&h, s.bytes)) return NULL;
     VkCommandBuffer cb = vcap_cb_begin(); uint8_t *out = NULL;
-    if (cb) { vcap_img_copy(cb, im, &s, 1, h.b, 0); if (vcap_cb_run(cb) && (out = malloc((size_t)s.bytes))) { memcpy(out, h.p, (size_t)s.bytes); *n = (size_t)s.bytes; } }
+    if (cb) { vcap_img_copy(cb, im, &s, 1, h.b, 0); if (vcap_cb_run(cb, &h, im) && (out = malloc((size_t)s.bytes))) { memcpy(out, h.p, (size_t)s.bytes); *n = (size_t)s.bytes; } }
     vcap_hbuf_free(&h);
     return out;
 }
@@ -423,7 +443,7 @@ static void cap_tex_read(const tex_t *t, int rec) {
     if (!vcap_hbuf_make(&hb, vcap_sub_off(subs, nsub) + 16)) { cap_fail("no readback buffer for a texture"); free(subs); vka_tex_drop(im); return; }
     if (!(cb = vcap_cb_begin())) { cap_fail("no command buffer for a texture readback"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
     vcap_img_copy(cb, im, subs, nsub, hb.b, 0);
-    if (!vcap_cb_run(cb)) { cap_fail("a texture readback did not finish"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
+    if (!vcap_cb_run(cb, &hb, im)) { cap_fail("a texture readback did not finish"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
     cap_tpix h = {*t, (uint32_t)im->f.vk, im->d.target, im->w, im->h, im->depth, im->levels, im->layers, im->samples, nsub, im->gpu_owned ? 1u : 0u};
     cap_tex_enc(&h.t, "texture contents");
     cap_buf c = {0}; cap_buf_put(&c, &h, sizeof h); cap_buf_put(&c, subs, nsub * sizeof *subs);
@@ -508,20 +528,25 @@ static void cap_pools(uint32_t submit) {
     for (int i = 0; i < n; i++) { cap_padd a = {ps[i].lo, ps[i].hi - ps[i].lo}; cap_enc_addr(NULL, &a.mem, 0, 0); cap_buf_put(&bb, &a, sizeof a); }
     cap_put(&g_cap_w, CAP_PADD, submit, bb.p, bb.n, 0); cap_buf_free(&bb); free(ps);
 }
-// A region's bytes go straight from guest memory to the file, after their hashes are taken: a write after the hash shows as a change at the next submit (no copy of up to
-// a whole pool in memory, which a phone running the game cannot spare)
-static void cap_put_region(uint32_t submit, const cap_regn *hh, const void *bytes) {
+// A region's bytes go from guest memory to the file a page at a time (no copy of up to a whole pool in memory, which a phone running the game cannot spare). Lichii: each
+// page's hash is that of the copy written, so a write meanwhile shows as a change at the next submit, even one that puts the old bytes back
+static void cap_put_region(uint32_t submit, const cap_regn *hh, cap_region *r) {
     cap_chunk c = {CAP_REGN, CAP_RAW, sizeof *hh + hh->size, sizeof *hh + hh->size, submit, 0};
-    if (fwrite(&c, sizeof c, 1, g_cap_w.f) != 1 || fwrite(hh, sizeof *hh, 1, g_cap_w.f) != 1 || fwrite(bytes, 1, (size_t)hh->size, g_cap_w.f) != hh->size) g_cap_w.err = 1;
+    if (fwrite(&c, sizeof c, 1, g_cap_w.f) != 1 || fwrite(hh, sizeof *hh, 1, g_cap_w.f) != 1) g_cap_w.err = 1;
+    size_t nb = (size_t)((r->size + 4095) / 4096); r->hash = realloc(r->hash, nb * 8);
+    for (size_t b = 0; b < nb; b++) {
+        uint8_t page[4096]; uint64_t o = (uint64_t)b * 4096; size_t len = (size_t)MIN(4096, r->size - o);
+        memcpy(page, (const uint8_t *)(uintptr_t)r->lo + o, len); r->hash[b] = cap_hash_block(page, len);
+        if (fwrite(page, 1, len, g_cap_w.f) != len) g_cap_w.err = 1;
+    }
     g_cap_w.raw += c.raw; g_cap_w.stored += c.stored + sizeof c;
 }
 static void cap_reg_write(uint32_t submit) {
     for (uint32_t i = 0; i < g_cap_nreg; i++) {
         cap_region *r = &g_cap_reg[i]; if (!r->pending) continue;
         r->pending = 0;
-        cap_reg_hash(r, (const uint8_t *)(uintptr_t)r->lo);
         cap_regn hh = {g_cap_rid[i], r->kind, r->lo, r->size};
-        cap_put_region(submit, &hh, (const void *)(uintptr_t)r->lo);
+        cap_put_region(submit, &hh, r);
     }
 }
 static void cap_mem(uint32_t submit) {
@@ -529,16 +554,16 @@ static void cap_mem(uint32_t submit) {
     cap_buf b = {0};
     for (uint32_t i = 0; i < g_cap_nreg; i++) {
         cap_region *r = &g_cap_reg[i]; size_t nb = (size_t)((r->size + 4095) / 4096);
-        for (size_t k = 0; k < nb;) {
-            uint64_t o = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, r->size - o);
-            uint64_t h = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, len);
-            if (h == r->hash[k]) { k++; continue; }
-            size_t k1 = k; uint64_t end = o;
-            while (k1 < nb) { uint64_t o1 = (uint64_t)k1 * 4096; size_t l1 = (size_t)MIN(4096, r->size - o1); uint64_t h1 = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o1, l1);
-                if (h1 == r->hash[k1]) break; r->hash[k1] = h1; end = o1 + l1; k1++; }
-            struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, o, end - o};
-            cap_buf_put(&b, &d, sizeof d); cap_buf_put(&b, (const uint8_t *)(uintptr_t)r->lo + o, (size_t)(end - o));
-            k = k1;
+        // Lichii: a changed page is copied, and its hash taken from the copy: the delta holds exactly the bytes its hash describes (a write meanwhile shows at the next submit)
+        size_t dh = 0;   // the open delta's header in b, + 1 (0: none)
+        for (size_t k = 0; k < nb; k++) {
+            uint8_t page[4096]; uint64_t o = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, r->size - o);
+            if (cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, len) == r->hash[k]) { dh = 0; continue; }
+            memcpy(page, (const uint8_t *)(uintptr_t)r->lo + o, len); r->hash[k] = cap_hash_block(page, len);
+            struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, o, len};
+            if (dh) { memcpy(&d, b.p + dh - 1, sizeof d); d.len += len; memcpy(b.p + dh - 1, &d, sizeof d); }
+            else { dh = b.n + 1; cap_buf_put(&b, &d, sizeof d); }
+            cap_buf_put(&b, page, len);
         }
     }
     if (b.n) cap_put(&g_cap_w, CAP_PDIF, submit, b.p, b.n, 0);

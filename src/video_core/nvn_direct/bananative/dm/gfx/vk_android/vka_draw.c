@@ -1110,7 +1110,7 @@ static int resolve(const prog_t *p, int st, vka_shader **out, unsigned *bad) {
     *out = NULL; if (!p) return 1;
     vka_progsh ps;
     uint64_t sr = p->serial; typeof(g_pm[0]) *m = &g_pm[(sr ^ sr >> 6) & 63];
-    if (sr && m->serial == sr) ps = m->ps;
+    if (sr && m->serial == sr && vka_progsh_current(&m->ps)) ps = m->ps;
     else { if (!vka_prog_shaders(p, &ps)) return 0; if (sr) { m->serial = sr; m->ps = ps; } }
     if (ps.bad & (1u << st | VKA_BAD_MISSING)) { *bad |= 1u << st; return 1; }
     *out = ps.sh[st]; return 1;

@@ -50,7 +50,8 @@
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds) \
     X(vkGetMemoryHostPointerPropertiesEXT) X(vkGetMemoryFdPropertiesKHR)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
-    X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */
+    X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */ \
+    X(vkDestroyCommandPool)   /* Lichii: a frame capture copy's pool, once the GPU finished it late (vka_capture.c vcap_late_reap) */
 #define VKA_DECL(f) PFN_##f f;
 typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS(VKA_DECL) VKA_INSTANCE_FNS(VKA_DECL) VKA_DEVICE_FNS(VKA_DECL) } vka_fns;
 extern vka_fns vk;   // a missing optional entry point is NULL
@@ -395,14 +396,17 @@ typedef struct vka_shader {
     uint16_t scale_tex_binding;         // Lichii (dotfiles-25x.34): a recompiled shader's first texture binding and that texture's bit in the render scale's push constants
     uint8_t scale_tex_bit, scale_tex_bits;   // (nvn_direct.h nvn_direct_scale_texture_bit; scale_tex_bits 0: no textures)
 } vka_shader;
-typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
+// by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped). Lichii: depth, recompiled shaders' depth mode
+// (1 + gl_depth: the pre-rasterization stages are translated for one, vka_rc_shader; 0: any)
+typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; uint8_t depth; } vka_progsh;
+int vka_progsh_current(const vka_progsh *ps);   // 1 = ps's shaders fit the depth mode now
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
 int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
 unsigned vka_shlib_stage_keys(int stage, uint64_t **keys);   // Lichii: the game library's shader keys of a DMSH_VK_STAGE_* (malloc'd), their count
-vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused
+vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused. gl_depth: the depth mode a recompiled one is for
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
@@ -422,10 +426,10 @@ int vka_rc_mode(void);
 void vka_rc_keep(const prog_t *p);
 typedef struct vka_dstate vka_dstate;
 void vka_rc_draw(const vka_dstate *d);
-vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t prim_inputs, int *st);
+vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t prim_inputs, int gl_depth, int *st);
 int vka_rc_stage(uint64_t key);         // NVN stage of a kept control section, -1 none
 uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic outputs per primitive
-vka_shader *vka_rc_by_key(uint64_t key);
+vka_shader *vka_rc_by_key(uint64_t key, int gl_depth);
 unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' shader keys of NVN stage st (malloc'd)
 void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs
 vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader for a cache-only stage library: not in the shader table, given back with vka_shader_scratch_free

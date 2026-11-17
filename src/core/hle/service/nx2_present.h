@@ -9,9 +9,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <fmt/format.h>
@@ -46,6 +49,26 @@ inline u32 Nx2VsyncRateHz() {
     }();
     return forced != 0 ? static_cast<u32>(forced)
                        : (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
+}
+
+/**
+ * The display HDR-change checks of the live nx2:vi2 sessions (INx2Vi2Session::NotifyHdrChange).
+ * nx2:vi2's Composite runs its session's own; NVN direct mode's presents skip Composite and run
+ * them all through Nx2NotifyHdrChange. A session is listed while it lives, and the mutex keeps it
+ * alive through a check.
+ */
+struct Nx2HdrChangeChecks {
+    std::mutex mutex;
+    std::vector<std::pair<const void*, std::function<void()>>> checks; ///< by session
+};
+inline Nx2HdrChangeChecks g_nx2_hdr_change_checks;
+
+/// Runs the HDR-change check of every live nx2:vi2 session, for a present made outside nx2:vi2.
+inline void Nx2NotifyHdrChange() {
+    std::scoped_lock lock{g_nx2_hdr_change_checks.mutex};
+    for (const auto& check : g_nx2_hdr_change_checks.checks) {
+        check.second();
+    }
 }
 
 /**
@@ -268,7 +291,7 @@ private:
         const std::string path =
             fmt::format("{}/nx2-frame-{:05}.tga", directory, presents);
         auto pending = m_capture_pending; // the screenshot callback can outlive the session
-        system.GPU().Renderer().RequestScreenshot(
+        const bool requested = system.GPU().Renderer().RequestScreenshot(
             pixels->data(),
             [pixels, layout, path, pending](bool invert_y) {
                 std::array<u8, 18> header{};
@@ -288,6 +311,11 @@ private:
                 pending->store(false);
             },
             layout);
+        if (!requested) {
+            // Another screenshot (the frontend's, the debug server's) holds the renderer: this
+            // capture is skipped, and its callback never runs to clear the flag.
+            m_capture_pending->store(false);
+        }
     }
 
     Core::System& system;
