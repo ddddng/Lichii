@@ -380,7 +380,7 @@ uint64_t nvn_pool_live(const void *pool, unsigned *flags, int *sparse) {
     if (sparse) *sparse = 0;
     if (!pool) return 0;
     pthread_mutex_lock(&g_pl_mu); plive *e = pl_find((const pool_t *)pool); uint64_t g = e ? e->gen : 0;
-    if (g) { const pool_t *o = (const pool_t *)pool; if (flags) *flags = (unsigned)o->flags; if (sparse) *sparse = o->vp != NULL; }
+    if (g) { const pool_t *o = (const pool_t *)pool; if (flags) *flags = (unsigned)o->flags; if (sparse) *sparse = o->vp && o->vmode != 1; }
     pthread_mutex_unlock(&g_pl_mu); return g;
 }
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
@@ -388,7 +388,7 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     pthread_mutex_lock(&g_pl_mu);   // (a pool initialized again without a Finalize: readers see its new fields only with its new serial)
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     pl_put(o, ++g_plgen); pthread_mutex_unlock(&g_pl_mu);
-    if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
+    if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range, which its mappings fill (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); pc_add(o); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
@@ -1598,7 +1598,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 }
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { mtl_pool_need(BF(buf)->pool->mem + BF(buf)->off, BF(buf)->size, "a buffer's address"); return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }   // (again here: a virtual pool's storage may have moved since the buffer was made)
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { mtl_pool_need(BF(buf)->pool->mem + BF(buf)->off, BF(buf)->size, "a buffer's address"); return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
 // A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
 // renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
 // copy's destination address 0 (FATAL buffer copy address is in no memory pool)
@@ -1623,9 +1623,6 @@ NVN(nvnQueueSetDebugLabel, void, NVNqueue *q, const char *s) { (void)q; (void)s;
 NVN(nvnProgramSetDebugLabel, void, NVNprogram *p, const char *s) { (void)p; (void)s; }
 NVN(nvnCommandBufferSetDebugLabel, void, NVNcommandBuffer *c, const char *s) { (void)c; (void)s; }
 // Virtual pool (flags 0x200): a GPU address range with no storage; MapVirtual maps pages of physical pools into it. A request is 0x28 bytes: {physical pool, physical offset, virtual offset, size, storage class}.
-// Host approach: if every request can be described by one "base" (same physical pool, same physical offset - virtual offset), the virtual pool's storage points straight at that memory of the physical pool -- the same semantics as one set of physical pages on the real device,
-//   and buffer addresses / Metal buffer lookups land on the block the physical pool already registered. SMBW has a single 128 MB virtual pool, mapped whole by one request onto one physical pool at offset 0.
-//   Inconsistent mappings (true sparse) are not implemented: reported red, returns failure. It used to always fail: the game treated the pool as unusable, a buffer later carved from it got a null pool, and MemoryPoolGetFlags read NULL+4 and crashed
 typedef struct { NVNmemoryPool *phys; int64_t poff, voff; uint64_t size; int32_t storage_class, _pad; } map_req;
 _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // True sparse virtual pools (Monster Hunter Rise: RE Engine's GPU heap is one 64 GB virtual pool, built from separately allocated 4 MB physical pools mapped at offsets of their own; boot maps 45 of them
@@ -1638,11 +1635,14 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // that set it), and the host reads textures of a sparse pool through it (nvn_sparse_copy): such a texture is uploaded from what the table points at, with unmapped pages read as 0,
 // and uploaded again only when a mapping in its range changes or the CPU writes a physical page behind it (nvn_sparse_since; the physical pools are dirty-tracked). The game fills
 // its sparse textures (flag 0x20, 32 GB into the pool) that way: it writes the tiles on the CPU into 4 MB physical pools, then maps them; no GPU copy writes them
-// Every virtual pool gets that range at Initialize, since the game may create its textures and buffers before mapping anything; its first mapping request then decides (MapVirtual):
-// one that maps the whole pool from offset 0 keeps the alias above (Mario's pool: the range is given back, and no object of the pool came before it), anything else makes the pool
-// sparse. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags 0x2a1), creates the texture in it, maps its mip
-// tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
-// mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
+// Every virtual pool gets that range at Initialize and keeps it until Finalize, since the game may create its textures and buffers, and take their addresses, before mapping anything,
+// and may unmap or replace any part of a mapping later. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags
+// 0x2a1), creates the texture in it, maps its mip tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU.
+// The first mapping request decides how textures made from then on read the pool (vmode): one that maps the whole pool (Mario Kart World's streamed textures and its 250 MB pool of
+// render targets, SMBW's 128 MB pool) makes it dense (1): its textures are ordinary ones over the range, which the CPU alias makes the physical pool's memory. Anything else, and any
+// later request of a dense pool that does not map it whole again, makes it sparse (2): its textures read through the page table. A pool larger than the application pool is sparse
+// from the start. Lichii: a dense pool used to give its range back and take the physical pool's address as its storage: addresses handed out before the mapping dangled, and a
+// later unmap or a mapping of part of it to other physical pages was ignored or refused
 enum { NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
 struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
@@ -1675,6 +1675,9 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
+#if !PLAT_APPLE
+    mtl_pool_alias(v->base, v->len < v->size ? v->len : v->size, NULL);   // (the GPU's aliases go with the range: a pool reserved there later starts unmapped)
+#endif
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { memmove(&g_vp[i], &g_vp[i + 1], (size_t)(g_nvp - 1 - i) * sizeof *g_vp); g_nvp--; break; }
@@ -1734,6 +1737,12 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     // Android: the physical pages are placed Vulkan memory, which cannot be remapped here. The GPU's lookups of the range answer with the physical pool's memory
     // (mtl_pool_alias); the game has no CPU access to a virtual pool, and the host reads its textures through the page table
     mtl_pool_alias((void *)to, r->size, (const void *)from);
+    // Lichii: the physical pages are guest memory, so the range maps them for the CPU too, as vm_remap does below: the replay reads and writes buffers of a virtual pool
+    // (indirect draw arguments, report values) at their addresses
+    if (nvn_direct_alias_pages((void *)to, (uint64_t)from, r->size)) {
+        static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[RED] virtual pool %p: %#llx+%#llx: physical pages with no guest memory behind them stay inaccessible to the CPU (later cases are not logged)",
+                                                                   (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size);
+    }
     return 1;
 #else
     vm_prot_t cur, max;
@@ -1749,27 +1758,21 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
 }
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
+    int unmap = 0; for (int i = 0; i < n; i++) unmap |= !r[i].phys;
+    if (unmap) nvn_pool_unmap(1);   // (a reader of the pool's storage that found a page mapped reads it before it goes: nvn_pool_use)
     pthread_mutex_lock(&g_vp_mu);
-    if (o->vp && o->vmode == 0 && n > 0) {   // the first mapping decides (see the sparse pools above)
-        if (r[0].phys && r[0].voff == 0 && r[0].size == o->size) { vpool_drop(o); o->mem = NULL; o->vmode = 1; }
-        else o->vmode = 2;
+    struct vpool *v = vpool_of(o); int ok = v != NULL;
+    if (v && n > 0 && o->vmode != 2) {   // the first request decides; a dense pool stays one only while its requests map it whole (see the sparse pools above)
+        int whole = n == 1 && r[0].phys && r[0].voff == 0 && r[0].size == o->size;
+        if (o->vmode == 1 && !whole) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 8) LOG("[nvn] virtual pool %p (%#llx bytes) was mapped whole and is now mapped in part: sparse from now on (its textures made before keep reading its range)", (void *)o, (unsigned long long)o->size); }
+        o->vmode = whole && o->vmode == 0 ? 1 : whole ? o->vmode : 2;
     }
-    struct vpool *v = o->vmode == 2 ? vpool_of(o) : NULL; int ok = 1;
     for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
     pthread_mutex_unlock(&g_vp_mu);
+    if (unmap) nvn_pool_unmap(0);
     for (int i = 0; i < n; i++) if (r[i].phys) pc_use((const pool_t *)r[i].phys, 'm', r[i].poff, r[i].size);   // (requested: counted whether or not they succeed)
-    if (v) return (NVNboolean)ok;
-    for (int i = 0; i < n; i++) {
-        const pool_t *ph = (const pool_t *)r[i].phys;
-        if (!ph) continue;   // Unmapping (null physical pool): the host keeps the storage as is
-        if (!ph->mem) { LOG("[RED] MapVirtual: physical pool %p has no storage", (const void *)ph); return 0; }
-        uint8_t *base = ph->mem + r[i].poff - r[i].voff;
-        if (r[i].voff < 0 || (uint64_t)r[i].voff + r[i].size > o->size || (uint64_t)r[i].poff + r[i].size > ph->size) { LOG("[RED] MapVirtual: request out of range (virtual %#llx+%#llx / pool %#llx, physical %#llx / pool %#llx)", (unsigned long long)r[i].voff, (unsigned long long)r[i].size, (unsigned long long)o->size, (unsigned long long)r[i].poff, (unsigned long long)ph->size); return 0; }
-        if (o->mem && o->mem != base) { LOG("[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented: virtual pool %p already maps to %p, this request wants %p", (void *)o, (void *)o->mem, (void *)base); return 0; }
-        if (!o->mem) LOG("[nvn] MapVirtual: the storage of virtual pool %p (%#llx bytes) points at physical pool %p + %#llx", (void *)o, (unsigned long long)o->size, (const void *)ph, (unsigned long long)(r[i].poff - r[i].voff));
-        o->mem = base;
-    }
-    return 1;
+    if (!v) LOG("[RED] MapVirtual: virtual pool %p (flags %#x) has no address range of its own: nothing is mapped", (void *)o, o->flags);
+    return (NVNboolean)ok;
 }
 
 // Samplers: the getters read the parameters in the object. Reduction (min / max of the texels a filtered sample covers) maps to the Metal 26 sampler reduction mode (nvn_mtl.m samp_by_id)
@@ -2120,7 +2123,7 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
     for (int k = 0; k < g_nvp; k++) { v = g_vp[k]; if ((const void *)v->pool == pool && a >= (uint64_t)(uintptr_t)v->base && a < (uint64_t)(uintptr_t)v->base + v->size) return v; }
     return hit;   // (a stale pool pointer: the live pool reserved at a, if any)
 }
-int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
+int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp && ((const pool_t *)pool)->vmode != 1; }   // no lock: vp set at Initialize, cleared at Finalize, vmode set by MapVirtual; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
@@ -2160,6 +2163,14 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }
     pthread_mutex_unlock(&g_vp_mu); return ok;
+}
+// Lichii: whether the page at a lies in a virtual pool's range with nothing mapped there (inaccessible to the CPU): nvn_direct_readable answers for those ranges with it
+int nvn_vpool_page_unmapped(uint64_t a) {
+    pthread_mutex_lock(&g_vp_mu);
+    int lo = 0, hi = g_nvp; while (lo < hi) { int m = (lo + hi) / 2; if ((uint64_t)(uintptr_t)g_vp[m]->base <= a) lo = m + 1; else hi = m; }
+    const struct vpool *v = lo ? g_vp[lo - 1] : NULL; int r = 0;
+    if (v && a < (uint64_t)(uintptr_t)v->base + v->len) { uint64_t o = a - (uint64_t)(uintptr_t)v->base; const vpte *e = o < v->size ? vpt_get(v, o) : NULL; r = !e || !e->phys; }
+    pthread_mutex_unlock(&g_vp_mu); return r;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
 static int run_any(const uint8_t *p, uint64_t n, uint64_t unused) { (void)p; (void)n; (void)unused; return 1; }

@@ -12,6 +12,7 @@
 
 #include <signal.h>
 #include <execinfo.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -60,14 +61,38 @@ int nvn_direct_backing_file(uint64_t address, uint64_t* offset) {
     *offset = (uint64_t)(backing - g_memory.backing_base);
     return g_memory.backing_fd;
 }
+uint64_t nvn_direct_alias_pages(void* to, uint64_t host, uint64_t size) {
+    const int guest = host >= g_arena && host - g_arena < g_guest_size;
+    uint64_t missing = 0;
+    for (uint64_t o = 0, n; o < size; o += n) {
+        uint64_t offset = 0, next = 0;
+        const int fd = guest ? nvn_direct_backing_file(host - g_arena + o, &offset) : -1;
+        n = 0x1000;
+        while (fd >= 0 && o + n < size && nvn_direct_backing_file(host - g_arena + o + n, &next) == fd &&
+               next == offset + n) {
+            n += 0x1000;
+        }
+        uint8_t* const at = (uint8_t*)to + o;
+        if (fd < 0 || mmap(at, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, (off_t)offset) ==
+                          MAP_FAILED) {
+            mmap(at, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            missing += n;
+        }
+    }
+    return missing;
+}
 void* nvn_direct_writable(uint64_t host) {
     const uint64_t guest = guest_addr(host);
     if (guest >= g_guest_size || !g_memory.backing) return (void*)(uintptr_t)host_addr(host);
     void* const backing = g_memory.backing(g_memory.context, guest);
     return backing ? backing : (void*)(uintptr_t)host_addr(host);
 }
+int nvn_vpool_page_unmapped(uint64_t a); // hle_nvn.c
 const void* nvn_direct_readable(uint64_t host) {
-    if (host < g_arena || host - g_arena >= g_guest_size || !g_memory.backing) return (const void*)(uintptr_t)host;
+    if (host < g_arena || host - g_arena >= g_guest_size) {
+        return nvn_vpool_page_unmapped(host) ? NULL : (const void*)(uintptr_t)host;
+    }
+    if (!g_memory.backing) return (const void*)(uintptr_t)host;
     return g_memory.backing(g_memory.context, host - g_arena);
 }
 static inline float F_float(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
