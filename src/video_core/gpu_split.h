@@ -485,9 +485,10 @@ public:
     /// What an acquire of the word at `address` (`device_address`) finds once the back ran
     /// everything sent so far, where the front knows that exactly, as FrontQmdView::WordAt values
     /// a reduction's base: the last release noted there, with a known payload and only noted
-    /// releases to other words sent after it; or memory, once the back ran every write sent there
-    /// and each landed. None, with `why`, where queued work may still change it or acquires read
-    /// it elsewhere. Every release the front did not note must have landed for either.
+    /// releases to other words sent after it; or memory, once the back ran every write sent there,
+    /// shader stores included, and each landed. None, with `why`, where queued work may still
+    /// change it or acquires read it elsewhere. Every release the front did not note must have
+    /// landed for either.
     [[nodiscard]] std::optional<SettledWord> SettledWordAt(const Tegra::MemoryManager& memory,
                                                            GPUVAddr address, u64 device_address,
                                                            AcquireUnsettled& why) const;

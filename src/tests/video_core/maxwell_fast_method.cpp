@@ -2527,11 +2527,43 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     drains(1);
     CHECK(unsettled(AcquireUnsettled::Writes) == writes + 1);
 
+    // Shader stores the back has yet to run, which may write any page: they mark it GPU-written
+    // only once they run.
+    release = false;
+    split.Defer(
+        [&release, before = stats.drained.load()] {
+            while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Caches);
+    split.Publish();
+    CHECK(acquire(Mask, 2));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == writes + 2);
+    // Nor does a release sent before them decide.
+    release = false;
+    split.Defer([&release, before = stats.drained.load()] {
+        while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    semaphore(11, OneWordRelease);
+    split.Defer([] {}, 0, VideoCommon::GpuSplit::Writes::Caches);
+    split.Publish();
+    CHECK_FALSE(acquire(Equal, 11)); // The release lands once its fence ran
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == writes + 3);
+    fences.RunFence();
+    CHECK(f.memory.Read<u32>(word) == 11);
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
+
     // GPU acquires read a word mirrored releases go beside from the mirror shadow.
     const u64 elsewhere = unsettled(AcquireUnsettled::Elsewhere);
     Tegra::Nx2AddSemaphoreRegion(word & ~GPUVAddr{0xfff});
     Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(word_device, word);
-    CHECK(acquire(Equal, 10));
+    CHECK(acquire(Equal, 11));
     drains(1);
     CHECK(unsettled(AcquireUnsettled::Elsewhere) == elsewhere + 1);
     Tegra::Nx2MirrorShadow::Get().Clear();

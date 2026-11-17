@@ -415,21 +415,23 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
         why = AcquireUnsettled::Unnoted;
         return std::nullopt;
     }
-    const u64 others = OtherWritesTarget(memory, address);
-    if (const auto queued = QueuedSemaphoreWriteAt(device_address)) {
-        if (!queued->known || queued->at_least) {
-            why = AcquireUnsettled::Unknown;
-            return std::nullopt;
-        }
-        if (queued->position < others) {
-            why = AcquireUnsettled::Writes;
-            return std::nullopt;
-        }
-        return SettledWord{queued->payload, queued->position};
+    // Shader stores are placed nowhere, and the back marks the pages they write GPU-written only
+    // as it runs them (NoteCacheWrite): each one sent may write the word.
+    const u64 others =
+        (std::max)(OtherWritesTarget(memory, address), (std::min)(last_any_write, write_position));
+    const auto queued = QueuedSemaphoreWriteAt(device_address);
+    if (queued && (!queued->known || queued->at_least)) {
+        why = AcquireUnsettled::Unknown;
+        return std::nullopt;
     }
-    if (!Ran(others)) {
+    // Read after Ran: the back marks the pages its stores wrote before it stores its position.
+    if ((queued ? queued->position < others : !Ran(others)) ||
+        Tegra::Nx2MayBeGpuWritten(device_address, sizeof(u32))) {
         why = AcquireUnsettled::Writes;
         return std::nullopt;
+    }
+    if (queued) {
+        return SettledWord{queued->payload, queued->position};
     }
     const u32 guest = memory.Read<u32>(address);
     return SettledWord{shadow.Read(device_address, guest).value_or(guest), std::nullopt};
