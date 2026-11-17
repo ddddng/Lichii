@@ -1201,7 +1201,7 @@ namespace {
 /// speed limiter, perf stats, pacing to the vblank, and as nx2:vi2's Composite the display
 /// HDR-change check.
 void PresentDirect(Core::System& system, State& state) {
-    Service::Nx2NotifyHdrChange();
+    Service::Nx2NotifyHdrChange(system.Kernel());
     if (!state.present) {
         state.present.emplace(system);
     }

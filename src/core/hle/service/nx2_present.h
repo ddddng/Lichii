@@ -26,6 +26,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
@@ -59,16 +60,31 @@ inline u32 Nx2VsyncRateHz() {
  */
 struct Nx2HdrChangeChecks {
     std::mutex mutex;
-    std::vector<std::pair<const void*, std::function<void()>>> checks; ///< by session
+    /// By session: adds the events to signal, opened, to its argument.
+    std::vector<std::pair<const void*, std::function<void(std::vector<Kernel::KEvent*>&)>>> checks;
 };
 inline Nx2HdrChangeChecks g_nx2_hdr_change_checks;
 
-/// Runs the HDR-change check of every live nx2:vi2 session, for a present made outside nx2:vi2.
-inline void Nx2NotifyHdrChange() {
-    std::scoped_lock lock{g_nx2_hdr_change_checks.mutex};
-    for (const auto& check : g_nx2_hdr_change_checks.checks) {
-        check.second();
+/// Signals and closes the events a check opened, with no lock held: a signal can switch this host
+/// thread to another guest thread, which may present and run the checks again.
+inline void Nx2SignalHdrEvents(Kernel::KernelCore& kernel,
+                               const std::vector<Kernel::KEvent*>& events) {
+    for (Kernel::KEvent* const event : events) {
+        event->Signal(kernel);
+        event->Close(kernel);
     }
+}
+
+/// Runs the HDR-change check of every live nx2:vi2 session, for a present made outside nx2:vi2.
+inline void Nx2NotifyHdrChange(Kernel::KernelCore& kernel) {
+    std::vector<Kernel::KEvent*> events;
+    {
+        std::scoped_lock lock{g_nx2_hdr_change_checks.mutex};
+        for (const auto& check : g_nx2_hdr_change_checks.checks) {
+            check.second(events);
+        }
+    }
+    Nx2SignalHdrEvents(kernel, events);
 }
 
 /**

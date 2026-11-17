@@ -2033,7 +2033,8 @@ public:
             {359, &INx2Vi2Session::StubReplyZeroed, "Unknown359"},
         });
         std::scoped_lock lk{g_nx2_hdr_change_checks.mutex};
-        g_nx2_hdr_change_checks.checks.emplace_back(this, [this] { NotifyHdrChange(); });
+        g_nx2_hdr_change_checks.checks.emplace_back(
+            this, [this](std::vector<Kernel::KEvent*>& events) { CollectHdrChange(events); });
     }
 
     ~INx2Vi2Session() override {
@@ -2794,6 +2795,14 @@ private:
     // presents and on the game's for NVN direct mode's (Nx2NotifyHdrChange); costs an atomic load
     // and a lock while nothing changes.
     void NotifyHdrChange() {
+        std::vector<Kernel::KEvent*> events;
+        CollectHdrChange(events);
+        Nx2SignalHdrEvents(system.Kernel(), events);
+    }
+
+    // NotifyHdrChange's check: the events to signal, opened, added to events. They are signalled
+    // (Nx2SignalHdrEvents) once m_hdr_mutex and the checks' mutex are released.
+    void CollectHdrChange(std::vector<Kernel::KEvent*>& events) {
         const u64 generation = Common::DisplayHdrMonitor::Instance().Generation();
         std::scoped_lock lk{m_hdr_mutex};
         if (generation == m_hdr_generation) {
@@ -2807,8 +2816,9 @@ private:
         }
         LOG_INFO(Service, "nx2:vi2 display HDR state changed, signalling the game");
         for (u32 index = 0; index < m_native_events.size(); ++index) {
-            if ((m_hdr_change_slots >> index) & 1 && m_native_events[index]) {
-                m_native_events[index]->Signal(system.Kernel());
+            Kernel::KEvent* const event = m_native_events[index];
+            if ((m_hdr_change_slots >> index) & 1 && event && event->Open(system.Kernel())) {
+                events.push_back(event);
             }
         }
     }
