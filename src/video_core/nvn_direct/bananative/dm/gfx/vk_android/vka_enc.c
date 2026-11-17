@@ -34,7 +34,7 @@
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
     X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) \
-    X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds)
+    X(vkCmdDrawMeshTasksIndirectEXT) X(vkCmdDrawMeshTasksIndirectCountEXT) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds)
 #define ENC_ID(f) E_##f,
 enum { E_WRAP = 0, E_CALL, ENC_FNS(ENC_ID) E_N };
 #define ENC_REAL(f) PFN_##f f;
@@ -274,6 +274,12 @@ static void VKAPI_CALL e_vkCmdSetDepthBounds(VkCommandBuffer cb, float lo, float
 static void VKAPI_CALL e_vkCmdDrawMeshTasksEXT(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDrawMeshTasksEXT, cb, x, y, z); BEGIN(r_draw, E_vkCmdDrawMeshTasksEXT, 0); r->a = x; r->b = y; r->c = z; END();
 }
+static void VKAPI_CALL e_vkCmdDrawMeshTasksIndirectEXT(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawMeshTasksIndirectEXT, cb, b, o, n, st); BEGIN(r_ind, E_vkCmdDrawMeshTasksIndirectEXT, 0); r->b = b; r->o = o; r->n = n; r->st = st; END();
+}
+static void VKAPI_CALL e_vkCmdDrawMeshTasksIndirectCountEXT(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer cbuf, VkDeviceSize co, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawMeshTasksIndirectCountEXT, cb, b, o, cbuf, co, n, st); BEGIN(r_indc, E_vkCmdDrawMeshTasksIndirectCountEXT, 0); r->b = b; r->o = o; r->cb2 = cbuf; r->co = co; r->n = n; r->st = st; END();
+}
 static void VKAPI_CALL e_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDispatch, cb, x, y, z); BEGIN(r_draw, E_vkCmdDispatch, 0); r->a = x; r->b = y; r->c = z; END();
 }
@@ -372,6 +378,8 @@ static void run(const hdr *h) {
     case E_vkCmdDrawIndexedIndirect: { C(r_ind); R.vkCmdDrawIndexedIndirect(r->cb, r->b, r->o, r->n, r->st); break; }
     case E_vkCmdDispatch: { C(r_draw); R.vkCmdDispatch(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDrawMeshTasksEXT: { C(r_draw); R.vkCmdDrawMeshTasksEXT(r->cb, r->a, r->b, r->c); break; }
+    case E_vkCmdDrawMeshTasksIndirectEXT: { C(r_ind); R.vkCmdDrawMeshTasksIndirectEXT(r->cb, r->b, r->o, r->n, r->st); break; }
+    case E_vkCmdDrawMeshTasksIndirectCountEXT: { C(r_indc); R.vkCmdDrawMeshTasksIndirectCountEXT(r->cb, r->b, r->o, r->cb2, r->co, r->n, r->st); break; }
     case E_vkCmdDrawIndirectCount: { C(r_indc); R.vkCmdDrawIndirectCount(r->cb, r->b, r->o, r->cb2, r->co, r->n, r->st); break; }
     case E_vkCmdDrawIndexedIndirectCount: { C(r_indc); R.vkCmdDrawIndexedIndirectCount(r->cb, r->b, r->o, r->cb2, r->co, r->n, r->st); break; }
     case E_vkCmdSetDepthBounds: { C(r_val); R.vkCmdSetDepthBounds(r->cb, r->f[0], r->f[1]); break; }

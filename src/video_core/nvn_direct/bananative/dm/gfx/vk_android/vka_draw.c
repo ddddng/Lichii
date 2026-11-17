@@ -1294,23 +1294,43 @@ void vka_checkpoint_report(void) {
     checkpoint_queue(V.q, "host queue");
     vka_qunlock();
 }
+// The records of an indirect mesh draw of one dimension are {count, first} (DrawMeshTasksIndirect: derived from the NVN2 driver in OoT's sdk NSO, function at sdk+0x6814e0,
+// a 2-word DMA into the draw method that DrawMeshTasks writes count, first to); VK_EXT_mesh_shader reads {x, y, z}. Each record's count is copied on the GPU into {count, 1, 1}
+// of scratch memory, outside the render pass (the game's culling writes the records earlier in the frame). first is not applied, as for the direct draw
+static int mesh_records(const p_draw *dw, vka_span *s) {
+    const uint32_t n = dw->mdi_max > 0 ? (uint32_t)dw->mdi_max : 1, st = dw->mdi_stride > 0 ? (uint32_t)dw->mdi_stride : 8;
+    VkBuffer b; VkDeviceSize o;
+    if (!vka_addr(dw->ind, (uint64_t)(n - 1) * st + 4, &b, &o, NULL) || !vka_scratch(12 * (VkDeviceSize)n, 16, s)) return 0;
+    VkBufferCopy *c = malloc(n * sizeof *c);
+    if (!c) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t w[3] = {0, 1, 1}; memcpy(s->ptr + 12 * (size_t)i, w, 12);
+        c[i] = (VkBufferCopy){o + (VkDeviceSize)i * st, s->off + 12 * (VkDeviceSize)i, 4};
+    }
+    vka_rp_end(); vka_barrier(g_cb);
+    vk.vkCmdCopyBuffer(g_cb, b, s->buf, n, c);
+    vka_barrier(g_cb);
+    free(c);
+    return 1;
+}
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!d->inited) vka_dstate_reset(d);
-    uint64_t mdi = dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
+    // An NVN2 mesh draw (hle_nvn.c): a multi-draw of them is one record, drawn whole below
+    const int mesh = dw && (dw->prim == NVN_PRIM_MESH || dw->prim == NVN_PRIM_MESH_3D);
+    uint64_t mdi = mesh ? 0 : dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
     // An indirect-count multi-draw (hle_nvn.c records one draw per possible record): on a device with drawIndirectCount the first record draws them all with the count the
     // GPU reads (vkCmdDraw*IndirectCount, at most mdi_max), and the other records are skipped; else each record reads the count on the CPU at replay
     int mdi_gpu = mdi && V.draw_indirect_count && (dw ? dw->mdi_max : di->mdi_max) > 0 && VKA_ENV("DM_VK_MDI_GPU", 1);
     if (mdi_gpu && mdi_i > 0) return;
     if (mdi && !mdi_gpu) { uint32_t cnt = 0; if (!cpu_read(mdi, &cnt, 4) || (uint32_t)mdi_i >= cnt) return;   // past the multi-draw's count (read now: a count the GPU writes in this submission is not seen)
                VRED_ONCE("indirect-count multi-draws read their count on the CPU at replay"); }
-    d->b.base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
+    d->b.base_instance = mesh ? 0 : (uint32_t)(dw ? dw->base_instance : di->base_instance);   // (a 3D mesh draw's z: hle_nvn.c)
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
     vka_rc_draw(d);   // Lichii: the state shaders recompiled at this draw read (nvn_recompile.c)
     PT(0);
-    // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
-    // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
-    const int mesh = dw && dw->prim == NVN_PRIM_MESH;
+    // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks and its indirect, 3D and multi-draw forms, hle_nvn.c): the task (optional) and mesh shaders of one program, the
+    // fragment stage's shader, in a mesh pipeline (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasks*EXT: no vertex input, primitive type or index buffer
     if (mesh) {
         if (!V.mesh) SKIP("mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0): skipped");
         // The program whose task and mesh shaders run: the fragment stage's when it has a mesh shader (a program's stages are bound together), else the one bound at the
@@ -1328,8 +1348,9 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
             SKIP("mesh draw: pixel shader %016llx reads per-primitive inputs that mesh shader %016llx does not write: skipped", (unsigned long long)sh[1]->key, (unsigned long long)sh[7]->key);
         if (sh[1] && !(sh[1]->e->flags & DMSH_VK_F_MESH_PRIM) && (sh[7]->e->flags & DMSH_VK_F_MESH_PRIM))
             VRED_ONCE("mesh draw: mesh shader %016llx writes per-primitive outputs and pixel shader %016llx has no per-primitive inputs: any it reads there are undefined", (unsigned long long)sh[7]->key, (unsigned long long)sh[1]->key);
-        if (dw->first) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh draw with first workgroup %d (count %d): drawn from 0 (the translated task / mesh shaders read their workgroup index with no base; open)", dw->first, dw->count); }
-        if (dw->count <= 0) return;
+        if (dw->prim == NVN_PRIM_MESH && !dw->ind && dw->first) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh draw with first workgroup %d (count %d): drawn from 0 (the translated task / mesh shaders read their workgroup index with no base; open)", dw->first, dw->count); }
+        if (!dw->ind && (dw->count <= 0 || (dw->prim == NVN_PRIM_MESH_3D && (dw->instances <= 0 || dw->base_instance <= 0)))) return;
+        if (dw->ind && (!vk.vkCmdDrawMeshTasksIndirectEXT || !vk.vkCmdDrawMeshTasksIndirectCountEXT)) SKIP("indirect mesh draw on a device without vkCmdDrawMeshTasksIndirect(Count)EXT: skipped");
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
     } else {
         for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
@@ -1393,6 +1414,9 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         int on = R.on; vka_rp_end(); (void)on;
         vka_nan_inputs(g_cb, ims, bs, ts, m);
     }
+    vka_span mrec = {0};
+    if (mesh && ind && dw->prim == NVN_PRIM_MESH && !mesh_records(dw, &mrec))
+        SKIP("indirect mesh draw: records at %#llx (%d, stride %d) not in one placed segment: skipped", (unsigned long long)ind, dw->mdi_max, dw->mdi_stride);
     if (!rp_begin(rt, has_rt, d)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!R.swrite && draw_writes(sh, d)) R.swrite = 1;   // (a game barrier in this pass from now on ends it: vka_rp_game_barrier)
     d->b.samples = R.samples;
@@ -1546,11 +1570,25 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     #undef SKIP   // (a draw skipped from here on ends its query first)
     #define SKIP(...) do { if (dq) { dq_arg x_ = {g_cb, dq}; if (!vka_enc_call(dq_end, &x_, sizeof x_)) dq_end(&x_); } g_skipped++, vka_skip_line[__LINE__ & 2047]++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return; } while (0)
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
-    if (mesh) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
-        static uint32_t largest; if ((uint32_t)dw->count > largest) { largest = (uint32_t)dw->count; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("mesh draw: largest so far %u workgroups (task %016llx mesh %016llx)", largest, sh[6] ? (unsigned long long)sh[6]->key : 0ull, (unsigned long long)sh[7]->key); }
-        uint32_t maxg = sh[6] ? V.task_groups : V.mesh_groups;
-        if ((uint32_t)dw->count > maxg) SKIP("mesh draw of %d workgroups: more than the device's %u in one dimension; skipped", dw->count, maxg);
-        vk.vkCmdDrawMeshTasksEXT(g_cb, (uint32_t)dw->count, 1, 1);
+    if (mesh && !ind) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
+        const int d3 = dw->prim == NVN_PRIM_MESH_3D;
+        const uint32_t g[3] = {(uint32_t)dw->count, d3 ? (uint32_t)dw->instances : 1, d3 ? (uint32_t)dw->base_instance : 1}, *maxg = sh[6] ? V.task_groups : V.mesh_groups;
+        static uint32_t largest; if (g[0] > largest) { largest = g[0]; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("mesh draw: largest so far %u workgroups (task %016llx mesh %016llx)", largest, sh[6] ? (unsigned long long)sh[6]->key : 0ull, (unsigned long long)sh[7]->key); }
+        if (g[0] > maxg[0] || g[1] > maxg[1] || g[2] > maxg[2]) SKIP("mesh draw of %ux%ux%u workgroups: more than the device's %ux%ux%u; skipped", g[0], g[1], g[2], maxg[0], maxg[1], maxg[2]);
+        vk.vkCmdDrawMeshTasksEXT(g_cb, g[0], g[1], g[2]);
+    } else if (mesh) {   // indirect: {x, y, z} records as they are, {count, first} ones as mesh_records made them; a count the GPU reads where the device can
+        uint32_t n = dw->mdi_max > 0 ? (uint32_t)dw->mdi_max : 1, st = mrec.buf ? 12 : dw->mdi_stride > 0 ? (uint32_t)dw->mdi_stride : 12;
+        VkBuffer b = mrec.buf; VkDeviceSize o = mrec.off;
+        if (!b && (!vka_addr(ind, (uint64_t)(n - 1) * st + 12, &b, &o, NULL) || (o & 3) || (st & 3) || st < 12))
+            SKIP("indirect mesh draw: records at %#llx (%u, stride %u) not in one placed segment or not aligned: skipped", (unsigned long long)ind, n, st);
+        VkBuffer cb_; VkDeviceSize co_;
+        if (dw->mdi_cnt && V.draw_indirect_count && vka_addr(dw->mdi_cnt, 4, &cb_, &co_, NULL) && !(co_ & 3)) vk.vkCmdDrawMeshTasksIndirectCountEXT(g_cb, b, o, cb_, co_, n, st);
+        else {
+            if (dw->mdi_cnt) { uint32_t c = 0; if (!cpu_read(dw->mdi_cnt, &c, 4)) SKIP("indirect-count mesh draw: count at %#llx not readable: skipped", (unsigned long long)dw->mdi_cnt);
+                               if (c < n) n = c; VRED_ONCE("indirect-count mesh draws read their count on the CPU at replay"); }
+            if (n == 1 || V.multi_draw_indirect) { if (n) vk.vkCmdDrawMeshTasksIndirectEXT(g_cb, b, o, n, st); }
+            else for (uint32_t i = 0; i < n; i++) vk.vkCmdDrawMeshTasksIndirectEXT(g_cb, b, o + (VkDeviceSize)i * st, 1, 12);
+        }
     } else if (expand) {   // quads or a line loop: the indices made here, 32-bit, in scratch memory
         uint32_t count = (uint32_t)(dw ? dw->count : di->count), *src = NULL;
         if (di && !(src = read_indices(di->ibuf, di->itype, count))) SKIP("indices at %#llx are not readable: the draw is skipped", (unsigned long long)di->ibuf);

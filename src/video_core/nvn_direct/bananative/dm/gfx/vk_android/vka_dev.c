@@ -234,9 +234,10 @@ static int init_once(void) {
     V.max_push = V.push_desc ? ppd.maxPushDescriptors : 0;
     if (V.mesh && !vk.vkCmdDrawMeshTasksEXT) V.mesh = V.task = 0;
     V.draw_indirect_count = f12.drawIndirectCount && vk.vkCmdDrawIndirectCount && vk.vkCmdDrawIndexedIndirectCount;
+    V.multi_draw_indirect = f2.features.multiDrawIndirect;
     if (V.mesh) { V.mesh_inv = pmesh.maxMeshWorkGroupInvocations; V.task_inv = pmesh.maxTaskWorkGroupInvocations; V.mesh_out_v = pmesh.maxMeshOutputVertices;
                   V.mesh_out_p = pmesh.maxMeshOutputPrimitives; V.task_payload = pmesh.maxTaskPayloadSize;
-                  V.task_groups = pmesh.maxTaskWorkGroupCount[0]; V.mesh_groups = pmesh.maxMeshWorkGroupCount[0]; }
+                  memcpy(V.task_groups, pmesh.maxTaskWorkGroupCount, sizeof V.task_groups); memcpy(V.mesh_groups, pmesh.maxMeshWorkGroupCount, sizeof V.mesh_groups); }
     VLOG("mesh shading (NVN2 task and mesh programs): %s", V.task ? "on" : V.mesh ? "mesh shaders only (no taskShader)" : !mesh_ext ? "not on this device" : !x_mesh ? "off (DM_VK_MESH=0)" : "extension without the mesh stage");
     if (V.mesh) VLOG("mesh shading limits: workgroups mesh %u / task %u invocations, mesh output %u vertices / %u primitives / %u components / %u bytes, task payload %u bytes, mesh shared %u bytes",
                      V.mesh_inv, V.task_inv, V.mesh_out_v, V.mesh_out_p, pmesh.maxMeshOutputComponents, pmesh.maxMeshOutputMemorySize, V.task_payload, pmesh.maxMeshSharedMemorySize);
@@ -605,7 +606,8 @@ static sblk *sblk_new(VkDeviceSize n) {
 }
 static sblk *sblk_new_(VkDeviceSize n) {
     sblk *b = calloc(1, sizeof *b); b->size = n;
-    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};   // (Lichii: indirect mesh draws' converted records, vka_draw.c mesh_records)
     if (vk.vkCreateBuffer(V.dev, &bi, NULL, &b->buf)) { free(b); return NULL; }
     VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, b->buf, &mr);
     uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);

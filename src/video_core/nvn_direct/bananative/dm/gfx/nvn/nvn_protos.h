@@ -481,6 +481,20 @@ typedef void (*NVNT_nvnEventSignal)(NVNevent*, NVNeventSignalMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferWaitEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventWaitMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventSignalMode, NVNeventSignalLocation, int, uint32_t);
 
+// Lichii: NVN2 calls the header lacks, derived from the NVN2 driver in OoT's sdk NSO (argument registers only; function at sdk+0x...):
+// DrawMeshTasksIndirect 0x6814e0, DrawMeshTasks3D 0x6818f0, DrawMeshTasks3DIndirect 0x681970, MultiDrawMeshTasksIndirect 0x6816e0, MultiDrawMeshTasksIndirectCount 0x6817e0,
+// MultiDrawMeshTasks3DIndirect 0x681bb0, MultiDrawMeshTasks3DIndirectCount 0x681cb0 (the multi-draws pass their arguments in MultiDrawArraysIndirectCount's order to one helper),
+// TexturePoolWriteDescriptorTableData 0x66c760, SamplerPoolWriteDescriptorTableData 0x6682e0 (id, byte offset in that entry's 32 bytes onwards, byte count, words)
+typedef void (*NVNT_nvnCommandBufferDrawMeshTasksIndirect)(NVNcommandBuffer*, NVNbufferAddress);
+typedef void (*NVNT_nvnCommandBufferDrawMeshTasks3D)(NVNcommandBuffer*, int, int, int);
+typedef void (*NVNT_nvnCommandBufferDrawMeshTasks3DIndirect)(NVNcommandBuffer*, NVNbufferAddress);
+typedef void (*NVNT_nvnCommandBufferMultiDrawMeshTasksIndirect)(NVNcommandBuffer*, NVNbufferAddress, int, ptrdiff_t);
+typedef void (*NVNT_nvnCommandBufferMultiDrawMeshTasksIndirectCount)(NVNcommandBuffer*, NVNbufferAddress, NVNbufferAddress, int, ptrdiff_t);
+typedef void (*NVNT_nvnCommandBufferMultiDrawMeshTasks3DIndirect)(NVNcommandBuffer*, NVNbufferAddress, int, ptrdiff_t);
+typedef void (*NVNT_nvnCommandBufferMultiDrawMeshTasks3DIndirectCount)(NVNcommandBuffer*, NVNbufferAddress, NVNbufferAddress, int, ptrdiff_t);
+typedef void (*NVNT_nvnTexturePoolWriteDescriptorTableData)(const NVNtexturePool*, int, ptrdiff_t, size_t, const void*);
+typedef void (*NVNT_nvnSamplerPoolWriteDescriptorTableData)(const NVNsamplerPool*, int, ptrdiff_t, size_t, const void*);
+
 // Names without a prototype in the header (newer interfaces): they can only get named stubs
 //   nvnDeviceBuilderGetFlags
 //   nvnQueueBuilderSetQueuePriority
@@ -557,19 +571,12 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnCommandBufferDispatchRays
 //   nvnCommandBufferDispatchRaysIndirect
 //   nvnCommandBufferDrawMeshTasks
-//   nvnCommandBufferDrawMeshTasks3D
-//   nvnCommandBufferDrawMeshTasks3DIndirect
-//   nvnCommandBufferDrawMeshTasksIndirect
 //   nvnCommandBufferEnableExclusiveScissor
 //   nvnCommandBufferEndDeviceCommands
 //   nvnCommandBufferEvaluateDlss
 //   nvnCommandBufferGetAccelerationStructureVisualizationData
 //   nvnCommandBufferInsertDebugMarkerCompute
 //   nvnCommandBufferInsertDebugMarkerGraphics
-//   nvnCommandBufferMultiDrawMeshTasks3DIndirect
-//   nvnCommandBufferMultiDrawMeshTasks3DIndirectCount
-//   nvnCommandBufferMultiDrawMeshTasksIndirect
-//   nvnCommandBufferMultiDrawMeshTasksIndirectCount
 //   nvnCommandBufferPopDebugGroupCompute
 //   nvnCommandBufferPopDebugGroupGraphics
 //   nvnCommandBufferPushComputeConstants
@@ -739,8 +746,6 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnWindowGetHdrDisplayMetadata
 //   nvnWindowSetHdrContentMetadata
 //   nvnWindowSetHdrDisplayMetadata
-//   nvnTexturePoolWriteDescriptorTableData
-//   nvnSamplerPoolWriteDescriptorTableData
 //   nvnCommandBufferConvertCooperativeVectorMatrix
 //   nvnDeviceGetCooperativeVectorMatrixSize
 //   nvnDeviceConvertCooperativeVectorMatrix
