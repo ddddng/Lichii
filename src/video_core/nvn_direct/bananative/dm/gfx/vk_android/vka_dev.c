@@ -196,6 +196,37 @@ static int init_once(void) {
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
+    {   // Lichii (dotfiles-25x.100): the state of hle_nvn.c's s2-cmd section that needs an extension, where Lichii's device enabled it (vulkan_device.cpp)
+        VkPhysicalDeviceProvokingVertexFeaturesEXT fpv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
+        VkPhysicalDeviceExclusiveScissorFeaturesNV fex = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXCLUSIVE_SCISSOR_FEATURES_NV, .pNext = &fpv};
+        VkPhysicalDeviceFragmentShadingRateFeaturesKHR ffsr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR, .pNext = &fex};
+        VkPhysicalDeviceFeatures2 qf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ffsr};
+        vk.vkGetPhysicalDeviceFeatures2(V.pd, &qf);
+        VkPhysicalDeviceConservativeRasterizationPropertiesEXT pcr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT};
+        VkPhysicalDeviceFragmentShadingRatePropertiesKHR pfsr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR, .pNext = &pcr};
+        VkPhysicalDeviceProperties2 qp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pfsr};
+        vk.vkGetPhysicalDeviceProperties2(V.pd, &qp);
+        V.cons = vka_dev_ext(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME); V.cons_max = pcr.maxExtraPrimitiveOverestimationSize;
+        V.provoking_last = vka_dev_ext(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME) && fpv.provokingVertexLast;
+        V.vp_swizzle = vka_dev_ext(VK_NV_VIEWPORT_SWIZZLE_EXTENSION_NAME);
+        if (vka_dev_ext(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME) && fex.exclusiveScissor) V.set_excl_scissor = (PFN_vkCmdSetExclusiveScissorNV)vk.vkGetDeviceProcAddr(V.dev, "vkCmdSetExclusiveScissorNV");
+        V.excl_scissor = V.set_excl_scissor != NULL;
+        // VRS: an attachment of NVN's 16x16-pixel tiles, written as R8_UINT storage by the pass that makes it (vka_draw.c vrs_fill)
+        VkFormatProperties r8; vk.vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_R8_UINT, &r8);
+        const VkFormatFeatureFlags r8_need = VK_FORMAT_FEATURE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+        const VkExtent2D t0 = pfsr.minFragmentShadingRateAttachmentTexelSize, t1 = pfsr.maxFragmentShadingRateAttachmentTexelSize;
+        V.vrs = vka_dev_ext(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) && ffsr.attachmentFragmentShadingRate && (r8.optimalTilingFeatures & r8_need) == r8_need
+                && t0.width <= 16 && t1.width >= 16 && t0.height <= 16 && t1.height >= 16;
+        if (g_adopt.debug_labels) {
+            V.label_begin = (PFN_vkCmdBeginDebugUtilsLabelEXT)vk.vkGetDeviceProcAddr(V.dev, "vkCmdBeginDebugUtilsLabelEXT");
+            V.label_end = (PFN_vkCmdEndDebugUtilsLabelEXT)vk.vkGetDeviceProcAddr(V.dev, "vkCmdEndDebugUtilsLabelEXT");
+            V.label_insert = (PFN_vkCmdInsertDebugUtilsLabelEXT)vk.vkGetDeviceProcAddr(V.dev, "vkCmdInsertDebugUtilsLabelEXT");
+            if (!V.label_begin || !V.label_end || !V.label_insert) V.label_begin = NULL;
+        }
+        VLOG("command-buffer state: conservative rasterization %s (dilation up to %.2f), last provoking vertex %s, viewport swizzles %s, exclusive scissors %s, shading rate attachment %s "
+             "(texels %ux%u-%ux%u), debug labels %s", V.cons ? "yes" : "no", V.cons_max, V.provoking_last ? "yes" : "no", V.vp_swizzle ? "yes" : "no", V.excl_scissor ? "yes" : "no",
+             V.vrs ? "yes" : "no", t0.width, t0.height, t1.width, t1.height, V.label_begin ? "yes" : "no");
+    }
     // Lichii: the queues it handed over; the last one is Lichii's own graphics queue, the host's here (V.q). With fewer than three everything goes to that one
     for (int i = 0; i < V.nq; i++) V.qs[i] = g_adopt.queues[fam_queues - (uint32_t)V.nq + (uint32_t)i];
     V.q = g_adopt.queues[fam_queues - 1];

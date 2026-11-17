@@ -72,6 +72,7 @@ target_sources(nvn_direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/nvn_recompile_stam
 
 target_include_directories(nvn_direct PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
+    ${HOST_SHADERS_INCLUDE}
     bananative/shim
     gen
     .
@@ -85,4 +86,6 @@ target_compile_definitions(nvn_direct PRIVATE __ANDROID__ _GNU_SOURCE)
 # Upstream's code is kept as it is: its warnings are not Lichii's to fix.
 target_compile_options(nvn_direct PRIVATE -w)
 target_compile_definitions(nvn_direct INTERFACE LICHII_NVN_DIRECT)
+# The shading-rate attachment's shader (vka_draw.c)
+add_dependencies(nvn_direct host_shaders)
 target_link_libraries(nvn_direct PUBLIC Vulkan::Headers PRIVATE common zstd::zstd ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS} m)

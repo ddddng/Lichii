@@ -1513,29 +1513,11 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 static void nvn_nop(void) {}
 void *nvn_nop_fn(void) { return (void *)nvn_nop; }   // Lichii: the dispatch calls the empty implementations without a prototype directly
 static const char *const g_nops[] = {
-    "nvnCommandBufferSetPatchSize",
 #if !defined(__ANDROID__)
     "nvnCommandBufferSetDepthBounds",   // (recorded on Android: OP_DEPTH_BOUNDS)
-#endif
-    "nvnCommandBufferWaitSync",
-    "nvnCommandBufferSetShaderScratchMemory",
-    "nvnCommandBufferPushDebugGroupDynamic",
-    "nvnCommandBufferPopDebugGroup",
-    "nvnCommandBufferInsertDebugMarkerDynamic",
-    "nvnCommandBufferInsertDebugMarker",   // 13 Sentinels
-    "nvnCommandBufferPushDebugGroup",      // Super Mario 3D World + Bowser's Fury (NVN 53)
-    "nvnCommandBufferPushDebugGroupStatic",
-    "nvnCommandBufferPopDebugGroupId",
-    "nvnCommandBufferInsertDebugMarkerStatic",
-#if !defined(__ANDROID__)
     "nvnCommandBufferWaitEvent",   // (recorded on Android: OP_WAIT_EVENT)
 #endif
     "nvnWindowFinalize",
-    // Variable-rate shading (NVN2; Mario Kart World binds a shading-rate image and its palette every frame): the host shades every pixel at full rate (the finest rate
-    // a palette entry can name): coarse-rate regions come out sharper, only the cost differs (a shader reading its shading rate would see 1x1)
-    "nvnCommandBufferBindShadingRateImage",
-    "nvnCommandBufferShadingRateImagePalette",
-    "nvnCommandBufferSetShadingRatePaletteMode",
 };
 void nvn_nops_register(void) {   // Lichii: called by nvn_direct_init (upstream: a constructor)
     // Empty implementations overwrite the unimplemented stubs after the slot table is initialized; a misspelled name (not in main's name table) reports a failure and aborts at startup
@@ -2211,8 +2193,6 @@ NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c;
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) { *REC(c, OP_PRIM_RESTART, p_prim_restart) = (p_prim_restart){(en & 0xff) != 0, (uint32_t)idx}; }
 // Rasterizer discard: draws run their vertex stage only (with transform feedback, the capture); recorded, and at replay such a draw rasterizes nothing (nvn_mtl.m)
 NVN(nvnCommandBufferSetRasterizerDiscard, void, NVNcommandBuffer *c, uint32_t en) { REC(c, OP_RAST_DISCARD, p_rast_discard)->on = (en & 0xff) != 0; }
-NVN(nvnCommandBufferSetSampleMask, void, NVNcommandBuffer *c, int m) { (void)c; if ((m & 0xffff) != 0xffff) ONCE_LOG("SetSampleMask %#x: ignored by the host for now", m); }
-NVN(nvnCommandBufferSetConservativeRasterEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; if (en & 0xff) ONCE_LOG("SetConservativeRasterEnable on: ignored by the host for now"); }
 NVN(nvnCommandBufferSetTiledCacheAction, void, NVNcommandBuffer *c, NVNtiledCacheAction a) { (void)c; (void)a; }        // Tegra tiled cache hint, no Metal equivalent
 // A bound target's contents may be discarded: they are undefined afterwards, so keeping them is correct (The Great Ace Attorney Chronicles discards colour target 0)
 NVN(nvnCommandBufferDiscardColor, void, NVNcommandBuffer *c, int i) { (void)c; (void)i; }
@@ -2345,3 +2325,123 @@ int nvn_host_signal_sync(void *nvnsync) {
     o->fence = 0; o->fenced = 1; return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush
+
+// ---------- s2-cmd: command-buffer state commands (Lichii, dotfiles-25x.100) ----------
+// The calls nvn_protos.h has no prototype for take the signatures of the NVN2 driver in Ocarina of Time's sdk (the registers each reads, the methods it writes).
+// The replay applies what Vulkan can express (vka_draw.c, vka_exec.c, vka_pso.c); what it cannot is logged once where it is used
+
+// Tessellation: the patch size is part of the pipeline (vka_pso.c). The levels are NVN's defaults for a program without a tessellation control shader, which Vulkan
+// cannot draw (it needs the control stage): kept in the replay's state, such draws are logged and skipped (vka_draw.c)
+NVN(nvnCommandBufferSetPatchSize, void, NVNcommandBuffer *c, int n) { REC(c, OP_PATCH_SIZE, p_patch_size)->n = n; }
+NVN(nvnCommandBufferSetInnerTessellationLevels, void, NVNcommandBuffer *c, const float *l) { p_tess_levels *r = REC(c, OP_TESS_LEVELS, p_tess_levels); r->outer = 0; memcpy(r->v, l, 2 * sizeof *l); }
+NVN(nvnCommandBufferSetOuterTessellationLevels, void, NVNcommandBuffer *c, const float *l) { p_tess_levels *r = REC(c, OP_TESS_LEVELS, p_tess_levels); r->outer = 1; memcpy(r->v, l, 4 * sizeof *l); }
+// Multisample coverage: the mask (the driver keeps its low 16 bits) is the pipeline's pSampleMask
+NVN(nvnCommandBufferSetSampleMask, void, NVNcommandBuffer *c, int m) { REC(c, OP_SAMPLE_MASK, p_sample_mask)->mask = (uint32_t)m & 0xffff; }
+// Conservative rasterization (VK_EXT_conservative_rasterization, overestimation): on / off and the dilation, which the driver rounds up to quarter pixels (at most 0.75).
+// The mode's pre-snap variants and the subpixel precision bias have no Vulkan equivalent (logged once at a draw that uses them). SetConservativeRasterMode: mode in w1,
+// a 4-bit value the driver writes beside it in w2, whose meaning is not known (kept out of the record)
+NVN(nvnCommandBufferSetConservativeRasterEnable, void, NVNcommandBuffer *c, uint32_t en) { *REC(c, OP_RASTER, p_raster) = (p_raster){RASTER_CONSERVATIVE, B(en) != 0, 0, 0}; }
+NVN(nvnCommandBufferSetConservativeRasterDilate, void, NVNcommandBuffer *c, float d) {
+    int q = d > 0 ? (int)(d * 4.0f) + (d * 4.0f > (float)(int)(d * 4.0f)) : 0; if (q > 3) q = 3;
+    *REC(c, OP_RASTER, p_raster) = (p_raster){RASTER_DILATE, 0, 0, (float)q / 4.0f};
+}
+NVN_NOPROTO(nvnCommandBufferSetConservativeRasterMode, void, NVNcommandBuffer *c, int mode, int extra) { (void)extra; *REC(c, OP_RASTER, p_raster) = (p_raster){RASTER_CONSERVATIVE_MODE, mode, 0, 0}; }
+NVN(nvnCommandBufferSetSubpixelPrecisionBias, void, NVNcommandBuffer *c, int x, int y) { *REC(c, OP_RASTER, p_raster) = (p_raster){RASTER_SUBPIXEL_BIAS, x & 0x1f, y & 0x1f, 0}; }
+// The provoking vertex of flat-shaded outputs: the driver's value is the GPU's (0 the first vertex, 1 the last); the last needs VK_EXT_provoking_vertex
+NVN_NOPROTO(nvnCommandBufferSetProvokingVertexMode, void, NVNcommandBuffer *c, int mode) { *REC(c, OP_RASTER, p_raster) = (p_raster){RASTER_PROVOKING, mode, 0, 0}; }
+// Clamping of blend inputs and results on float targets: Vulkan blends them unclamped, which is NVN's default
+NVN_NOPROTO(nvnCommandBufferSetFloatBlendClamp, void, NVNcommandBuffer *c, uint32_t en) { (void)c; if (B(en)) ONCE_LOG("[RED] SetFloatBlendClamp(true): float targets blend unclamped on the host (Vulkan has no such clamp)"); }
+// Representative fragment test: lets the GPU skip fragments of a primitive beyond a representative set; shading all of them is a valid result, which the host does
+NVN_NOPROTO(nvnCommandBufferSetRepresentativeFragmentTest, void, NVNcommandBuffer *c, uint32_t en) { (void)c; (void)en; }
+// GPU hints with no effect on what the commands produce: ZCull's compression of 32-bit float depth (the host does no ZCull, as for SaveZCullData), the share of the GPU's
+// resources a kind of work may take (kind 0 / 1, a fraction) and its priority, and the tiled cache's subtile size
+NVN_NOPROTO(nvnCommandBufferSetZCullZF32CompressionEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; (void)en; }
+NVN_NOPROTO(nvnCommandBufferSetResourceOccupancy, void, NVNcommandBuffer *c, int kind, float share) { (void)c; (void)kind; (void)share; }
+NVN_NOPROTO(nvnCommandBufferSetGraphicsWorkloadPriority, void, NVNcommandBuffer *c, int prio) { (void)c; (void)prio; }
+NVN_NOPROTO(nvnCommandBufferSetComputeWorkloadPriority, void, NVNcommandBuffer *c, int prio) { (void)c; (void)prio; }
+NVN_NOPROTO(nvnCommandBufferOverrideSubtileSize, void, NVNcommandBuffer *c, uint32_t en, int size) { (void)c; (void)en; (void)size; }
+// Control memory callbacks: the host records no control commands (cmd_t.ctl_size), so the callback this enables never becomes due
+NVN_NOPROTO(nvnCommandBufferSetControlMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
+// Scratch memory for shaders' local memory: the translated shaders keep local memory per invocation (the recompiler sizes it from the shader header), so the replay reads
+// none of it. The range must lie in the pool, as the driver needs
+NVN(nvnCommandBufferSetShaderScratchMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
+    (void)c; const pool_t *pl = (const pool_t *)p;
+    if (pl && (off < 0 || (uint64_t)off + n > pl->size)) ONCE_LOG("[RED] SetShaderScratchMemory: %#zx bytes at %#llx are outside their pool (%#llx bytes)", n, (unsigned long long)off, (unsigned long long)pl->size);
+}
+// A wait for a sync object in the command stream: the replay waits for the sync's fence where the command runs (vka_exec.c), read then, as the GPU reads it
+NVN(nvnCommandBufferWaitSync, void, NVNcommandBuffer *c, const NVNsync *s) { REC(c, OP_WAIT_SYNC, p_wait_sync)->sync = (const sync_t *)s; }
+// Compute and copy enables: like SetRenderEnable(Conditional), for dispatches and for copies (mode: render if the counters at addr and addr + 16 are equal / not equal)
+NVN_NOPROTO(nvnCommandBufferSetComputeEnable, void, NVNcommandBuffer *c, uint32_t en) { *REC(c, OP_ENABLE_COND, p_enable_cond) = (p_enable_cond){0, B(en) ? 2 : 3, 0}; }
+NVN_NOPROTO(nvnCommandBufferSetComputeEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) { *REC(c, OP_ENABLE_COND, p_enable_cond) = (p_enable_cond){0, (int)m & 1, a}; }
+NVN_NOPROTO(nvnCommandBufferSetCopyEnable, void, NVNcommandBuffer *c, uint32_t en) { *REC(c, OP_ENABLE_COND, p_enable_cond) = (p_enable_cond){1, B(en) ? 2 : 3, 0}; }
+NVN_NOPROTO(nvnCommandBufferSetCopyEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) { *REC(c, OP_ENABLE_COND, p_enable_cond) = (p_enable_cond){1, (int)m & 1, a}; }
+// Exclusive scissor (VK_NV_scissor_exclusive): fragments inside the rectangle are discarded
+NVN_NOPROTO(nvnCommandBufferEnableExclusiveScissor, void, NVNcommandBuffer *c, uint32_t en) { p_excl_scissor *r = RECN(c, OP_EXCL_SCISSOR, p_excl_scissor, r, 0); r->what = 0; r->first = B(en) != 0; }
+NVN_NOPROTO(nvnCommandBufferSetExclusiveScissors, void, NVNcommandBuffer *c, int first, int n, const int *rects) {
+    if (n < 0 || first < 0 || first + n > 16) { LOG("[RED] SetExclusiveScissors first=%d n=%d", first, n); return; }
+    p_excl_scissor *r = RECN(c, OP_EXCL_SCISSOR, p_excl_scissor, r, n); r->what = 1; r->first = first; r->n = n; memcpy(r->r, rects, 16 * (size_t)n);
+}
+NVN_NOPROTO(nvnCommandBufferSetExclusiveScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { const int r[4] = {x, y, w, h}; h_nvnCommandBufferSetExclusiveScissors(c, 0, 1, r); }
+// Coverage modulation scales colour by the share of raster samples covered when there are more of them than colour samples (mixed samples); the replay rasterizes at the
+// colour sample count, where the table changes nothing
+NVN(nvnCommandBufferBindCoverageModulationTable, void, NVNcommandBuffer *c, const float *t) { (void)c; (void)t; ONCE_LOG("BindCoverageModulationTable: the host rasterizes at the colour sample count, where coverage modulation changes nothing"); }
+// Shader subroutines: the translated shaders call no subroutines (the recompiler has no subroutine uniforms), so the linkage is accepted and a selection has no effect
+NVN(nvnProgramSetSubroutineLinkage, NVNboolean, NVNprogram *p, int n, const NVNsubroutineLinkageMapPtr *maps) { (void)p; (void)n; (void)maps; return 1; }
+NVN(nvnCommandBufferSetProgramSubroutines, void, NVNcommandBuffer *c, NVNprogram *p, NVNshaderStage st, const int first, const int n, const int *values) {
+    (void)c; (void)p; (void)values; ONCE_LOG("[RED] SetProgramSubroutines (stage %d, %d from %d): the translated shaders have no subroutine uniforms, the selection is not applied", (int)st, n, first);
+}
+// Checkpoints: the retail driver records nothing and returns true (sdk 0x64bf60 / 0x64bf70)
+NVN_NOPROTO(nvnCommandBufferInsertCheckpointStatic, NVNboolean, NVNcommandBuffer *c) { (void)c; return 1; }
+NVN_NOPROTO(nvnCommandBufferInsertCheckpointDynamic, NVNboolean, NVNcommandBuffer *c) { (void)c; return 1; }
+
+// Debug groups and markers: VK_EXT_debug_utils labels in the replay's command buffers when the host has them (a debugging tool attached or renderer debug on: vka_exec.c),
+// else the records are walked past. The name is copied (the Dynamic forms' string may be gone by submit; the Static ones' is kept by the game, copied all the same)
+static void debug_label(NVNcommandBuffer *c, int what, uint32_t domain, const char *name) {
+    size_t n = what == LABEL_POP || !name ? 0 : strnlen(name, 255);
+    p_debug_label *r = rec(c, OP_DEBUG_LABEL, offsetof(p_debug_label, name) + n + 1); r->what = what; r->domain = domain;
+    if (n) memcpy(r->name, name, n);
+}
+NVN(nvnCommandBufferPushDebugGroupStatic, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_PUSH, d, s); }
+NVN(nvnCommandBufferPushDebugGroupDynamic, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_PUSH, d, s); }
+NVN(nvnCommandBufferPushDebugGroup, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_PUSH, d, s); }
+NVN_NOPROTO(nvnCommandBufferPushDebugGroupGraphics, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_PUSH, d, s); }
+NVN_NOPROTO(nvnCommandBufferPushDebugGroupCompute, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_PUSH, d, s); }
+NVN(nvnCommandBufferPopDebugGroup, void, NVNcommandBuffer *c) { debug_label(c, LABEL_POP, 0, NULL); }
+NVN(nvnCommandBufferPopDebugGroupId, void, NVNcommandBuffer *c, uint32_t d) { debug_label(c, LABEL_POP, d, NULL); }
+NVN_NOPROTO(nvnCommandBufferPopDebugGroupGraphics, void, NVNcommandBuffer *c, uint32_t d) { debug_label(c, LABEL_POP, d, NULL); }
+NVN_NOPROTO(nvnCommandBufferPopDebugGroupCompute, void, NVNcommandBuffer *c, uint32_t d) { debug_label(c, LABEL_POP, d, NULL); }
+NVN(nvnCommandBufferInsertDebugMarkerStatic, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_MARKER, d, s); }
+NVN(nvnCommandBufferInsertDebugMarkerDynamic, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_MARKER, d, s); }
+NVN(nvnCommandBufferInsertDebugMarker, void, NVNcommandBuffer *c, const char *s) { debug_label(c, LABEL_MARKER, 0, s); }
+NVN_NOPROTO(nvnCommandBufferInsertDebugMarkerGraphics, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_MARKER, d, s); }
+NVN_NOPROTO(nvnCommandBufferInsertDebugMarkerCompute, void, NVNcommandBuffer *c, uint32_t d, const char *s) { debug_label(c, LABEL_MARKER, d, s); }
+
+// Variable-rate shading (VK_KHR_fragment_shading_rate: vka_draw.c turns the palette indices of the bound image into a shading-rate attachment of the passes that draw with it).
+// BindShadingRateImage(texture, view; NULL unbinds). ShadingRateImagePalette(viewport, count, rates): the driver packs 16 4-bit entries and fills those past count (or all of
+// them for NULL rates) with 5, one invocation a pixel. The palette mode (1 or another value, one method bit) is not known; logged once
+NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v) {
+    p_vrs_image *o = REC_SNAP(c, OP_VRS_IMAGE, p_vrs_image, 1); o->tex = tex_snap(o, SNAP_OFF(p_vrs_image), 0, t, nvn_caller()); copy_view(&o->view, &o->has_view, v);
+}
+NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int viewport, int n, const int *rates) {
+    p_vrs_palette *r = REC(c, OP_VRS_PALETTE, p_vrs_palette); r->viewport = viewport & 15;
+    for (int i = 0; i < 16; i++) r->rate[i] = rates && i < n ? (uint8_t)(rates[i] & 15) : 5;
+}
+NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; ONCE_LOG("SetShadingRatePaletteMode %d: the host maps the palette the same in every mode", mode); }
+
+// Deferred binds and push constants: the GPU reads the bindings at src when it runs the command; the replay reads them there when it walks the record (vka_draw.c)
+static void bind_defer(NVNcommandBuffer *c, int kind, NVNshaderStage st, int first, int n, NVNbufferAddress src) {
+    if (n < 0 || n > 32 || first < 0) { LOG("[RED] deferred bind of %d from %d", n, first); return; }
+    *REC(c, OP_BIND_DEFER, p_bind_defer) = (p_bind_defer){kind, (int32_t)st, first, n, src, CB(c)->tex_base, CB(c)->samp_base};
+}
+NVN_NOPROTO(nvnCommandBufferBindUniformBuffersDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, NVNbufferAddress src) { bind_defer(c, DEFER_UBO, st, first, n, src); }
+NVN_NOPROTO(nvnCommandBufferBindStorageBuffersDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, NVNbufferAddress src) { bind_defer(c, DEFER_SSBO, st, first, n, src); }
+NVN_NOPROTO(nvnCommandBufferBindImagesDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, NVNbufferAddress src) { bind_defer(c, DEFER_IMG, st, first, n, src); }
+NVN_NOPROTO(nvnCommandBufferBindSeparateTexturesDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, NVNbufferAddress src) { bind_defer(c, DEFER_TEX, st, NVN_SEPTEX_SLOT0 + first, n, src); }
+NVN_NOPROTO(nvnCommandBufferBindSeparateSamplersDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, NVNbufferAddress src) { bind_defer(c, DEFER_SAMP, st, first, n, src); }
+static void push_defer(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, NVNbufferAddress src) {
+    if (w) ONCE_LOG("[RED] deferred push constants with the word before the offset %#llx: its meaning is not known", (unsigned long long)w);
+    if (off + n > DMSH_PUSH_SIZE || !src) { static int k; if (k++ < 8) LOG("[RED] deferred push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
+    *REC(c, OP_PUSH_DEFER, p_push_defer) = (p_push_defer){(uint16_t)compute, (uint16_t)off, (uint32_t)n, src};
+}
+NVN_NOPROTO(nvnCommandBufferPushGraphicsConstantsDeferred, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, NVNbufferAddress src) { push_defer(c, 0, w, off, n, src); }
+NVN_NOPROTO(nvnCommandBufferPushComputeConstantsDeferred, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, NVNbufferAddress src) { push_defer(c, 1, w, off, n, src); }

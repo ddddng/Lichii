@@ -322,6 +322,11 @@ typedef struct {
     VkPipelineViewportStateCreateInfo vp; VkPipelineRasterizationStateCreateInfo rs; VkPipelineMultisampleStateCreateInfo ms; VkPipelineDepthStencilStateCreateInfo ds;
     VkPipelineColorBlendAttachmentState cb[8]; VkPipelineColorBlendStateCreateInfo bs; VkDynamicState dyn[24]; VkPipelineDynamicStateCreateInfo dy;
     VkFormat cf[8]; VkPipelineRenderingCreateInfo ri; VkGraphicsPipelineCreateInfo ci; int tess, mesh;   // mesh: a task / mesh pipeline (pstate_fill)
+    // Lichii (dotfiles-25x.100): the sample mask, conservative rasterization, the provoking vertex, viewport 0's swizzle, its exclusive scissor, the shading rate
+    // attachment's combiner (vrs: such a pipeline is made whole, no libraries)
+    VkSampleMask smask; VkPipelineRasterizationConservativeStateCreateInfoEXT cons; VkPipelineRasterizationProvokingVertexStateCreateInfoEXT prov;
+    VkViewportSwizzleNV sw; VkPipelineViewportSwizzleStateCreateInfoNV vsw; VkPipelineViewportExclusiveScissorStateCreateInfoNV excl;
+    VkPipelineFragmentShadingRateStateCreateInfoKHR fsr; int vrs;
     VkDescriptorSetLayout set0;   // the layout's set 0 (the library probe's independent-sets layout)
     VkPipelineLayout pre_layout, fs_layout;   // Lichii (dotfiles-25x.16): what the pre-rasterization and fragment shader libraries are made with (vka_layout)
 } pstate;
@@ -380,12 +385,27 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     P->vi = (VkPipelineVertexInputStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = nvd ? &P->vds : NULL, .vertexBindingDescriptionCount = nvb, .pVertexBindingDescriptions = P->vb,
                                                    .vertexAttributeDescriptionCount = nva, .pVertexAttributeDescriptions = P->va};
     P->ia = (VkPipelineInputAssemblyStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = (VkPrimitiveTopology)k->topo};
-    P->ts = (VkPipelineTessellationStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, .patchControlPoints = 3};
+    P->ts = (VkPipelineTessellationStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, .patchControlPoints = k->patch ? k->patch : 3};
     P->vp = (VkPipelineViewportStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};   // one viewport, as nvn_mtl.m draws
     P->rs = (VkPipelineRasterizationStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .depthClampEnable = k->depth_clamp && V.depth_clamp,
         .polygonMode = (VkPolygonMode)k->poly_mode, .lineWidth = 1.0f};
     P->ms = (VkPipelineMultisampleStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = (VkSampleCountFlagBits)(k->samples ? k->samples : 1), .alphaToCoverageEnable = k->a2c};
     P->ds = (VkPipelineDepthStencilStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .maxDepthBounds = 1.0f};
+    // Lichii (dotfiles-25x.100): each only when it differs from Vulkan's default, so the pipelines that do not use it stay as they were
+    if (k->sample_mask != (1u << P->ms.rasterizationSamples) - 1) { P->smask = k->sample_mask; P->ms.pSampleMask = &P->smask; }
+    const void *rs_next = NULL;
+    if (k->cons) { float d = k->dilate / 4.0f; P->cons = (VkPipelineRasterizationConservativeStateCreateInfoEXT){VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT, rs_next, 0,
+                   VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT, d < V.cons_max ? d : V.cons_max}; rs_next = &P->cons; }
+    if (k->provoking_last) { P->prov = (VkPipelineRasterizationProvokingVertexStateCreateInfoEXT){VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT, rs_next,
+                             VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT}; rs_next = &P->prov; }
+    P->rs.pNext = rs_next;
+    const void *vp_next = NULL;
+    if (k->vp_sw[0] | k->vp_sw[1] | k->vp_sw[2] | k->vp_sw[3]) {   // (the key holds each component XOR the identity, as the record)
+        P->sw = (VkViewportSwizzleNV){(VkViewportCoordinateSwizzleNV)(k->vp_sw[0] ^ 0), (VkViewportCoordinateSwizzleNV)(k->vp_sw[1] ^ 2), (VkViewportCoordinateSwizzleNV)(k->vp_sw[2] ^ 4), (VkViewportCoordinateSwizzleNV)(k->vp_sw[3] ^ 6)};
+        P->vsw = (VkPipelineViewportSwizzleStateCreateInfoNV){VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_SWIZZLE_STATE_CREATE_INFO_NV, vp_next, 0, 1, &P->sw}; vp_next = &P->vsw;
+    }
+    if (k->excl) { P->excl = (VkPipelineViewportExclusiveScissorStateCreateInfoNV){VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_EXCLUSIVE_SCISSOR_STATE_CREATE_INFO_NV, vp_next, 1, NULL}; vp_next = &P->excl; }
+    P->vp.pNext = vp_next;
     for (int i = 0; i < k->ncolor; i++)
         P->cb[i] = (VkPipelineColorBlendAttachmentState){k->att[i].en, (VkBlendFactor)k->att[i].src, (VkBlendFactor)k->att[i].dst, (VkBlendOp)k->att[i].op,
                                                           (VkBlendFactor)k->att[i].srca, (VkBlendFactor)k->att[i].dsta, (VkBlendOp)k->att[i].opa, k->att[i].mask};
@@ -399,15 +419,19 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     for (size_t i = 0; i < sizeof base / sizeof *base; i++)   // (a mesh pipeline may not name the primitive topology or restart: it has no input assembly)
         if (!mesh || (base[i] != VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY && base[i] != VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)) P->dyn[nd++] = base[i];
     if (!k->vin_static && !mesh) P->dyn[nd++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
+    if (k->excl) P->dyn[nd++] = VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV;
     P->dy = (VkPipelineDynamicStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = nd, .pDynamicStates = P->dyn};
     for (int i = 0; i < k->ncolor; i++) P->cf[i] = (VkFormat)k->cfmt[i];
     P->ri = (VkPipelineRenderingCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor, .pColorAttachmentFormats = P->cf,
                                             .depthAttachmentFormat = (VkFormat)k->dfmt, .stencilAttachmentFormat = (VkFormat)k->sfmt};
     P->tess = !mesh && (sh[3] || sh[4]); P->mesh = mesh;
+    P->vrs = k->vrs;   // (the pass's attachment rate replaces the pipeline's 1x1; the primitive's is not written by the translated shaders)
+    if (k->vrs) { P->fsr = (VkPipelineFragmentShadingRateStateCreateInfoKHR){VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR, NULL, {1, 1},
+                  {VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR, VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR}}; P->ri.pNext = &P->fsr; }
     P->ci = (VkGraphicsPipelineCreateInfo){VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &P->ri, .stageCount = P->ns, .pStages = P->ss, .pVertexInputState = mesh ? NULL : &P->vi,
         .pInputAssemblyState = mesh ? NULL : &P->ia,
         .pTessellationState = P->tess ? &P->ts : NULL, .pViewportState = &P->vp, .pRasterizationState = &P->rs, .pMultisampleState = &P->ms, .pDepthStencilState = &P->ds, .pColorBlendState = &P->bs,
-        .pDynamicState = &P->dy, .layout = lay->layout};
+        .pDynamicState = &P->dy, .layout = lay->layout, .flags = k->vrs ? VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR : 0};
     P->set0 = lay->set0;
     P->pre_layout = lay->pre_layout ? lay->pre_layout : lay->layout; P->fs_layout = lay->fs_layout ? lay->fs_layout : lay->layout;   // (Lichii: the stage libraries' own, layout_slow)
     return 1;
@@ -548,9 +572,9 @@ static void pipe_stats(VkPipeline p, const char *what, uint64_t k0, uint64_t k1)
 // pre-rasterization library made, so a miss costs the whole pipeline only
 enum { L_VI, L_PRE, L_FS, L_FO, L_PREFS, NLIB };
 typedef struct { uint8_t topo; uint32_t vin_static; uint8_t va[sizeof(((vka_gkey *)0)->va)], vb[sizeof(((vka_gkey *)0)->vb)]; } vikey;
-typedef struct { VkShaderModule mod[4]; VkShaderStageFlagBits stage[4]; uint32_t pin[4]; uint8_t gl[4]; VkPipelineLayout layout; uint8_t depth_clamp, poly_mode, tess, vin_static; } prekey;
-typedef struct { VkShaderModule mod; uint32_t pin, afunc; VkPipelineLayout layout; uint8_t samples, a2c, vin_static; } fskey;
-typedef struct { uint32_t cfmt[8], dfmt, sfmt; uint8_t ncolor, samples, a2c, logic_en, logic_op, vin_static, att[8][8]; } fokey;
+typedef struct { VkShaderModule mod[4]; VkShaderStageFlagBits stage[4]; uint32_t pin[4]; uint8_t gl[4]; VkPipelineLayout layout; uint8_t depth_clamp, poly_mode, tess, vin_static, patch, cons, dilate, provoking_last, vp_sw[4]; } prekey;
+typedef struct { VkShaderModule mod; uint32_t pin, afunc; VkPipelineLayout layout; uint8_t samples, a2c, vin_static; uint16_t sample_mask; } fskey;
+typedef struct { uint32_t cfmt[8], dfmt, sfmt; uint8_t ncolor, samples, a2c, logic_en, logic_op, vin_static, att[8][8]; uint16_t sample_mask; } fokey;
 typedef struct { prekey pre; fskey fs; } prefskey;
 static kmap g_lib[NLIB] = {{.klen = sizeof(vikey)}, {.klen = sizeof(prekey)}, {.klen = sizeof(fskey)}, {.klen = sizeof(fokey)}, {.klen = sizeof(prefskey)}};
 static uint64_t g_nlib[NLIB], g_nlinked, g_nopt; static double g_lib_ms, g_link_ms;
@@ -707,9 +731,10 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
     for (uint32_t i = 0; i < npre; i++) { pk.mod[i] = pre[i].module; pk.stage[i] = pre[i].stage; pk.gl[i] = pre[i].pSpecializationInfo != NULL;
                                           pk.pin[i] = pre[i].pNext ? ((const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)pre[i].pNext)->requiredSubgroupSize : 0; }
     pk.layout = P->pre_layout; pk.depth_clamp = (uint8_t)P->rs.depthClampEnable; pk.poly_mode = (uint8_t)P->rs.polygonMode; pk.tess = (uint8_t)P->tess; pk.vin_static = (uint8_t)k->vin_static;
+    pk.patch = k->patch; pk.cons = k->cons; pk.dilate = k->dilate; pk.provoking_last = k->provoking_last; memcpy(pk.vp_sw, k->vp_sw, 4);   // (Lichii, dotfiles-25x.100)
     fskey fk; memset(&fk, 0, sizeof fk);
     if (fs) { fk.mod = fs->module; fk.afunc = fs->pSpecializationInfo ? P->afunc : 0; fk.pin = fs->pNext ? ((const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)fs->pNext)->requiredSubgroupSize : 0; }
-    fk.layout = P->fs_layout; fk.samples = (uint8_t)P->ms.rasterizationSamples; fk.a2c = (uint8_t)P->ms.alphaToCoverageEnable; fk.vin_static = (uint8_t)k->vin_static;
+    fk.layout = P->fs_layout; fk.samples = (uint8_t)P->ms.rasterizationSamples; fk.a2c = (uint8_t)P->ms.alphaToCoverageEnable; fk.vin_static = (uint8_t)k->vin_static; fk.sample_mask = k->sample_mask;
     if (g_pre_adapt & A_COMBINED) {
         if (t_ahead) return VK_NULL_HANDLE;   // (the combined library depends on the pair)
         prefskey key; memset(&key, 0, sizeof key); key.pre = pk; key.fs = fk;
@@ -745,7 +770,7 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
     if (t_ahead) return VK_NULL_HANDLE;   // (Lichii: made ahead, nothing linked)
     {   fokey key; memset(&key, 0, sizeof key);
         memcpy(key.cfmt, k->cfmt, sizeof key.cfmt); key.dfmt = k->dfmt; key.sfmt = k->sfmt; key.ncolor = k->ncolor; key.samples = (uint8_t)P->ms.rasterizationSamples; key.a2c = k->a2c;
-        key.logic_en = k->logic_en; key.logic_op = k->logic_op; key.vin_static = (uint8_t)k->vin_static; memcpy(key.att, k->att, sizeof key.att);
+        key.logic_en = k->logic_en; key.logic_op = k->logic_op; key.vin_static = (uint8_t)k->vin_static; memcpy(key.att, k->att, sizeof key.att); key.sample_mask = k->sample_mask;
         VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &P->ri, .pMultisampleState = &P->ms, .pColorBlendState = &P->bs, .pDynamicState = &dy[L_FO]};
         if (!(part[nparts++] = lib_make(L_FO, &key, sizeof key, &ci, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, NULL))) return VK_NULL_HANDLE; }
     VkPipelineLibraryCreateInfoKHR libs = {VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = nparts, .pLibraries = part};
@@ -816,8 +841,8 @@ typedef struct { char magic[8]; uint32_t gkey_size, n, layout, pad; } pwhdr2;   
 static const char PW_MAGIC[8] = "NXVKPW1", PW_MAGIC2[8] = "NXVKPW2";
 static uint32_t gkey_layout(void) {
     static const uint32_t o[] = {offsetof(vka_gkey, dfmt), offsetof(vka_gkey, ncolor), offsetof(vka_gkey, samples), offsetof(vka_gkey, topo), offsetof(vka_gkey, poly_mode),
-        offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static),
-        offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 2 /* the format's own version */};
+        offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att), offsetof(vka_gkey, sample_mask), offsetof(vka_gkey, vin_static),
+        offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 3 /* the format's own version */};
     return (uint32_t)fnv(o, sizeof o, 1469598103934665603ull);
 }
 // A record of the file before it is used: a file from another build, a truncated or damaged one must not reach pstate_fill (an ncolor of 200 indexes past cf[8]).
@@ -830,6 +855,9 @@ static int pw_rec_ok(const pwrec *r, const uint8_t *kb) {
     if (k.ncolor > 8 || k.fs_variant > VKA_FS_RETYPE || (k.samples != 1 && k.samples != 2 && k.samples != 4 && k.samples != 8)) return 0;
     if (k.topo > VK_PRIMITIVE_TOPOLOGY_PATCH_LIST || k.poly_mode > VK_POLYGON_MODE_POINT || k.alpha_func > 8 || k.logic_op > VK_LOGIC_OP_SET) return 0;
     if (k.depth_clamp > 1 || k.a2c > 1 || k.logic_en > 1 || k.gl_depth > 1 || k.gs_fx > 1 || k.vin_static > 1) return 0;
+    if (k.patch > 32 || k.cons > 1 || k.dilate > 3 || k.provoking_last > 1 || k.excl > 1 || k.vrs > 1) return 0;
+    for (int i = 0; i < 4; i++) if (k.vp_sw[i] > 7) return 0;
+    if ((k.cons && !V.cons) || (k.provoking_last && !V.provoking_last) || (k.excl && !V.excl_scissor) || (k.vrs && !V.vrs) || ((k.vp_sw[0] | k.vp_sw[1] | k.vp_sw[2] | k.vp_sw[3]) && !V.vp_swizzle)) return 0;
     for (int i = 0; i < 8; i++) if (k.att[i].en > 1 || k.att[i].src > VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA || k.att[i].dst > VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA || k.att[i].srca > VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA
                                     || k.att[i].dsta > VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA || k.att[i].op > VK_BLEND_OP_MAX || k.att[i].opa > VK_BLEND_OP_MAX) return 0;
     if (k.vin_static) { for (int i = 0; i < 32; i++) if (k.va[i].used > 1 || (k.va[i].used && k.va[i].binding > 32)) return 0;
@@ -940,7 +968,8 @@ static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen
         {"alpha to coverage", offsetof(vka_gkey, a2c), offsetof(vka_gkey, logic_en)}, {"logic op", offsetof(vka_gkey, logic_en), offsetof(vka_gkey, gl_depth)},
         {"GL depth", offsetof(vka_gkey, gl_depth), offsetof(vka_gkey, fs_variant)}, {"fragment variant", offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func)},
         {"alpha func", offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx)}, {"geometry claim", offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u)},
-        {"vertex input retype", offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att)}, {"blend", offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static)},
+        {"vertex input retype", offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att)}, {"blend", offsetof(vka_gkey, att), offsetof(vka_gkey, sample_mask)},
+        {"sample mask, patch, raster, swizzle, VRS", offsetof(vka_gkey, sample_mask), offsetof(vka_gkey, vin_static)},
         {"static vertex input", offsetof(vka_gkey, vin_static), sizeof(vka_gkey)}};
     enum { NF = sizeof F / sizeof F[0] };
     uint64_t want[5]; for (int i = 0; i < 5; i++) want[i] = sh[i] ? sh[i]->key : 0;
@@ -1063,7 +1092,7 @@ static int gfx_make(gval *g, const gkey_full *fk, size_t len, vka_shader *const 
     const int async = mode == MK_FRAME && !wait && async_threads() > 0;
     pstate *P = malloc(sizeof *P);
     if (P && pstate_fill(P, sh, lay, k)) {   // (else logged by vka_shader_module)
-        const int gpl = gpl_on() && !P->mesh;   // (a mesh pipeline is made whole: the libraries here are cut for vertex input pipelines)
+        const int gpl = gpl_on() && !P->mesh && !P->vrs && !k->excl;   // (a mesh pipeline is made whole: the libraries here are cut for vertex input pipelines; Lichii: so are those with a shading rate attachment or an exclusive scissor)
         // The pipeline cache may already hold the optimized one (made in an earlier run): then it is made at once, else linked from parts
         if (mode == MK_FRAME && (gpl || async)) p = cache_probe(P);
         if (!p && mode != MK_PREWARM && gpl) {
