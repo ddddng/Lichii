@@ -130,15 +130,16 @@ static void *worker_main(void *arg) {
     }
     return NULL;
 }
-static int up(void) {
-    if (!vka_worker_on()) return 0;
-    if (g_up) return g_up > 0;
+// Lichii: started once, as submissions, CPU event signals and presents may make their first call from different threads at once
+static pthread_once_t g_up_once = PTHREAD_ONCE_INIT;
+static void up_once(void) {
+    if (!vka_worker_on()) return;
     pthread_t th;
-    if (pthread_create(&th, NULL, worker_main, NULL)) { VRED("cannot start the replay worker: submissions are replayed inline"); g_up = -1; g_on = 0; return 0; }
+    if (pthread_create(&th, NULL, worker_main, NULL)) { VRED("cannot start the replay worker: submissions are replayed inline"); g_up = -1; g_on = 0; return; }
     pthread_detach(th); g_up = 1;
     VLOG("replay worker: submissions and presents are replayed on their own thread, at most %d frame%s behind the game (DM_VK_WORKER=0: inline)", g_frames, g_frames == 1 ? "" : "s");
-    return 1;
 }
+static int up(void) { pthread_once(&g_up_once, up_once); return g_up > 0; }
 static void push(const job_t *j) {
     uint64_t t0 = wns();
     pthread_mutex_lock(&g_mu);
