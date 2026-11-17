@@ -618,6 +618,44 @@ TEST_CASE("RunOrWait runs a queued job on the waiting thread", "[video_core][sha
     REQUIRE(blocker.Status() == ShaderJobStatus::Done);
 }
 
+TEST_CASE("RunOrWait runs the driver stage itself once a worker's CPU stage ends",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate driver_gate;
+    auto driver_entered = std::make_shared<std::promise<void>>();
+    ShaderJob driver_blocker_job;
+    driver_blocker_job.priority = Background;
+    driver_blocker_job.driver = [&driver_gate, driver_entered] {
+        driver_entered->set_value();
+        driver_gate.Wait();
+    };
+    const auto driver_blocker = scheduler.Submit(std::move(driver_blocker_job));
+    driver_entered->get_future().wait();
+
+    Gate cpu_gate;
+    std::thread::id driver_thread;
+    const auto job = scheduler.Submit(TwoStageJob(
+        Soon, [&](ShaderJobContext&) { cpu_gate.Wait(); },
+        [&] { driver_thread = std::this_thread::get_id(); }));
+    WaitForStatus(job, ShaderJobStatus::Cpu);
+    // Without the driver stage on this thread, it would wait for the driver worker until the
+    // blocker ends.
+    std::thread opener{[&] {
+        std::this_thread::sleep_for(20ms);
+        cpu_gate.Open();
+        std::this_thread::sleep_for(500ms);
+        driver_gate.Open();
+    }};
+    scheduler.RunOrWait(job);
+    const auto blocker_status = driver_blocker.Status();
+    opener.join();
+    driver_blocker.Wait();
+
+    REQUIRE(job.Status() == ShaderJobStatus::Done);
+    REQUIRE(driver_thread == std::this_thread::get_id());
+    REQUIRE(blocker_status == ShaderJobStatus::Driver);
+}
+
 #ifdef __linux__
 TEST_CASE("Shader job workers are named by stage", "[video_core][shader_jobs]") {
     ShaderJobScheduler scheduler{Config(1, 1)};
