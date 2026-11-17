@@ -566,6 +566,7 @@ struct Switch2Ble::Impl : std::enable_shared_from_this<Impl> {
     std::vector<Offer> offers;
     std::vector<std::pair<u64, Clock::time_point>> retry_after;
     std::thread worker;
+    std::thread connector;
     BluetoothLEAdvertisementWatcher::Received_revoker received_revoker;
 
     void OnAdvertisement(const BluetoothLEAdvertisementReceivedEventArgs& args) {
@@ -602,15 +603,17 @@ struct Switch2Ble::Impl : std::enable_shared_from_this<Impl> {
             return;
         }
         offers.push_back({address, &product});
-        cv.notify_one();
+        cv.notify_all();
     }
 
-    BluetoothLEAdvertisementWatcher StartWatcher() {
+    BluetoothLEAdvertisementWatcher StartWatcher(bool& logged_unavailable) {
         try {
             const auto adapter = BluetoothAdapter::GetDefaultAsync().get();
             if (!adapter || !adapter.IsLowEnergySupported() || !adapter.IsCentralRoleSupported()) {
-                LOG_INFO(Input,
-                         "No Bluetooth LE adapter, Switch 2 controllers connect over USB only");
+                if (!std::exchange(logged_unavailable, true)) {
+                    LOG_INFO(Input,
+                             "No Bluetooth LE adapter, Switch 2 controllers connect over USB only");
+                }
                 return nullptr;
             }
             BluetoothLEAdvertisementWatcher watcher;
@@ -624,52 +627,72 @@ struct Switch2Ble::Impl : std::enable_shared_from_this<Impl> {
                     }
                 });
             watcher.Start();
+            logged_unavailable = false;
             return watcher;
         } catch (const winrt::hresult_error& error) {
-            LOG_WARNING(Input, "Bluetooth LE scanning unavailable: {}",
-                        winrt::to_string(error.message()));
+            if (!std::exchange(logged_unavailable, true)) {
+                LOG_WARNING(Input, "Bluetooth LE scanning unavailable: {}",
+                            winrt::to_string(error.message()));
+            }
             return nullptr;
         }
     }
 
+    // Connecting blocks for seconds on GATT replies, so it has its own thread and the pads that
+    // are already connected keep being serviced.
+    void RunConnector() {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        while (true) {
+            Offer offer;
+            {
+                std::unique_lock lock{mutex};
+                cv.wait(lock, [&] { return stopping || !offers.empty(); });
+                if (stopping) {
+                    break;
+                }
+                offer = offers.front();
+            }
+            auto pad = Connect(offer.address, *offer.product);
+            std::scoped_lock lock{mutex};
+            std::erase_if(offers, [&](const auto& other) { return other.address == offer.address; });
+            if (!pad) {
+                retry_after.emplace_back(offer.address, Clock::now() + RetryAfter);
+            } else if (stopping) {
+                ClosePad(*pad);
+            } else {
+                pads.push_back(std::move(pad));
+            }
+        }
+        winrt::uninit_apartment();
+    }
+
     void Run() {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
-        auto watcher = StartWatcher();
+        bool logged_unavailable = false;
+        auto watcher = StartWatcher(logged_unavailable);
         auto next_watcher_check = Clock::now() + WatcherCheckInterval;
         while (true) {
-            std::optional<Offer> offer;
             std::vector<std::shared_ptr<Pad>> current;
             {
                 std::unique_lock lock{mutex};
                 cv.wait_for(lock, pads.empty() ? WatcherCheckInterval : RumbleInterval,
-                            [&] { return stopping || !offers.empty(); });
+                            [&] { return stopping; });
                 if (stopping) {
                     break;
                 }
-                if (!offers.empty()) {
-                    offer = offers.front();
-                }
                 current = pads;
-            }
-            if (offer) {
-                auto pad = Connect(offer->address, *offer->product);
-                std::scoped_lock lock{mutex};
-                std::erase_if(offers,
-                              [&](const auto& other) { return other.address == offer->address; });
-                if (pad) {
-                    pads.push_back(std::move(pad));
-                } else {
-                    retry_after.emplace_back(offer->address, Clock::now() + RetryAfter);
-                }
-                continue;
             }
             const auto now = Clock::now();
             for (const auto& pad : current) {
                 ServiceOrClose(*pad, now);
             }
-            if (watcher && now >= next_watcher_check) {
+            if (now >= next_watcher_check) {
                 next_watcher_check = now + WatcherCheckInterval;
-                RestartWatcher(watcher);
+                if (watcher) {
+                    RestartWatcher(watcher);
+                } else {
+                    watcher = StartWatcher(logged_unavailable);
+                }
             }
         }
         if (watcher) {
@@ -718,6 +741,7 @@ struct Switch2Ble::Impl : std::enable_shared_from_this<Impl> {
 
 Switch2Ble::Switch2Ble() : impl{std::make_shared<Impl>()} {
     impl->worker = std::thread([this] { impl->Run(); });
+    impl->connector = std::thread([this] { impl->RunConnector(); });
 }
 
 Switch2Ble::~Switch2Ble() {
@@ -725,7 +749,8 @@ Switch2Ble::~Switch2Ble() {
         std::scoped_lock lock{impl->mutex};
         impl->stopping = true;
     }
-    impl->cv.notify_one();
+    impl->cv.notify_all();
+    impl->connector.join();
     impl->worker.join();
     for (const auto& pad : impl->pads) {
         DetachJoystick(*pad);

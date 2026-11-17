@@ -76,8 +76,8 @@ TEST_CASE("Switch2: USB framed input report and short packets", "[input_common]"
 }
 
 TEST_CASE("Switch2: stick calibration and SDL normalisation", "[input_common]") {
-    const auto block =
-        ParseFlashReadResponse(Hex(LeftStickFlashReply), FactoryLeftStickAddress, FlashBlockSize);
+    const auto reply = Hex(LeftStickFlashReply);
+    const auto block = ParseFlashReadResponse(reply, FactoryLeftStickAddress, FlashBlockSize);
     REQUIRE(block.has_value());
     const auto left = ParseFactoryStickCalibration(*block);
     REQUIRE(left.x.neutral == 1962);
