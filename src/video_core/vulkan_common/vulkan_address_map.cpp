@@ -111,10 +111,10 @@ std::string AddressMap::Describe(u64 address, Clock::time_point now) const {
     }
     for (auto it = unbound.rbegin(); it != unbound.rend() && parts.size() < 3; ++it) {
         if (it->base <= address && address - it->base < it->size) {
-            parts.push_back(fmt::format("in freed {} at +{:#x}, unbound {} ms before after {} ms bound",
-                                        Label(*it, false), address - it->base,
-                                        Milliseconds(now - it->unbound),
-                                        Milliseconds(it->unbound - it->bound)));
+            parts.push_back(
+                fmt::format("in freed {} at +{:#x}, unbound {} ms before after {} ms bound",
+                            Label(*it, false), address - it->base, Milliseconds(now - it->unbound),
+                            Milliseconds(it->unbound - it->bound)));
         }
     }
     if (!parts.empty()) {
