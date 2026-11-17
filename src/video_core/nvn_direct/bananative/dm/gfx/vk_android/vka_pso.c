@@ -246,7 +246,7 @@ static void save_now(void) {
             FILE *f = fopen(tmp, "wb");
             int ok = f && fwrite(d, 1, n, f) == n; if (f && fclose(f)) ok = 0;   // (closed once, whatever failed)
             if (ok && !rename(tmp, g_pc_path)) g_saved_at = made;
-            else { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); d = NULL; n = 0; }
+            else { unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); free(d); d = NULL; n = 0; }
         }
     }
     int keys = pw_save();
