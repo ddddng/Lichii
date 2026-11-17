@@ -291,6 +291,20 @@ enum class SparseTilesMode {
     Aliased,
 };
 
+// Experiment switch (#1839): zero every new colour-renderable image, so texels the game never
+// writes (padding past a render target's used width) read zero instead of stale host memory.
+[[nodiscard]] bool ClearNewRenderTargets() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_CLEAR_NEW_RTS");
+        const bool on = value != nullptr && value[0] != '\0' && value[0] != '0';
+        if (on) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_CLEAR_NEW_RTS: new colour-renderable images are cleared");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
 [[nodiscard]] SparseTilesMode SparseTilesModeOf(const Device& device) {
     static const char force_aliased = [] {
         const char* value = std::getenv("EDEN_NX2_SPARSE_ALIASED");
@@ -3280,6 +3294,12 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
         original_image.SetObjectNameEXT(VideoCommon::Name(*this).c_str());
     }
     current_image = &Image::original_image;
+    if (ClearNewRenderTargets() && aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT &&
+        False(flags & (VideoCommon::ImageFlagBits::Unbacked | VideoCommon::ImageFlagBits::Converted)) &&
+        MaxwellToVK::SurfaceFormat(runtime->device, FormatType::Optimal, false, info.format)
+            .attachable) {
+        ClearTiles();
+    }
     const s32 host_levels =
         static_cast<s32>(HostMipCount(info)) - static_cast<s32>(host_level_offset);
     storage_image_views.resize(host_levels);
