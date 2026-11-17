@@ -18,9 +18,9 @@ enum { NVN_FAST_CLEARS = 64 };
 typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; uint32_t fc_color[NVN_FAST_CLEARS][4], fc_depth[NVN_FAST_CLEARS], fc_stencil[NVN_FAST_CLEARS]; int32_t fc_ncolor, fc_ndepth, fc_nstencil; } dev_t_;  FITS(dev_t_, NVNdevice);
 
 // The sizes start unset (0) and each setter marks its own set (set[QB_*]), as NVN2's driver does (Mario Kart World's sdk: SetDefaults clears them, the getters return the size and the flag);
-// prio: SetQueuePriority, 100 by default (the driver's); primary: SetPrimaryQueue
-enum { QB_CMD, QB_COMP, QB_CTL, QB_FLUSH };
-typedef struct { NVNdevice *dev; void *mem; NVNqueue *primary; uint32_t flags, sz[4], mem_sz; int32_t prio; uint8_t set[4]; } queue_builder_t;
+// prio: SetQueuePriority, 100 by default (the driver's); primary: SetPrimaryQueue; QB_RT: SetRayTracingMemorySize (not part of GetQueueMemorySize, as in the driver)
+enum { QB_CMD, QB_COMP, QB_CTL, QB_FLUSH, QB_RT, QB_N_ };
+typedef struct { NVNdevice *dev; void *mem; NVNqueue *primary; uint32_t flags, sz[QB_N_], mem_sz; int32_t prio; uint8_t set[QB_N_]; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
 enum { NVN_QUEUE_WAITS = 32 };   // Lichii: QueueWaitSync fences kept for a queue's next submission
 typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial, last_fence; int nwait; uint64_t wait_fence[NVN_QUEUE_WAITS]; } queue_t;   // last_fence: its last submission's (Lichii: QueueFenceSync); wait_fence: QueueWaitSync's fences for its next submission (Lichii)  FITS(queue_t, NVNqueue);

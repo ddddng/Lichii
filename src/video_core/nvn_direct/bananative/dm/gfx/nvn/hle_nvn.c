@@ -1980,9 +1980,10 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
 // NVN2 (Switch 2) creates programs from a builder: SetDefaults, SetDevice, SetShaders(count, NVNshaderData[]) and then nvnProgramInitializeFromBuilder (Donkey Kong Bananza). The stages are
 // 16-byte {data, control} pairs as in NVN, so initializing from the builder is nvnProgramInitialize + nvnProgramSetShaders. The builder only keeps the caller's array, which the game keeps
 // until it initializes the program (its stack frame), as other NVN builders keep their pointers. Lichii: the array as the game wrote it (its addresses), which GetShaders returns;
-// InitializeFromBuilder turns them into host pointers. sample_shading, dbg, link / nlink: SetSampleShading, SetDebugDataHashes, SetSubroutineLinkage (s1-state section)
-typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n, sample_shading, nlink; const void *dbg, *link; } prog_builder_t;
-NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
+// InitializeFromBuilder turns them into host pointers. sample_shading, dbg, link / nlink: SetSampleShading, SetDebugDataHashes, SetSubroutineLinkage (s1-state section);
+// rt_*: the ray-tracing setters (s5-rt section)
+typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n, sample_shading, nlink; const void *dbg, *link; int32_t rt_nmod, rt_max_trace, rt_max_callable; uint32_t rt_flags; uint64_t rt_mod; } prog_builder_t;
+NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); ((prog_builder_t *)b)->rt_max_trace = ((prog_builder_t *)b)->rt_max_callable = 2; }
 NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev = d; }
 NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const void *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
 NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
@@ -2558,3 +2559,148 @@ NVN_NOPROTO(nvnProgramBuilderGetSubroutineLinkageCount, int, const void *b) { re
 // A ray tracing program's scratch per warp (the driver asks its ray tracing pipeline, made from the builder's ray tracing modules, for its stack size): 0 for any other program,
 // and the host makes no ray tracing programs
 NVN_NOPROTO(nvnProgramGetScratchBytesPerWarp, int, const NVNprogram *p) { (void)p; return 0; }
+
+// ---------- s5-rt: device command buffers, device message buffers, ray-tracing builder state ----------
+#include <stdarg.h>
+// None of these calls is in nvn.h or Banana Native's prototypes. Signatures, object layouts and defaults are derived from the NVN2 driver in
+// Ocarina of Time's sdk NSO (function offsets in that NSO below); the objects keep the driver's layout so a game reading one finds what it wrote.
+
+// nvnDeviceCommandBuffer (sdk+0x657870..0x6578d0): {device, pool, offset, size, command memory size, compute memory size}. GetHandle is the storage's
+// GPU address (pool + offset), which NVN2 hands to GPU work that writes commands there.
+typedef struct { NVNdevice *dev; const pool_t *pool; int64_t off; uint64_t size, cmd_sz, comp_sz; } dev_cmd_t;
+NVN_NOPROTO(nvnDeviceCommandBufferSetDefaults, void, void *b) { memset((uint8_t *)b + 8, 0, sizeof(dev_cmd_t) - 8); }   // the device stays, as in the driver
+NVN_NOPROTO(nvnDeviceCommandBufferSetDevice, void, void *b, NVNdevice *d) { ((dev_cmd_t *)b)->dev = d; }
+NVN_NOPROTO(nvnDeviceCommandBufferSetStorage, void, void *b, const NVNmemoryPool *p, int64_t off, uint64_t size) {
+    dev_cmd_t *o = b; o->pool = (const pool_t *)p; o->off = off; o->size = size;
+}
+NVN_NOPROTO(nvnDeviceCommandBufferSetCommandMemorySize, void, void *b, uint64_t n) { ((dev_cmd_t *)b)->cmd_sz = n; }
+NVN_NOPROTO(nvnDeviceCommandBufferSetComputeMemorySize, void, void *b, uint64_t n) { ((dev_cmd_t *)b)->comp_sz = n; }
+NVN_NOPROTO(nvnDeviceCommandBufferGetHandle, NVNcommandHandle, const void *b) {
+    const dev_cmd_t *o = b;
+    return o->pool ? (NVNcommandHandle)(uintptr_t)(o->pool->mem + o->off) : 0;
+}
+
+// nvnDeviceMessageBuffer (sdk+0x6580f0..0x6581e0): shader messages (printf-style) in a buffer of a pool. The buffer starts with a 12-byte header
+// {next write offset, size, end at a wrap (0: none)}; each message is {u32 size, u16 kind, s16 code, u32 data[4], format string, arguments}.
+// Reading goes through the pool's CPU mapping, as the driver does.
+typedef struct { NVNdevice *dev; const pool_t *pool; int32_t off, size; uint8_t *base; uint32_t read, end; uint64_t reserved; } dev_msg_buf_t;
+typedef struct { int32_t code, kind; uint32_t data[4]; } dev_msg_t;   // NVNdeviceMessage as GetNextMessage fills it (0x18 bytes)
+static uint8_t *dev_msg_mem(const dev_msg_buf_t *o) {
+    const pool_t *p = o->pool;
+    return p && p->mem && !(p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? p->mem + o->off : NULL;
+}
+NVN_NOPROTO(nvnDeviceMessageBufferSetDefaults, void, void *b) { memset((uint8_t *)b + 8, 0, sizeof(dev_msg_buf_t) - 8); }
+NVN_NOPROTO(nvnDeviceMessageBufferSetDevice, void, void *b, NVNdevice *d) { ((dev_msg_buf_t *)b)->dev = d; }
+NVN_NOPROTO(nvnDeviceMessageBufferSetStorage, void, void *b, const NVNmemoryPool *p, int off, int size) {
+    dev_msg_buf_t *o = b; o->pool = (const pool_t *)p; o->off = off; o->size = size;
+}
+NVN_NOPROTO(nvnDeviceMessageBufferReset, void, void *b) {
+    dev_msg_buf_t *o = b; uint8_t *m = dev_msg_mem(o);
+    if (m) { const uint32_t hdr[3] = {12, (uint32_t)o->size, 0}; memcpy(m, hdr, sizeof hdr); }
+}
+NVN_NOPROTO(nvnDeviceMessageBufferBeginMessages, void, void *b) {
+    dev_msg_buf_t *o = b; o->base = dev_msg_mem(o); o->read = 12; o->end = 0;
+    if (o->base) { uint32_t hdr[3]; memcpy(hdr, o->base, sizeof hdr); o->end = hdr[2] ? hdr[2] : hdr[0]; }
+}
+NVN_NOPROTO(nvnDeviceMessageBufferEndMessages, void, void *b) { dev_msg_buf_t *o = b; o->base = NULL; o->read = o->end = 0; }
+// The driver's message kinds (u16) as NVN's
+static int32_t dev_msg_kind(uint32_t k) {
+    switch (k) {
+    case 0: return 0; case 1: return 3; case 2: return 4; case 3: return 2; case 4: return 1; case 5: return 5;
+    case 0x1493: case 0x14f4: return 6; case 0x1494: case 0x14f5: return 7;
+    default: return k >= 0x14c1 && k <= 0x14c6 ? 8 : -1;
+    }
+}
+typedef struct { char *p; size_t left; } dev_msg_out;   // left includes the terminating NUL's byte
+static void dev_msg_put(dev_msg_out *w, const char *s, size_t n) {
+    if (w->left <= 1) return;
+    if (n > w->left - 1) n = w->left - 1;
+    memcpy(w->p, s, n); w->p += n; w->left -= n;
+}
+static void dev_msg_putf(dev_msg_out *w, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void dev_msg_putf(dev_msg_out *w, const char *fmt, ...) {
+    if (w->left <= 1) return;
+    va_list ap; va_start(ap, fmt); int n = vsnprintf(w->p, w->left, fmt, ap); va_end(ap);
+    if (n < 0) return;
+    size_t k = (size_t)n < w->left - 1 ? (size_t)n : w->left - 1; w->p += k; w->left -= k;
+}
+// The driver's formatter (sdk+0x6583e0..0x658b30): text is copied; %% is a %; a conversion is '%', digits, optionally '.' and digits, optionally
+// v2 / v3 / v4 (a vector: that many arguments, ", " between them), then a float conversion (a A e E f F g G: 32-bit floats), d i o u x X (32-bit),
+// l followed by d i o u x X or u followed by l (64-bit). Anything else drops the '%' and what was read of the conversion. Arguments follow the
+// string from the next 4-byte boundary up to the end of the message; past it they read as 0.
+static void dev_msg_format(dev_msg_out *w, const char *s, const uint8_t *arg, const uint8_t *arg_end) {
+    while (*s) {
+        const char *lit = s; while (*s && *s != '%') s++;
+        dev_msg_put(w, lit, (size_t)(s - lit));
+        if (!*s) break;
+        if (s[1] == '%') { dev_msg_put(w, "%", 1); s += 2; continue; }
+        const char *spec = s++;
+        while (*s >= '0' && *s <= '9') s++;
+        if (*s == '.') { s++; while (*s >= '0' && *s <= '9') s++; }
+        char f[40]; size_t fl = (size_t)(s - spec) < 32 ? (size_t)(s - spec) : 32; memcpy(f, spec, fl);
+        int n = 1;
+        if (*s == 'v') { if (s[1] >= '2' && s[1] <= '4') { n = s[1] - '0'; s += 2; } else { s++; continue; } }
+        int wide = 0, flt = 0; char c = *s;
+        if (c && strchr("aAeEfFgG", c)) { flt = 1; f[fl++] = c; s++; }
+        else if (c && strchr("diouxX", c)) {
+            if (c == 'u' && s[1] == 'l') { wide = 1; memcpy(f + fl, "llu", 3); fl += 3; s += 2; } else { f[fl++] = c; s++; }
+        } else if (c == 'l' && s[1] && strchr("diouxX", s[1])) { wide = 1; f[fl++] = 'l'; f[fl++] = 'l'; f[fl++] = s[1]; s += 2; }
+        else continue;   // resumes as text at c
+        f[fl] = 0;
+        for (int i = 0; i < n; i++) {
+            if (i) dev_msg_put(w, ", ", 2);
+            size_t sz = wide ? 8 : 4; uint64_t v = 0;
+            if (arg + sz <= arg_end) { memcpy(&v, arg, sz); arg += sz; } else arg = arg_end;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+            if (flt) { float x; uint32_t u = (uint32_t)v; memcpy(&x, &u, 4); dev_msg_putf(w, f, (double)x); }
+            else if (wide) dev_msg_putf(w, f, (unsigned long long)v);
+            else dev_msg_putf(w, f, (uint32_t)v);
+#pragma clang diagnostic pop
+        }
+    }
+}
+NVN_NOPROTO(nvnDeviceMessageBufferGetNextMessage, NVNboolean, void *b, void *msg, char *buf, uint64_t bufsize) {
+    dev_msg_buf_t *o = b;
+    if (o->read >= o->end) return 0;
+    uint8_t *m = dev_msg_mem(o);
+    if (!m) return 0;
+    const uint8_t *r = m + o->read;
+    uint32_t size, data[4]; uint16_t kind; int16_t code;
+    memcpy(&size, r, 4); memcpy(&kind, r + 4, 2); memcpy(&code, r + 6, 2); memcpy(data, r + 8, 16);
+    dev_msg_t out = {code, dev_msg_kind(kind), {data[0], data[1], data[2], data[3]}};
+    memcpy(msg, &out, sizeof out);
+    const char *fmt = (const char *)r + 24;
+    dev_msg_out w = {buf, bufsize};
+    dev_msg_format(&w, fmt, (const uint8_t *)fmt + (strlen(fmt) & ~(size_t)3) + 4, r + size);
+    if (bufsize) *w.p = 0;
+    o->read += size;
+    return 1;
+}
+// CommandBufferResetDeviceMessageBuffer (sdk+0x6591e0): the GPU writes the empty header in order with the commands around it, an inline write as
+// UpdateUniformBuffer records
+NVN_NOPROTO(nvnCommandBufferResetDeviceMessageBuffer, void, NVNcommandBuffer *c, const void *b) {
+    const dev_msg_buf_t *o = b;
+    const uint32_t hdr[3] = {12, (uint32_t)o->size, 0};
+    if (o->pool) h_nvnCommandBufferUpdateUniformBuffer(c, (NVNbufferAddress)(uintptr_t)(o->pool->mem + o->off), sizeof hdr, 0, sizeof hdr, hdr);
+}
+
+// Ray-tracing state of the program builder (sdk+0x661d60 SetDefaults: both recursion depths 2; +0x661e50..0x661e70, +0x673b90..0x673be0). The
+// module array is kept as the game's address, as the driver keeps the pointer.
+#define PB(b) ((prog_builder_t *)(b))
+NVN_NOPROTO(nvnProgramBuilderSetRayTracingModules, void, void *b, int n, uint64_t modules) { PB(b)->rt_nmod = n; PB(b)->rt_mod = modules; }
+NVN_NOPROTO(nvnProgramBuilderGetRayTracingModuleCount, int, const void *b) { return PB(b)->rt_nmod; }
+NVN_NOPROTO(nvnProgramBuilderGetRayTracingModuleData, uint64_t, const void *b) { return PB(b)->rt_mod; }
+NVN_NOPROTO(nvnProgramBuilderSetMaxTraceRecursionDepth, void, void *b, int n) { PB(b)->rt_max_trace = n; }
+NVN_NOPROTO(nvnProgramBuilderGetMaxTraceRecursionDepth, int, const void *b) { return PB(b)->rt_max_trace; }
+NVN_NOPROTO(nvnProgramBuilderSetMaxCallableRecursionDepth, void, void *b, int n) { PB(b)->rt_max_callable = n; }
+NVN_NOPROTO(nvnProgramBuilderGetMaxCallableRecursionDepth, int, const void *b) { return PB(b)->rt_max_callable; }
+NVN_NOPROTO(nvnProgramBuilderSetProgramRayTracingFlags, void, void *b, uint32_t f) { PB(b)->rt_flags = f; }
+NVN_NOPROTO(nvnProgramBuilderGetProgramRayTracingFlags, uint32_t, const void *b) { return PB(b)->rt_flags; }
+#undef PB
+
+// Queue ray-tracing memory (sdk+0x664500, +0x664820, +0x667760): Get answers whether Set was called and the size set. The queue memory size does not
+// include it (sdk+0x664740). The replay runs no ray tracing, so a queue has used none of it.
+NVN_NOPROTO(nvnQueueBuilderSetRayTracingMemorySize, void, NVNqueueBuilder *b, int n) { QB(b)->sz[QB_RT] = n; QB(b)->set[QB_RT] = 1; }
+NVN_NOPROTO(nvnQueueBuilderGetRayTracingMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { *n = ((const queue_builder_t *)b)->sz[QB_RT]; return ((const queue_builder_t *)b)->set[QB_RT]; }
+NVN_NOPROTO(nvnQueueGetTotalRayTracingMemoryUsed, uint64_t, const NVNqueue *q) { (void)q; return 0; }
