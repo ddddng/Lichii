@@ -199,7 +199,7 @@ bool RetryWaitStopped(Pad& pad) {
 
 bool EnableNotify(Pad& pad, const GattCharacteristic& characteristic) {
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (attempt > 0 && RetryWaitStopped(pad)) {
+        if (attempt > 0 ? RetryWaitStopped(pad) : Stopping(pad)) {
             return false;
         }
         if (characteristic
@@ -341,7 +341,7 @@ void OnInput(Pad& pad, std::span<const u8> data) {
 
 bool FindCharacteristics(Pad& pad) {
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (attempt > 0 && RetryWaitStopped(pad)) {
+        if (attempt > 0 ? RetryWaitStopped(pad) : Stopping(pad)) {
             return false;
         }
         const auto services = pad.device.GetGattServicesAsync(BluetoothCacheMode::Uncached).get();
@@ -349,6 +349,9 @@ bool FindCharacteristics(Pad& pad) {
             continue;
         }
         for (const auto& service : services.Services()) {
+            if (Stopping(pad)) {
+                return false;
+            }
             const auto characteristics =
                 service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached).get();
             if (characteristics.Status() != GattCommunicationStatus::Success) {
@@ -394,8 +397,9 @@ void ClosePad(Pad& pad) {
     }
 }
 
-// Shutdown (Stop) ends the waits between and after the GATT operations, not an operation already
-// in flight.
+// Shutdown (Stop) ends the waits between the GATT operations, and each operation checks it before
+// it starts. An operation already in flight, or one started just as Stop lands, still runs to the
+// end.
 bool Connect(const std::shared_ptr<Pad>& pad) {
     const u64 address = pad->address;
     const std::weak_ptr<Pad> weak = pad;
@@ -410,6 +414,9 @@ bool Connect(const std::shared_ptr<Pad>& pad) {
         return false;
     };
     try {
+        if (Stopping(*pad)) {
+            return fail({});
+        }
         pad->device = BluetoothLEDevice::FromBluetoothAddressAsync(address).get();
         if (!pad->device) {
             return fail("couldn't open the Bluetooth device");
@@ -419,7 +426,7 @@ bool Connect(const std::shared_ptr<Pad>& pad) {
         }
         pad->session = GattSession::FromDeviceIdAsync(pad->device.BluetoothDeviceId()).get();
         pad->session.MaintainConnection(true);
-        if (Stopping(*pad) || !FindCharacteristics(*pad)) {
+        if (!FindCharacteristics(*pad)) {
             return fail("couldn't read its GATT services; remove it from Windows' Bluetooth "
                         "devices if it is paired there");
         }
@@ -492,7 +499,8 @@ void Service(Pad& pad, Clock::time_point now) {
         SendCommand(pad, Switch2::BuildPlayerLedCommand(pad.player_index, Switch2::Transport::Ble));
     }
     const u32 rumble = pad.rumble;
-    if (!pad.vibration || (rumble == 0 && pad.sent_rumble == 0) || now < pad.next_rumble) {
+    if (!pad.vibration || (rumble == 0 && pad.sent_rumble == 0) || now < pad.next_rumble ||
+        Stopping(pad)) {
         return;
     }
     const auto packet = Switch2::BuildBleRumblePacket(
