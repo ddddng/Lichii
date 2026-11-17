@@ -702,8 +702,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // Once FixProfiles has read the configured NAND and -u may have picked another user.
     Common::Nextendo::MigrateAccountFile(
         Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
-    auto orphans = Common::Nextendo::OrphanAccounts(
-        QtCommon::system->GetProfileManager().FindExistingProfileUUIDs());
+    // A default user made for an unreadable profiles.dat would make every account an orphan.
+    auto& profile_manager = QtCommon::system->GetProfileManager();
+    auto orphans =
+        profile_manager.UserSaveFileRead()
+            ? Common::Nextendo::OrphanAccounts(profile_manager.FindExistingProfileUUIDs())
+            : std::vector<Common::UUID>{};
     std::erase_if(orphans, [kept = Settings::values.nextendo_kept_accounts.GetValue()](
                                const Common::UUID& profile) {
         return kept.find(profile.FormattedString()) != std::string::npos;
