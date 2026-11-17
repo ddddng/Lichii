@@ -907,9 +907,11 @@ NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) {
     volatile uint32_t *w = (volatile uint32_t *)nvn_direct_writable((uint64_t)(uintptr_t)e->val);   // Lichii: through the backing memory (nvn_tracking.c)
-    if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *w += v; else *w = v;
+    uint32_t r = mode == NVN_EVENT_SIGNAL_MODE_ADD ? *w + v : v; *w = r;
 #if defined(__ANDROID__)
-    mtl_event_cpu(e->val, mode, v);   // (the replay's own order of signals and waits, vka_exec.c OP_WAIT_EVENT)
+    // (the replay's own order of signals and waits, vka_exec.c OP_WAIT_EVENT). Lichii: as the value written, which the replay's event caches take as is (an ADD they
+    // would add again to the memory they seed from, which holds it already)
+    mtl_event_cpu(e->val, NVN_EVENT_SIGNAL_MODE_WRITE, r);
 #endif
 }
 NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); }
