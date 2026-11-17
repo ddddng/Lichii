@@ -247,9 +247,10 @@ int nvn_direct_float_args(int slot);
 #define NVN_DISPATCH_FLOAT_RETURN 2
 
 /// Runs an implemented slot's function with the guest's x0-x7 and v0-v7 (low 64 bits) as its
-/// arguments; returns x0, and v0 through *v0 for a float result. lr: the guest's return address
-/// (the call site the front end records).
-uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0);
+/// arguments, and the guest's stack at sp for the arguments past them; returns x0, and v0 through
+/// *v0 for a float result. lr: the guest's return address (the call site the front end records).
+uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr,
+                         uint64_t* v0);
 
 /// A presented image as Lichii's presenter shows it (dotfiles-25x.7). The image stays in
 /// VK_IMAGE_LAYOUT_GENERAL; it is drawn on the replay's queues and finished at fence.

@@ -103,11 +103,9 @@ static inline uint64_t R_float(float f) { uint32_t u; memcpy(&u, &f, 4); return 
 static inline uint64_t R_double(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
 
 // Host copies of the arrays a call passes, per thread: at most two arrays per call (gen_dispatch.py
-// checks), each copy valid until the thread's next call. kept: the front end keeps the array
-// past the call (a program builder's shader list): a copy of its own, never freed.
+// checks), each copy valid until the thread's next call.
 static _Thread_local struct { void* p; size_t cap; } g_scratch[2];
-static void* scratch(int k, size_t bytes, int kept) {
-    if (kept) return malloc(bytes ? bytes : 1);
+static void* scratch(int k, size_t bytes) {
     if (g_scratch[k].cap < bytes) {
         free(g_scratch[k].p);
         g_scratch[k].cap = bytes < 256 ? 256 : bytes;
@@ -115,39 +113,39 @@ static void* scratch(int k, size_t bytes, int kept) {
     }
     return g_scratch[k].p;
 }
-static void* xl_pointers(uint64_t a, int n, int k, int kept) {
+static void* xl_pointers(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
     const uint64_t* in = host_ptr(a);
-    uint64_t* out = scratch(k, sizeof *out * (size_t)n, kept);
+    uint64_t* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = host_addr(in[i]);
     return out;
 }
-static void* xl_handles(uint64_t a, int n, int k, int kept) { return xl_pointers(a, n, k, kept); }
-static void* xl_buffer_ranges(uint64_t a, int n, int k, int kept) {
+static void* xl_handles(uint64_t a, int n, int k) { return xl_pointers(a, n, k); }
+static void* xl_buffer_ranges(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
     const NVNbufferRange* in = host_ptr(a);
-    NVNbufferRange* out = scratch(k, sizeof *out * (size_t)n, kept);
+    NVNbufferRange* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (NVNbufferRange){host_addr(in[i].address), in[i].size};
     return out;
 }
-static void* xl_shader_data(uint64_t a, int n, int k, int kept) {
+static void* xl_shader_data(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
     const NVNshaderData* in = host_ptr(a);
-    NVNshaderData* out = scratch(k, sizeof *out * (size_t)n, kept);
+    NVNshaderData* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (NVNshaderData){host_addr(in[i].data), host_ptr((uint64_t)(uintptr_t)in[i].control)};
     return out;
 }
-static void* xl_shader_data_ext(uint64_t a, int n, int k, int kept) {
+static void* xl_shader_data_ext(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
     const shader_data_ext* in = host_ptr(a);
-    shader_data_ext* out = scratch(k, sizeof *out * (size_t)n, kept);
+    shader_data_ext* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (shader_data_ext){host_addr(in[i].data), host_ptr((uint64_t)(uintptr_t)in[i].control), in[i].ext};
     return out;
 }
-static void* xl_mapping_requests(uint64_t a, int n, int k, int kept) {
+static void* xl_mapping_requests(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
     const mapping_request* in = host_ptr(a);
-    mapping_request* out = scratch(k, sizeof *out * (size_t)n, kept);
+    mapping_request* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) {
         out[i] = in[i];
         out[i].phys = host_ptr((uint64_t)(uintptr_t)in[i].phys);
@@ -155,10 +153,12 @@ static void* xl_mapping_requests(uint64_t a, int n, int k, int kept) {
     return out;
 }
 
-typedef uint64_t (*dispatch_fn)(void* fn, const uint64_t* x, const uint64_t* v, uint64_t* v0);
+// s: the guest's stack at the call (its arguments past x7 / v7), as a host pointer.
+typedef uint64_t (*dispatch_fn)(void* fn, const uint64_t* x, const uint64_t* v, const uint64_t* s, uint64_t* v0);
 #define D(name, flags, body)                                                                       \
-    static uint64_t d_##name(void* fn, const uint64_t* x, const uint64_t* v, uint64_t* v0) {      \
-        (void)x; (void)v; (void)v0;                                                                \
+    static uint64_t d_##name(void* fn, const uint64_t* x, const uint64_t* v, const uint64_t* s,   \
+                             uint64_t* v0) {                                                       \
+        (void)x; (void)v; (void)s; (void)v0;                                                       \
         body                                                                                       \
     }
 #include "nvn_dispatch.inc"
@@ -186,8 +186,8 @@ _Thread_local uint64_t nvn_direct_guest_lr;
 static struct { void* fn; const dispatch_entry* d; } g_slot[NVN_NFUNC];
 // The empty implementations of names without a prototype (hle_nvn.c g_nops: the shading-rate calls):
 // they take no arguments and return nothing.
-static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, uint64_t* v0) {
-    (void)x; (void)v; (void)v0;
+static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, const uint64_t* s, uint64_t* v0) {
+    (void)x; (void)v; (void)s; (void)v0;
     ((void (*)(void))fn)();
     return 0;
 }
@@ -287,10 +287,10 @@ uint64_t nvn_direct_calls(const char* name) {
     for (int i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], name)) return atomic_load(&g_calls[i]);
     return 0;
 }
-uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0) {
+uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
     if (calls_on()) atomic_fetch_add_explicit(&g_calls[slot], 1, memory_order_relaxed);
-    return g_slot[slot].d->d(g_slot[slot].fn, x, v, v0);
+    return g_slot[slot].d->d(g_slot[slot].fn, x, v, (const uint64_t*)host_ptr(sp), v0);
 }
 
 // nvnDeviceGetInteger: the game's own NVN2 driver's answers, as Lichii captured them or read the

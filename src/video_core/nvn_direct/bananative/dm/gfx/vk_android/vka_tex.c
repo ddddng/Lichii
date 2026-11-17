@@ -2005,7 +2005,8 @@ static VkSampler sampler_of(const samp_par *p) {
     int mip = p->minf >= NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST;
     float aniso = p->aniso > 1 ? (p->aniso < V.props.limits.maxSamplerAnisotropy ? p->aniso : V.props.limits.maxSamplerAnisotropy) : 1;
     float bias = p->lod_bias, bl = V.props.limits.maxSamplerLodBias; if (bias > bl) bias = bl; if (bias < -bl) bias = -bl;
-    int white = p->border[0] > 0.5f && p->border[3] > 0.5f, opaque = p->border[3] > 0.5f;
+    float border[4]; samp_border(p, border);
+    int white = border[0] > 0.5f && border[3] > 0.5f, opaque = border[3] > 0.5f;
     VkSamplerCreateInfo ci = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = p->magf == NVN_MAG_FILTER_LINEAR ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
         .minFilter = p->minf == NVN_MIN_FILTER_LINEAR || p->minf == NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST || p->minf == NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
