@@ -289,9 +289,8 @@ static uint64_t pc_cover(const pcen *c, const uint8_t *bm, int none) {   // byte
 static uint64_t pc_nonzero(const pcen *c) {   // bytes in 4 KiB pages that are not all zero (reads the whole pool)
     uint64_t n = 0;
     for (uint64_t o = 0; o < c->size; o += 4096) {
-        uint64_t k = c->size - o < 4096 ? c->size - o : 4096, v = 0;
-        if (dm_guest_unmapped((uintptr_t)(c->mem + o), k)) continue;   // (not mapped by the guest: inaccessible)
-        const uint64_t *q = (const uint64_t *)(const void *)(c->mem + o);
+        uint64_t k = c->size - o < 4096 ? c->size - o : 4096, v = 0, q[512];
+        if (dm_guest_read_mapped(q, (uintptr_t)(c->mem + o), k)) continue;   // (not mapped by the guest: inaccessible; copied, not read in place: the guest may unmap the page meanwhile)
         for (uint64_t i = 0; i < k / 8 && !v; i++) v = q[i];
         if (v) n += k;
     }
@@ -343,12 +342,15 @@ static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); 
 // replay never reads a pool object directly: nvn_pool_live answers from this table, and reads the object only under its lock, which nvnMemoryPoolFinalize takes before anything is
 // released (the game unmaps the object's memory after Finalize returns; vp itself changes under g_vp_mu, read here only as set or not). gen is the pool's Initialize serial: a
 // pool initialized again at the same address is another pool. A reader that goes on to read the texture's storage holds nvn_pool_use (a read lock) from its liveness check until
-// it is done; nvnMemoryPoolFinalize takes it for writing before the pool leaves the table, so a pool cannot be finalized, and its memory unmapped, under such a reader
+// it is done; nvnMemoryPoolFinalize takes it for writing before the pool leaves the table, so a pool cannot be finalized, and its memory unmapped, under such a reader.
+// Lichii: a guest unmap takes it for writing too, until the pages are gone (nvn_pool_unmap): a reader that found a page mapped reads it before the unmap, not after
 typedef struct { const pool_t *p; uint64_t gen; } plive;
 static plive *g_pl; static uint32_t g_npl, g_cpl; static uint64_t g_plgen;   // open addressing, g_cpl a power of two; p == (void *)1: a deleted slot; g_npl: used slots, deleted ones included
 static pthread_mutex_t g_pl_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t g_pl_use = PTHREAD_RWLOCK_INITIALIZER;
-void nvn_pool_use(int on) { if (on) pthread_rwlock_rdlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); }   // (never taken twice by one thread: a waiting writer would block the second)
+static _Thread_local int t_pl_use;   // this thread's holds: only the outermost takes the lock (a waiting writer would block a second read lock)
+void nvn_pool_use(int on) { if (on ? !t_pl_use++ : !--t_pl_use) { if (on) pthread_rwlock_rdlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); } }
+void nvn_pool_unmap(int on) { if (on) pthread_rwlock_wrlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); }
 static uint32_t pl_hash(const pool_t *p) { uint64_t h = (uint64_t)(uintptr_t)p * 0x9E3779B97F4A7C15ull; return (uint32_t)(h >> 32); }
 static _Atomic uint64_t g_plfin;   // pools finalized (or initialized again at a live pool's address) so far: nvn_pool_fin
 uint64_t nvn_pool_fin(void) { return atomic_load_explicit(&g_plfin, memory_order_acquire); }
@@ -2126,7 +2128,10 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     for (uint64_t p = 0, o = a - (uint64_t)(uintptr_t)v->base; p < n;) {
         uint64_t at = o + p, k = 0x1000 - (at & 0xFFF); if (k > n - p) k = n - p;
         const vpte *e = at < v->size ? vpt_get(v, at) : NULL;
-        if (e && e->phys) memcpy((uint8_t *)dst + p, e->phys + (at & 0xFFF), k); else { memset((uint8_t *)dst + p, 0, k); miss += k; }
+        const uint8_t *s = e && e->phys ? e->phys + (at & 0xFFF) : NULL;
+        // (Lichii: guest memory through its backing memory, which a guest unmap of the physical pages leaves readable; never through nvn_direct_readable's lookup of g_vp)
+        if (s && nvn_direct_guest_of((uint64_t)(uintptr_t)s) != (uint64_t)(uintptr_t)s) dm_guest_read_mapped((uint8_t *)dst + p, (uintptr_t)s, k);
+        else if (s) memcpy((uint8_t *)dst + p, s, k); else { memset((uint8_t *)dst + p, 0, k); miss += k; }
         p += k;
     }
     pthread_mutex_unlock(&g_vp_mu); return miss;

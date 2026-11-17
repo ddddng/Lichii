@@ -1067,9 +1067,13 @@ void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddre
 
 void Memory::UnmapRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                          bool separate_heap) {
-    // NVN2 direct mode: pool memory the replay imported here is given back before the pages go.
-    Core::NvnHook::OnGuestUnmap(page_table, GetInteger(base), size);
+    // NVN2 direct mode: pool memory the replay imported here is given back before the pages go,
+    // and the replay reads no guest memory until they are gone.
+    const bool direct = Core::NvnHook::OnGuestUnmap(page_table, GetInteger(base), size);
     impl->UnmapRegion(page_table, base, size, separate_heap);
+    if (direct) {
+        Core::NvnHook::OnGuestUnmapDone();
+    }
 }
 
 void Memory::ProtectRegion(Common::PageTable& page_table, Common::ProcessAddress vaddr, u64 size,
