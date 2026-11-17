@@ -728,12 +728,15 @@ private:
     /// SwizzleImage of the `size` bytes at gpu_addr through `memory`, inside a
     /// VideoCore::DownloadLanding, that leaves as they are the `keep` ranges of guest memory and
     /// the guest CPU writes collected and not yet applied: it writes none of their bytes.
+    /// With `landed`, fills it with the device ranges it wrote, merged (while write-backs are on).
     void SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_addr, u64 size,
                         const ImageInfo& info, std::span<const BufferImageCopy> copies,
-                        std::span<const u8> data, const KeepRanges& keep);
+                        std::span<const u8> data, const KeepRanges& keep,
+                        std::vector<std::pair<DAddr, DAddr>>* landed = nullptr);
     PendingCpuWrites pending_cpu_writes;
     Common::ScratchBuffer<u8> swizzle_keep_buffer;
     std::vector<std::pair<u64, u64>> swizzle_keep_written;
+    std::vector<std::pair<DAddr, DAddr>> landed_ranges;
     void NoteOverlapWriteback(const ImageBase& image, bool lost = false);
     /// The same for the image's contents at modification tick `tick`, written to all of its
     /// guest memory but the `keep` ranges: those hold other data, whose records stay. Returns
@@ -798,12 +801,19 @@ private:
     /// The GPU memory of an address space the cache has seen, or null.
     [[nodiscard]] Tegra::MemoryManager* AddressSpaceMemory(size_t as_id);
     void FinishAsyncOverlapDownloads(bool wait_all);
-    /// After a write-back of [cpu_addr, cpu_addr + size) at modification tick `tick` landed,
-    /// waiting or not: images over it the GPU did not write, with contents no newer, load it again.
-    void ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick);
+    /// After a write-back with contents of modification tick `tick` landed, waiting or not:
+    /// images under the device ranges it wrote that the GPU did not write, with contents no
+    /// newer, load it again.
+    void ReloadUnderLanded(std::span<const std::pair<DAddr, DAddr>> landed, u64 tick);
     /// Whether a write-back still waiting covers the image and would reload it when it lands
-    /// (the image has not been GPU-written since that write-back's contents).
+    /// (the image has not been GPU-written since that write-back's contents). Conservative: it
+    /// counts every byte outside the keep ranges, which the landing writes but for pending guest
+    /// CPU writes and bytes the swizzle doesn't cover.
     [[nodiscard]] bool WritebackWouldReload(const ImageBase& image);
+    /// Images first drawn to while a write-back that would reload them was still on the GPU
+    /// (PrepareImage), since the last log and since boot.
+    u64 early_writeback_draws{};
+    u64 early_writeback_draws_total{};
     /// Whether a write-back still waiting writes to [cpu_addr, cpu_addr + size): its GPU data
     /// is not in guest memory yet.
     [[nodiscard]] bool WritebackPendingOver(DAddr cpu_addr, u64 size) const;

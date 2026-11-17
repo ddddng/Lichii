@@ -15,6 +15,7 @@ using VideoCommon::WritebackRanges::CapPageRecords;
 using VideoCommon::WritebackRanges::ForEachLandedPart;
 using VideoCommon::WritebackRanges::ForEachUnkept;
 using VideoCommon::WritebackRanges::KeepNewerBytes;
+using VideoCommon::WritebackRanges::LandingReloads;
 using VideoCommon::WritebackRanges::MaxTickedRanges;
 using VideoCommon::WritebackRanges::MaxPageRecords;
 using VideoCommon::WritebackRanges::MergeRanges;
@@ -24,6 +25,7 @@ using VideoCommon::WritebackRanges::Segment;
 using VideoCommon::WritebackRanges::TickedRange;
 using VideoCommon::WritebackRanges::TickedRanges;
 using VideoCommon::WritebackRanges::TrimOverwritten;
+using VideoCommon::WritebackRanges::WritesOver;
 
 namespace {
 using Range = std::pair<DAddr, DAddr>;
@@ -431,4 +433,50 @@ TEST_CASE("A landing writes what the swizzle wrote but newer data, through each 
                                      {0x10300, 0x300, 0x500},
                                      {0x10c00, 0xc00, 0x400},
                                      {0x30100, 0x1100, 0x300}});
+}
+
+TEST_CASE("A write-back writes over a range only outside the ranges it keeps",
+          "[video_core][texture_cache][writeback]") {
+    // A write-back of [0x1000, 0x2000) that keeps [0x1400, 0x1800) to newer data.
+    const std::vector<Range> keep{{0x1400, 0x1800}};
+    CHECK(WritesOver(0x1000, 0x1000, keep, 0x1000, 0x1400));
+    CHECK(WritesOver(0x1000, 0x1000, keep, 0x17ff, 0x1801));
+    CHECK_FALSE(WritesOver(0x1000, 0x1000, keep, 0x1400, 0x1800));
+    CHECK_FALSE(WritesOver(0x1000, 0x1000, keep, 0x1500, 0x1600));
+    // Outside the write-back, and touching it without overlapping.
+    CHECK_FALSE(WritesOver(0x1000, 0x1000, keep, 0x2000, 0x3000));
+    CHECK_FALSE(WritesOver(0x1000, 0x1000, keep, 0x0, 0x1000));
+    // Kept all over (a guest write in pieces), it writes nothing.
+    const std::vector<Range> pieces{{0x1000, 0x1800}, {0x1800, 0x2000}};
+    CHECK_FALSE(WritesOver(0x1000, 0x1000, pieces, 0x0, 0x3000));
+}
+
+namespace {
+/// A write-back waiting for the GPU, with what decides whether its landing reloads an image.
+struct LandingDownload {
+    DAddr cpu_addr;
+    u64 size;
+    u64 tick;
+    std::vector<Range> keep;
+    bool cancelled;
+};
+} // Anonymous namespace
+
+TEST_CASE("A landing reloads only images no newer than it under bytes it writes",
+          "[video_core][texture_cache][writeback]") {
+    // A write-back at tick 10 of [0x1000, 0x2000) that keeps [0x1800, 0x2000) to newer data.
+    LandingDownload download{0x1000, 0x1000, 10, {{0x1800, 0x2000}}, false};
+    // An image over its written bytes, loaded at or before its tick, reloads.
+    CHECK(LandingReloads(download, 0x1000, 0x1400, 10));
+    CHECK(LandingReloads(download, 0x0, 0x1100, 3));
+    // Contents newer than the write-back's are not replaced.
+    CHECK_FALSE(LandingReloads(download, 0x1000, 0x1400, 11));
+    // An image only under the kept bytes would load the same data again.
+    CHECK_FALSE(LandingReloads(download, 0x1800, 0x2000, 3));
+    CHECK_FALSE(LandingReloads(download, 0x1900, 0x3000, 3));
+    // Nor one beside it.
+    CHECK_FALSE(LandingReloads(download, 0x2000, 0x3000, 3));
+    // A cancelled write-back never lands.
+    download.cancelled = true;
+    CHECK_FALSE(LandingReloads(download, 0x1000, 0x1400, 3));
 }

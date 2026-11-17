@@ -533,7 +533,8 @@ template <class P>
 void TextureCache<P>::SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_addr, u64 size,
                                      const ImageInfo& info,
                                      std::span<const BufferImageCopy> copies,
-                                     std::span<const u8> data, const KeepRanges& keep) {
+                                     std::span<const u8> data, const KeepRanges& keep,
+                                     std::vector<std::pair<DAddr, DAddr>>* landed) {
     if (!OverlapWritebacksEnabled()) {
         SwizzleImage(memory, gpu_addr, info, copies, data, swizzle_data_buffer);
         return;
@@ -582,7 +583,13 @@ void TextureCache<P>::SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_
     WritebackRanges::ForEachLandedPart(
         segments, swizzle_keep_written, skip, [&](DAddr device, u64 offset, u64 part_size) {
             device_memory.WriteBlockUnsafe(device, swizzle_keep_buffer.data() + offset, part_size);
+            if (landed != nullptr) {
+                landed->emplace_back(device, device + part_size);
+            }
         });
+    if (landed != nullptr) {
+        WritebackRanges::MergeRanges(*landed);
+    }
 }
 
 template <class P>
@@ -612,9 +619,11 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
                 NoteWritebackLost(download.cpu_addr, download.size, download.writeback_id);
             }
             if (!download.cancelled) {
+                landed_ranges.clear();
                 SwizzleKeeping(*memory, download.gpu_addr, download.size, download.info,
-                               download.copies, download.map.mapped_span, download.keep);
-                ReloadUnderLanded(download.cpu_addr, download.size, download.tick);
+                               download.copies, download.map.mapped_span, download.keep,
+                               &landed_ranges);
+                ReloadUnderLanded(landed_ranges, download.tick);
             }
             runtime.FreeDeferredStagingBuffer(download.map);
             device_memory.UpdatePagesCachedCount(download.cpu_addr, download.size, -1);
@@ -624,33 +633,37 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
 }
 
 template <class P>
-void TextureCache<P>::ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick) {
+void TextureCache<P>::ReloadUnderLanded(std::span<const std::pair<DAddr, DAddr>> landed,
+                                        u64 tick) {
     // Images the GPU did not write loaded these pages before the data landed (made in the
     // meantime by a join, or kept from before it): they load them again. Not one whose contents
     // are newer than the landed data: a view made over a newer target took the target's pixels
     // by a GPU copy without becoming GPU-modified, and reloading it put the older images' bytes in
     // their place (The Duskbloods' 698x80 message banner band came out black or with other HUD
     // text in it).
-    ForEachImageInRegion(cpu_addr, size, [tick](ImageId, ImageBase& image) {
-        if (False(image.flags & ImageFlagBits::GpuModified) && image.modification_tick <= tick) {
-            image.flags |= ImageFlagBits::CpuModified;
-        }
-    });
+    for (const auto& [begin, end] : landed) {
+        ForEachImageInRegion(begin, end - begin, [tick](ImageId, ImageBase& image) {
+            if (False(image.flags & ImageFlagBits::GpuModified) &&
+                image.modification_tick <= tick) {
+                image.flags |= ImageFlagBits::CpuModified;
+            }
+        });
+    }
 }
 
 template <class P>
 bool TextureCache<P>::WritebackWouldReload(const ImageBase& image) {
     // As a landing write-back's reload (ReloadUnderLanded): not GPU-written, contents no newer
-    // than the data, over any of the image's guest memory (a sparse image's mapped segments).
+    // than the data, under bytes it writes in any of the image's guest memory (a sparse image's
+    // mapped segments).
     if (True(image.flags & ImageFlagBits::GpuModified)) {
         return false;
     }
     bool reload = false;
     ForEachWrittenRange(image, [&](DAddr begin, DAddr end) {
         for (const AsyncOverlapDownload& download : async_overlap_downloads) {
-            reload |= !download.cancelled && download.cpu_addr < end &&
-                      begin < download.cpu_addr + download.size &&
-                      image.modification_tick <= download.tick;
+            reload |= WritebackRanges::LandingReloads(download, begin, end,
+                                                      image.modification_tick);
         }
     });
     return reload;
@@ -1064,6 +1077,14 @@ void TextureCache<P>::LogThresholds() const {
 template <class P>
 void TextureCache<P>::TickFrame() {
     FinishAsyncOverlapDownloads(false);
+    if (frame_tick % 600 == 0 && early_writeback_draws != 0) {
+        LOG_INFO(HW_GPU,
+                 "Texture cache: {} images drawn to before the write-back under them landed in "
+                 "the last 600 frames ({} since boot); where they weren't drawn they may keep older "
+                 "guest data",
+                 early_writeback_draws, early_writeback_draws_total);
+        early_writeback_draws = 0;
+    }
     if (Common::DkbFrameTrace::Enabled()) {
         static u64 frames{};
         if (++frames % 600 == 0 && (overlap_download_batches != 0 || overlap_download_skips != 0 || join_writebacks != 0 ||
@@ -5341,10 +5362,17 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
     Image& image = slot_images[image_id];
     if (is_modification && !invalidate && !async_overlap_downloads.empty() &&
         WritebackWouldReload(image)) {
-        // Its write-back landing would reload it, but not once the GPU has written to it: a
-        // partial render now would keep guest memory's stale bytes where it doesn't draw. Land
-        // the write-backs first (they mark it for the upload below).
-        FinishAsyncOverlapDownloads(true);
+        // Without waiting: write-backs still on the GPU won't reload it once it is drawn to.
+        FinishAsyncOverlapDownloads(false);
+        if (WritebackWouldReload(image)) {
+            ++early_writeback_draws;
+            if (early_writeback_draws_total++ == 0) {
+                LOG_INFO(HW_GPU,
+                         "Texture cache: image {:#x} drawn to before the write-back under it "
+                         "landed; where it isn't drawn it may keep older guest data",
+                         image.gpu_addr);
+            }
+        }
     }
     if (invalidate) {
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);

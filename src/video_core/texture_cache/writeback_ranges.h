@@ -168,6 +168,25 @@ void ForEachUnkept(DAddr begin, DAddr end, const Keep& keep, Func&& func) {
     }
 }
 
+/// Whether a write-back of [cpu_addr, cpu_addr + size) that leaves its `keep` ranges as they were
+/// writes any byte of [begin, end).
+template <typename Keep>
+bool WritesOver(DAddr cpu_addr, u64 size, const Keep& keep, DAddr begin, DAddr end) {
+    bool writes = false;
+    ForEachUnkept((std::max)(cpu_addr, begin), (std::min)(cpu_addr + size, end), keep,
+                  [&](DAddr, DAddr) { writes = true; });
+    return writes;
+}
+
+/// Whether a waiting write-back (cancelled, cpu_addr, size, tick, keep) reloads, when it lands,
+/// an image the GPU has not written whose contents of modification tick `image_tick` are in
+/// [begin, end): it writes some of those bytes, and its data is no older than the image's.
+template <typename Download>
+bool LandingReloads(const Download& download, DAddr begin, DAddr end, u64 image_tick) {
+    return !download.cancelled && image_tick <= download.tick &&
+           WritesOver(download.cpu_addr, download.size, download.keep, begin, end);
+}
+
 /// Appends to `landed` what a write-back of [cpu_addr, cpu_addr + size) at modification tick
 /// `tick` left in guest memory: its own bytes (all but the `keep` ranges it left as they were) at
 /// its tick, and each range of `kept` at the tick of the data that range holds.
