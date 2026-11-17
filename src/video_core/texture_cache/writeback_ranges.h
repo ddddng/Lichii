@@ -151,28 +151,62 @@ void CapPageRecords(Records& records, DAddr page_begin, DAddr page_end) {
     }
 }
 
+/// Calls func(begin, end) for each range of [begin, end) outside the `keep` ranges, in order.
+template <typename Keep, typename Func>
+void ForEachUnkept(DAddr begin, DAddr end, const Keep& keep, Func&& func) {
+    boost::container::small_vector<std::pair<DAddr, DAddr>, 4> sorted(keep.begin(), keep.end());
+    std::ranges::sort(sorted);
+    DAddr cursor = begin;
+    for (const auto& [keep_begin, keep_end] : sorted) {
+        if (keep_begin > cursor && cursor < end) {
+            func(cursor, (std::min)(keep_begin, end));
+        }
+        cursor = (std::max)(cursor, keep_end);
+    }
+    if (cursor < end) {
+        func(cursor, end);
+    }
+}
+
 /// Appends to `landed` what a write-back of [cpu_addr, cpu_addr + size) at modification tick
 /// `tick` left in guest memory: its own bytes (all but the `keep` ranges it left as they were) at
 /// its tick, and each range of `kept` at the tick of the data that range holds.
 template <typename Landed, typename Keep, typename Kept>
 void AppendLanded(Landed& landed, DAddr cpu_addr, u64 size, u64 tick, const Keep& keep,
                   const Kept& kept) {
-    boost::container::small_vector<std::pair<DAddr, DAddr>, 4> sorted(keep.begin(), keep.end());
-    std::ranges::sort(sorted);
-    const DAddr end = cpu_addr + size;
-    DAddr cursor = cpu_addr;
-    for (const auto& [keep_begin, keep_end] : sorted) {
-        if (keep_begin > cursor && cursor < end) {
-            landed.push_back(TickedRange{cursor, (std::min)(keep_begin, end), tick});
-        }
-        cursor = (std::max)(cursor, keep_end);
-    }
-    if (cursor < end) {
-        landed.push_back(TickedRange{cursor, end, tick});
-    }
+    ForEachUnkept(cpu_addr, cpu_addr + size, keep, [&](DAddr begin, DAddr end) {
+        landed.push_back(TickedRange{begin, end, tick});
+    });
     for (const TickedRange& range : kept) {
         landed.push_back(range);
     }
+}
+
+/// Takes out of the write-back records (begin, end, tick) of the page [page_begin, page_end) the
+/// bytes a write-back of [begin, end) at modification tick `tick` wrote, leaving the merged
+/// `keep` ranges as they were: of each record no newer and within it, only its parts in the kept
+/// ranges on the page stay, as they were otherwise. Those bytes still hold that record's data, at
+/// its tick, also when that is older (the write-back kept a smaller image's that was written back
+/// after its own image loaded).
+template <typename Records, typename Keep>
+void TrimOverwritten(Records& records, DAddr begin, DAddr end, u64 tick, const Keep& keep,
+                     DAddr page_begin, DAddr page_end) {
+    Records trimmed;
+    for (const auto& record : records) {
+        if (record.tick > tick || record.begin < begin || end < record.end) {
+            trimmed.push_back(record);
+            continue;
+        }
+        for (const auto& [keep_begin, keep_end] : keep) {
+            auto part = record;
+            part.begin = (std::max)({record.begin, keep_begin, page_begin});
+            part.end = (std::min)({record.end, keep_end, page_end});
+            if (part.begin < part.end) {
+                trimmed.push_back(part);
+            }
+        }
+    }
+    records = std::move(trimmed);
 }
 
 /// Appends to `keep` the bytes of [begin, end) that the write-back records (begin, end, tick,
@@ -185,6 +219,37 @@ void AppendNewerLanded(Keep& keep, const Records& records, DAddr begin, DAddr en
         if (record.tick > tick && !record.lost && record.begin < end && begin < record.end &&
             !waiting(record)) {
             keep.emplace_back((std::max)(record.begin, begin), (std::min)(record.end, end));
+        }
+    }
+}
+
+/// A range [offset, offset + size) of an image's guest memory, from its GPU address, that is one
+/// range of device memory from `device`.
+struct Segment {
+    u64 offset;
+    DAddr device;
+    u64 size;
+};
+
+/// Calls write(device_addr, offset, size) for each part of an image's guest memory a landing
+/// writes: the ranges [first, second) of it the swizzle wrote, through the segments they are in,
+/// except the device ranges [first, second) of `skip`, which hold newer data.
+template <typename Segments, typename Written, typename Skip, typename Write>
+void ForEachLandedPart(const Segments& segments, const Written& written, const Skip& skip,
+                       Write&& write) {
+    for (const Segment& segment : segments) {
+        for (const auto& [written_begin, written_end] : written) {
+            const u64 begin = (std::max)(written_begin, segment.offset);
+            const u64 end = (std::min)(written_end, segment.offset + segment.size);
+            if (begin >= end) {
+                continue;
+            }
+            const DAddr device_begin = segment.device + (begin - segment.offset);
+            ForEachUnkept(device_begin, device_begin + (end - begin), skip,
+                          [&](DAddr part_begin, DAddr part_end) {
+                              write(part_begin, begin + (part_begin - device_begin),
+                                    part_end - part_begin);
+                          });
         }
     }
 }

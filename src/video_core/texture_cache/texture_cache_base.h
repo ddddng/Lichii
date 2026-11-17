@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -399,6 +400,13 @@ public:
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
 
+    /// Calls its argument for each guest CPU write collected and not yet applied
+    /// (GPU::ForEachPendingCpuWrite): landing write-backs leave their bytes (SwizzleKeeping).
+    using PendingCpuWrites = std::function<void(const std::function<void(DAddr, size_t)>&)>;
+    void SetPendingCpuWrites(PendingCpuWrites source) {
+        pending_cpu_writes = std::move(source);
+    }
+
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
 
@@ -709,8 +717,6 @@ private:
     /// pages starts without an upload: the upload would only copy stale bytes the GPU overwrites.
     /// Switch 2 titles only: the buffer cache feeds Nx2MayBeGpuWritten for them alone.
     void MarkStale(const ImageBase& image);
-    [[nodiscard]] static u64 OverlapDownloadMaxBytes();
-    [[nodiscard]] bool AsyncOverlapDownloadsEnabled();
     /// Device byte ranges [begin, end) of a write-back that newer data owns.
     using KeepRanges = boost::container::small_vector<std::pair<DAddr, DAddr>, 4>;
     /// Fills `keep` with the image's bytes that newer write-backs (or newer images dropped
@@ -719,16 +725,25 @@ private:
     [[nodiscard]] bool OverlapHasNewerData(ImageId image_id, const ImageBase& image,
                                            KeepRanges& keep,
                                            WritebackRanges::TickedRanges* keep_ticks = nullptr);
-    /// SwizzleImage through `memory` that leaves the `keep` ranges of guest memory as they were.
-    void SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_addr, const ImageInfo& info,
-                        std::span<const BufferImageCopy> copies, std::span<const u8> data,
-                        const KeepRanges& keep);
+    /// SwizzleImage of the `size` bytes at gpu_addr through `memory`, inside a
+    /// VideoCore::DownloadLanding, that leaves as they are the `keep` ranges of guest memory and
+    /// the guest CPU writes collected and not yet applied: it writes none of their bytes.
+    void SwizzleKeeping(Tegra::MemoryManager& memory, GPUVAddr gpu_addr, u64 size,
+                        const ImageInfo& info, std::span<const BufferImageCopy> copies,
+                        std::span<const u8> data, const KeepRanges& keep);
+    PendingCpuWrites pending_cpu_writes;
+    Common::ScratchBuffer<u8> swizzle_keep_buffer;
+    std::vector<std::pair<u64, u64>> swizzle_keep_written;
     void NoteOverlapWriteback(const ImageBase& image, bool lost = false);
-    /// The same for the image's contents at modification tick `tick`.
-    void NoteOverlapWriteback(const ImageBase& image, bool lost, u64 tick);
-    /// A noted write-back that was cancelled before it landed: its range stays newer than older
-    /// images, but its data is gone (like an image dropped without one).
-    void NoteWritebackLost(DAddr cpu_addr, u64 size, u64 tick);
+    /// The same for the image's contents at modification tick `tick`, written to all of its
+    /// guest memory but the `keep` ranges: those hold other data, whose records stay. Returns
+    /// the write-back's id (WritebackRange::id).
+    u64 NoteOverlapWriteback(const ImageBase& image, bool lost, u64 tick,
+                             const KeepRanges& keep = {});
+    /// A noted write-back over [cpu_addr, cpu_addr + size) that was cancelled before it landed:
+    /// its range stays newer than older images, but its data is gone (like an image dropped
+    /// without one).
+    void NoteWritebackLost(DAddr cpu_addr, u64 size, u64 id);
     /// Whether the image's guest memory is the one range at its cpu_addr, which write-backs
     /// track, keep and note: not sparse, and not a stand-in address for GPU memory without CPU
     /// backing (ImageCpuAddress; TrackImage skips those the same way).
@@ -752,11 +767,11 @@ private:
     /// Fills `keep` with the bytes of the image's guest memory that landed write-backs and
     /// flushes with contents newer than `tick` hold (an asynchronous flush's snapshot leaves them).
     void KeepNewerLanded(const ImageBase& image, u64 tick, KeepRanges& keep);
-    /// Whether the collector's or joins' write-backs are on (writeback_switches.h).
+    /// Whether this backend supports the title's overlap write-backs.
     [[nodiscard]] static bool OverlapWritebacksEnabled();
     u64 join_writeback_reuses{};
     void WriteBackBadOverlaps(ImageId new_image_id);
-    /// Collector write-backs waiting for the GPU (EDEN_NX2_GC_DOWNLOAD_ASYNC): written to guest
+    /// Collector write-backs waiting for the GPU: written to guest
     /// memory once their command buffer is done, except bytes the guest writes first; dropped if
     /// the memory is unmapped first. Their pages stay write-tracked meanwhile.
     struct AsyncOverlapDownload {
@@ -776,6 +791,8 @@ private:
         u64 tick{};
         /// The image's address space: gpu_addr is in it, whichever channel is bound on landing.
         size_t address_space{};
+        /// NoteOverlapWriteback's id for it.
+        u64 writeback_id{};
     };
     std::deque<AsyncOverlapDownload> async_overlap_downloads;
     /// The GPU memory of an address space the cache has seen, or null.
@@ -798,20 +815,26 @@ private:
     u64 async_overlap_cancels{};
     u64 join_writebacks{};
     u64 join_writeback_images{};
-    u64 join_writeback_wait_us{};
     static constexpr u32 OverlapPageBits = 12;
     /// Per 4 KiB device page: the newest modification tick of a dropped GPU-written overlapping
     /// image over it (written back or lost), so older ones are not written back over it.
     std::unordered_map<DAddr, u64> overlap_writeback_ticks;
     /// The same write-backs by byte range, per page they touch (a few each, CapPageRecords):
     /// small targets share pages, and a page-wide skip dropped a neighbour's data with them
-    /// (black UI boxes, EDEN_NX2_GC_DOWNLOAD_KEEP_BYTES).
+    /// (black UI boxes).
     struct WritebackRange {
         DAddr begin;
         DAddr end;
         u64 tick;
         bool lost; ///< An image dropped without a write-back: newer, but its data is gone
+        /// The whole image range the write-back is of: [begin, end) is the part of it that holds
+        /// its data.
+        DAddr source_begin;
+        DAddr source_end;
+        /// The write-back's own, which no other has: a waiting or cancelled one is found by it.
+        u64 id;
     };
+    u64 next_writeback_id{};
     /// Whether OverlapHasNewerData's last call found a lost image's range among the cover.
     bool last_cover_lost{};
     std::unordered_map<DAddr, boost::container::small_vector<WritebackRange, 4>>
@@ -821,7 +844,6 @@ private:
     u64 overlap_download_batches{};  ///< GC overlap downloads (EDEN_DKB_FRAME_TRACE summary)
     u64 overlap_download_images{};
     u64 overlap_download_bytes{};
-    u64 overlap_download_wait_us{};
     void ClearStale(DAddr addr, size_t size);
     void ClearStaleImage(const ImageBase& image);
     /// Clears every device range [gpu_addr, gpu_addr + size) maps to.

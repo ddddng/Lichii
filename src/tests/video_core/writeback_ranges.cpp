@@ -12,14 +12,18 @@
 using VideoCommon::WritebackRanges::AppendLanded;
 using VideoCommon::WritebackRanges::AppendNewerLanded;
 using VideoCommon::WritebackRanges::CapPageRecords;
+using VideoCommon::WritebackRanges::ForEachLandedPart;
+using VideoCommon::WritebackRanges::ForEachUnkept;
 using VideoCommon::WritebackRanges::KeepNewerBytes;
 using VideoCommon::WritebackRanges::MaxTickedRanges;
 using VideoCommon::WritebackRanges::MaxPageRecords;
 using VideoCommon::WritebackRanges::MergeRanges;
 using VideoCommon::WritebackRanges::NoteTick;
 using VideoCommon::WritebackRanges::PageRecords;
+using VideoCommon::WritebackRanges::Segment;
 using VideoCommon::WritebackRanges::TickedRange;
 using VideoCommon::WritebackRanges::TickedRanges;
+using VideoCommon::WritebackRanges::TrimOverwritten;
 
 namespace {
 using Range = std::pair<DAddr, DAddr>;
@@ -242,4 +246,140 @@ TEST_CASE("A page's write-back records drop the oldest past the hard limit",
     CapPageRecords(records, page, page + 0x1000);
     CHECK(records.size() == MaxPageRecords);
     CHECK_FALSE(HasRecord(records, page, page + 0x40, 1));
+}
+
+namespace {
+/// A page's write-back record with the write-back it is part of, as the texture cache keeps them.
+struct SourcedRecord {
+    DAddr begin;
+    DAddr end;
+    u64 tick;
+    bool lost;
+    DAddr source_begin;
+    DAddr source_end;
+};
+
+/// As NoteOverlapWriteback on a page [0x1000, 0x2000): records of the bytes the write-back
+/// wrote, and those of older ones taken out of them.
+void NoteWriteback(std::vector<SourcedRecord>& records, DAddr begin, DAddr end, u64 tick,
+                   const std::vector<Range>& keep) {
+    TrimOverwritten(records, begin, end, tick, keep, 0x1000, 0x2000);
+    ForEachUnkept(begin, end, keep, [&](DAddr written_begin, DAddr written_end) {
+        records.push_back(SourcedRecord{written_begin, written_end, tick, false, begin, end});
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("A write-back's records leave the bytes it kept to their data's tick",
+          "[video_core][texture_cache][writeback]") {
+    // A large image loaded at tick 5 and modified at tick 20 keeps a smaller image's bytes
+    // written back at tick 9 (after it loaded) and a newer image's at tick 30.
+    std::vector<SourcedRecord> records{
+        {0x1400, 0x1500, 9, false, 0x1400, 0x1500},  // kept, older
+        {0x1800, 0x1900, 4, false, 0x1800, 0x1900},  // written over
+        {0x1c00, 0x1d00, 30, false, 0x1c00, 0x1d00}, // kept, newer
+        {0x0800, 0x1100, 3, false, 0x0800, 0x1100},  // past its start: not all written over
+    };
+    NoteWriteback(records, 0x1000, 0x2000, 20, {{0x1400, 0x1500}, {0x1c00, 0x1d00}});
+    const auto has = [&](DAddr begin, DAddr end, u64 tick) {
+        return std::ranges::any_of(records, [&](const SourcedRecord& record) {
+            return record.begin == begin && record.end == end && record.tick == tick;
+        });
+    };
+    CHECK(has(0x1400, 0x1500, 9));
+    CHECK_FALSE(has(0x1800, 0x1900, 4));
+    CHECK(has(0x1c00, 0x1d00, 30));
+    CHECK(has(0x0800, 0x1100, 3));
+    CHECK(has(0x1000, 0x1400, 20));
+    CHECK(has(0x1500, 0x1c00, 20));
+    CHECK(has(0x1d00, 0x2000, 20));
+    CHECK_FALSE(has(0x1000, 0x2000, 20));
+
+    // A flush's snapshot at tick 15 that pops after it landed writes its bytes over the tick-9
+    // data: the write-back did not put tick-20 data there.
+    std::vector<Range> keep;
+    const auto landed = [](const SourcedRecord&) { return false; };
+    AppendNewerLanded(keep, records, 0x1000, 0x2000, 15, landed);
+    MergeRanges(keep);
+    CHECK(keep == std::vector<Range>{{0x1000, 0x1400}, {0x1500, 0x2000}});
+
+    // Still waiting, every record of it is found by the write-back's range: only the newer
+    // image's bytes stay.
+    keep.clear();
+    AppendNewerLanded(keep, records, 0x1000, 0x2000, 15, [](const SourcedRecord& record) {
+        return record.source_begin == 0x1000 && record.source_end == 0x2000 &&
+               record.tick == 20;
+    });
+    MergeRanges(keep);
+    CHECK(keep == std::vector<Range>{{0x1c00, 0x1d00}});
+}
+
+TEST_CASE("A write-back without kept bytes supersedes every older record within it",
+          "[video_core][texture_cache][writeback]") {
+    std::vector<SourcedRecord> records{{0x1400, 0x1500, 9, false, 0x1400, 0x1500},
+                                       {0x1000, 0x2000, 12, true, 0x1000, 0x2000}};
+    NoteWriteback(records, 0x1000, 0x2000, 20, {});
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().begin == 0x1000);
+    CHECK(records.front().end == 0x2000);
+    CHECK(records.front().tick == 20);
+}
+
+TEST_CASE("An older record the write-back kept part of keeps that part",
+          "[video_core][texture_cache][writeback]") {
+    // [0x1300, 0x1480) at tick 8, lost, of an image over [0x1300, 0x1480); the write-back at tick
+    // 20 keeps [0x1400, 0x1500) for a newer image's bytes.
+    std::vector<SourcedRecord> records{{0x1300, 0x1480, 8, true, 0x1300, 0x1480},
+                                       {0x1400, 0x1500, 30, false, 0x1400, 0x1500}};
+    NoteWriteback(records, 0x1000, 0x2000, 20, {{0x1400, 0x1500}});
+    const auto part = std::ranges::find_if(records, [](const SourcedRecord& record) {
+        return record.tick == 8;
+    });
+    REQUIRE(part != records.end());
+    CHECK(part->begin == 0x1400);
+    CHECK(part->end == 0x1480);
+    CHECK(part->lost);
+    CHECK(part->source_begin == 0x1300);
+    CHECK(part->source_end == 0x1480);
+    CHECK(std::ranges::count_if(records, [](const SourcedRecord& r) { return r.tick == 8; }) == 1);
+}
+
+TEST_CASE("An older record over two pages keeps on each only its kept part there",
+          "[video_core][texture_cache][writeback]") {
+    // A record over [0x1f00, 0x2200), a write-back of [0x1000, 0x3000) keeping [0x1f80, 0x2100).
+    const SourcedRecord record{0x1f00, 0x2200, 4, false, 0x1f00, 0x2200};
+    const std::vector<Range> keep{{0x1f80, 0x2100}};
+    std::vector<SourcedRecord> first{record};
+    std::vector<SourcedRecord> second{record};
+    TrimOverwritten(first, 0x1000, 0x3000, 20, keep, 0x1000, 0x2000);
+    TrimOverwritten(second, 0x1000, 0x3000, 20, keep, 0x2000, 0x3000);
+    REQUIRE(first.size() == 1);
+    CHECK(first.front().begin == 0x1f80);
+    CHECK(first.front().end == 0x2000);
+    REQUIRE(second.size() == 1);
+    CHECK(second.front().begin == 0x2000);
+    CHECK(second.front().end == 0x2100);
+}
+
+TEST_CASE("A landing writes what the swizzle wrote but newer data, through each segment",
+          "[video_core][texture_cache][writeback]") {
+    // The image's first 4 KiB at device 0x10000, the next at 0x30000.
+    const std::vector<Segment> segments{{0x0, 0x10000, 0x1000}, {0x1000, 0x30000, 0x1000}};
+    const std::vector<std::pair<u64, u64>> written{{0x0, 0x800}, {0xc00, 0x1400}};
+    // A guest write in the first segment and a kept range at the second's start.
+    const std::vector<Range> skip{{0x10200, 0x10300}, {0x30000, 0x30100}};
+    struct Part {
+        DAddr device;
+        u64 offset;
+        u64 size;
+        bool operator==(const Part&) const = default;
+    };
+    std::vector<Part> parts;
+    ForEachLandedPart(segments, written, skip, [&](DAddr device, u64 offset, u64 size) {
+        parts.push_back(Part{device, offset, size});
+    });
+    CHECK(parts == std::vector<Part>{{0x10000, 0x0, 0x200},
+                                     {0x10300, 0x300, 0x500},
+                                     {0x10c00, 0xc00, 0x400},
+                                     {0x30100, 0x1100, 0x300}});
 }
