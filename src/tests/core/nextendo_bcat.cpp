@@ -116,6 +116,9 @@ TEST_CASE("Nextendo BCAT rejects packages that are not a plain delivery cache", 
     rejects({{"dir/..", "x"}});
     rejects({{"dir/" + std::string(32, 'f'), "x"}});
     rejects({{"dir/bad name", "x"}});
+    rejects({{"dir.x/file", "x"}});
+    rejects({{"dir/file-x", "x"}});
+    rejects({{"dir/file", "x"}, {"dir/file.", "y"}});
     rejects({{"dir\\file", "x"}});
     rejects({{"Dir/file", "x"}, {"dir/FILE", "y"}});
     rejects({});

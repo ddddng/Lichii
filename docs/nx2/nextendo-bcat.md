@@ -22,6 +22,7 @@ X-Nextendo-Client-Id: <nextendo_client_id>
 The route is public. Lichii sends no account token, and a sign-in changes nothing here. The
 request goes from the host directly over HTTPS with certificate checks. It doesn't go through the
 emulated network or its DNS redirection, and it counts against the Nextendo request budget.
+The whole check, a Scarlet fallback included, has 15 seconds.
 
 | Status | Meaning | What Lichii does |
 | --- | --- | --- |
@@ -40,8 +41,8 @@ no encryption or signature at this layer; files the game encrypts itself (Splato
 `.pack.zs.enc`) are stored unchanged. Lichii rejects the whole package, and keeps the old cache,
 when any of these holds:
 
-- a name is empty, `.` or `..`, over 31 characters, or uses a character outside
-  `A-Z a-z 0-9 _ - .`
+- a name is empty, over 31 characters, ends with `.`, or uses a character the bcat services
+  refuse: directory names take `A-Z a-z 0-9 _ -`, file names `A-Z a-z 0-9 _ .`
 - an entry is a symbolic link, is encrypted, or uses a compression other than store or deflate
 - two paths differ only by case
 - there are more than 512 entries, the download is over 32 MiB, or the files add up to more than

@@ -62,12 +62,23 @@ u32 Read32(std::span<const u8> data, std::size_t offset) {
     return Read16(data, offset) | (u32{Read16(data, offset + 2)} << 16);
 }
 
-bool IsValidName(std::string_view name) {
-    return !name.empty() && name.size() <= MaxNameLength && name != "." && name != ".." &&
-           std::all_of(name.begin(), name.end(), [](char c) {
+// The names the bcat services open (VerifyNameValidDir and VerifyNameValidFile): letters, digits
+// and '_', plus '-' in a directory or '.' in a file. Windows drops a final '.', which would make
+// two names one file.
+bool IsValidName(std::string_view name, char extra) {
+    return !name.empty() && name.size() <= MaxNameLength && name.back() != '.' &&
+           std::all_of(name.begin(), name.end(), [extra](char c) {
                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                      c == '_' || c == '-' || c == '.';
+                      c == '_' || c == extra;
            });
+}
+
+bool IsValidDirectoryName(std::string_view name) {
+    return IsValidName(name, '-');
+}
+
+bool IsValidFileName(std::string_view name) {
+    return IsValidName(name, '.');
 }
 
 // Windows paths ignore case, so two names that differ only by case would overwrite each other.
@@ -191,7 +202,14 @@ std::string Summary(const Contents& contents) {
     return fmt::format("{}", fmt::join(parts, ", "));
 }
 
-std::optional<Response> Download(u64 title_id) {
+std::optional<Response> Download(u64 title_id, std::chrono::steady_clock::time_point deadline) {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    if (left <= std::chrono::milliseconds::zero()) {
+        LOG_WARNING(Service_BCAT, "Nextendo BCAT: out of time before asking for {:016X}",
+                    title_id);
+        return std::nullopt;
+    }
     if (!Common::Nextendo::TakeRequestSlot()) {
         LOG_WARNING(Service_BCAT, "Nextendo BCAT: request budget spent, not checking {:016X}",
                     title_id);
@@ -200,7 +218,7 @@ std::optional<Response> Download(u64 title_id) {
     httplib::Client client{std::string{Common::Nextendo::ApiBase}};
     Common::Nextendo::ConfigureClient(client, 10);
     client.set_follow_location(false);
-    client.set_max_timeout(std::chrono::seconds{15});
+    client.set_max_timeout(left);
     const httplib::Headers headers{
         {"User-Agent", fmt::format("Lichii/{}", Common::g_build_version)},
         {"X-Nextendo-Client-Id", Settings::values.nextendo_client_id.GetValue()},
@@ -279,15 +297,16 @@ Contents ReadPackage(std::span<const u8> zip, u64 title_id) {
         if (!name.empty() && name.back() == '/') {
             // Directory entries are optional; the directories come from the file paths.
             name.pop_back();
-            if (!IsValidName(name)) {
+            if (!IsValidDirectoryName(name)) {
                 throw std::runtime_error("Unsafe BCAT directory name");
             }
             continue;
         }
         const auto slash = name.find('/');
         // '/' is not a name character, so a deeper path fails the file name check.
-        if (slash == std::string::npos || !IsValidName(std::string_view{name}.substr(0, slash)) ||
-            !IsValidName(std::string_view{name}.substr(slash + 1))) {
+        if (slash == std::string::npos ||
+            !IsValidDirectoryName(std::string_view{name}.substr(0, slash)) ||
+            !IsValidFileName(std::string_view{name}.substr(slash + 1))) {
             throw std::runtime_error("BCAT entry is not a <directory>/<file> file");
         }
         if (!folded.insert(FoldCase(name)).second) {
@@ -425,7 +444,9 @@ void PrepareForGame(u64 title_id) {
     if (!Common::Nextendo::OnlinePlayActive() || title_id <= LastSystemTitle) {
         return;
     }
-    Update(title_id, CacheDirectory(title_id), Download);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+    Update(title_id, CacheDirectory(title_id),
+           [deadline](u64 title) { return Download(title, deadline); });
 }
 
 } // namespace Service::BCAT::Nextendo
