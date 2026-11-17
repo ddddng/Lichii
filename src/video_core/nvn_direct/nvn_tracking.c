@@ -185,15 +185,24 @@ int nvn_dirty_take(nvn_dirty_range* out, int max) {
     return n;
 }
 
-// A CPU write Lichii saw on guest [address, address + size): new generation, pages disarmed.
+// A CPU write Lichii saw on guest [address, address + size): new generation, pages disarmed, in
+// every span the range touches (spans change only under g_mu, which is held).
 static void written(uintptr_t a, size_t len) {
     if (!len) return;
+    const uintptr_t e = a + len;
     pthread_mutex_lock(&g_mu);
-    span_t* s = find(a, 1);
-    if (s) {
-        const uint64_t g = atomic_fetch_add(&g_now, 1) + 1;
-        const uintptr_t end = a + len < s->hi ? a + len : s->hi;
-        const uintptr_t p = (a - s->lo) >> PAGE_SHIFT, q = (end - 1 - s->lo) >> PAGE_SHIFT;
+    int k = 0, lo = 0, hi = g_nspans - 1;
+    while (lo <= hi) {
+        const int m = (lo + hi) / 2;
+        if (g_spans[m]->lo <= a) { k = m; lo = m + 1; } else hi = m - 1;
+    }
+    uint64_t g = 0;
+    for (; k < g_nspans && g_spans[k]->lo < e; k++) {
+        span_t* s = g_spans[k];
+        if (s->hi <= a) continue;
+        if (!g) g = atomic_fetch_add(&g_now, 1) + 1;
+        const uintptr_t b = a > s->lo ? a : s->lo, end = e < s->hi ? e : s->hi;
+        const uintptr_t p = (b - s->lo) >> PAGE_SHIFT, q = (end - 1 - s->lo) >> PAGE_SHIFT;
         for (uintptr_t i = p; i <= q; i++) atomic_store(&s->gen[i], g);
         arm_pages(s, p, q, 0);
         wlog_add(s->lo + (p << PAGE_SHIFT), s->lo + ((q + 1) << PAGE_SHIFT));
