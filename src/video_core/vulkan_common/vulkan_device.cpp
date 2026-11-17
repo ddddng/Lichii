@@ -33,6 +33,7 @@
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -1144,7 +1145,13 @@ void Device::LoadStaticPipelineCache() {
         create(0, nullptr);
         return;
     }
-    create(data.size(), data.empty() ? nullptr : data.data());
+    try {
+        create(data.size(), data.empty() ? nullptr : data.data());
+    } catch (const vk::Exception& e) {
+        LOG_ERROR(Render_Vulkan, "Driver rejected the static pipeline cache ({}), starting empty",
+                  e.what());
+        create(0, nullptr);
+    }
 }
 
 void Device::SaveStaticPipelineCache() const {
@@ -1163,8 +1170,11 @@ void Device::SaveStaticPipelineCache() const {
     }
     data.resize(size);
     static_pipeline_cache.Read(&size, data.data());
+    // Written beside the cache and renamed over it, so an exit mid-write keeps the old one.
+    auto temporary = filename;
+    temporary += ".tmp";
     try {
-        std::ofstream file(filename, std::ios::binary | std::ios::trunc);
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
         file.exceptions(std::ofstream::failbit);
         if (!file.is_open()) {
             return;
@@ -1173,8 +1183,16 @@ void Device::SaveStaticPipelineCache() const {
             .write(reinterpret_cast<const char*>(&STATIC_CACHE_VERSION),
                    sizeof(STATIC_CACHE_VERSION))
             .write(data.data(), static_cast<std::streamsize>(size));
+        file.close();
     } catch (const std::ios_base::failure& e) {
-        Common::FS::RemoveFile(filename);
+        Common::FS::RemoveFile(temporary);
+        return;
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, filename, error);
+    if (error) {
+        LOG_ERROR(Render_Vulkan, "Couldn't replace the static pipeline cache: {}", error.message());
+        Common::FS::RemoveFile(temporary);
     }
 }
 
@@ -1302,6 +1320,10 @@ void Device::ReportDeviceFault() const {
         const VkDeviceSize lower = address.reportedAddress & ~(precision - 1);
         LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {} at {:#x} (range [{:#x}, {:#x}))",
                      i, type, address.reportedAddress, lower, lower + precision);
+        if (address_binding_report) {
+            LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {}", i,
+                         AddressMap::Get().Describe(address.reportedAddress));
+        }
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         const VkDeviceFaultVendorInfoEXT& vendor = vendor_infos[i];
@@ -1605,6 +1627,16 @@ bool Device::GetSuitability(bool requires_swapchain) {
         device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
         SetNext(next, device_fault_features);
     }
+    // VK_EXT_device_address_binding_report: what each faulting address belonged to
+    // (EDEN_NX2_FAULT_MAP).
+    const bool has_address_binding_report =
+        AddressMap::Wanted() &&
+        supported_extensions.contains(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (has_address_binding_report) {
+        address_binding_report_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT;
+        SetNext(next, address_binding_report_features);
+    }
 
     // The features the driver reports are enabled through the same chain at device creation.
     if (loaded_extensions.contains(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
@@ -1618,6 +1650,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         device_fault_features.deviceFaultVendorBinary = VK_FALSE;
+    }
+    if (has_address_binding_report) {
+        loaded_extensions.insert(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+        address_binding_report = address_binding_report_features.reportAddressBinding == VK_TRUE;
+    }
+    if (AddressMap::Wanted()) {
+        LOG_INFO(Render_Vulkan, "EDEN_NX2_FAULT_MAP: device address binding reports {}",
+                 address_binding_report ? "on" : "not supported by the driver");
     }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.
