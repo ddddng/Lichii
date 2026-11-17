@@ -256,7 +256,8 @@ static void unref_locked(vka_img *im) {
     for (int i = 0; i < g_nlive; i++) if (g_live[i] == im) { g_live[i] = g_live[--g_nlive]; memidx_del(im); break; }
     for (int i = 0; i < g_nbig; i++) if (g_big[i] == im) { g_big[i] = g_big[--g_nbig]; break; }
     g_img_bytes -= im->bytes;
-    vka_after(vka_fence_last(), img_destroy, im);
+    // (inline replay: after the submission another thread may be recording, whose fence is not reserved yet; TextureFinalize and a present's drop come from other threads)
+    vka_after(vka_fence_last() + !vka_worker_on(), img_destroy, im);
 }
 
 // Textures of one memory and shape share an image (one storage, many texture objects: a clear through one and a present through another meet), and so do ones of another
