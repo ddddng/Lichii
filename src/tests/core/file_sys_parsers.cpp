@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -443,6 +444,32 @@ TEST_CASE("NSP discovery skips unreadable NCA metadata", "[core][file_sys][nca_d
             CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS);
             CHECK(nsp.GetProgramTitleIDs() == std::vector<u64>{TitleId});
             CHECK(nsp.GetNCA(TitleId, ContentRecordType::Program) != nullptr);
+        }
+        SECTION("A bundled update does not hide a base program's missing key") {
+            auto base = MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Program,
+                                         MakePfs0WithFiles({{"main", {0}}}));
+            Put(base, offsetof(NcaHeader, magic), NcaHeader::Magic3);
+            REQUIRE(NCA{MakeFile(base)}.GetStatus() ==
+                    Loader::ResultStatus::ErrorMissingKeyAreaKey);
+            files.emplace_back(program_name, std::move(base));
+
+            header.title_id = TitleId + 0x800;
+            header.type = TitleType::Update;
+            record.nca_id.fill(0x11);
+            const CNMT update_cnmt{header, {}, {record}, {}};
+            files.emplace_back("update.cnmt.nca",
+                               MakeDiscoveryNca(TitleId + 0x800, NcaHeader::ContentType::Meta,
+                                                MakePfs0WithFiles(
+                                                    {{"test.cnmt", update_cnmt.Serialize()}})));
+            files.emplace_back("11111111111111111111111111111111.nca",
+                               MakeDiscoveryNca(TitleId + 0x800, NcaHeader::ContentType::Program,
+                                                MakePfs0WithFiles({{"main", {0}}})));
+            const auto file = MakeFile(MakePfs0WithFiles(files));
+            const NSP nsp{file};
+            CHECK(nsp.GetProgramTitleID() == TitleId);
+            CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::ErrorMissingKeyAreaKey);
+            CHECK(Loader::GetContainerProgramStatus(file, Loader::FileType::NSP) ==
+                  Loader::ResultStatus::ErrorMissingKeyAreaKey);
         }
     }
 

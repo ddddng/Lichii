@@ -299,7 +299,7 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
                 if (next_nca->GetStatus() != Loader::ResultStatus::Success &&
                     next_nca->GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
                     if (rec.type == ContentRecordType::Program) {
-                        nca_error = next_nca->GetStatus();
+                        program_status[cnmt.GetTitleID() + rec.id_offset] = next_nca->GetStatus();
                     }
                     continue;
                 }
