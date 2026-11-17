@@ -4,7 +4,7 @@
 // Vulkan cannot set dynamically here (vka_pso.c), writes set 0 from the binding records (vka_bind.c's walker: push descriptors when they fit, else a set from the submission
 // slot's pool), sets the dynamic state and draws. The pass stays open across draws and closes at anything else (vka_rp_end), followed by a full barrier.
 // What is not here yet, each logged once: SINT attachments and integer vertex formats (no variants), transform feedback, DrawTexture, line loops and quads through indirect draws,
-// tessellation's patch size, texel buffers, viewport swizzles other than a y flip
+// texel buffers, viewport swizzles other than a y flip without VK_NV_viewport_swizzle
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "nvn_direct_front.h"
@@ -106,6 +106,25 @@ void vka_dstate_reset(vka_dstate *d) {   // NVN's defaults (nvn_mtl.m state_rese
     d->poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
     d->ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
     d->st_vmask[0] = d->st_vmask[1] = d->st_wmask[0] = d->st_wmask[1] = 0xff; d->dr[1] = 1; d->b.samples = 1;
+    d->sample_mask = 0xffff; d->patch = 3; d->tess_inner[0] = d->tess_inner[1] = 1; for (int i = 0; i < 4; i++) d->tess_outer[i] = 1;   // (Lichii, dotfiles-25x.100)
+    memset(d->vrs_pal, 5, sizeof d->vrs_pal);   // one invocation a pixel
+}
+static int cpu_read(uint64_t addr, void *out, size_t n);
+// Lichii (dotfiles-25x.100): a deferred bind (Bind*Deferred) as the memory at its source holds it now, applied as the bind it names (hle_nvn.c bind_handles' pool bases)
+static void bind_deferred(vka_dstate *d, const p_bind_defer *b) {
+    if (b->stage < 0 || b->stage >= VKA_NSTAGE || b->n <= 0 || b->n > 32) return;
+    uint64_t w[64]; const int buf = b->kind == DEFER_UBO || b->kind == DEFER_SSBO;
+    if (!cpu_read(b->src, w, (buf ? 16 : 8) * (size_t)b->n)) { VRED_ONCE("deferred bind at %#llx is not readable: not bound", (unsigned long long)b->src); return; }
+    for (int i = 0; i < b->n; i++) {
+        const int s = b->first + i;
+        if (buf) { if (s < 16) (b->kind == DEFER_UBO ? d->b.ubo : d->b.ssbo)[b->stage][s] = (vka_range){nvn_direct_host_of(w[2 * i]), w[2 * i + 1]}; continue; }
+        uint64_t v = (uint32_t)w[i], tid = v & 0xfffff, sid = v >> 20;
+        if (b->kind == DEFER_SAMP) { if (s < 128) d->b.samp[b->stage][s] = sid ? (sid + (uint64_t)b->sbase) << 20 : v; continue; }
+        if (tid) tid += (uint64_t)b->tbase;
+        if (sid && b->kind == DEFER_TEX) sid += (uint64_t)b->sbase;
+        if (b->kind == DEFER_IMG) { if (s < 32) d->b.img[b->stage][s] = tid | sid << 20; }
+        else if (s < VKA_NTEX) d->b.tex[b->stage][s] = tid | sid << 20;
+    }
 }
 int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
 int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
@@ -161,6 +180,32 @@ int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
     case OP_TF_STATE: { const p_tf_state *b = a; d->tf_on = b->what == 0 || b->what == 3; break; }
     case OP_PRIM_RESTART: d->restart = *(const p_prim_restart *)a; break;
     case OP_RAST_DISCARD: d->rast_discard = ((const p_rast_discard *)a)->on; break;
+    case OP_PATCH_SIZE: d->patch = ((const p_patch_size *)a)->n; break;
+    case OP_TESS_LEVELS: { const p_tess_levels *b = a; if (b->outer) memcpy(d->tess_outer, b->v, sizeof d->tess_outer); else memcpy(d->tess_inner, b->v, sizeof d->tess_inner); break; }
+    case OP_SAMPLE_MASK: d->sample_mask = ((const p_sample_mask *)a)->mask; break;
+    case OP_RASTER: { const p_raster *b = a;
+        switch (b->what) {
+        case RASTER_CONSERVATIVE: d->cons = b->a; break;
+        case RASTER_DILATE: d->dilate = b->f; break;
+        case RASTER_CONSERVATIVE_MODE: d->cons_mode = b->a; break;
+        case RASTER_SUBPIXEL_BIAS: d->subpixel_bias[0] = b->a; d->subpixel_bias[1] = b->b; break;
+        case RASTER_PROVOKING: d->provoking = b->a; break;
+        }
+        break; }
+    case OP_EXCL_SCISSOR: { const p_excl_scissor *b = a;
+        if (!b->what) d->excl_on = b->first;
+        else if (b->first >= 0 && b->n >= 0 && b->first + b->n <= 16) { memcpy(d->excl[b->first], b->r, 16 * (size_t)b->n); if (b->first + b->n > d->excl_n) d->excl_n = b->first + b->n; }
+        break; }
+    case OP_VRS_IMAGE: d->vrs = *(const p_vrs_image *)a; break;
+    case OP_VRS_PALETTE: { const p_vrs_palette *b = a; memcpy(d->vrs_pal[b->viewport & 15], b->rate, 16);
+        static _Atomic int noted; int coarse = 0; for (int i = 0; i < 16; i++) coarse |= b->rate[i] != 5;
+        if (coarse && !atomic_exchange(&noted, 1)) VLOG("shading-rate palette: the first with rates other than one invocation a pixel, viewport %d: %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", b->viewport,
+                                                        b->rate[0], b->rate[1], b->rate[2], b->rate[3], b->rate[4], b->rate[5], b->rate[6], b->rate[7], b->rate[8], b->rate[9], b->rate[10], b->rate[11], b->rate[12], b->rate[13], b->rate[14], b->rate[15]);
+        break; }
+    case OP_BIND_DEFER: bind_deferred(d, a); break;
+    case OP_PUSH_DEFER: { const p_push_defer *b = a;
+        if ((uint32_t)b->offset + b->size <= DMSH_PUSH_SIZE && !cpu_read(b->src, d->b.push[b->compute ? 1 : 0] + b->offset, b->size)) VRED_ONCE("deferred push constants at %#llx are not readable: not pushed", (unsigned long long)b->src);
+        break; }
     default: return 0;
     }
     return 1;
@@ -275,6 +320,7 @@ static struct {
     int scaled;                                          // Lichii (dotfiles-25x.34): its targets are at the render scale: viewports and scissors scaled
     VkExtent2D own;                                      // Lichii (dotfiles-25x.40): the area in the targets' own texels (not scaled): the render area shaders read
     int again;                                           // Lichii (dotfiles-25x.32): every target was drawn in the frames just before too (drawn_again): only such draws are skipped while their pipeline is made asynchronously
+    int vrs; uint64_t vrs_serial; view_t vrs_view; uint8_t vrs_has_view, vrs_rate[16];   // Lichii (dotfiles-25x.100): its shading-rate attachment's image and palette (vrs_key)
 } R;
 // Lichii (dotfiles-25x.34): the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
 // pixel stage's down factor; no image is scaled: vka_tex.c img_unscale), and the last pushed, which stays while every layout has the same push constant range (vka_dyn_invalidate forgets it)
@@ -343,9 +389,102 @@ static int drawn_again(vka_img *im) {
     if (im->drawn[0] != f) { im->drawn[1] = im->drawn[0]; im->drawn[0] = f; }
     return im->drawn[1] && im->drawn[1] + 3 >= f;
 }
+// ---------- Variable-rate shading (Lichii, dotfiles-25x.100) ----------
+// NVN's shading-rate image (BindShadingRateImage) holds a palette index per 16x16-pixel tile, and a viewport's palette (ShadingRateImagePalette) the rates, as
+// VK_NV_shading_rate_image's VkShadingRatePaletteEntryNV. A pass whose draws have an image bound gets a VK_KHR_fragment_shading_rate attachment made from them just
+// before it begins (vulkan_nvn_direct_shading_rate.comp): per tile the rate of its index in viewport 0's palette (the replay draws with one viewport). The pipelines
+// replace their own rate with the attachment's (vka_pso.c). One attachment per submission slot (slots may run at once on other queues), at most VRS_MAX texels a side
+#include "video_core/host_shaders/vulkan_nvn_direct_shading_rate_comp_spv.h"
+enum { VRS_TEXEL = 16, VRS_MAX = 1024 };
+static struct { VkImage img; VkDeviceMemory mem; VkImageView view; } g_vrs_att[NSLOT];
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline pipe; int failed; } g_vrs;
+typedef struct { const tex_t *tex; uint64_t serial; view_t view; uint8_t has_view, rate[16]; } vrs_key;
+// A palette entry as a Vulkan rate ((log2 width) << 2 | log2 height): no invocations and several a pixel have none, they shade at full rate
+static uint8_t vrs_rate(uint8_t e) {
+    static const uint8_t rate[12] = {[6] = 4, [7] = 1, [8] = 5, [9] = 6, [10] = 9, [11] = 10};
+    if (e != 5 && (e < 6 || e > 11)) VRED_ONCE("shading-rate palette entry %u (no invocations, or several a pixel) has no Vulkan rate: shaded at full rate", e);
+    return e < 12 ? rate[e] : 0;
+}
+static int vrs_want(const vka_dstate *d, vrs_key *k) {
+    memset(k, 0, sizeof *k);
+    if (!d->vrs.tex || d->rast_discard) return 0;
+    if (d->vrs.tex->magic != MAGIC('T', 'E', 'X', 0)) { VRED_ONCE("the bound shading-rate image's snapshot is no longer a texture (its command memory was reused): drawn at full rate"); return 0; }
+    if (!V.vrs) { VRED_ONCE("a shading-rate image is bound and the device has no VK_KHR_fragment_shading_rate attachment of 16x16-pixel texels: drawn at full rate"); return 0; }
+    k->tex = d->vrs.tex; k->serial = d->vrs.tex->serial; k->has_view = d->vrs.has_view; if (k->has_view) k->view = d->vrs.view;
+    for (int i = 0; i < 16; i++) k->rate[i] = vrs_rate(d->vrs_pal[0][i]);
+    return 1;
+}
+static int vrs_same(const vrs_key *k, int on) {
+    return (R.vrs != 0) == on && (!on || (R.vrs_serial == k->serial && R.vrs_has_view == k->has_view && (!k->has_view || view_same(&R.vrs_view, &k->view)) && !memcmp(R.vrs_rate, k->rate, 16)));
+}
+static int vrs_pipeline(void) {
+    if (g_vrs.pipe || g_vrs.failed) return g_vrs.pipe != VK_NULL_HANDLE;
+    g_vrs.failed = 1;
+    const VkDescriptorSetLayoutBinding b[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = V.push_desc ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0, .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof VULKAN_NVN_DIRECT_SHADING_RATE_COMP_SPV, .pCode = VULKAN_NVN_DIRECT_SHADING_RATE_COMP_SPV};
+    VkShaderModule m = VK_NULL_HANDLE; VkResult r = vk.vkCreateDescriptorSetLayout(V.dev, &li, NULL, &g_vrs.dsl);
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_vrs.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (!r) r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &g_vrs.layout);
+    if (!r) r = vk.vkCreateShaderModule(V.dev, &mi, NULL, &m);
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}, .layout = g_vrs.layout};
+    if (!r) r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_vrs.pipe);
+    if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
+    if (r) { VRED("shading-rate attachment pipeline: %d; shading-rate images are drawn at full rate", r); g_vrs.pipe = VK_NULL_HANDLE; return 0; }
+    g_vrs.failed = 0; return 1;
+}
+static VkImageView vrs_attachment(void) {
+    typeof(g_vrs_att[0]) *a = &g_vrs_att[g_slot];
+    if (a->view) return a->view;
+    VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8_UINT, .extent = {VRS_MAX, VRS_MAX, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR};
+    VkMemoryRequirements mr; uint32_t t;
+    if (vk.vkCreateImage(V.dev, &ii, NULL, &a->img)) { VRED_ONCE("shading-rate attachment not made: drawn at full rate"); a->img = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    vk.vkGetImageMemoryRequirements(V.dev, a->img, &mr);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = a->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8_UINT, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &a->mem) || vk.vkBindImageMemory(V.dev, a->img, a->mem, 0) || vk.vkCreateImageView(V.dev, &vi, NULL, &a->view)) {
+        VRED_ONCE("shading-rate attachment memory not made: drawn at full rate"); a->view = VK_NULL_HANDLE; return VK_NULL_HANDLE; }   // (kept: not tried again for this slot)
+    vka_mem_grew(mr.size);
+    vka_img_barrier(g_cb, a->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    return a->view;
+}
+// The slot's attachment filled for a pass of this area (no pass open): VK_NULL_HANDLE = the pass draws at full rate
+static VkImageView vrs_fill(const vrs_key *k, VkExtent2D area) {
+    const uint32_t tw = (area.width + VRS_TEXEL - 1) / VRS_TEXEL, th = (area.height + VRS_TEXEL - 1) / VRS_TEXEL;
+    if (tw > VRS_MAX || th > VRS_MAX) { VRED_ONCE("a pass of %ux%u with a shading-rate image: larger than the attachment's %d texels a side, drawn at full rate", area.width, area.height, VRS_MAX); return VK_NULL_HANDLE; }
+    vka_img *im = vka_tex_get(k->tex, g_cb); if (!im) return VK_NULL_HANDLE;
+    if (im->f.kind != 1 || !(im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { VRED_ONCE("shading-rate image (format %#x) is not a sampled unsigned integer texture: drawn at full rate", im->d.format); return VK_NULL_HANDLE; }
+    uint32_t lv = k->has_view && k->view.set_levels ? k->view.base_level : 0, l0 = k->has_view && k->view.set_layers ? k->view.min_layer : 0;
+    if (!vka_img_lv(im, &lv) || l0 >= im->layers) return VK_NULL_HANDLE;
+    VkImageView src = vka_view(im, im->f.view, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, l0, 1, NULL), att = vrs_attachment();
+    if (!src || !att || !vrs_pipeline()) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo ii[2] = {{vka_samp_default(), src, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, att, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
+                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[1]}};
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vrs.pipe);
+    if (V.push_desc) vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vrs.layout, 0, 2, w);
+    else { VkDescriptorSet s = set_alloc(g_vrs.dsl); if (!s) return VK_NULL_HANDLE;
+           w[0].dstSet = w[1].dstSet = s; vk.vkUpdateDescriptorSets(V.dev, 2, w, 0, NULL); vk.vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vrs.layout, 0, 1, &s, 0, NULL); }
+    // An index texel covers 16x16 of the texture's own pixels: with the render scale, the pass's texels are scaled pixels, and the index image may or may not be scaled
+    const float s = (float)vka_scale_up / (float)(1u << vka_scale_shift);
+    struct { uint8_t rate[16]; uint32_t size[2]; float index_scale; int32_t level; } pc = {.size = {tw, th}, .index_scale = (im->scaled ? s : 1.0f) / (R.scaled ? s : 1.0f)};
+    memcpy(pc.rate, k->rate, 16);
+    vk.vkCmdPushConstants(g_cb, g_vrs.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vk.vkCmdDispatch(g_cb, (tw + 7) / 8, (th + 7) / 8, 1);
+    vka_barrier(g_cb);
+    vka_dyn_invalidate();   // (the compute pipeline's push constants and descriptors disturb the draws' ones)
+    static _Atomic int noted;
+    if (!atomic_exchange(&noted, 1)) VLOG("shading-rate attachment: first pass %ux%u, from texture serial %llu (%ux%u format %#x%s), viewport 0's rates %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                                          area.width, area.height, (unsigned long long)k->serial, im->w, im->h, im->d.format, im->scaled ? ", scaled" : "", k->rate[0], k->rate[1], k->rate[2], k->rate[3],
+                                          k->rate[4], k->rate[5], k->rate[6], k->rate[7], k->rate[8], k->rate[9], k->rate[10], k->rate[11]);
+    return att;
+}
 // Opens the pass over the bound targets: 0 = it cannot (no target can be an attachment), logged
 static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
-    if (R.on) { if (!g_pass_keep || rt_same(rt, has_rt, &R.rt, R.has_rt)) return 1; vka_rp_end(); }   // a new SET_RT of other targets ends the pass at its first draw (exec does not)
+    vrs_key vk_; const int vrs = vrs_want(d, &vk_);
+    if (R.on) { if ((!g_pass_keep || rt_same(rt, has_rt, &R.rt, R.has_rt)) && vrs_same(&vk_, vrs)) return 1; vka_rp_end(); }   // a new SET_RT of other targets ends the pass at its first draw (exec does not)
     if (PC.n && !rt_same(rt, has_rt, &PC.rt, 1)) pc_flush();                             // clears of other targets: done before
     if (vka_scale_on()) rp_scale_targets(rt, has_rt);
     VkRenderingAttachmentInfo ca[8], da = {0}, sa; uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0, ow = UINT32_MAX, oh = UINT32_MAX;
@@ -425,8 +564,12 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (sp) sp = &sa;
     #undef INAREA
     #undef WHOLE
+    VkRenderingFragmentShadingRateAttachmentInfoKHR fsr = {VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR, .imageView = vrs ? vrs_fill(&vk_, R.area.extent) : VK_NULL_HANDLE,
+                                                           .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .shadingRateAttachmentTexelSize = {VRS_TEXEL, VRS_TEXEL}};
+    // (-1: it wanted an attachment and none could be made: the draws after it with the same image do not open the pass again)
+    if (vrs) { R.vrs = fsr.imageView ? 1 : -1; R.vrs_serial = vk_.serial; R.vrs_view = vk_.view; R.vrs_has_view = vk_.has_view; memcpy(R.vrs_rate, vk_.rate, 16); }
     vka_tex_feedback(fb_im, fb_lv, nfb);
-    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = R.area, .layerCount = layers, .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca,
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .pNext = fsr.imageView ? &fsr : NULL, .renderArea = R.area, .layerCount = layers, .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca,
                           .pDepthAttachment = dp, .pStencilAttachment = sp};
     if (vka_gp_active) {   // DM_VK_GPUPROF: what the pass is, for the step it ends
         char b[96]; size_t bn = (size_t)snprintf(b, sizeof b, "%ux%ux%u", w, h, layers);
@@ -1236,6 +1379,8 @@ static struct { uint64_t n, frame, keys[VKA_NSTAGE]; int64_t count, instances; u
 static uint64_t g_ckn;
 typedef struct { VkCommandBuffer cb; uint64_t marker; } ckpt_arg;
 static void ckpt_call(const void *a) { const ckpt_arg *c = a; vk.vkCmdSetCheckpointNV(c->cb, (const void *)(uintptr_t)c->marker); }
+typedef struct { VkCommandBuffer cb; VkRect2D r; } excl_arg;   // Lichii (dotfiles-25x.100): the exclusive scissor, through the encoder thread when it records
+static void excl_call(const void *a) { const excl_arg *x = a; V.set_excl_scissor(x->cb, 0, 1, &x->r); }
 static void checkpoint(vka_shader *const *sh, int disp, int64_t count, int64_t instances, uint64_t ind, uint64_t mdi, const vka_dstate *d, int prim, int first, int bvert) {
     if (!vk.vkCmdSetCheckpointNV) return;
     uint64_t vka_frame(void); uint64_t n = ++g_ckn; typeof(g_ck[0]) *e = &g_ck[n % NCK];
@@ -1379,7 +1524,12 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!mesh) {
         topo = topology(prim, &expand);
         if (expand < 0) SKIP("primitive type %d not on Vulkan: the draw is skipped", prim);
-        if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) SKIP("tessellation patches are not on Vulkan yet (no patch size is recorded): the draw is skipped");
+        if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {   // (Lichii, dotfiles-25x.100: the patch size is the pipeline's)
+            if (!sh[4]) SKIP("patches drawn with no tessellation evaluation shader: skipped");
+            if (!sh[3]) SKIP("patches drawn with tessellation evaluation shader %016llx and no control shader: NVN's default levels (outer %g %g %g %g, inner %g %g) need a control stage on Vulkan; skipped",
+                             (unsigned long long)sh[4]->key, d->tess_outer[0], d->tess_outer[1], d->tess_outer[2], d->tess_outer[3], d->tess_inner[0], d->tess_inner[1]);
+            if (d->patch < 1 || d->patch > (int)V.props.limits.maxTessellationPatchSize) SKIP("patch size %d: beyond the device's %u, skipped", d->patch, V.props.limits.maxTessellationPatchSize);
+        }
     }
     uint64_t ind = dw ? dw->ind : di->ind;
     // A geometry shader that writes memory makes those writes in the run that claims its primitive (vka_spv_gs_claim): a zeroed word per primitive at VKA_GS_CLAIM_BINDING.
@@ -1425,6 +1575,22 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     k.topo = mesh ? 0 : (uint8_t)topo_class(topo);
     k.poly_mode = (uint8_t)(d->poly.mode == NVN_POLYGON_MODE_LINE && V.fill_lines ? VK_POLYGON_MODE_LINE : d->poly.mode == NVN_POLYGON_MODE_POINT && V.fill_lines ? VK_POLYGON_MODE_POINT : VK_POLYGON_MODE_FILL);
     k.depth_clamp = d->depth_clamp && V.depth_clamp; k.a2c = d->ms.a2c != 0;
+    // Lichii (dotfiles-25x.100): the sample mask, the patch size, conservative rasterization, the provoking vertex, viewport swizzles, the exclusive scissor, VRS
+    k.sample_mask = (uint16_t)(d->sample_mask & ((1u << k.samples) - 1));
+    if (!mesh && (sh[3] || sh[4])) k.patch = (uint8_t)d->patch;
+    if (d->cons) {
+        if (!V.cons) VRED_ONCE("conservative rasterization and no VK_EXT_conservative_rasterization: drawn without it");
+        else { k.cons = 1; k.dilate = (uint8_t)(d->dilate * 4.0f + 0.5f); }
+        if (d->cons_mode) VRED_ONCE("conservative rasterization mode %d (snapping before rasterization) has no Vulkan equivalent: drawn as mode 0", d->cons_mode);
+        if (d->subpixel_bias[0] || d->subpixel_bias[1]) VRED_ONCE("subpixel precision bias %d,%d has no Vulkan equivalent: drawn without it", d->subpixel_bias[0], d->subpixel_bias[1]);
+    }
+    if (d->provoking == 1) { if (V.provoking_last) k.provoking_last = 1; else VRED_ONCE("the last vertex provokes and the device cannot (VK_EXT_provoking_vertex provokingVertexLast): the first does"); }
+    uint32_t vsw; memcpy(&vsw, d->vp_sw[0], 4);   // (stored XOR the identity: 0 unchanged; 0x100 alone, y negated, is a viewport flip below)
+    if (vsw && vsw != 0x100) { if (V.vp_swizzle) memcpy(k.vp_sw, d->vp_sw[0], 4);
+                               else VRED_ONCE("viewport swizzle %d,%d,%d,%d and no VK_NV_viewport_swizzle: drawn unswizzled", d->vp_sw[0][0], d->vp_sw[0][1] ^ 2, d->vp_sw[0][2] ^ 4, d->vp_sw[0][3] ^ 6); }
+    const int excl = d->excl_on && d->excl_n > 0 && d->excl[0][2] > 0 && d->excl[0][3] > 0;
+    if (excl) { if (V.excl_scissor) k.excl = 1; else VRED_ONCE("an exclusive scissor and no VK_NV_scissor_exclusive: drawn without it"); }
+    k.vrs = R.vrs > 0;
     if (d->color.logic_op != NVN_LOGIC_OP_COPY && V.logic_op) { k.logic_en = 1; k.logic_op = (uint8_t)d->color.logic_op; }
     k.gl_depth = !vka_depth_zero();
     const vka_shader *fs = d->rast_discard ? NULL : sh[1];
@@ -1498,9 +1664,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     float vx = d->has_vp ? d->vp[0][0] : 0, vy = d->has_vp ? d->vp[0][1] : 0, vw = d->has_vp ? d->vp[0][2] : (float)R.area.extent.width, vh = d->has_vp ? d->vp[0][3] : (float)R.area.extent.height;
     if (R.scaled && d->has_vp) { float f = (float)vka_scale_up / (float)(1u << vka_scale_shift); vx *= f; vy *= f; vw *= f; vh *= f; }   // (Lichii, dotfiles-25x.34: the render scale)
     if (vka_origin_ll()) { vy += vh; vh = -vh; }
-    { uint32_t sw; memcpy(&sw, d->vp_sw[0], 4);
-      if (sw == 0x100) { vy += vh; vh = -vh; }
-      else if (sw) VRED_ONCE("viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", d->vp_sw[0][0], d->vp_sw[0][1] ^ 2, d->vp_sw[0][2] ^ 4, d->vp_sw[0][3] ^ 6); }
+    if (vsw == 0x100) { vy += vh; vh = -vh; }   // (other swizzles are the pipeline's: k.vp_sw)
     float n0 = d->dr[0] < 0 ? 0 : d->dr[0] > 1 ? 1 : d->dr[0], n1 = d->dr[1] < 0 ? 0 : d->dr[1] > 1 ? 1 : d->dr[1];
     if (!vw) vw = 1; if (!vh) vh = 1;
     VkViewport vp = {vx, vy + vh, vw, -vh, n0, n1};
@@ -1516,6 +1680,13 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     { int xs = VKA_ENV("DM_VK_XP_SCISSOR", 0);   // experiment (wrong picture): every draw's scissor cut to xs x xs pixels, to split a pass's GPU time into per-pixel and per-draw work
       if (xs > 0) { if (scr.extent.width > (uint32_t)xs) scr.extent.width = (uint32_t)xs; if (scr.extent.height > (uint32_t)xs) scr.extent.height = (uint32_t)xs; } }
     DY_SET(sc, scr, vk.vkCmdSetScissor(g_cb, 0, 1, &scr));
+    if (k.excl) {   // (Lichii: VK_NV_scissor_exclusive, set at every such draw: other pipelines do not keep it)
+        int64_t ex[4] = {d->excl[0][0], d->excl[0][1], (int64_t)d->excl[0][0] + d->excl[0][2], (int64_t)d->excl[0][1] + d->excl[0][3]};
+        if (R.scaled) for (int i = 0; i < 4; i++) ex[i] = ex[i] * vka_scale_up >> vka_scale_shift;
+        for (int i = 0; i < 2; i++) if (ex[i] < 0) ex[i] = 0;
+        excl_arg x = {g_cb, {{(int32_t)ex[0], (int32_t)ex[1]}, {(uint32_t)(ex[2] > ex[0] ? ex[2] - ex[0] : 0), (uint32_t)(ex[3] > ex[1] ? ex[3] - ex[1] : 0)}}};
+        if (!vka_enc_call(excl_call, &x, sizeof x)) excl_call(&x);
+    }
     // Rasterizer and depth / stencil
     DY_SET1(cull, (uint32_t)(d->poly.cull == NVN_FACE_FRONT ? VK_CULL_MODE_FRONT_BIT : d->poly.cull == NVN_FACE_BACK ? VK_CULL_MODE_BACK_BIT : d->poly.cull == NVN_FACE_FRONT_AND_BACK ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE), vk.vkCmdSetCullMode(g_cb, DY.cull));
     DY_SET1(ff, (uint32_t)((d->poly.front == NVN_FRONT_FACE_CCW) != vka_queue_origin_ll() ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE), vk.vkCmdSetFrontFace(g_cb, DY.ff));   // as nvn_mtl.m's winding

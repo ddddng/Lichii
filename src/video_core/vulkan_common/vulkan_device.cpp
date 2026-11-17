@@ -998,6 +998,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT direct_pipeline_library{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
     };
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR direct_shading_rate{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR,
+    };
+    VkPhysicalDeviceExclusiveScissorFeaturesNV direct_exclusive_scissor{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXCLUSIVE_SCISSOR_FEATURES_NV,
+    };
     std::array<float, NvnDirectMaxQueues> direct_queue_priorities{};
     if (nvn_direct) {
         const bool pipeline_library =
@@ -1030,6 +1036,32 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             loaded_extensions.insert(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
         } else if (supported_extensions.contains(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        }
+        // NVN state the replay maps onto extensions Lichii's renderer does not use
+        // (dotfiles-25x.100): shading-rate images as a fragment shading rate attachment, and
+        // exclusive scissors.
+        if (supported_extensions.contains(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 shading_rate_query{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &direct_shading_rate};
+            physical.GetFeatures2(shading_rate_query);
+            if (direct_shading_rate.attachmentFragmentShadingRate == VK_TRUE) {
+                direct_shading_rate.pipelineFragmentShadingRate = VK_FALSE;
+                direct_shading_rate.primitiveFragmentShadingRate = VK_FALSE;
+                direct_shading_rate.pNext = const_cast<void*>(first_next);
+                first_next = &direct_shading_rate;
+                loaded_extensions.insert(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+            }
+        }
+        if (supported_extensions.contains(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 exclusive_scissor_query{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                .pNext = &direct_exclusive_scissor};
+            physical.GetFeatures2(exclusive_scissor_query);
+            if (direct_exclusive_scissor.exclusiveScissor == VK_TRUE) {
+                direct_exclusive_scissor.pNext = const_cast<void*>(first_next);
+                first_next = &direct_exclusive_scissor;
+                loaded_extensions.insert(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME);
+            }
         }
         // EDEN_NX2_NVN_CHECKPOINTS=1 (lab, dotfiles-25x.15): a checkpoint before each of the
         // replay's draws and dispatches, logged at a GPU hang (vka_draw.c vka_checkpoint_report).

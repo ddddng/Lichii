@@ -324,6 +324,7 @@ bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .shader_context = &shaders,
         .scale_up = Settings::values.resolution_info.up_scale,
         .scale_shift = Settings::values.resolution_info.down_shift,
+        .debug_labels = device.HasDebuggingToolAttached() || Settings::values.renderer_debug.GetValue(),
     };
     for (size_t index = 0; index < queues.size(); ++index) {
         adopted.queues[index] = queues[(index + 1) % queues.size()];

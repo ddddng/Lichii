@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { uint64_t serial; p_set_rt rt; int has_rt; p_scissor sc; int has_sc; int64_t copy_stride, copy_img_stride; int rc_skip; vka_dstate d; } qstate;   // what a queue keeps between submissions (d: the draw state, vka_draw.c)
+typedef struct { uint64_t serial; p_set_rt rt; int has_rt; p_scissor sc; int has_sc; int64_t copy_stride, copy_img_stride; int rc_skip, compute_skip, copy_skip; vka_dstate d; } qstate;   // what a queue keeps between submissions (d: the draw state, vka_draw.c)
 static qstate S;
 enum { NQS = 8 };
 static qstate g_qs[NQS]; static int g_nqs;
@@ -407,9 +407,11 @@ static void part_begin(const void *a) {
     vk.vkBeginCommandBuffer(cb, &bi);
     if (pa.q != UINT32_MAX) qf.write(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, pa.q);
 }
+static void labels_close(void);
 static int chunk(void) {   // 1 = the part was ended and submitted
     unsigned k = (g_slot_i - 1) % NSLOT;
     if (g_nx >= NCHUNK) return 0;
+    labels_close();
     if (!g_slot[k].x[g_nx]) {
         vka_enc_sync();   // the pool: not while the encoder thread records into one of its command buffers
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
@@ -452,6 +454,7 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     int n = g_npost; g_npost = 0;
     if (!g_cb) { vka_fence_cpu(fence, ops, n, post_run); return fence; }
     vka_rp_end();
+    labels_close();
     { uint64_t t_o72 = now_ns(); vka_tex_writeback(g_cb); vka_o72_ns[1] += now_ns() - t_o72; }   // linear textures the GPU wrote, back into their storage for the CPU
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
     vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -1171,6 +1174,36 @@ static void evsem_wait(const p_wait_event *w) {   // a wait walked here: met on 
     if (!chunk()) VRED_ONCE("an event wait in a submission of more than %d parts: the whole part waits", NCHUNK);
     psy_wait(s, t);
 }
+// Lichii (dotfiles-25x.100): CommandBufferWaitSync. The sync's fence is read as the command runs; a submission on another Vulkan queue that has not completed is waited
+// for from here on: the part ends and the next one waits for that queue's timeline value (as vka_rp_sub_wait for QueueWaitSync). One queue, or other NVN queues sharing
+// this one: queue order already puts the fence's submission first
+static void wait_sync(uint64_t fence) {
+    int q; VkSemaphore sm; uint64_t v;
+    if (!g_cb || !V.multi || g_qshared >> g_qi & 1 || vka_wait_fence(fence, 0) || !vka_fence_queue(fence, &q, &sm, &v) || q == g_qi) return;
+    vka_rp_end();
+    if (!chunk()) VRED_ONCE("a sync wait in a submission of more than %d parts: the whole part waits", NCHUNK);
+    for (uint32_t i = 0; i < g_psy.nw; i++) if (g_psy.ws[i] == sm) { if (g_psy.wv[i] < v) g_psy.wv[i] = v; return; }
+    if (g_psy.nw < PWS) { g_psy.ws[g_psy.nw] = sm; g_psy.wv[g_psy.nw++] = v; } else VRED_ONCE("more than %d waits in one part", PWS);
+}
+// Lichii (dotfiles-25x.100): debug groups and markers as VK_EXT_debug_utils labels (V.label_begin: a debugging tool or renderer debug). Groups are kept balanced in each
+// of the replay's command buffers: a pop with none open there is dropped, and the ones still open when it ends are closed (labels_close)
+static int g_label_depth;
+typedef struct { VkCommandBuffer cb; int what; char name[256]; } label_arg;
+static void label_call(const void *a) {
+    const label_arg *l = a; VkDebugUtilsLabelEXT li = {VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, .pLabelName = l->name};
+    if (l->what == LABEL_PUSH) V.label_begin(l->cb, &li); else if (l->what == LABEL_POP) V.label_end(l->cb); else V.label_insert(l->cb, &li);
+}
+static void label_put(int what, const char *name) {
+    label_arg l = {g_cb, what}; snprintf(l.name, sizeof l.name, "%s", name ? name : "");
+    size_t n = offsetof(label_arg, name) + strlen(l.name) + 1;
+    if (!vka_enc_call(label_call, &l, n)) label_call(&l);
+}
+static void label_op(const p_debug_label *l) {
+    if (l->what == LABEL_POP) { if (g_label_depth > 0) { g_label_depth--; label_put(LABEL_POP, NULL); } return; }
+    if (l->what == LABEL_PUSH) g_label_depth++;
+    label_put(l->what, l->name);
+}
+static void labels_close(void) { for (; g_label_depth > 0; g_label_depth--) label_put(LABEL_POP, NULL); }
 static void try_resume(void);
 // Walks w until its lists end (0) or a wait is not met (1: w stops at the wait)
 static int walk(walk_t *w) {
@@ -1182,7 +1215,8 @@ static int walk(walk_t *w) {
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) chunk_check();   // before a draw that opens a new pass
         switch (h.op) {   // a render pass a draw opened stays open across draws and state; anything else closes it first
         case OP_END: case OP_BEGIN: case OP_JUMP: case OP_CALL: case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_FENCE_SYNC: case OP_RENDER_COND: case OP_RESET_COUNTER:
-        case OP_SCISSOR: case OP_COPY_STRIDE: case OP_DRAW: case OP_DRAW_IDX: break;
+        case OP_SCISSOR: case OP_COPY_STRIDE: case OP_DRAW: case OP_DRAW_IDX: case OP_ENABLE_COND: break;
+        case OP_DEBUG_LABEL: if (g_cb && V.label_begin && ((const p_debug_label *)a)->what != LABEL_MARKER) vka_rp_end(); break;   // (a group begins and ends outside passes)
         case OP_SET_RT: if (g_cb && !vka_pass_keep()) vka_rp_end(); break;
         case OP_BARRIER: if (g_cb) { int32_t bits; memcpy(&bits, a, 4); bar_kept = vka_rp_game_barrier((uint32_t)bits); if (!bar_kept) vka_rp_end(); } break;
         case OP_CLEAR_COLOR: case OP_CLEAR_DS: break;   // the pass is ended by the next draw over other targets, or the clear (vka_rp_clear)
@@ -1236,6 +1270,12 @@ static int walk(walk_t *w) {
             }
             break; }
         case OP_RESET_COUNTER: break;
+        case OP_ENABLE_COND: { const p_enable_cond *ec = a; int skip = ec->mode == 3;   // (Lichii, dotfiles-25x.100: as OP_RENDER_COND, for dispatches or copies)
+            if (ec->mode < 2) { uint64_t x = 0, y = 0; skip = rc_known(ec->addr, &x) && rc_known(ec->addr + 16, &y) && (ec->mode ? x == y : x != y); }
+            if (ec->target) S.copy_skip = skip; else S.compute_skip = skip;
+            break; }
+        case OP_WAIT_SYNC: { const sync_t *sy; memcpy(&sy, a, 8); if (sy && sy->magic == MAGIC('S', 'Y', 'N', 'C') && sy->fenced && sy->fence) wait_sync(sy->fence); break; }
+        case OP_DEBUG_LABEL: if (g_cb && V.label_begin) label_op(a); break;
         default: break;
         }
         switch (h.op) {   // (lab: EDEN_NX2_NVN_CHECKPOINTS, vka_draw.c)
@@ -1244,7 +1284,7 @@ static int walk(walk_t *w) {
         }
         switch (h.op) {
         case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; if (cb->size <= 64) for (uint64_t o = 0; o < cb->size; o += 8) rpt_note(cb->addr + o, 0x200 | (cb->value & 0xff)); buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
-        case OP_COPY_B2B: if (g_cb) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
+        case OP_COPY_B2B: if (g_cb && !S.copy_skip) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
         case OP_UPDATE_UB: { static uint64_t wa = ~0ull; if (wa == ~0ull) { const char *e = getenv("DM_VK_WATCHADDR"); wa = e ? strtoull(e, NULL, 16) : 0; }
             uint64_t d_, n_; memcpy(&d_, a, 8); memcpy(&n_, (const uint8_t *)a + 8, 8);
             if (wa && wa >= d_ && wa < d_ + n_) { static int k; if (k++ < 16) VLOG("watchaddr: frame %llu queue %llu UpdateUniformBuffer %#llx+%#llx covers it", (unsigned long long)g_frame, (unsigned long long)S.serial, (unsigned long long)d_, (unsigned long long)n_); } }
@@ -1255,13 +1295,13 @@ static int walk(walk_t *w) {
         case OP_CLEAR_COLOR: if (g_cb) clear_color(a); break;
         case OP_CLEAR_DS: if (g_cb) clear_ds(a); break;
         case OP_CLEAR_TEX: if (g_cb) clear_tex(a); break;
-        case OP_COPY_B2T: if (g_cb) copy_bt(a, 1); break;
-        case OP_COPY_T2B: if (g_cb) copy_bt(a, 0); break;
-        case OP_COPY_T2T: if (g_cb) copy_t2t(a); break;
+        case OP_COPY_B2T: if (g_cb && !S.copy_skip) copy_bt(a, 1); break;
+        case OP_COPY_T2B: if (g_cb && !S.copy_skip) copy_bt(a, 0); break;
+        case OP_COPY_T2T: if (g_cb && !S.copy_skip) copy_t2t(a); break;
         case OP_BARRIER: if (g_cb && !bar_kept) vka_barrier(g_cb); break;
         case OP_DRAW: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, draw_rec(a, h.size, &t), NULL); } break;
         case OP_DRAW_IDX: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
-        case OP_DISPATCH: if (g_cb) vka_dispatch(&S.d, a); break;
+        case OP_DISPATCH: if (g_cb && !S.compute_skip) vka_dispatch(&S.d, a); break;
         case OP_DRAW_TEX: not_yet(h.op); break;
         case OP_DLSS: if (g_cb) { vka_dlss_eval(g_cb, a); g_stat_ops++; } break;
         case OP_COOPVEC_CONVERT: coopvec_convert(a); break;

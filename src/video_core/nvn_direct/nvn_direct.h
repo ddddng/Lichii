@@ -165,6 +165,9 @@ typedef struct nvn_direct_device {
     /// Lichii's resolution setting (Settings::ResolutionScalingInfo): render targets are made
     /// scale_up / 2^scale_shift times their size (dotfiles-25x.34). 1 and 0: no scale.
     uint32_t scale_up, scale_shift;
+    /// Whether the replay labels its command buffers with the game's debug groups and markers
+    /// (VK_EXT_debug_utils), as Lichii labels its own: a debugging tool attached, or renderer debug.
+    int debug_labels;
 } nvn_direct_device;
 
 /// The push constants of a translated stage that Lichii's RescalingPass changed

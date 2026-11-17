@@ -117,6 +117,11 @@ typedef struct {
     pthread_mutex_t qmu;                            // the queue is shared by the submit and present threads
     int sparse_res;                                 // sparse residency images can be made (vka_sparse.c): binding on the queue, 2D residency, standard block shape, strict non-resident reads
     uint64_t tl_queued;                             // the highest timeline value a vkQueueSubmit so far signals (under qmu): what a later submission on the queue may wait for
+    // Lichii (dotfiles-25x.100), each 0 without the device extension Lichii enabled: conservative rasterization (cons_max: maxExtraPrimitiveOverestimationSize), the last
+    // vertex as the provoking one, NV viewport swizzles, NV exclusive scissors, a fragment shading rate attachment (VRS) of 16x16-pixel texels, debug utils labels
+    int cons, provoking_last, vp_swizzle, excl_scissor, vrs; float cons_max;
+    PFN_vkCmdSetExclusiveScissorNV set_excl_scissor;
+    PFN_vkCmdBeginDebugUtilsLabelEXT label_begin; PFN_vkCmdEndDebugUtilsLabelEXT label_end; PFN_vkCmdInsertDebugUtilsLabelEXT label_insert;
 } vka_dev;
 extern vka_dev V;
 // Custom GPU drivers (vka_driver.c): DM_VK_DRIVER=<folder with meta.json, or a .so> loads that driver through libadrenotools (restart only); unset, empty or "system" = the
@@ -447,6 +452,9 @@ typedef struct {   // what a graphics pipeline is made from beyond its shaders a
     uint8_t ncolor, samples, topo, poly_mode, depth_clamp, a2c, logic_en, logic_op, gl_depth, fs_variant, alpha_func, gs_fx;   // fs_variant: DMSH_VK_MOD_*; alpha_func: NVN_ALPHA_FUNC_* or 0; gs_fx: 1 = the geometry module with the claim (vka_shader_gs_module)
     uint32_t vin_u, vin_s;            // float vertex inputs fed UINT / SINT formats: retyped in the vertex module (vka_spvpatch.c), by location
     struct { uint8_t en, src, dst, op, srca, dsta, opa, mask; } att[8];
+    // Lichii (dotfiles-25x.100): the sample mask (of the key's samples), the patch's control points (0: no tessellation), conservative rasterization (cons: on, dilate:
+    // quarter pixels), the last vertex provoking, VK_NV_viewport_swizzle's swizzles of viewport 0 (0: none), the exclusive scissor's dynamic state, a shading rate attachment
+    uint16_t sample_mask; uint8_t patch, cons, dilate, provoking_last, excl, vrs; uint8_t vp_sw[4];
     uint32_t vin_static;              // no vertex input dynamic state: the attributes and bindings below are part of the pipeline
     struct { uint32_t fmt, offset; uint8_t binding, used, pad[2]; } va[32];   // by location
     struct { uint32_t stride, divisor; uint8_t used, pad[3]; } vb[33];         // by binding (stream; 32 = the zero buffer of inputs no attribute feeds)
@@ -474,6 +482,11 @@ typedef struct vka_dstate {   // (named: nvn_recompile.c declares it ahead)
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; uint8_t vp_sw[16][4]; p_depth_bounds dbounds;
     float blend_color[4], alpha_ref;
     p_prim_restart restart; int rast_discard, tf_on;
+    // Lichii (dotfiles-25x.100): the command-buffer state of hle_nvn.c's s2-cmd section
+    int patch; float tess_inner[2], tess_outer[4]; uint32_t sample_mask;
+    int cons, cons_mode, subpixel_bias[2], provoking; float dilate;
+    int excl_on, excl_n; int32_t excl[16][4];
+    p_vrs_image vrs; uint8_t vrs_pal[16][16];
     int inited;
 } vka_dstate;
 void vka_dstate_reset(vka_dstate *d);
