@@ -286,16 +286,24 @@ std::vector<u8> DecodeBlocks(PixelFormat format, std::span<const u8> blocks, u32
         return out;
     }
     // Rows of blocks are tightly packed: DecompressBCn steps a row by buffer_row_length texels.
-    VideoCommon::BufferImageCopy copy{
-        .buffer_offset = 0,
-        .buffer_size = blocks.size(),
-        .buffer_row_length = width < 4 ? width : (width + 3) & ~3U,
-        .buffer_image_height = height,
-        .image_subresource{},
-        .image_offset{},
-        .image_extent{width, height, depth},
-    };
-    VideoCommon::DecompressBCn(blocks, out, copy, format);
+    // Slices are decoded one by one, as it steps a slice by whole block rows of output.
+    const size_t slice_blocks =
+        size_t{(width + 3) / 4} * ((height + 3) / 4) * BytesPerBlock(format);
+    const size_t slice_texels = out.size() / depth;
+    for (u32 slice = 0; slice < depth; ++slice) {
+        VideoCommon::BufferImageCopy copy{
+            .buffer_offset = 0,
+            .buffer_size = slice_blocks,
+            .buffer_row_length = width < 4 ? width : (width + 3) & ~3U,
+            .buffer_image_height = height,
+            .image_subresource{},
+            .image_offset{},
+            .image_extent{width, height, 1},
+        };
+        VideoCommon::DecompressBCn(blocks.subspan(slice * slice_blocks, slice_blocks),
+                                   std::span(out).subspan(slice * slice_texels, slice_texels), copy,
+                                   format);
+    }
     return out;
 }
 

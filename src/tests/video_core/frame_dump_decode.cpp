@@ -53,6 +53,21 @@ TEST_CASE("Frame dump decodes BC1 levels whose width is not a multiple of the bl
     REQUIRE(Texel(image, 6, 5, 5) == Rgba{255, 255, 255, 255});
 }
 
+TEST_CASE("Frame dump decodes BC1 volume slices with partial block rows", "[frame_dump_decode]") {
+    // 6x6x2 texels: each slice is 2x2 blocks, the first all red and the second all blue.
+    std::vector<u8> blocks;
+    for (const u16 color : {0xf800, 0x001f}) {
+        for (int block = 0; block < 4; ++block) {
+            AppendBc1(blocks, color);
+        }
+    }
+    const std::vector<u8> image = Vulkan::DecodeBlocks(PixelFormat::BC1_RGBA_UNORM, blocks, 6, 6, 2);
+    REQUIRE(image.size() == 6 * 6 * 2 * 4);
+    REQUIRE(Texel(image, 6, 5, 5) == Rgba{255, 0, 0, 255});
+    REQUIRE(Texel(image, 6, 0, 6) == Rgba{0, 0, 255, 255});
+    REQUIRE(Texel(image, 6, 5, 11) == Rgba{0, 0, 255, 255});
+}
+
 TEST_CASE("Frame dump decodes ASTC levels with partial blocks", "[frame_dump_decode]") {
     REQUIRE(Vulkan::DecodedFormat(PixelFormat::ASTC_2D_8X8_SRGB) == PixelFormat::A8B8G8R8_SRGB);
     // 12x10 texels in 8x8 blocks are 2x2 blocks.
