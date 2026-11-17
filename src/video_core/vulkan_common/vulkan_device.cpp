@@ -822,6 +822,28 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     nvn_direct = Core::NvnHook::DirectMode();
     const VkPhysicalDeviceDescriptorIndexingFeatures supported_descriptor_indexing =
         features.descriptor_indexing;
+    // Before any of that reaches vkCreateDevice: the replay needs Vulkan 1.3 (dynamic rendering
+    // is core there), and buffer update-after-bind is invalid beside robustBufferAccess, which
+    // stays on, unless the device has robustBufferAccessUpdateAfterBind.
+    if (nvn_direct) {
+        const bool buffer_update_after_bind =
+            supported_descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind ||
+            supported_descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind;
+        if (properties.properties.apiVersion < VK_API_VERSION_1_3) {
+            LOG_WARNING(Render_Vulkan, "NVN2 direct mode: the device is Vulkan {}.{}, it needs 1.3",
+                        VK_API_VERSION_MAJOR(properties.properties.apiVersion),
+                        VK_API_VERSION_MINOR(properties.properties.apiVersion));
+            nvn_direct = false;
+        } else if (buffer_update_after_bind &&
+                   !properties.descriptor_indexing.robustBufferAccessUpdateAfterBind) {
+            LOG_WARNING(Render_Vulkan, "NVN2 direct mode: the device has buffer update-after-bind "
+                                       "but not robustBufferAccessUpdateAfterBind");
+            nvn_direct = false;
+        }
+        if (!nvn_direct) {
+            Core::NvnHook::DirectFailed();
+        }
+    }
     {
         auto& descriptor_indexing = features.descriptor_indexing;
         descriptor_indexing.shaderInputAttachmentArrayDynamicIndexing = false;
