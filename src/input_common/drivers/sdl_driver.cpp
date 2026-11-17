@@ -655,6 +655,10 @@ public:
             default:
                 break;
             }
+            if (SDL_GetGamepadVendor(sdl_controller.get()) == 0x057E &&
+                SDL_GetGamepadProduct(sdl_controller.get()) == 0x2069) {
+                return "Nintendo Switch 2 Pro Controller";
+            }
             const auto name = SDL_GetGamepadName(sdl_controller.get());
             if (name) {
                 return name;
@@ -1060,6 +1064,9 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
         SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT, "0", SDL_HINT_OVERRIDE);
         SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_OVERRIDE);
     }
+    // SDL is built with libusb on Windows for Switch 2 controllers. Leave the GameCube adapter to
+    // the GC adapter driver, which claims it through libusb itself.
+    SDL_SetHint(SDL_HINT_HIDAPI_LIBUSB_GAMECUBE, "0");
 #endif
 
     // SDL3 defaults Steam Controller Bluetooth HIDAPI support to off, which can disable gyro.
