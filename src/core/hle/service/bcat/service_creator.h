@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "core/file_sys/vfs/vfs_types.h"
 #include "core/hle/service/bcat/backend/backend.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
@@ -36,6 +37,9 @@ private:
 
     Result CreateDeliveryCacheStorageServiceWithApplicationId(
         u64 application_id, OutInterface<IDeliveryCacheStorageService> out_interface);
+
+    // The title's cache folder, or an empty one when it can't be opened or created.
+    FileSys::VirtualDir OpenCache(u64 title_id);
 
     Result CreateDeliveryCacheProgressService(
         ClientProcessId process_id, OutInterface<IDeliveryCacheProgressService> out_interface);

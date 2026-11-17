@@ -135,16 +135,6 @@ fs::path BackupPath(const fs::path& target) {
     return path;
 }
 
-// An install interrupted between its two renames leaves the previous cache in the backup folder.
-// Caller holds install_mutex.
-void RecoverInterrupted(const fs::path& target) {
-    std::error_code ec;
-    const auto backup = BackupPath(target);
-    if (!fs::exists(target, ec) && !ec && fs::is_directory(backup, ec)) {
-        fs::rename(backup, target, ec);
-    }
-}
-
 void WriteFile(const fs::path& path, std::span<const char> data) {
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
     out.write(data.data(), static_cast<std::streamsize>(data.size()));
@@ -167,6 +157,18 @@ bool HasDirectories(const fs::path& target) {
         }
     }
     return false;
+}
+
+// An install cut off between its two renames leaves the previous cache in the backup folder, and
+// the services may have created an empty target since. Caller holds install_mutex.
+void RecoverInterruptedLocked(const fs::path& target) {
+    std::error_code ec;
+    const auto backup = BackupPath(target);
+    if (!fs::is_directory(backup, ec) || HasDirectories(target)) {
+        return;
+    }
+    fs::remove_all(target, ec);
+    fs::rename(backup, target, ec);
 }
 
 std::string Sha256Hex(std::span<const u8> data) {
@@ -332,11 +334,16 @@ Contents ReadPackage(std::span<const u8> zip, u64 title_id) {
     return contents;
 }
 
+void RecoverInterrupted(const fs::path& target) {
+    std::scoped_lock lock{install_mutex};
+    RecoverInterruptedLocked(target);
+}
+
 void Install(const Contents& contents, const fs::path& target, std::string_view hash) {
     std::scoped_lock lock{install_mutex};
     const auto stage = StagePath(target);
     const auto backup = BackupPath(target);
-    RecoverInterrupted(target);
+    RecoverInterruptedLocked(target);
     std::error_code ec;
     fs::remove_all(stage, ec);
     try {
@@ -367,10 +374,7 @@ void Install(const Contents& contents, const fs::path& target, std::string_view 
 }
 
 Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
-    {
-        std::scoped_lock lock{install_mutex};
-        RecoverInterrupted(target);
-    }
+    RecoverInterrupted(target);
     auto response = fetch(title_id);
     // Scarlet and Violet share one event package, published under Violet's title ID.
     if (title_id == PokemonScarlet && response &&

@@ -44,6 +44,10 @@ using Contents = std::map<std::string, std::vector<u8>>;
 // Splatoon 3's must hold all four regions' Splatfest files. Throws std::runtime_error otherwise.
 Contents ReadPackage(std::span<const u8> zip, u64 title_id);
 
+// Puts back the cache an install moved aside when it was cut off between its two renames, unless
+// target already holds directories. Runs whether or not Nextendo is on.
+void RecoverInterrupted(const std::filesystem::path& target);
+
 // Writes contents as the cache folder target with the package hash, in a folder beside it that
 // replaces target only once every file is written. On failure the previous cache stays.
 void Install(const Contents& contents, const std::filesystem::path& target, std::string_view hash);

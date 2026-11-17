@@ -69,7 +69,8 @@ the same for every account, so every profile on this NAND shares it.
 An install writes the new folder as `<TITLE ID>.nextendo-stage`, renames the old one to
 `<TITLE ID>.nextendo-backup`, then renames the stage into place and deletes the backup. A
 directory or file the new package doesn't have disappears. An install cut off between the two
-renames is undone at the next check.
+renames is undone the next time the game opens its cache, with Nextendo on or off, or at the next
+check. If the cache folder can't be opened or created, the services serve an empty cache.
 
 ## The services
 

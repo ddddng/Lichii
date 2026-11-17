@@ -234,7 +234,13 @@ TEST_CASE("Nextendo BCAT restores a cache an interrupted install moved away", "[
         std::ofstream out{backup / "vsdata" / "VSSetting_0.byaml"};
         out << "old";
     }
-    REQUIRE(Update(Splatoon2, target, Serve(std::nullopt)) == Outcome::Failed);
+    SECTION("before the next check") {
+        REQUIRE(Update(Splatoon2, target, Serve(std::nullopt)) == Outcome::Failed);
+    }
+    SECTION("after the services created an empty folder, with Nextendo off") {
+        fs::create_directories(target);
+        RecoverInterrupted(target);
+    }
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "old");
     REQUIRE_FALSE(fs::exists(backup));
 }
