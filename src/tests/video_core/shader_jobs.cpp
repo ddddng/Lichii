@@ -618,6 +618,7 @@ TEST_CASE("RunOrWait runs a queued job on the waiting thread", "[video_core][sha
     REQUIRE(blocker.Status() == ShaderJobStatus::Done);
 }
 
+
 #ifdef __linux__
 TEST_CASE("Shader job workers are named by stage", "[video_core][shader_jobs]") {
     ShaderJobScheduler scheduler{Config(1, 1)};
@@ -872,12 +873,27 @@ TEST_CASE("A prebuild reports what became of its builds once all have ended",
     REQUIRE(outcome->failed == 2);
     REQUIRE(outcome->taken_unfinished == 1);
     REQUIRE(outcome->unclaimed == 1);
+    // Pipelines 0 and 2 reached the driver; 2 failed there
+    REQUIRE(outcome->driver_builds.Summary().starts_with(
+        "2 under 10 ms, 0 10-100 ms, 0 over 100 ms"));
 
     // Taken once built: no wait to report
     std::optional<std::chrono::steady_clock::duration> no_wait;
     REQUIRE(prebuild.Take(0, &no_wait) != nullptr);
     REQUIRE_FALSE(no_wait.has_value());
     REQUIRE(prebuild.Finished()->unclaimed == 0);
+}
+
+TEST_CASE("Driver build times are counted in the ranges of a cache hit and a compile",
+          "[video_core][shader_jobs]") {
+    Vulkan::DriverBuildTimes times;
+    REQUIRE(times.Summary() ==
+            "0 under 10 ms, 0 10-100 ms, 0 over 100 ms (0.0 s in all, longest 0.0 ms)");
+    for (const auto elapsed : {1ms, 9ms, 10ms, 99ms, 100ms, 1500ms}) {
+        times.Add(elapsed);
+    }
+    REQUIRE(times.Summary() ==
+            "2 under 10 ms, 2 10-100 ms, 2 over 100 ms (1.7 s in all, longest 1500.0 ms)");
 }
 
 TEST_CASE("A prebuild's job ends once its pipeline is built or dropped",
