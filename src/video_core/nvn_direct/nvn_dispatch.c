@@ -242,6 +242,9 @@ int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
         return s->fenced && !(s->fenced == 2 ? mtl_wait_acq : mtl_wait)(s->fence, 0);   // (one not fenced yet answers at once: hle_nvn.c)
     }
     if (!strcmp(name, "nvnQueueFinish")) return !mtl_wait(((const queue_t*)host_ptr(x[0]))->last_fence, 0);
+    // A texture the GPU wrote is read back once everything submitted is done (the game waited for its own work; the replay may still be behind it)
+    if (!strcmp(name, "nvnTextureReadTexels") || !strcmp(name, "nvnTextureReadTexelsStrided"))
+        return mtl_tex_gpu_owned(((const tex_t*)host_ptr(x[0]))->serial) && !mtl_wait_acq(mtl_last_fence(), 0);
     return 0;
 }
 // Lab (DM_VK_TS_LOG=1, dotfiles-25x.26): the calls of each name, for the counter timestamp log (vka_exec.c)

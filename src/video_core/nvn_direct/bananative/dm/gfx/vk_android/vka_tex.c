@@ -7,6 +7,7 @@
 // one object and a present through another meet. Every image stays in VK_IMAGE_LAYOUT_GENERAL after its first use: no layout tracking until the draw path needs it
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "vka_capture.h"   // Lichii: one-off readbacks (mtl_read_texels)
 #include "nvn_direct_front.h"   // Lichii: raw global memory logs hold the game's addresses (gml_poll)
 #include "nvn_direct.h"   // Lichii: nvn_direct_astc_level (ASTC decoded on the GPU by the host)
 #include "../nvn/nvn_mtl.h"
@@ -1883,6 +1884,71 @@ void vka_tex_writeback(VkCommandBuffer cb) {
     }
     g_nwb = 0;
     pthread_mutex_unlock(&g_tmu);
+}
+// Lichii: CPU texture reads (nvnTextureReadTexels / ReadTexelsStrided, hle_nvn.c read_texels), region r of level / layer0 into dst with row / img byte strides. A texture
+// the GPU wrote is read back from its image (the call waited for the GPU first: nvn_dispatch.c nvn_direct_call_blocks); any other has its content in its storage, read there
+// undoing its layout, on the calling thread (after nxnative's mtl_read_texels, MIT)
+static int read_texels_gpu(vka_img *im, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img, int bw, int bh, int bpb) {
+    uint32_t lv = level;
+    if (im->samples > 1 || im->scaled || im->f.astc_bw || im->f.bpb != bpb || im->f.bw != bw || im->f.bh != bh || !vka_img_lv(im, &lv)) return 0;
+    VkImageAspectFlags asp = im->f.kind < 3 ? VK_IMAGE_ASPECT_COLOR_BIT : im->f.vk == VK_FORMAT_D16_UNORM || im->f.vk == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT
+                           : im->f.vk == VK_FORMAT_S8_UINT ? VK_IMAGE_ASPECT_STENCIL_BIT : 0;   // (a packed depth-stencil one: its buffer layout interleaves what Vulkan copies by aspect)
+    const int is3d = im->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth > 0 ? r->depth : 1;
+    if (!asp || (!is3d && layer0 + (uint32_t)r->zoffset + (uint32_t)nz > im->layers)) return 0;
+    const size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh);
+    vcap_hbuf h; if (!vcap_hbuf_make(&h, wb * hb * (size_t)nz)) return 0;
+    VkCommandBuffer cb = vcap_cb_begin(); int ok = 0;
+    if (cb) {
+        VkBufferImageCopy c = {0, 0, 0, {asp, lv, is3d ? 0 : layer0 + (uint32_t)r->zoffset, is3d ? 1 : (uint32_t)nz}, {r->xoffset, r->yoffset, is3d ? r->zoffset : 0},
+                               {(uint32_t)r->width, (uint32_t)r->height, is3d ? (uint32_t)nz : 1}};
+        vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, h.b, 1, &c);
+        if ((ok = vcap_cb_run(cb)))
+            for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + (size_t)z * img + y * row, h.p + ((size_t)z * hb + y) * wb, wb);
+    }
+    vcap_hbuf_free(&h);
+    return ok;
+}
+static void read_texels_storage(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img, int bw, int bh, int bpb) {
+    const int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth > 0 ? r->depth : 1;
+    const size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh), x0 = (size_t)(r->xoffset / bw) * (size_t)bpb, y0 = (size_t)(r->yoffset / bh);
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {   // one level of rows of its stride
+        const size_t srow = t->d.stride ? t->d.stride : (size_t)((t->d.width + (uint32_t)bw - 1) / (uint32_t)bw) * (size_t)bpb;
+        if (level || layer0 + (unsigned)r->zoffset || nz != 1 || x0 + wb > srow || (y0 + hb) * srow > t->L.size) {
+            VRED_ONCE("ReadTexels of a linear texture outside its one level of rows (%ux%u format %#x, stride %zu): zeros", t->d.width, t->d.height, t->d.format, srow);
+            for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memset(dst + (size_t)z * img + y * row, 0, wb);
+            return;
+        }
+        for (size_t y = 0; y < hb; y++) memcpy(dst + y * row, t->mem + (y0 + y) * srow + x0, wb);
+        return;
+    }
+    // A sparse pool's texture through a copy of its page table's memory, unmapped pages as 0 (its own address range is inaccessible where nothing is mapped)
+    const uint8_t *mem = t->mem; uint8_t *part = NULL;
+    if (pool_sparse(t->pool)) {
+        if (!(part = malloc(t->L.size ? t->L.size : 1))) return;
+        nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); mem = part;
+    }
+    const uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+    const size_t lp = (size_t)((lw + (uint32_t)bw - 1) / (uint32_t)bw) * (size_t)bpb, lr = (lh + (uint32_t)bh - 1) / (uint32_t)bh;
+    uint8_t *lin = malloc(lp * lr * lz);
+    for (int z = 0; lin && z < nz; z++) {
+        const unsigned layer = is3d ? 0 : layer0 + (unsigned)(r->zoffset + z);
+        if ((!is3d || !z) && nvn_deswizzle(&t->d, level, layer, mem, lin, lp)) { VRED_ONCE("ReadTexels: texture %ux%u format %#x target %d not decodable from its storage", t->d.width, t->d.height, t->d.format, t->d.target); break; }
+        const uint8_t *src = lin + (is3d ? (size_t)(r->zoffset + z) * lp * lr : 0);
+        for (size_t y = 0; y < hb; y++) memcpy(dst + (size_t)z * img + y * row, src + (y0 + y) * lp + x0, wb);
+    }
+    free(lin); free(part);
+}
+void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
+    int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    if (!bpb || !t->mem || r->width <= 0 || r->height <= 0 || r->xoffset < 0 || r->yoffset < 0 || level >= t->d.levels) {
+        VRED_ONCE("ReadTexels of texture %ux%u format %#x: unknown format, no storage or region out of range; nothing read", t->d.width, t->d.height, t->d.format); return; }
+    vka_img *im = vka_tex_acquire(t->serial);
+    const int gpu = im && im->gpu_owned, ok = gpu && read_texels_gpu(im, level, layer0, r, dst, row, img, bw, bh, bpb);
+    vka_tex_drop(im);
+    if (ok) return;
+    if (gpu) VRED_ONCE("ReadTexels of GPU-written texture serial %llu (format %#x): its image cannot be copied as NVN lays it out (multisampled, at the render scale, ASTC as BC, packed depth-stencil "
+                       "or another block size): read from its storage, which lacks the GPU's writes", (unsigned long long)t->serial, t->d.format);
+    read_texels_storage(t, level, layer0, r, dst, row, img, bw, bh, bpb);
 }
 int mtl_tex_gpu_owned(uint64_t serial) {   // hle_nvn.c nvn_ft_poll: the GPU has written the image (render target, copy or clear destination)
     pthread_mutex_lock(&g_tmu); smap_ent *e = map_get(serial); int r = e && e->im && e->im->gpu_owned; pthread_mutex_unlock(&g_tmu); return r;

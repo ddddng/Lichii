@@ -82,7 +82,8 @@ constexpr std::array HaltingCalls{
     std::string_view{"nvnQueueSubmitCommands"}, std::string_view{"nvnQueuePresentTexture"},
     std::string_view{"nvnQueueFinish"},         std::string_view{"nvnSyncWait"},
     std::string_view{"nvnWindowAcquireTexture"}, std::string_view{"nvnQueueAcquireTexture"},
-    std::string_view{"nvnMemoryPoolFinalize"},
+    std::string_view{"nvnMemoryPoolFinalize"},  std::string_view{"nvnTextureReadTexels"},
+    std::string_view{"nvnTextureReadTexelsStrided"},
 };
 
 struct DeviceIntegerFrame {
