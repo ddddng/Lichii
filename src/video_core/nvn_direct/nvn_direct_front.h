@@ -31,6 +31,10 @@ int nvn_direct_backing_file(uint64_t address, uint64_t* offset);
 /// address): its backing memory, which write tracking never protects. Anything else (a host
 /// segment): unchanged. The value must not cross a page.
 void* nvn_direct_writable(uint64_t host);
+/// Where the replay reads guest memory at host (an arena pointer): its backing memory, which a
+/// guest unmap never takes away, NULL when the guest has not mapped the page (the arena's page is
+/// then inaccessible). Anything else (a host segment): unchanged. The read must not cross a page.
+const void* nvn_direct_readable(uint64_t host);
 /// The front end writes [mem, mem + size) of a pool in place from now on (command memory): its
 /// pages are never write-tracked (a host write to a tracked page would fault outside the JIT).
 void nvn_direct_host_written(const void* mem, size_t size);

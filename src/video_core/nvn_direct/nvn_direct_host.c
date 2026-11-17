@@ -12,6 +12,7 @@
 #include <time.h>
 
 #include "nvn_count.h"
+#include "nvn_direct_front.h"
 
 uint64_t now_ns(void) {
     struct timespec t;
@@ -63,15 +64,30 @@ int vka_fg_frame(uint64_t serial, const int* crop, double period, uint64_t fence
 }
 
 // Guest memory. The front end and the replay reach it through host pointers into Lichii's
-// fastmem arena (the dispatch adds the arena's base to the game's addresses); every page they
-// are given is mapped by the guest. Write tracking is Lichii's (nvn_tracking.c): the replay's
-// own fault and pre-write hooks are not installed.
+// fastmem arena (the dispatch adds the arena's base to the game's addresses). Pages the guest has
+// not mapped are inaccessible there: the readers that check for them (texture uploads from pool
+// storage) read through the backing memory (nvn_direct_readable), which a concurrent unmap leaves
+// readable. Write tracking is Lichii's (nvn_tracking.c): the replay's own fault and pre-write
+// hooks are not installed.
 void dm_fault_hook_register(int (*fn)(void* addr, int is_write, void* uc)) { (void)fn; }
 void dm_guest_write_prep_register(void (*fn)(void* addr, size_t len)) { (void)fn; }
-uint64_t dm_guest_unmapped(uintptr_t a, size_t n) { (void)a; (void)n; return 0; }
+uint64_t dm_guest_unmapped(uintptr_t a, size_t n) {
+    uint64_t c = 0;
+    for (uintptr_t p = a & ~(uintptr_t)0xFFF; n && p < a + n; p += 0x1000) c += !nvn_direct_readable(p);
+    return c;
+}
 uint64_t dm_guest_read_mapped(void* dst, uintptr_t a, size_t n) {
-    memcpy(dst, (const void*)a, n);
-    return 0;
+    uint64_t c = 0;
+    uint8_t* d = dst;
+    for (uintptr_t p = a; p < a + n;) {
+        uintptr_t e = (p & ~(uintptr_t)0xFFF) + 0x1000;
+        if (e > a + n) e = a + n;
+        const void* s = nvn_direct_readable(p);
+        if (s) memcpy(d + (p - a), s, e - p);
+        else { memset(d + (p - a), 0, e - p); c++; }
+        p = e;
+    }
+    return c;
 }
 // The placement swap's guest block (vka_mem.c): pools are not placed in Lichii.
 void svc_guest_range(uint8_t** base, size_t* size) { *base = NULL; *size = 0; }

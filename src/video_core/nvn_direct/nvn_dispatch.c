@@ -65,6 +65,10 @@ void* nvn_direct_writable(uint64_t host) {
     void* const backing = g_memory.backing(g_memory.context, guest);
     return backing ? backing : (void*)(uintptr_t)host_addr(host);
 }
+const void* nvn_direct_readable(uint64_t host) {
+    if (host < g_arena || host - g_arena >= g_guest_size || !g_memory.backing) return (const void*)(uintptr_t)host;
+    return g_memory.backing(g_memory.context, host - g_arena);
+}
 static inline float F_float(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 static inline double F_double(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
 static inline uint64_t R_float(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
