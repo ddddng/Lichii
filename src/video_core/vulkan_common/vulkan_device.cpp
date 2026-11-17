@@ -34,6 +34,7 @@
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -564,6 +565,21 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     if (!is_suitable)
         LOG_WARNING(Render_Vulkan, "Unsuitable driver - continuing anyways");
+
+    if (is_radv) {
+        // Mesa splits debug options on commas and spaces.
+        const char* const radv_debug = std::getenv("RADV_DEBUG");
+        std::string_view options{radv_debug ? radv_debug : ""};
+        while (!options.empty() && !radv_hang_report) {
+            const size_t end = (std::min)(options.find_first_of(", "), options.size());
+            radv_hang_report = options.substr(0, end) == "hang";
+            options.remove_prefix((std::min)(end + 1, options.size()));
+        }
+        if (radv_hang_report) {
+            LOG_INFO(Render_Vulkan, "RADV_DEBUG=hang: shaders carry their program hash, and a "
+                                    "device loss waits for RADV's GPU hang report");
+        }
+    }
 
     if (is_nvidia) {
         nvidia_arch = GetNvidiaArchitecture(physical, supported_extensions);
@@ -1358,6 +1374,13 @@ void Device::ReportLoss() const {
         // Give Nsight Aftermath time to write its dump.
         std::this_thread::sleep_for(std::chrono::seconds{15});
     }
+    if (radv_hang_report) {
+        // RADV writes the report on the thread whose submit hung, then aborts. Another thread
+        // that sees the loss first would end the process before the report is written.
+        LOG_CRITICAL(Render_Vulkan, "Waiting for RADV's GPU hang report in $HOME/radv_dumps_*");
+        Common::Log::Flush();
+        std::this_thread::sleep_for(std::chrono::seconds{60});
+    }
     LOG_CRITICAL(Render_Vulkan, "Closing Lichii: the GPU driver lost the Vulkan device");
     Common::Log::Flush();
 #ifdef _WIN32
@@ -1427,6 +1450,10 @@ void Device::ReportDeviceFault() const {
         const VkDeviceSize lower = address.reportedAddress & ~(precision - 1);
         LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {} at {:#x} (range [{:#x}, {:#x}))",
                      i, type, address.reportedAddress, lower, lower + precision);
+        if (address_binding_report) {
+            LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {}", i,
+                         AddressMap::Get().Describe(address.reportedAddress));
+        }
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         const VkDeviceFaultVendorInfoEXT& vendor = vendor_infos[i];
@@ -1730,6 +1757,16 @@ bool Device::GetSuitability(bool requires_swapchain) {
         device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
         SetNext(next, device_fault_features);
     }
+    // VK_EXT_device_address_binding_report: what each faulting address belonged to
+    // (EDEN_NX2_FAULT_MAP).
+    const bool has_address_binding_report =
+        AddressMap::Wanted() &&
+        supported_extensions.contains(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (has_address_binding_report) {
+        address_binding_report_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT;
+        SetNext(next, address_binding_report_features);
+    }
 
     // The features the driver reports are enabled through the same chain at device creation.
     if (loaded_extensions.contains(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
@@ -1743,6 +1780,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         device_fault_features.deviceFaultVendorBinary = VK_FALSE;
+    }
+    if (has_address_binding_report) {
+        loaded_extensions.insert(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+        address_binding_report = address_binding_report_features.reportAddressBinding == VK_TRUE;
+    }
+    if (AddressMap::Wanted()) {
+        LOG_INFO(Render_Vulkan, "EDEN_NX2_FAULT_MAP: device address binding reports {}",
+                 address_binding_report ? "on" : "not supported by the driver");
     }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.

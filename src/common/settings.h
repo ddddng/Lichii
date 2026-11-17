@@ -1103,12 +1103,17 @@ struct Values {
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
     Setting<bool> lan_play{linkage, false, "lan_play", Category::Network};
     Setting<bool> nextendo_enabled{linkage, false, "nextendo_enabled", Category::Network};
+    // Replaces the current user's nickname and icon with the Nextendo account's.
+    Setting<bool> nextendo_sync_profile{linkage, false, "nextendo_sync_profile", Category::Network};
     Setting<std::string> nextendo_server_ip{linkage, "51.178.29.194", "nextendo_server_ip",
                                            Category::Network};
     Setting<std::string> nextendo_nat_ip{linkage, "164.132.111.120", "nextendo_nat_ip",
                                         Category::Network};
     Setting<std::string> nextendo_client_id{linkage, "nxc_eHeSgpYwMkFV", "nextendo_client_id",
                                            Category::Network};
+    // Profiles missing from the NAND whose Nextendo sign-ins the user chose to keep, comma-separated.
+    Setting<std::string> nextendo_kept_accounts{linkage, std::string(), "nextendo_kept_accounts",
+                                                Category::Network};
     // Host redirect to a server the user runs (core/internal_network/local_redirect.h). Off: the
     // online_redirect_* values are ignored.
     Setting<bool> online_service_redirect{linkage, false, "online_service_redirect",
