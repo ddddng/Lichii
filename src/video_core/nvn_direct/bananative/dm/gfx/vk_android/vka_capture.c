@@ -528,20 +528,25 @@ static void cap_pools(uint32_t submit) {
     for (int i = 0; i < n; i++) { cap_padd a = {ps[i].lo, ps[i].hi - ps[i].lo}; cap_enc_addr(NULL, &a.mem, 0, 0); cap_buf_put(&bb, &a, sizeof a); }
     cap_put(&g_cap_w, CAP_PADD, submit, bb.p, bb.n, 0); cap_buf_free(&bb); free(ps);
 }
-// A region's bytes go straight from guest memory to the file, after their hashes are taken: a write after the hash shows as a change at the next submit (no copy of up to
-// a whole pool in memory, which a phone running the game cannot spare)
-static void cap_put_region(uint32_t submit, const cap_regn *hh, const void *bytes) {
+// A region's bytes go from guest memory to the file a page at a time (no copy of up to a whole pool in memory, which a phone running the game cannot spare). Lichii: each
+// page's hash is that of the copy written, so a write meanwhile shows as a change at the next submit, even one that puts the old bytes back
+static void cap_put_region(uint32_t submit, const cap_regn *hh, cap_region *r) {
     cap_chunk c = {CAP_REGN, CAP_RAW, sizeof *hh + hh->size, sizeof *hh + hh->size, submit, 0};
-    if (fwrite(&c, sizeof c, 1, g_cap_w.f) != 1 || fwrite(hh, sizeof *hh, 1, g_cap_w.f) != 1 || fwrite(bytes, 1, (size_t)hh->size, g_cap_w.f) != hh->size) g_cap_w.err = 1;
+    if (fwrite(&c, sizeof c, 1, g_cap_w.f) != 1 || fwrite(hh, sizeof *hh, 1, g_cap_w.f) != 1) g_cap_w.err = 1;
+    size_t nb = (size_t)((r->size + 4095) / 4096); r->hash = realloc(r->hash, nb * 8);
+    for (size_t b = 0; b < nb; b++) {
+        uint8_t page[4096]; uint64_t o = (uint64_t)b * 4096; size_t len = (size_t)MIN(4096, r->size - o);
+        memcpy(page, (const uint8_t *)(uintptr_t)r->lo + o, len); r->hash[b] = cap_hash_block(page, len);
+        if (fwrite(page, 1, len, g_cap_w.f) != len) g_cap_w.err = 1;
+    }
     g_cap_w.raw += c.raw; g_cap_w.stored += c.stored + sizeof c;
 }
 static void cap_reg_write(uint32_t submit) {
     for (uint32_t i = 0; i < g_cap_nreg; i++) {
         cap_region *r = &g_cap_reg[i]; if (!r->pending) continue;
         r->pending = 0;
-        cap_reg_hash(r, (const uint8_t *)(uintptr_t)r->lo);
         cap_regn hh = {g_cap_rid[i], r->kind, r->lo, r->size};
-        cap_put_region(submit, &hh, (const void *)(uintptr_t)r->lo);
+        cap_put_region(submit, &hh, r);
     }
 }
 static void cap_mem(uint32_t submit) {
@@ -549,16 +554,16 @@ static void cap_mem(uint32_t submit) {
     cap_buf b = {0};
     for (uint32_t i = 0; i < g_cap_nreg; i++) {
         cap_region *r = &g_cap_reg[i]; size_t nb = (size_t)((r->size + 4095) / 4096);
-        for (size_t k = 0; k < nb;) {
-            uint64_t o = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, r->size - o);
-            uint64_t h = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, len);
-            if (h == r->hash[k]) { k++; continue; }
-            size_t k1 = k; uint64_t end = o;
-            while (k1 < nb) { uint64_t o1 = (uint64_t)k1 * 4096; size_t l1 = (size_t)MIN(4096, r->size - o1); uint64_t h1 = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o1, l1);
-                if (h1 == r->hash[k1]) break; r->hash[k1] = h1; end = o1 + l1; k1++; }
-            struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, o, end - o};
-            cap_buf_put(&b, &d, sizeof d); cap_buf_put(&b, (const uint8_t *)(uintptr_t)r->lo + o, (size_t)(end - o));
-            k = k1;
+        // Lichii: a changed page is copied, and its hash taken from the copy: the delta holds exactly the bytes its hash describes (a write meanwhile shows at the next submit)
+        size_t dh = 0;   // the open delta's header in b, + 1 (0: none)
+        for (size_t k = 0; k < nb; k++) {
+            uint8_t page[4096]; uint64_t o = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, r->size - o);
+            if (cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, len) == r->hash[k]) { dh = 0; continue; }
+            memcpy(page, (const uint8_t *)(uintptr_t)r->lo + o, len); r->hash[k] = cap_hash_block(page, len);
+            struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, o, len};
+            if (dh) { memcpy(&d, b.p + dh - 1, sizeof d); d.len += len; memcpy(b.p + dh - 1, &d, sizeof d); }
+            else { dh = b.n + 1; cap_buf_put(&b, &d, sizeof d); }
+            cap_buf_put(&b, page, len);
         }
     }
     if (b.n) cap_put(&g_cap_w, CAP_PDIF, submit, b.p, b.n, 0);

@@ -454,7 +454,20 @@ std::vector<std::pair<u64, u64>> PoolRanges(const State& s) {
     return merged;
 }
 
-/// Emits pages [first, last) of guest memory as `type` records, runs of up to 1 MiB.
+u64 PageHash(const u8* page) {
+    u64 h = 0x9e3779b97f4a7c15ull;
+    for (size_t i = 0; i < PageSize; i += 8) {
+        u64 v;
+        std::memcpy(&v, page + i, 8);
+        h = (h ^ v) * 0xff51afd7ed558ccdull;
+        h ^= h >> 29;
+    }
+    return h;
+}
+
+/// Emits pages [first, last) of guest memory as `type` records, runs of up to 1 MiB. Each page's
+/// hash in s.page_hashes becomes that of the bytes read for it, so it describes the file even when
+/// the guest writes the page meanwhile.
 void EmitPages(State& s, Core::Memory::Memory& memory, u8 type, const std::vector<u64>& pages,
                bool skip_zero) {
     static const std::array<u8, PageSize> zero{};
@@ -472,6 +485,7 @@ void EmitPages(State& s, Core::Memory::Memory& memory, u8 type, const std::vecto
             if (!ReadGuest(memory, pages[j] * PageSize, page.data(), PageSize)) {
                 page.fill(0);
             }
+            s.page_hashes[pages[j]] = PageHash(page.data());
             if (skip_zero && page == zero) {
                 break;
             }
@@ -490,25 +504,20 @@ void EmitPages(State& s, Core::Memory::Memory& memory, u8 type, const std::vecto
     }
 }
 
-u64 PageHash(const u8* page) {
-    u64 h = 0x9e3779b97f4a7c15ull;
-    for (size_t i = 0; i < PageSize; i += 8) {
-        u64 v;
-        std::memcpy(&v, page + i, 8);
-        h = (h ^ v) * 0xff51afd7ed558ccdull;
-        h ^= h >> 29;
-    }
-    return h;
-}
-
-/// The pages of the live pools, and their hashes (on 16 threads).
-std::pair<std::vector<u64>, std::vector<u64>> HashPoolPages(State& s, Core::Memory::Memory& memory) {
+/// The pages of the live pools.
+std::vector<u64> PoolPages(const State& s) {
     std::vector<u64> pages;
     for (const auto& [begin, end] : PoolRanges(s)) {
         for (u64 a = begin; a < end; a += PageSize) {
             pages.push_back(a / PageSize);
         }
     }
+    return pages;
+}
+
+/// The pages of the live pools, and their hashes (on 16 threads).
+std::pair<std::vector<u64>, std::vector<u64>> HashPoolPages(State& s, Core::Memory::Memory& memory) {
+    std::vector<u64> pages = PoolPages(s);
     std::vector<u64> hashes(pages.size());
     constexpr u64 Threads = 16;
     const u64 per = (pages.size() + Threads - 1) / Threads;
@@ -542,10 +551,11 @@ void Dirty(State& s, Core::Memory::Memory& memory) {
         const auto it = s.page_hashes.find(pages[i]);
         if (it == s.page_hashes.end() || it->second != hashes[i]) {
             changed.push_back(pages[i]);
+        } else {
+            next.emplace(pages[i], it->second);
         }
-        next.emplace(pages[i], hashes[i]);
     }
-    s.page_hashes = std::move(next);
+    s.page_hashes = std::move(next); // (EmitPages adds the changed pages' hashes)
     EmitPages(s, memory, 'D', changed, false);
 }
 
@@ -559,11 +569,8 @@ void Snapshot(State& s, Core::Memory::Memory& memory) {
         Put(s, p.flags);
         Put<u32>(s, 0);
     }
-    auto [pages, hashes] = HashPoolPages(s, memory);
-    s.page_hashes.clear();
-    for (size_t i = 0; i < pages.size(); ++i) {
-        s.page_hashes.emplace(pages[i], hashes[i]);
-    }
+    const std::vector<u64> pages = PoolPages(s);
+    s.page_hashes.clear(); // (EmitPages adds every page's hash)
     const u64 bytes = pages.size() * PageSize;
     EmitPages(s, memory, 'S', pages, true);
     Put<u8>(s, 'W');
