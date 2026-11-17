@@ -295,6 +295,11 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
                 .address_space = image.address_space,
             });
             ++gc_download_deletes;
+            if (False(image.flags & ImageFlagBits::Sparse)) {
+                ClearStale(image.cpu_addr, image.guest_size_bytes);
+            } else if (const auto memory = WriteBackMemory(image)) {
+                ClearStaleGpu(*memory, image.gpu_addr, image.guest_size_bytes);
+            }
         } else {
             if (OverlapWritebacksEnabled() && True(image.flags & ImageFlagBits::GpuModified) &&
                 HasGuestRange(image)) {
