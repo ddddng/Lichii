@@ -2247,15 +2247,12 @@ typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
 }
 
 template <class P>
-bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame() noexcept {
-    if (!maxwell3d) {
+bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame(u32 index) noexcept {
+    if (!maxwell3d || index >= rt_image_id.size()) {
         return false;
     }
     const auto& regs = maxwell3d->regs;
-    if (regs.rt_control.count == 0) {
-        return false;
-    }
-    const auto& rt = regs.rt[0];
+    const auto& rt = regs.rt[index];
     const GPUVAddr gpu_addr = rt.Address();
     if (gpu_addr == 0 || rt.format == Tegra::RenderTargetFormat::NONE) {
         return false;
@@ -2263,8 +2260,8 @@ bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame() noexcept {
     std::scoped_lock lock{mutex};
     ImageId image_id{};
     if (!maxwell3d->dirty.flags[Dirty::RenderTargets] &&
-        !maxwell3d->dirty.flags[Dirty::ColorBuffer0]) {
-        image_id = rt_image_id[0];
+        !maxwell3d->dirty.flags[Dirty::ColorBuffer0 + index]) {
+        image_id = rt_image_id[index];
     } else {
         const ImageInfo info(rt, regs.anti_alias_samples_mode);
         if (info.format == PixelFormat::Invalid || info.size.width == 0 || info.size.height == 0 ||
