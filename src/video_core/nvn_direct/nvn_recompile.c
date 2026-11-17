@@ -354,13 +354,21 @@ static vka_shlib* rc_lib(uint64_t key, int vks, uint16_t flags, const nvn_direct
 }
 
 // ---------- Translation ----------
-typedef struct { vka_shader* sh; int st, gl_depth; uint32_t prim; } rc_shader;   // prim: a mesh shader's generic outputs written per primitive
+typedef struct { vka_shader* sh; int st; uint32_t prim; } rc_shader;   // prim: a mesh shader's generic outputs written per primitive
+// Lichii: the stages that place depth (vertex, geometry, tessellation evaluation, mesh: convert_depth), translated for one depth mode
+static int rc_depth_stage(int st) { return st == 0 || st == 2 || st == 4 || st == 7; }
+// The slot of a translation: its shader key, with a pixel shader's per-primitive inputs and a depth stage's depth mode. GL's (NVN's default, Mario Kart World's)
+// keeps the key's own slot, which every translation had before the mode was part of it: those kept from earlier runs are placed by their record's gl_depth (disk_open)
+static uint64_t rc_translation_slot(uint64_t key, uint32_t prim_inputs, int st, int gl_depth) {
+    uint64_t slot = prim_inputs ? key ^ ((uint64_t)prim_inputs << 32 | 0x9e1u) : key;
+    return rc_key(rc_depth_stage(st) && !gl_depth ? slot ^ 0xd3b7a1e5c4f20961ull : slot);
+}
 static _Atomic unsigned g_made, g_failed, g_unplaced, g_cached;
 static int rc_vks(int st) { return vka_vk_stage(st); }
 static unsigned rc_first_binding(int vks) { int r = vks == DMSH_VK_STAGE_CS || vks == DMSH_VK_STAGE_MS ? DMSH_VK_STAGE_VS : vks == DMSH_VK_STAGE_TS ? DMSH_VK_STAGE_TCS : vks; return (unsigned)r * DMSH_VK_STAGE_BINDINGS; }
 // A stage translated with draw d's state: 1 with *o filled (given back with vka_shader_translated_free), *vin_types the vertex inputs' types
-// it was made for (DMSH_VK_TYPE_* by location), *gl_depth its depth mode; else 0 and why
-static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, const vka_dstate* d, uint32_t prim_inputs, nvn_direct_shader* o, uint64_t* vin_types, int* gl_depth, char* why, size_t whyn) {
+// it was made for (DMSH_VK_TYPE_* by location); gl_depth: the depth mode it is made for; else 0 and why
+static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, const vka_dstate* d, uint32_t prim_inputs, int gl_depth, nvn_direct_shader* o, uint64_t* vin_types, char* why, size_t whyn) {
     int st = (int)control->stage;
     uint32_t nctl, ncode; nvn_ctl_lens(control->bytes, &nctl, &ncode);
     uint64_t data = p->sd[i].data;
@@ -370,7 +378,7 @@ static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, 
     rc_ctx* x = calloc(1, sizeof *x); if (!x) { snprintf(why, whyn, "out of memory"); return 0; }
     x->d = d; x->st = st; x->control = control; x->code = (const uint8_t*)(uintptr_t)nvn_direct_host_of(data); x->ncode = ncode;
     nvn_direct_shader_source src = {.nvn_stage = (uint32_t)st, .control = control->bytes, .code = x->code, .code_size = ncode, .code_address = nvn_direct_guest_of(data),
-                                    .first_binding = rc_first_binding(rc_vks(st)), .convert_depth = !vka_depth_zero(), .per_primitive_inputs = st == 1 ? prim_inputs : 0, .context = x,
+                                    .first_binding = rc_first_binding(rc_vks(st)), .convert_depth = gl_depth, .per_primitive_inputs = st == 1 ? prim_inputs : 0, .context = x,
                                     .read_cbuf = rc_cbuf, .read_memory = rc_read, .texture_info = rc_texture};
     if (st == 0 && d)   // vertex inputs typed as the draw's attributes (the integer formats' classes): vka_draw.c then binds them retyping none
         for (int loc = 0; loc < 16 && loc < d->nattr; loc++) {
@@ -378,7 +386,6 @@ static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, 
             src.vertex_input_types[loc] = vf.kind == 1 ? 2 : vf.kind == 2 ? 1 : 0;
             *vin_types |= (uint64_t)(vf.kind == 1 ? DMSH_VK_TYPE_UINT : vf.kind == 2 ? DMSH_VK_TYPE_SINT : DMSH_VK_TYPE_FLOAT) << (2 * loc);
         }
-    *gl_depth = src.convert_depth;
     int ok = vka_shader_translate(&src, o);
     free(x);
     if (!ok) { snprintf(why, whyn, "%s", o->error); return 0; }
@@ -437,7 +444,9 @@ static void disk_open(void) {
                 memcpy(m, &r, sizeof r);
                 if (fread(m + sizeof r, 1, rest, f) != rest) { free(m); break; }
                 if (r.ctl_len < sizeof(rc_control) || rc_control_bytes(rc_rec_control((const rc_rec*)m)) != r.ctl_len) { free(m); break; }
-                rc_put(&g_disk, r.slot, m); n++; good = ftell(f);
+                // (Lichii: by the slot of its depth mode: records written before the mode was part of the slot have the key's own in r.slot)
+                rc_put(&g_disk, rc_translation_slot(r.key, r.prim_inputs, (int)rc_rec_control((const rc_rec*)m)->stage, r.gl_depth), m);
+                n++; good = ftell(f);
             }
             if (ns) VLOG("recompiler: %u shaders translated speculatively in earlier runs (not done again)", ns);
             // A run killed while it appended a record leaves part of one at the end: cut there, or this run's records would follow it and never be read
@@ -524,8 +533,8 @@ static void dump_listed(const prog_t* p, unsigned i, uint64_t key, const rc_cont
     const char* dir = getenv("EDEN_NX2_NVN_RECOMPILE_DUMP");
     int listed = 0; for (int k = 0; k < nk; k++) listed |= keys[k] == (key ? key : 1);
     if (!listed || !dir || !*dir) return;
-    nvn_direct_shader o; uint64_t vin_types; int gl; char why[300] = "";
-    if (!rc_translate(p, i, control, NULL, 0, &o, &vin_types, &gl, why, sizeof why)) { VRED("recompiler dump %016llx: not translated: %s", (unsigned long long)key, why); return; }
+    nvn_direct_shader o; uint64_t vin_types; char why[300] = "";
+    if (!rc_translate(p, i, control, NULL, 0, !vka_depth_zero(), &o, &vin_types, why, sizeof why)) { VRED("recompiler dump %016llx: not translated: %s", (unsigned long long)key, why); return; }
     char path[1024]; snprintf(path, sizeof path, "%s/%016llx-setshaders.spv", dir, (unsigned long long)key);
     FILE* f = fopen(path, "wb"); if (f) { fwrite(o.spirv, 4, o.spirv_words, f); fclose(f); }
     VLOG("recompiler dump: %s (NVN stage %u, %zu words)", path, control->stage, o.spirv_words);
@@ -557,18 +566,18 @@ static void rc_make(rc_shader* r, uint64_t key, const nvn_direct_shader* o, cons
         memset(r->sh->loop_guard.ptr, 0, 16); guard_add(key, &r->sh->loop_guard); }
 }
 // A shader met for the first time in this run: kept from an earlier run, or translated now with the draw's state (caller holds g_make_mu)
-static rc_shader* rc_new(const prog_t* p, unsigned i, uint64_t key, uint64_t slot, const rc_control* control, uint32_t prim_inputs) {
+static rc_shader* rc_new(const prog_t* p, unsigned i, uint64_t key, uint64_t slot, const rc_control* control, uint32_t prim_inputs, int gl_depth) {
     rc_shader* r = calloc(1, sizeof *r); r->st = (int)control->stage;
     nvn_direct_shader o; uint64_t vin_types = 0; char why[300] = "";
     uint64_t t0 = now_ns();
-    const rc_control* kc; const uint8_t* c1; uint32_t c1_len;
-    int kept = disk_get(slot, &o, &vin_types, &r->gl_depth, &r->prim, &kc, &c1, &c1_len), ok = kept;
+    const rc_control* kc; const uint8_t* c1; uint32_t c1_len; int kept_depth;
+    int kept = disk_get(slot, &o, &vin_types, &kept_depth, &r->prim, &kc, &c1, &c1_len), ok = kept;
     if (!kept) {
         uint32_t a, c1e; rc_c1_range(control, &a, &c1e);
         c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(p->sd[i].data) + a; c1_len = a < c1e ? c1e - a : 0;
-        if ((ok = rc_translate(p, i, control, g_draw, prim_inputs, &o, &vin_types, &r->gl_depth, why, sizeof why))) {
+        if ((ok = rc_translate(p, i, control, g_draw, prim_inputs, gl_depth, &o, &vin_types, why, sizeof why))) {
             r->prim = o.per_primitive_outputs;
-            disk_put(slot, key, prim_inputs, &o, vin_types, r->gl_depth, control, c1, c1_len);
+            disk_put(slot, key, prim_inputs, &o, vin_types, gl_depth, control, c1, c1_len);
             dump_spirv(key, prim_inputs, &o);
         }
     }
@@ -595,42 +604,48 @@ static pthread_mutex_t g_make_mu = PTHREAD_MUTEX_INITIALIZER;
 static rc_shader* rc_lookup(uint64_t slot) { pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_sh, slot); rc_shader* r = e ? e->val : NULL; pthread_mutex_unlock(&g_mu); return r; }
 // The recompiled shader of program p's stage i (key), translated at its first use with the draw's state (or as an earlier run kept it); *st its
 // NVN stage (-1: no control section kept for the key). prim_inputs: a pixel shader's generic inputs its program's mesh shader writes per primitive
-// (PerPrimitiveEXT, flag DMSH_VK_F_MESH_PRIM: a shader of its own, valid only in a mesh pipeline). NULL: not translated or refused (logged once)
-vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t prim_inputs, int* st) {
+// (PerPrimitiveEXT, flag DMSH_VK_F_MESH_PRIM: a shader of its own, valid only in a mesh pipeline). gl_depth: the depth mode a depth stage is translated
+// for (each mode has a translation of its own). NULL: not translated or refused (logged once)
+vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t prim_inputs, int gl_depth, int* st) {
     *st = -1;
-    uint64_t slot = rc_key(prim_inputs ? key ^ ((uint64_t)prim_inputs << 32 | 0x9e1u) : key);
+    const rc_control* control = rc_control_of(key);
+    if (!control) return NULL;
+    uint64_t slot = rc_translation_slot(key, prim_inputs, (int)control->stage, gl_depth);
     rc_shader* r = rc_lookup(slot);
     if (!r) {
-        const rc_control* control = rc_control_of(key);
-        if (!control) return NULL;
         pthread_mutex_lock(&g_make_mu);
-        if (!(r = rc_lookup(slot))) r = rc_new(p, i, key, slot, control, prim_inputs);
+        if (!(r = rc_lookup(slot))) r = rc_new(p, i, key, slot, control, prim_inputs, gl_depth);
         pthread_mutex_unlock(&g_make_mu);
     }
     *st = r->st;
-    if ((r->st == 0 || r->st == 7) && r->gl_depth != !vka_depth_zero()) VRED_ONCE("shader %016llx was translated for the other depth mode: its depth is wrong now", (unsigned long long)key);
     return r->sh;
 }
-vka_shader* vka_rc_by_key(uint64_t key) {
-    uint64_t slot = rc_key(key);
+// Only the key is known here (the prewarm), not its stage: in the near-zero depth mode a depth stage's slot is looked at first, then the key's own, which
+// then counts only for a stage without depth (in GL's, the key's own slot holds both)
+static rc_shader* rc_by_slot(uint64_t key, uint64_t slot, int depth_ok) {
     rc_shader* r = rc_lookup(slot);
-    if (r) return r->sh;
+    if (r) return depth_ok || !rc_depth_stage(r->st) ? r : NULL;
     // Lichii (dotfiles-25x.13): not met in this run yet: made from the translation an earlier run kept (prewarm, pipelines made ahead), and kept for the frame path
-    pthread_mutex_lock(&g_make_mu);
-    if (!(r = rc_lookup(slot))) {
-        nvn_direct_shader o; uint64_t vin_types; const rc_control* control; const uint8_t* c1; uint32_t c1_len; int gl_depth; uint32_t prim;
-        if (disk_get(slot, &o, &vin_types, &gl_depth, &prim, &control, &c1, &c1_len)) {
-            r = calloc(1, sizeof *r); r->st = (int)control->stage; r->gl_depth = gl_depth; r->prim = prim;
-            char why[300] = "";
-            rc_make(r, key, &o, control, c1, c1_len, vin_types, 0, why, sizeof why);
-            g_cached++;
-            unsigned n = ++g_ahead;
-            if (*why || !r->sh) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 64) VRED("recompiled shader %016llx (NVN stage %d, kept): %s", (unsigned long long)key, r->st, *why ? why : "refused"); }
-            if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders made ahead from kept translations (prewarm)", n);
-            pthread_mutex_lock(&g_mu); rc_put(&g_sh, slot, r); pthread_mutex_unlock(&g_mu);
-        }
+    nvn_direct_shader o; uint64_t vin_types; const rc_control* control; const uint8_t* c1; uint32_t c1_len; int gl_depth; uint32_t prim;
+    if (!disk_get(slot, &o, &vin_types, &gl_depth, &prim, &control, &c1, &c1_len) || (!depth_ok && rc_depth_stage((int)control->stage))) return NULL;
+    r = calloc(1, sizeof *r); r->st = (int)control->stage; r->prim = prim;
+    char why[300] = "";
+    rc_make(r, key, &o, control, c1, c1_len, vin_types, 0, why, sizeof why);
+    g_cached++;
+    unsigned n = ++g_ahead;
+    if (*why || !r->sh) { static _Atomic int k; if (atomic_fetch_add(&k, 1) < 64) VRED("recompiled shader %016llx (NVN stage %d, kept): %s", (unsigned long long)key, r->st, *why ? why : "refused"); }
+    if (n == 1 || !(n & (n - 1))) VLOG("recompiler: %u shaders made ahead from kept translations (prewarm)", n);
+    pthread_mutex_lock(&g_mu); rc_put(&g_sh, slot, r); pthread_mutex_unlock(&g_mu);
+    return r;
+}
+vka_shader* vka_rc_by_key(uint64_t key, int gl_depth) {
+    const uint64_t own = rc_key(key), depth = rc_translation_slot(key, 0, 0, gl_depth);
+    rc_shader* r = rc_lookup(depth);
+    if (!r) {
+        pthread_mutex_lock(&g_make_mu);
+        if (!(r = rc_by_slot(key, depth, 1)) && depth != own) r = rc_by_slot(key, own, 0);
+        pthread_mutex_unlock(&g_make_mu);
     }
-    pthread_mutex_unlock(&g_make_mu);
     return r ? r->sh : NULL;
 }
 
@@ -654,8 +669,8 @@ static void spec_one(spec_item it) {
     if (known) { g_spec_skipped++; return; }   // kept from an earlier run (made ahead), met by a draw already, or done speculatively in an earlier run
     int st = (int)it.control->stage;
     prog_t p; memset(&p, 0, sizeof p); p.nstage = 1; p.sd[0].data = it.data;
-    nvn_direct_shader o; uint64_t vin_types; int gl_depth; char why[300]; why[0] = 0;
-    if (!rc_translate(&p, 0, it.control, NULL, 0, &o, &vin_types, &gl_depth, why, sizeof why)) { g_spec_failed++; disk_spec_done(it.key); return; }
+    nvn_direct_shader o; uint64_t vin_types; char why[300]; why[0] = 0;
+    if (!rc_translate(&p, 0, it.control, NULL, 0, !vka_depth_zero(), &o, &vin_types, why, sizeof why)) { g_spec_failed++; disk_spec_done(it.key); return; }
     dmsh_vk_bind* b = rc_binds(&o, st, it.control, why, sizeof why);
     uint32_t a0, c1e; rc_c1_range(it.control, &a0, &c1e); uint32_t c1_len = a0 < c1e ? c1e - a0 : 0;
     const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(it.data) + a0;
@@ -746,8 +761,8 @@ void vka_rc_compare(const prog_t* p, unsigned i, uint64_t key, const vka_shader*
     if (seen) return;
     const rc_control* control = rc_control_of(key);
     if (!control) return;
-    nvn_direct_shader o; dmsh_vk_bind* b = NULL; uint64_t vin_types; int gl = 0; char why[300] = "";
-    int ok = rc_translate(p, i, control, g_draw, 0, &o, &vin_types, &gl, why, sizeof why);
+    nvn_direct_shader o; dmsh_vk_bind* b = NULL; uint64_t vin_types; char why[300] = "";
+    int ok = rc_translate(p, i, control, g_draw, 0, !vka_depth_zero(), &o, &vin_types, why, sizeof why);
     if (ok && !(b = rc_binds(&o, (int)control->stage, control, why, sizeof why))) { vka_shader_translated_free(&o); ok = 0; }
     if (!ok) {
         g_cmp_fail++;
