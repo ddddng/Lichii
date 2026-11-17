@@ -12,9 +12,11 @@
 #define VCAP_IFACE 101   // header key iface: what vcap_iface hashes (the Mac's cap_iface is 2)
 
 // One-off GPU work outside the submissions (texture contents in and out): a command buffer of its own, submitted on the queue and waited for
-VkCommandBuffer vcap_cb_begin(void);
-int vcap_cb_run(VkCommandBuffer cb);   // 1 = done
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n; } vcap_hbuf;   // host-visible, coherent
+VkCommandBuffer vcap_cb_begin(void);
+// 1 = done. h and im (each optional): the staging buffer and image cb uses. When the GPU has not finished in 30 s they are kept until it has: h is taken (left zeroed, so
+// vcap_hbuf_free on it frees nothing) and im gets a reference of its own
+int vcap_cb_run(VkCommandBuffer cb, vcap_hbuf *h, vka_img *im);
 int vcap_hbuf_make(vcap_hbuf *h, VkDeviceSize n);
 void vcap_hbuf_free(vcap_hbuf *h);
 

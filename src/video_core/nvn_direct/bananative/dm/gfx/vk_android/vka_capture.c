@@ -30,9 +30,24 @@
 
 // ---------- One-off GPU work ----------
 static VkCommandPool g_ocp; static VkCommandBuffer g_ocb; static pthread_mutex_t g_omu = PTHREAD_MUTEX_INITIALIZER;
+// Lichii: a submission whose fence was not reached in 30 s keeps its command pool, staging buffer and image (a reference) until the fence is reached (checked at each
+// vcap_cb_begin); the GPU may still run it. The next one-off work gets a new pool. At most VCAP_LATE stay pending: one-off work stops while they all do
+#define VCAP_LATE 4
+typedef struct { VkFence f; VkCommandPool cp; vcap_hbuf h; vka_img *im; } vcap_late;
+static vcap_late g_olate[VCAP_LATE]; static int g_nolate;
+static void vcap_late_reap(void) {
+    for (int i = 0; i < g_nolate;) {
+        vcap_late *l = &g_olate[i];
+        if (vk.vkWaitForFences(V.dev, 1, &l->f, VK_TRUE, 0) != VK_SUCCESS) { i++; continue; }
+        vk.vkDestroyFence(V.dev, l->f, NULL); vk.vkDestroyCommandPool(V.dev, l->cp, NULL); vcap_hbuf_free(&l->h); vka_tex_drop(l->im);
+        *l = g_olate[--g_nolate];
+    }
+}
 VkCommandBuffer vcap_cb_begin(void) {
     if (!vka_init()) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_omu);
+    vcap_late_reap();
+    if (g_nolate == VCAP_LATE) { pthread_mutex_unlock(&g_omu); return VK_NULL_HANDLE; }
     if (!g_ocp) {
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
@@ -44,7 +59,7 @@ VkCommandBuffer vcap_cb_begin(void) {
     vka_barrier(g_ocb);   // after everything submitted before it
     return g_ocb;         // g_omu stays held until vcap_cb_run
 }
-int vcap_cb_run(VkCommandBuffer cb) {
+int vcap_cb_run(VkCommandBuffer cb, vcap_hbuf *h, vka_img *im) {
     vka_barrier(cb);
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
@@ -54,7 +69,12 @@ int vcap_cb_run(VkCommandBuffer cb) {
         vka_qlock(); VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, f); vka_qunlock();
         ok = !r && !vk.vkWaitForFences(V.dev, 1, &f, VK_TRUE, 30000000000ull);
         if (!ok) LOG("[RED] vk: capture / replay copy: submit %d, fence not reached in 30 s", r);
-        if (ok || r) vk.vkDestroyFence(V.dev, f, NULL);   // a fence the GPU may still signal is left alone
+        if (ok || r) vk.vkDestroyFence(V.dev, f, NULL);
+        else {   // the GPU may still run it: its pool, staging buffer and image wait for the fence (vcap_late_reap); the caller's vcap_hbuf_free then frees nothing
+            vcap_late *l = &g_olate[g_nolate++]; *l = (vcap_late){f, g_ocp, {0}, vka_tex_ref(im)};
+            if (h) { l->h = *h; memset(h, 0, sizeof *h); }
+            g_ocp = VK_NULL_HANDLE; g_ocb = VK_NULL_HANDLE;
+        }
     }
     pthread_mutex_unlock(&g_omu);
     return ok;
@@ -118,7 +138,7 @@ uint8_t *vcap_img_level0(vka_img *im, size_t *n) {
     cap_tsub s = all[0]; free(all);   // plane 0, level 0, layer 0
     vcap_hbuf h; if (!vcap_hbuf_make(&h, s.bytes)) return NULL;
     VkCommandBuffer cb = vcap_cb_begin(); uint8_t *out = NULL;
-    if (cb) { vcap_img_copy(cb, im, &s, 1, h.b, 0); if (vcap_cb_run(cb) && (out = malloc((size_t)s.bytes))) { memcpy(out, h.p, (size_t)s.bytes); *n = (size_t)s.bytes; } }
+    if (cb) { vcap_img_copy(cb, im, &s, 1, h.b, 0); if (vcap_cb_run(cb, &h, im) && (out = malloc((size_t)s.bytes))) { memcpy(out, h.p, (size_t)s.bytes); *n = (size_t)s.bytes; } }
     vcap_hbuf_free(&h);
     return out;
 }
@@ -423,7 +443,7 @@ static void cap_tex_read(const tex_t *t, int rec) {
     if (!vcap_hbuf_make(&hb, vcap_sub_off(subs, nsub) + 16)) { cap_fail("no readback buffer for a texture"); free(subs); vka_tex_drop(im); return; }
     if (!(cb = vcap_cb_begin())) { cap_fail("no command buffer for a texture readback"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
     vcap_img_copy(cb, im, subs, nsub, hb.b, 0);
-    if (!vcap_cb_run(cb)) { cap_fail("a texture readback did not finish"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
+    if (!vcap_cb_run(cb, &hb, im)) { cap_fail("a texture readback did not finish"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
     cap_tpix h = {*t, (uint32_t)im->f.vk, im->d.target, im->w, im->h, im->depth, im->levels, im->layers, im->samples, nsub, im->gpu_owned ? 1u : 0u};
     cap_tex_enc(&h.t, "texture contents");
     cap_buf c = {0}; cap_buf_put(&c, &h, sizeof h); cap_buf_put(&c, subs, nsub * sizeof *subs);
