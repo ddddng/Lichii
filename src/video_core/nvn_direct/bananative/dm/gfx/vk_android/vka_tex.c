@@ -1238,7 +1238,7 @@ static int img_rebase(vka_img *im, uint32_t base, VkCommandBuffer cb) {
     im->rs = n->rs; im->va = n->va; im->rs_tw = n->rs_tw; im->rs_th = n->rs_th; im->bfloor = n->bfloor; im->bneed = n->bneed; im->dcap = n->dcap;   // (old's address space, still counted, goes back
                                                                                                                            // at its img_destroy: a finer start is tried again once enough is free)
     free(n);
-    vka_after(vka_fence_last(), img_destroy, old);
+    vka_after(vka_fence_last() + !vka_worker_on(), img_destroy, old);   // (inline replay: after the submission being recorded, whose fence is not reserved yet)
     vka_img_barrier(cb, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     unsigned nid = redirty_ids(im);
     if (g_rebase++ < 32) VLOG("sparse texture serial %llu %ux%u format %#x: levels %u+%u → %u+%u (%.1f → %.1f MiB of image memory, %u texture IDs written again)", (unsigned long long)im->serial, im->d.width, im->d.height,
@@ -2087,7 +2087,7 @@ static int img_storage_upgrade(vka_img *im, VkCommandBuffer cb) {
     VkImage oi = im->img; vka_imem od = im->m; void *ov = im->views; uint64_t ob = im->bytes;
     im->img = n->img; im->m = n->m; im->views = NULL; im->usage = n->usage; im->bytes = n->bytes; im->alt = n->alt; im->any_fmt = n->any_fmt;
     n->img = oi; n->m = od; n->views = ov; n->bytes = ob; g_img_bytes -= ob;
-    vka_after(vka_fence_last(), img_destroy, n);
+    vka_after(vka_fence_last() + !vka_worker_on(), img_destroy, n);   // (inline replay: after the submission being recorded, which copies from it)
     // Views made of the old image are gone with it: the recording memo (g_tgen) and the registered pool slots that name the image are made again
     atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release);
     int named = 0;
@@ -2430,7 +2430,7 @@ static int astc_reformat(vka_img *im, uint8_t bpb, VkCommandBuffer cb) {
     g_img_bytes -= im->bytes;
     im->img = n->img; im->m = n->m; im->views = NULL; im->usage = n->usage; im->bytes = n->bytes; im->f = n->f; im->alt = n->alt; im->nx = n->nx; memcpy(im->xfmt, n->xfmt, sizeof im->xfmt);
     free(n);
-    vka_after(vka_fence_last(), img_destroy, old);
+    vka_after(vka_fence_last() + !vka_worker_on(), img_destroy, old);   // (inline replay: after the submission being recorded)
     VkCommandBuffer ucb = cb && cb == vka_rp_cb() && vka_up_on() ? vka_up_begin() : VK_NULL_HANDLE, ub = ucb ? ucb : cb;
     vka_img_barrier(ub, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     nvn_tex_layout(&t.d, &t.L);
