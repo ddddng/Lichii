@@ -174,10 +174,17 @@ int NvnDirectAstc::Record(void* context, VkCommandBuffer cmdbuf,
                           const nvn_direct_astc_level* level) {
     auto* const self = static_cast<NvnDirectAstc*>(context);
     std::scoped_lock lock{self->mutex};
-    if (self->RecordSmall(cmdbuf, *level)) {
-        return 1;
+    // Called from the replay's C code: nothing may throw through it.
+    try {
+        if (self->RecordSmall(cmdbuf, *level)) {
+            return 1;
+        }
+        return self->RecordLevel(cmdbuf, *level) ? 1 : 0;
+    } catch (const std::exception& exception) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: ASTC decode not recorded: {}",
+                  exception.what());
+        return 0;
     }
-    return self->RecordLevel(cmdbuf, *level) ? 1 : 0;
 }
 
 void NvnDirectAstc::Flush(void* context, VkCommandBuffer cmdbuf) {
@@ -212,30 +219,41 @@ bool NvnDirectAstc::MakeSmallResources() {
         LOG_ERROR(Render_Vulkan, "NVN2 direct mode: no memory for the ASTC small-level slots");
         return false;
     }
-    for (u32 slot = 0; slot < SmallSlots; ++slot) {
-        small_views[slot] = device.GetLogical().CreateImageView({
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .image = *small_image,
-            .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-            .format = VK_FORMAT_R8G8B8A8_UNORM,
-            .components{},
-            .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot, 1},
-        });
+    try {
+        for (u32 slot = 0; slot < SmallSlots; ++slot) {
+            small_views[slot] = device.GetLogical().CreateImageView({
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .image = *small_image,
+                .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+                .format = VK_FORMAT_R8G8B8A8_UNORM,
+                .components{},
+                .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot, 1},
+            });
+        }
+        small_blocks = memory_allocator.TryCreateBuffer(
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .size = VkDeviceSize{SmallTile} * SmallTile * SmallSlots,
+                .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            },
+            MemoryUsage::DeviceLocal);
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: ASTC small-level slots: {}", exception.what());
     }
-    small_blocks = memory_allocator.CreateBuffer(
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = VkDeviceSize{SmallTile} * SmallTile * SmallSlots,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr,
-        },
-        MemoryUsage::DeviceLocal);
+    // Ready only with the whole set: small_blocks stays empty otherwise.
+    if (!small_blocks) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: no ASTC small-level slots");
+        small_views = {};
+        small_image = {};
+        return false;
+    }
     return true;
 }
 
@@ -380,7 +398,7 @@ int NvnDirectAstc::IsOpaque(const void* blocks, size_t size) {
 
 bool NvnDirectAstc::MakeTileResources() {
     if (tile_resources_tried) {
-        return static_cast<bool>(tile_view);
+        return static_cast<bool>(tile_blocks);
     }
     tile_resources_tried = true;
     // The decoder writes rgba8 and the encoder reads it as rgba8 (layout(rgba8)): the storage
@@ -406,29 +424,40 @@ bool NvnDirectAstc::MakeTileResources() {
         LOG_ERROR(Render_Vulkan, "NVN2 direct mode: no memory for the ASTC decode image");
         return false;
     }
-    tile_view = device.GetLogical().CreateImageView({
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .image = *tile_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .components{},
-        .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-    });
-    // BC3 takes one byte a texel, BC1 half of it.
-    tile_blocks = memory_allocator.CreateBuffer(
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    try {
+        tile_view = device.GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .size = VkDeviceSize{TileWidth} * TileHeight,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr,
-        },
-        MemoryUsage::DeviceLocal);
+            .image = *tile_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .components{},
+            .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        });
+        // BC3 takes one byte a texel, BC1 half of it.
+        tile_blocks = memory_allocator.TryCreateBuffer(
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .size = VkDeviceSize{TileWidth} * TileHeight,
+                .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            },
+            MemoryUsage::DeviceLocal);
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: ASTC decode tile: {}", exception.what());
+    }
+    // Ready only with the whole set: tile_blocks stays empty otherwise.
+    if (!tile_blocks) {
+        LOG_ERROR(Render_Vulkan, "NVN2 direct mode: no ASTC decode tile");
+        tile_view = {};
+        tile_image = {};
+        return false;
+    }
     return true;
 }
 
