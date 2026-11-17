@@ -471,6 +471,32 @@ TEST_CASE("NSP discovery skips unreadable NCA metadata", "[core][file_sys][nca_d
             CHECK(Loader::GetContainerProgramStatus(file, Loader::FileType::NSP) ==
                   Loader::ResultStatus::ErrorMissingKeyAreaKey);
         }
+        SECTION("An unreadable duplicate never masks a readable program") {
+            record.nca_id.fill(0x11);
+            const CNMT duplicate_cnmt{header, {}, {record}, {}};
+            const auto readable = MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Program,
+                                                    MakePfs0WithFiles({{"main", {0}}}));
+            for (const bool readable_first : {true, false}) {
+                DYNAMIC_SECTION("Readable program first: " << readable_first) {
+                    auto duplicates = files;
+                    duplicates.emplace_back(
+                        "duplicate.cnmt.nca",
+                        MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Meta,
+                                         MakePfs0WithFiles(
+                                             {{"test.cnmt", duplicate_cnmt.Serialize()}})));
+                    duplicates.emplace_back(program_name,
+                                            readable_first ? readable : unreadable);
+                    duplicates.emplace_back("11111111111111111111111111111111.nca",
+                                            readable_first ? unreadable : readable);
+                    const NSP nsp{MakeFile(MakePfs0WithFiles(duplicates))};
+                    CHECK(nsp.GetProgramTitleID() == TitleId);
+                    CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::Success);
+                    const auto program = nsp.GetNCA(TitleId, ContentRecordType::Program);
+                    REQUIRE(program != nullptr);
+                    CHECK(program->GetStatus() == Loader::ResultStatus::Success);
+                }
+            }
+        }
     }
 
     for (const auto& line : Common::Log::ReadRing(0)) {
