@@ -16,6 +16,8 @@
 
 # Lichii
 
+[![Total downloads](https://img.shields.io/github/downloads/zortos293/Lichii/total)](https://github.com/zortos293/Lichii/releases) [![Latest release downloads](https://img.shields.io/github/downloads/zortos293/Lichii/latest/total)](https://github.com/zortos293/Lichii/releases) [![Latest release](https://img.shields.io/github/v/release/zortos293/Lichii)](https://github.com/zortos293/Lichii/releases)
+
 Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
 
 This is an independent fork, not an official release of those upstream projects. Lichii is not affiliated with Nintendo.
