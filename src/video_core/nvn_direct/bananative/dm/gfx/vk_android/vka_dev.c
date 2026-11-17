@@ -327,14 +327,21 @@ static uint64_t sub_ex(int q, VkCommandBuffer cb, uint64_t signal, uint32_t nwai
     *res = r;
     return qv;
 }
-// The queue idle, bounded by the hang time: the timeline up to the last value handed to it (the present's copies wait for no more), then vkQueueWaitIdle for the rest
+// The queue idle, bounded by the hang time: every timeline the replay's queue work signals, up to the last value handed to a queue: submissions (the present's copies wait
+// for no more), upload batches and sparse binds. Lichii: no vkQueueWaitIdle, which nothing bounds and which held the queue lock
 int vka_queue_idle(void) {
     if (vka_hung()) return 0;
-    uint64_t q = vka_fence_queued();
-    VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &q};
-    VkResult r = q ? vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns()) : VK_SUCCESS;
-    if (r) { VRED("queue idle: fence %llu not reached in %.1f s (%d): not waited for", (unsigned long long)q, vka_hang_ns() / 1e9, r); return 0; }
-    vka_qlock(); vk.vkQueueWaitIdle(V.q); for (int i = 0; V.multi && i < V.nq - 1; i++) vk.vkQueueWaitIdle(V.qs[i]); vka_qunlock();
+    vka_qlock();
+    const uint64_t f = vka_fence_queued(), u = vka_up_last(); const VkSemaphore ut = vka_up_timeline(); uint64_t sp = 0; const VkSemaphore st = vks_timeline(&sp);
+    vka_qunlock();
+    VkSemaphore s[3]; uint64_t v[3]; uint32_t n = 0;
+    if (f) { s[n] = V.tl; v[n++] = f; }
+    if (u && ut) { s[n] = ut; v[n++] = u; }
+    if (sp && st) { s[n] = st; v[n++] = sp; }
+    VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = n, .pSemaphores = s, .pValues = v};
+    VkResult r = n ? vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns()) : VK_SUCCESS;
+    if (r) { VRED("queue idle: fence %llu, upload batch %llu and sparse bind value %llu not all reached in %.1f s (%d): not waited for", (unsigned long long)f, (unsigned long long)u,
+                  (unsigned long long)sp, vka_hang_ns() / 1e9, r); return 0; }
     return 1;
 }
 uint64_t vka_fence_queued(void) { return __atomic_load_n(&V.tl_queued, __ATOMIC_ACQUIRE); }

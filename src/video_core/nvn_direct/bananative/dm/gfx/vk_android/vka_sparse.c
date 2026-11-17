@@ -297,6 +297,8 @@ void vks_queue_locked(uint32_t *nw, VkSemaphore *ws, uint64_t *wv, VkPipelineSta
     pthread_mutex_unlock(&g_ks);
 }
 
+VkSemaphore vks_timeline(uint64_t *last) { pthread_mutex_lock(&g_ks); VkSemaphore s = g_stl; *last = g_sig; pthread_mutex_unlock(&g_ks); return s; }   // Lichii (vka_queue_idle)
+
 void vks_stats(char *o, size_t n) {
     pthread_mutex_lock(&g_ks);
     uint64_t used = 0; uint32_t nb = 0; for (uint32_t i = 0; i < g_ntb; i++) if (g_tb[i]) { nb++; used += g_tb[i]->used; }
