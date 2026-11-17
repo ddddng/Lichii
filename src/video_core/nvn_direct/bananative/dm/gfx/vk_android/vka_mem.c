@@ -901,7 +901,7 @@ void *vka_mem_mapped(size_t n) {
 static void lazy_release_note(uintptr_t lo, uintptr_t hi);
 int vka_mem_release(uintptr_t lo, uintptr_t hi) {
     if (!vka_ok() || hi <= lo) return 0;
-    lo = key(lo); hi = lo + (hi - lo);
+    const uintptr_t len = hi - lo; lo = key(lo); hi = lo + len;
     segvec v = {0};
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
     int k = sg_find(lo); if (k < 0 || g_sg[k].hi <= lo) k++;
