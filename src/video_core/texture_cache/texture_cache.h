@@ -184,7 +184,8 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     // was made again, the outfit, blade or enemy drew zeros (black) or, before the image
     // loaded stale pages, leftover host memory (rainbow noise). Download them, all with one
     // wait, oldest modification first so the newest data wins where they overlap.
-    // EDEN_NX2_GC_DOWNLOAD_OVERLAPS (on for The Duskbloods, =1 every title, =0 off).
+    // EDEN_NX2_GC_DOWNLOAD_OVERLAPS (on for The Duskbloods and Ocarina of Time, =1 every title,
+    // =0 off).
     using DownloadMap = decltype(runtime.DownloadStagingBuffer(size_t{}));
     struct OverlapDownload {
         u64 tick;
@@ -205,7 +206,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     // Not const, here and below: with OpenGL both would be constant expressions, which the
     // lambda below must then not capture (-Wunused-lambda-capture), while Vulkan's must be.
     bool download_overlaps = std::is_trivially_destructible_v<DownloadMap> &&
-                             WritebackSwitches::DuskbloodsDefault(download_overlaps_setting);
+                             WritebackSwitches::TitleDefault(download_overlaps_setting);
     // EDEN_NX2_GC_DOWNLOAD_ASYNC (on unless =0): the collector does not wait for its
     // write-backs (each wait was 5-10 ms, several a second in combat); they reach guest memory
     // when the GPU is done with them.
@@ -756,13 +757,13 @@ void TextureCache<P>::CancelAsyncOverlapDownloadsGpu(size_t as_id, GPUVAddr gpu_
 
 template <class P>
 void TextureCache<P>::WriteBackBadOverlaps(ImageId new_image_id) {
-    // EDEN_NX2_JOIN_WRITEBACK (on for The Duskbloods, =1 every title, =0 off). An image made over
-    // GPU-written images it overlaps without fitting (kept alive, not copied in) loaded guest
-    // memory without their data. The Duskbloods renders its characters' 64x64 detail maps through
+    // EDEN_NX2_JOIN_WRITEBACK (on for The Duskbloods and Ocarina of Time, =1 every title, =0
+    // off). An image made over GPU-written images it overlaps without fitting (kept alive, not
+    // copied in) loaded guest memory without their data. The Duskbloods renders its characters' 64x64 detail maps through
     // other render targets at the same addresses and samples them through new images, which
     // showed the memory's fill pattern (purple enemies) or zeros (black outfits).
     static const int setting = WritebackSwitches::SwitchSetting("EDEN_NX2_JOIN_WRITEBACK");
-    if (!WritebackSwitches::DuskbloodsDefault(setting)) {
+    if (!WritebackSwitches::TitleDefault(setting)) {
         return;
     }
     const bool async = AsyncOverlapDownloadsEnabled();
