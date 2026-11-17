@@ -2613,10 +2613,18 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             return alignment > 1 && (offset % alignment) != 0;
         }
     }();
-    if (native_bank &&
-        (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
+    // EDEN_NX2_BANK_REUPLOAD (test switch, upstream Eglantine 031e07436c by kraibse): 0 off,
+    // 1 once per frame (the default), 2 on every bind.
+    static const char bank_mode = [] {
+        const char* const value = std::getenv("EDEN_NX2_BANK_REUPLOAD");
+        return value != nullptr && value[0] != '\0' ? value[0] : '1';
+    }();
+    const bool every_bind = bank_mode == '2';
+    if (native_bank && bank_mode != '0' &&
+        (every_bind || Nx2Perf::Verify() ||
+         !native_indirect_uniforms_this_frame.contains(device_addr)) &&
         !memory_tracker.IsRegionGpuModified(device_addr, size) &&
-        native_indirect_uniforms_this_frame.insert(device_addr).second) {
+        (native_indirect_uniforms_this_frame.insert(device_addr).second || every_bind)) {
         // The bank size is only an upper limit: stop at the end of the mapped memory.
         u64 mapped_size = 0;
         while (mapped_size < size &&
@@ -3096,19 +3104,44 @@ void BufferCache<P>::UpdateIndexBuffer() {
 
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
     const u32 size = (std::min)(address_size, draw_size);
-    if (size == 0 || !device_addr) {
+    if (size == 0) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
-    channel_state->index_buffer = Binding{
-        .device_addr = *device_addr,
+    // The draw macros dirty the index buffer on every draw. While the start's translation and
+    // the buffers are unchanged, the buffer FindBuffer gave for a size from the start is its answer
+    // for every smaller size too. Accurate GPU fences make FindBuffer wait for buffer writes.
+    ResolveMemo& memo = index_memo;
+    const size_t owner = gpu_memory->GetID() + 1;
+    const u64 serial = gpu_memory->MapSerial();
+    const bool hit = memo.owner == owner && memo.map_serial == serial &&
+                     memo.deletions == buffer_deletions && memo.begin == gpu_addr_begin &&
+                     size <= memo.binding.size && !Settings::IsGPUFenceBehaviorAccurate();
+    const Binding kept{
+        .device_addr = memo.binding.device_addr,
         .size = size,
-        .buffer_id = FindBuffer(*device_addr, size, false),
+        .buffer_id = memo.binding.buffer_id,
     };
+    if (hit && !Nx2Perf::Verify()) {
+        channel_state->index_buffer = kept;
+        return;
+    }
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
+    const Binding binding = device_addr ? Binding{
+                                              .device_addr = *device_addr,
+                                              .size = size,
+                                              .buffer_id = FindBuffer(*device_addr, size, false),
+                                          }
+                                        : NULL_BINDING;
+    if (hit) {
+        CheckResolveMemo("index buffer", 0, kept, binding);
+    }
+    memo = device_addr ? ResolveMemo{owner, serial, buffer_deletions, gpu_addr_begin, 0, binding}
+                       : ResolveMemo{};
+    channel_state->index_buffer = binding;
 }
 
 template <class P>
@@ -3138,25 +3171,62 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         throw std::runtime_error("Native vertex stream exceeds supported 32-bit buffer size");
     }
     const GPUVAddr gpu_addr_end = native ? gpu_addr_begin + native_size : limit.Address() + 1;
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
-    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
-    u32 size = address_size; // TODO: Analyze stride and number of vertices
-    if (array.enable == 0 || size == 0 || !device_addr) {
+    // TODO: Analyze stride and number of vertices
+    u32 size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
+    if (array.enable == 0 || size == 0) {
         channel_state->vertex_buffers[index] = NULL_BINDING;
         UpdateVertexBufferSlot(index, NULL_BINDING);
         return;
     }
-    if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
-        size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr_begin, size));
+    // A stream resolves as it did last time while its range, the address space's mappings and the
+    // buffers are unchanged: FindBuffer answers otherwise only once a buffer over the range is
+    // deleted. Accurate GPU fences make FindBuffer wait for buffer writes.
+    ResolveMemo& memo = vertex_memos[index];
+    const size_t owner = gpu_memory->GetID() + 1;
+    const u64 serial = gpu_memory->MapSerial();
+    const bool hit = memo.owner == owner && memo.map_serial == serial &&
+                     memo.deletions == buffer_deletions && memo.begin == gpu_addr_begin &&
+                     memo.end == gpu_addr_end && !Settings::IsGPUFenceBehaviorAccurate();
+    if (hit && !Nx2Perf::Verify()) {
+        channel_state->vertex_buffers[index] = memo.binding;
+        UpdateVertexBufferSlot(index, memo.binding);
+        return;
     }
-    const BufferId buffer_id = FindBuffer(*device_addr, size, false);
-    const Binding binding{
-        .device_addr = *device_addr,
-        .size = size,
-        .buffer_id = buffer_id,
-    };
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
+    Binding binding = NULL_BINDING;
+    if (device_addr) {
+        if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
+            size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr_begin, size));
+        }
+        binding = Binding{
+            .device_addr = *device_addr,
+            .size = size,
+            .buffer_id = FindBuffer(*device_addr, size, false),
+        };
+    }
+    if (hit) {
+        CheckResolveMemo("vertex stream", index, memo.binding, binding);
+    }
+    memo = device_addr
+               ? ResolveMemo{owner, serial, buffer_deletions, gpu_addr_begin, gpu_addr_end, binding}
+               : ResolveMemo{};
     channel_state->vertex_buffers[index] = binding;
     UpdateVertexBufferSlot(index, binding);
+}
+
+template <class P>
+void BufferCache<P>::CheckResolveMemo(const char* kind, u32 index, const Binding& kept,
+                                      const Binding& resolved) {
+    static std::atomic<u32> logged{};
+    if ((kept.device_addr != resolved.device_addr || kept.size != resolved.size ||
+         kept.buffer_id != resolved.buffer_id) &&
+        logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+        LOG_ERROR(HW_GPU,
+                  "Nx2Perf resolve memo: {} {} kept {:#x}+{:#x} in buffer {}, resolves to "
+                  "{:#x}+{:#x} in buffer {}",
+                  kind, index, kept.device_addr, kept.size, kept.buffer_id.index,
+                  resolved.device_addr, resolved.size, resolved.buffer_id.index);
+    }
 }
 
 template <class P>
