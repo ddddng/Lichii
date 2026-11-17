@@ -311,6 +311,18 @@ static int queue_move(int n) {
     g_qt[n].q = c; qt_shared();
     return c;
 }
+// The submission's slot: the next in turn once its last submission is done. Lichii: with the NVN queues as Vulkan queues, the first in turn whose own last submission
+// is done, not every fence before it as well (vka_done is in fence order): a submission whose part waits on the GPU for an event signalled by a submission 8 or more
+// later, on another queue as the console allows, held the replay thread here before it could submit that signal. It still waits while every slot's submission runs
+static unsigned slot_take(void) {
+    while (V.multi) {
+        for (unsigned i = 0; i < NSLOT; i++) { unsigned k = (g_slot_i + i) % NSLOT; if (!g_slot[k].fence || vka_wait_fence(g_slot[k].fence, 0)) { g_slot_i = k + 1; return k; } }
+        vka_wait_fence(g_slot[g_slot_i % NSLOT].fence, 1000000);   // (then every slot again)
+    }
+    unsigned k = g_slot_i++ % NSLOT;
+    if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
+    return k;
+}
 void vka_rp_sub_begin(void) {
     uint64_t t_o72b = now_ns();
     vka_perf_thread(0); vka_ctl_sub();
@@ -331,8 +343,8 @@ void vka_rp_sub_begin(void) {
         if (vk.vkCreateCommandPool(V.dev, &pi, NULL, &g_pool) || ((ai.commandPool = g_pool), vk.vkAllocateCommandBuffers(V.dev, &ai, cbs))) { VRED("submission command buffers not made"); g_pool = VK_NULL_HANDLE; return; }
         for (int i = 0; i < NSLOT; i++) g_slot[i].cb = cbs[i];
     }
-    unsigned k = g_slot_i++ % NSLOT;
-    if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
+    unsigned k = slot_take();
+    if (g_slot_ts[k]) gpu_slot_done(k);
     uint64_t done = vka_done();
     for (unsigned i = 0; i < NSLOT; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
     g_cb = g_slot[k].cb;
