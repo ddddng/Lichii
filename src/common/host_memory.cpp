@@ -11,6 +11,7 @@
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
 #include <psapi.h>
+#include <atomic>
 #include <vector>
 #include "common/dynamic_library.h"
 
@@ -124,6 +125,97 @@ using PFN_MapViewOfFile3 = _Ret_maybenull_ PVOID(WINAPI*)(
 using PFN_UnmapViewOfFile2 = BOOL(WINAPI*)(_In_ HANDLE Process, _In_ PVOID BaseAddress,
                                            _In_ ULONG UnmapFlags);
 
+// Windows can't shrink a view in place: a partial unmap takes the whole view down and maps back what
+// the unmap leaves (UnmapOnePlaceholder, UnmapOneAlias), and the rest of the view faults meanwhile.
+// The JIT gets past such a fault through its fastmem handler, but host code that reads guest memory
+// in place has none (NVN direct's front end). A fault in the arena or an alias region waits for the
+// remaps in progress and retries the access when the page allows it now.
+namespace {
+std::atomic<int> remaps_in_progress{};
+thread_local bool remapping{};
+SRWLOCK retry_ranges_lock = SRWLOCK_INIT;
+std::vector<std::pair<uintptr_t, size_t>> retry_ranges; ///< (base, size)
+
+LONG CALLBACK RetryRemappedAccess(EXCEPTION_POINTERS* pointers) {
+    const EXCEPTION_RECORD& record = *pointers->ExceptionRecord;
+    if (record.ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record.NumberParameters < 2 ||
+        remapping) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const ULONG_PTR access = record.ExceptionInformation[0]; // 0 read, 1 write, 8 execute
+    const uintptr_t address = record.ExceptionInformation[1];
+    if (access > 1) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    AcquireSRWLockShared(&retry_ranges_lock);
+    const bool in_range =
+        std::any_of(retry_ranges.begin(), retry_ranges.end(),
+                    [&](const auto& range) { return address - range.first < range.second; });
+    ReleaseSRWLockShared(&retry_ranges_lock);
+    if (!in_range) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    while (remaps_in_progress.load(std::memory_order_acquire) != 0) {
+        SwitchToThread();
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) == 0 ||
+        info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    constexpr DWORD Writable =
+        PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (access == 1 && (info.Protect & Writable) == 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // A page that allows the access and still faults would retry forever.
+    thread_local uintptr_t last_address{};
+    thread_local ULONGLONG last_tick{};
+    thread_local int retries{};
+    const ULONGLONG tick = GetTickCount64();
+    retries = address == last_address && tick - last_tick < 100 ? retries + 1 : 0;
+    last_address = address;
+    last_tick = tick;
+    return retries < 64 ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+void AddRetryRange(const void* base, size_t size) {
+    static std::once_flag installed;
+    std::call_once(installed, [] { AddVectoredExceptionHandler(1, RetryRemappedAccess); });
+    AcquireSRWLockExclusive(&retry_ranges_lock);
+    retry_ranges.emplace_back(reinterpret_cast<uintptr_t>(base), size);
+    ReleaseSRWLockExclusive(&retry_ranges_lock);
+}
+
+void RemoveRetryRange(const void* base) {
+    AcquireSRWLockExclusive(&retry_ranges_lock);
+    std::erase_if(retry_ranges, [&](const auto& range) {
+        return range.first == reinterpret_cast<uintptr_t>(base);
+    });
+    ReleaseSRWLockExclusive(&retry_ranges_lock);
+}
+
+/// Marks the time a partial unmap leaves the rest of its view unmapped.
+class RemapScope {
+public:
+    explicit RemapScope(bool active_) : active{active_} {
+        if (active) {
+            remapping = true;
+            remaps_in_progress.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+    ~RemapScope() {
+        if (active) {
+            remaps_in_progress.fetch_sub(1, std::memory_order_acq_rel);
+            remapping = false;
+        }
+    }
+
+private:
+    bool active;
+};
+} // namespace
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
@@ -212,6 +304,7 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to reserve {} GiB of virtual memory", virtual_size >> 30);
             return false;
         }
+        AddRetryRange(virtual_base, virtual_size);
         return true;
     }
 
@@ -402,6 +495,7 @@ public:
             LOG_ERROR(HW_Memory, "Alias region of {:#x} bytes: no placeholder, error {}", length, GetLastError());
             return nullptr;
         }
+        AddRetryRange(base, length);
         std::scoped_lock lock{alias_mutex};
         alias_regions.emplace(base, AliasRegion{.size = length});
         return base;
@@ -469,6 +563,7 @@ public:
         if (!region.views.empty()) {
             VirtualFreeEx(process, base, region.size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
         }
+        RemoveRetryRange(base);
         if (!VirtualFreeEx(process, base, 0, MEM_RELEASE)) {
             LOG_ERROR(HW_Memory, "Alias region at {}: freeing it, error {}", fmt::ptr(base), GetLastError());
         }
@@ -499,6 +594,7 @@ private:
             Coalesce(0, virtual_size);
         }
         if (virtual_base) {
+            RemoveRetryRange(virtual_base);
             if (!VirtualFree(virtual_base, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free virtual memory");
             }
@@ -544,26 +640,29 @@ private:
         const bool split_left = unmap_begin > placeholder_begin;
         const bool split_right = unmap_end < placeholder_end;
 
-        if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder_begin,
-                                  MEM_PRESERVE_PLACEHOLDER)) {
-            LOG_CRITICAL(HW_Memory, "Failed to unmap placeholder");
-        }
-        // If we have to remap memory regions due to partial unmaps, we are in a data race as
-        // Windows doesn't support remapping memory without unmapping first. Avoid adding any extra
-        // logic within the panic region described below.
+        {
+            const RemapScope remap{split_left || split_right};
+            if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder_begin,
+                                      MEM_PRESERVE_PLACEHOLDER)) {
+                LOG_CRITICAL(HW_Memory, "Failed to unmap placeholder");
+            }
+            // If we have to remap memory regions due to partial unmaps, we are in a data race as
+            // Windows doesn't support remapping memory without unmapping first. Avoid adding any
+            // extra logic within the panic region described below.
 
-        // Panic region, we are in a data race right now
-        if (split_left || split_right) {
-            Split(unmap_begin, unmap_end - unmap_begin);
+            // Panic region, we are in a data race right now
+            if (split_left || split_right) {
+                Split(unmap_begin, unmap_end - unmap_begin);
+            }
+            if (split_left) {
+                MapView(placeholder_begin, host_offset, unmap_begin - placeholder_begin);
+            }
+            if (split_right) {
+                MapView(unmap_end, host_offset + unmap_end - placeholder_begin,
+                        placeholder_end - unmap_end);
+            }
+            // End panic region
         }
-        if (split_left) {
-            MapView(placeholder_begin, host_offset, unmap_begin - placeholder_begin);
-        }
-        if (split_right) {
-            MapView(unmap_end, host_offset + unmap_end - placeholder_begin,
-                    placeholder_end - unmap_end);
-        }
-        // End panic region
 
         size_t coalesce_begin = unmap_begin;
         if (!split_left) {
@@ -675,22 +774,25 @@ private:
         const bool split_left = unmap_begin > view_begin;
         const bool split_right = unmap_end < view_end;
 
-        if (!pfn_UnmapViewOfFile2(process, base + view_begin, MEM_PRESERVE_PLACEHOLDER)) {
-            LOG_ERROR(HW_Memory, "Alias at {}: unmapping its view, error {}", fmt::ptr(base + view_begin), GetLastError());
-        }
-        if (split_left || split_right) {
-            VirtualFreeEx(process, base + unmap_begin, unmap_end - unmap_begin, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
-        }
-        const auto map = [&](size_t at, size_t from, size_t size) {
-            if (!pfn_MapViewOfFile3(backing_handle, process, base + at, from, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0)) {
-                LOG_ERROR(HW_Memory, "Alias at {}: mapping what an unmap leaves, error {}", fmt::ptr(base + at), GetLastError());
+        {
+            const RemapScope remap{split_left || split_right};
+            if (!pfn_UnmapViewOfFile2(process, base + view_begin, MEM_PRESERVE_PLACEHOLDER)) {
+                LOG_ERROR(HW_Memory, "Alias at {}: unmapping its view, error {}", fmt::ptr(base + view_begin), GetLastError());
             }
-        };
-        if (split_left) {
-            map(view_begin, host_offset, unmap_begin - view_begin);
-        }
-        if (split_right) {
-            map(unmap_end, host_offset + unmap_end - view_begin, view_end - unmap_end);
+            if (split_left || split_right) {
+                VirtualFreeEx(process, base + unmap_begin, unmap_end - unmap_begin, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+            }
+            const auto map = [&](size_t at, size_t from, size_t size) {
+                if (!pfn_MapViewOfFile3(backing_handle, process, base + at, from, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0)) {
+                    LOG_ERROR(HW_Memory, "Alias at {}: mapping what an unmap leaves, error {}", fmt::ptr(base + at), GetLastError());
+                }
+            };
+            if (split_left) {
+                map(view_begin, host_offset, unmap_begin - view_begin);
+            }
+            if (split_right) {
+                map(unmap_end, host_offset + unmap_end - view_begin, view_end - unmap_end);
+            }
         }
 
         size_t coalesce_begin = unmap_begin;
