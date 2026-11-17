@@ -92,18 +92,20 @@ struct DeviceIntegerFrame {
     u64 out;
 };
 
-/// One host thread's counters (a core's thread runs one guest thread at a time: no atomics).
+/// One host thread's counters. Only that thread increments them, but OnPresent sums them from
+/// another: relaxed atomics.
 struct Counters {
-    std::array<u64, MaxSlots> calls{};
-    std::vector<u64> emitted_headers; ///< by key, EDEN_NX2_NVN_EMITTED only
-    u64 decoded_calls{};
-    u64 emitted_words{};
-    u64 skipped_calls{}; ///< the write pointer moved to another chunk
+    std::array<std::atomic<u64>, MaxSlots> calls{};
+    std::vector<std::atomic<u64>> emitted_headers; ///< by key, EDEN_NX2_NVN_EMITTED only
+    std::atomic<u64> decoded_calls{};
+    std::atomic<u64> emitted_words{};
+    std::atomic<u64> skipped_calls{}; ///< the write pointer moved to another chunk
     // EDEN_NX2_NVN_HLE=BindTexture
-    u64 hle_calls{};      ///< written as a marker
-    u64 hle_fallbacks{};  ///< left to the driver: compute/task stage, unlearned, no room
-    u64 verify_checked{}; ///< EDEN_NX2_NVN_HLE_VERIFY: driver output compared with the marker's
-    u64 verify_mismatches{};
+    std::atomic<u64> hle_calls{};     ///< written as a marker
+    std::atomic<u64> hle_fallbacks{}; ///< left to the driver: compute/task stage, unlearned, no room
+    /// EDEN_NX2_NVN_HLE_VERIFY: driver output compared with the marker's
+    std::atomic<u64> verify_checked{};
+    std::atomic<u64> verify_mismatches{};
 };
 
 struct LookupFrame {
@@ -267,7 +269,7 @@ Counters& LocalCounters(State& state) {
         counters = new Counters;
         counters_boot = state.boot;
         if (state.emitted) {
-            counters->emitted_headers.resize(1u << 16);
+            counters->emitted_headers = std::vector<std::atomic<u64>>(1u << 16);
         }
         std::scoped_lock lock{state.mutex};
         state.counters.push_back(counters);
@@ -437,12 +439,12 @@ bool ReadGuest(Core::Memory::Memory& memory, u64 address, void* out, size_t size
 /// The method headers a top-level command-buffer call wrote between `begin` and `end`.
 void DecodeEmitted(Counters& counters, Core::Memory::Memory& memory, u64 begin, u64 end) {
     if (begin == 0 || end < begin || end - begin > 0x10000) {
-        ++counters.skipped_calls;
+        counters.skipped_calls.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    ++counters.decoded_calls;
+    counters.decoded_calls.fetch_add(1, std::memory_order_relaxed);
     const size_t count = static_cast<size_t>((end - begin) / 4);
-    counters.emitted_words += count;
+    counters.emitted_words.fetch_add(count, std::memory_order_relaxed);
     if (count == 0) {
         return;
     }
@@ -464,7 +466,7 @@ void DecodeEmitted(Counters& counters, Core::Memory::Memory& memory, u64 begin, 
         }
         // The header's method field is in words; subchannel bits 13-15.
         const u32 key = (((header >> 13) & 7) << 13) | (header & 0x1fff);
-        ++counters.emitted_headers[key];
+        counters.emitted_headers[key].fetch_add(1, std::memory_order_relaxed);
         VideoCommon::NvnHeaderCount::NoteWritten(
             memory.GetPointerSilent(Common::ProcessAddress{begin + i * 4}), header);
         i += 1 + data;
@@ -481,14 +483,14 @@ bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
     const u32 slot = static_cast<u32>(jit.GetRegister(2));
     const u32 handle = static_cast<u32>(jit.GetRegister(3));
     if (stage == ComputeStage || stage == TaskStage || stage >= MaxStages || slot > 0xff) {
-        ++counters.hle_fallbacks;
+        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     const u32 learned = state.bind_texture_argument[stage].load(std::memory_order_relaxed);
     if (learned == 0) {
         frame.learn_stage = stage;
         want_return = true;
-        ++counters.hle_fallbacks;
+        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     namespace Marker = VideoCommon::NvnHleMarker;
@@ -504,13 +506,14 @@ bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
     const u64 write_pointer = memory.Read64(command_buffer);
     const u64 end = memory.Read64(command_buffer + 8);
     if (write_pointer == 0 || write_pointer + 12 > end) {
-        ++counters.hle_fallbacks; // the driver asks the game for more memory
+        // the driver asks the game for more memory
+        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     const std::array<u32, 3> words{Marker::Header(Marker::BindTexture, 2), word0, handle};
     memory.WriteBlock(write_pointer, words.data(), sizeof(words));
     memory.Write64(command_buffer, write_pointer + sizeof(words));
-    ++counters.hle_calls;
+    counters.hle_calls.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -532,10 +535,10 @@ void CheckBindTexture(State& state, Counters& counters, Core::Memory::Memory& me
         }
         return;
     }
-    ++counters.verify_checked;
+    counters.verify_checked.fetch_add(1, std::memory_order_relaxed);
     if (count != frame.expected_count ||
         !std::equal(written, written + count, frame.expected)) {
-        if (counters.verify_mismatches++ < 16) {
+        if (counters.verify_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
             LOG_ERROR(Core, "NVN HLE verify: BindTexture wrote {} words {:08x} {:08x} {:08x} {:08x} "
                             "{:08x}, the marker stands for {} words {:08x} {:08x} {:08x} {:08x} {:08x}",
                       count, written[0], written[1], written[2], written[3], written[4],
@@ -738,7 +741,7 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
         jit.SetRegister(16, lr);
         return false;
     }
-    ++LocalCounters(state).calls[slot];
+    LocalCounters(state).calls[slot].fetch_add(1, std::memory_order_relaxed);
     const Slot& target = state.slots[slot];
     jit.SetRegister(16, lr);
     if (target.front < 0 || !nvn_direct_implemented(target.front)) {
@@ -946,7 +949,7 @@ bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
                          ? MaxSlots
                          : static_cast<u32>((pc - state.synthetic_base) / 4);
     if (slot == LookupSlot) {
-        ++LocalCounters(state).calls[LookupSlot];
+        LocalCounters(state).calls[LookupSlot].fetch_add(1, std::memory_order_relaxed);
     }
     if (slot == MaxSlots || slot == LookupSlot) {
         // nvnBootstrapLoader(name) or nvnDeviceGetProcAddress(device, name): return through
@@ -1043,7 +1046,7 @@ bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
         return false;
     }
     Counters& counters = LocalCounters(state);
-    ++counters.calls[slot];
+    counters.calls[slot].fetch_add(1, std::memory_order_relaxed);
     const Slot& target = state.slots[slot];
     CommandFrame frame{.lr = jit.GetRegister(30), .decode = state.emitted && target.command_buffer};
     bool want_return = frame.decode;
@@ -1257,7 +1260,7 @@ void OnPresent(u64 present) {
     for (u32 slot = LookupSlot; slot < slots; ++slot) {
         u64 calls = 0;
         for (const Counters* counters : state.counters) {
-            calls += counters->calls[slot];
+            calls += counters->calls[slot].load(std::memory_order_relaxed);
         }
         if (calls != 0) {
             text += fmt::format("c {} {} {}\n", present, slot, calls);
@@ -1266,15 +1269,15 @@ void OnPresent(u64 present) {
     if (state.emitted) {
         u64 decoded = 0, words = 0, skipped = 0;
         for (const Counters* counters : state.counters) {
-            decoded += counters->decoded_calls;
-            words += counters->emitted_words;
-            skipped += counters->skipped_calls;
+            decoded += counters->decoded_calls.load(std::memory_order_relaxed);
+            words += counters->emitted_words.load(std::memory_order_relaxed);
+            skipped += counters->skipped_calls.load(std::memory_order_relaxed);
         }
         text += fmt::format("ew {} {} {} {}\n", present, decoded, words, skipped);
         for (u32 key = 0; key < (1u << 16); ++key) {
             u64 headers = 0;
             for (const Counters* counters : state.counters) {
-                headers += counters->emitted_headers[key];
+                headers += counters->emitted_headers[key].load(std::memory_order_relaxed);
             }
             if (headers != 0) {
                 text += fmt::format("e {} {:#x} {}\n", present, key, headers);
@@ -1288,10 +1291,10 @@ void OnPresent(u64 present) {
     if (state.hle_bind_texture) {
         u64 hle = 0, fallbacks = 0, checked = 0, mismatches = 0;
         for (const Counters* counters : state.counters) {
-            hle += counters->hle_calls;
-            fallbacks += counters->hle_fallbacks;
-            checked += counters->verify_checked;
-            mismatches += counters->verify_mismatches;
+            hle += counters->hle_calls.load(std::memory_order_relaxed);
+            fallbacks += counters->hle_fallbacks.load(std::memory_order_relaxed);
+            checked += counters->verify_checked.load(std::memory_order_relaxed);
+            mismatches += counters->verify_mismatches.load(std::memory_order_relaxed);
         }
         text += fmt::format("h {} {} {} {} {}\n", present, hle, fallbacks, checked, mismatches);
     }
