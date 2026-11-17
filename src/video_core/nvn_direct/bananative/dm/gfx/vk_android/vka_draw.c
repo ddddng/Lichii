@@ -197,7 +197,11 @@ int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
         else if (b->first >= 0 && b->n >= 0 && b->first + b->n <= 16) { memcpy(d->excl[b->first], b->r, 16 * (size_t)b->n); if (b->first + b->n > d->excl_n) d->excl_n = b->first + b->n; }
         break; }
     case OP_VRS_IMAGE: d->vrs = *(const p_vrs_image *)a; break;
-    case OP_VRS_PALETTE: { const p_vrs_palette *b = a; memcpy(d->vrs_pal[b->viewport & 15], b->rate, 16); break; }
+    case OP_VRS_PALETTE: { const p_vrs_palette *b = a; memcpy(d->vrs_pal[b->viewport & 15], b->rate, 16);
+        static _Atomic int noted; int coarse = 0; for (int i = 0; i < 16; i++) coarse |= b->rate[i] != 5;
+        if (coarse && !atomic_exchange(&noted, 1)) VLOG("shading-rate palette: the first with rates other than one invocation a pixel, viewport %d: %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", b->viewport,
+                                                        b->rate[0], b->rate[1], b->rate[2], b->rate[3], b->rate[4], b->rate[5], b->rate[6], b->rate[7], b->rate[8], b->rate[9], b->rate[10], b->rate[11], b->rate[12], b->rate[13], b->rate[14], b->rate[15]);
+        break; }
     case OP_BIND_DEFER: bind_deferred(d, a); break;
     case OP_PUSH_DEFER: { const p_push_defer *b = a;
         if ((uint32_t)b->offset + b->size <= DMSH_PUSH_SIZE && !cpu_read(b->src, d->b.push[b->compute ? 1 : 0] + b->offset, b->size)) VRED_ONCE("deferred push constants at %#llx are not readable: not pushed", (unsigned long long)b->src);
@@ -471,6 +475,10 @@ static VkImageView vrs_fill(const vrs_key *k, VkExtent2D area) {
     vk.vkCmdDispatch(g_cb, (tw + 7) / 8, (th + 7) / 8, 1);
     vka_barrier(g_cb);
     vka_dyn_invalidate();   // (the compute pipeline's push constants and descriptors disturb the draws' ones)
+    static _Atomic int noted;
+    if (!atomic_exchange(&noted, 1)) VLOG("shading-rate attachment: first pass %ux%u, from texture serial %llu (%ux%u format %#x%s), viewport 0's rates %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                                          area.width, area.height, (unsigned long long)k->serial, im->w, im->h, im->d.format, im->scaled ? ", scaled" : "", k->rate[0], k->rate[1], k->rate[2], k->rate[3],
+                                          k->rate[4], k->rate[5], k->rate[6], k->rate[7], k->rate[8], k->rate[9], k->rate[10], k->rate[11]);
     return att;
 }
 // Opens the pass over the bound targets: 0 = it cannot (no target can be an attachment), logged
