@@ -225,7 +225,8 @@ static void *ts_main(void *a) {
             if (got && ok) { pthread_mutex_unlock(&g_tsmu); ts_busiest(base, tmp, b, sizeof b); pthread_mutex_lock(&g_tsmu); }
             if (g_tsq[q].f == fq && g_tsq[q].state == 1) { memcpy(g_tsq[q].s, b, sizeof b); g_tsq[q].state = 2; }   // (else a newer frame took the slot meanwhile: asked again)
         }
-        if (ok) { g_ts[g_tsn++ % TS_RING] = *tmp; next = ts_now() + (uint64_t)ts_period_ms() * 1000000ull; }
+        if (ok) g_ts[g_tsn++ % TS_RING] = *tmp;
+        next = ts_now() + (uint64_t)ts_period_ms() * 1000000ull;   // (also after a failed reading: the next one waits its period)
     }
     return NULL;
 }
