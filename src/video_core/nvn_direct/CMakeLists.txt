@@ -50,6 +50,7 @@ add_library(nvn_direct STATIC
     ${BN}/gfx/vk_android/vka_tex.c
     ${BN}/gfx/vk_android/vka_worker.c
     ${BN}/host/plat/plat_android.c
+    ${BN}/host/plat/plat_portable.c
 )
 
 # The recompiler translations' stamp (nvn_recompile.c, recompile_stamp.cmake): the shader
