@@ -10,10 +10,12 @@
 #include <string.h>
 #include <time.h>
 #include <dirent.h>
+#if !defined(_WIN32)   // Lichii: the stall stacks below are Linux's
 #include <execinfo.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 vka_fns vk;
@@ -483,15 +485,20 @@ static void multi_wait(void) {   // until any NVN queue's timeline moves (or 0.5
 }
 // DM_VK_STALL_STACKS=1 (lab, dotfiles-25x.15): at a GPU stall every thread of the process writes its stack to stderr (frame addresses: addr2line against the binary),
 // where ptrace is not permitted
+#if !defined(_WIN32)
 static void stall_stack_sig(int sig) {
     (void)sig; void *b[48]; int n = backtrace(b, 48); char name[17] = {0}; prctl(PR_GET_NAME, name);
     char h[96]; int k = snprintf(h, sizeof h, "[dm] [RED] vk: stall stack: thread %ld %s\n", (long)syscall(SYS_gettid), name); write(2, h, (size_t)k);
     backtrace_symbols_fd(b, n, 2);
 }
+#endif
 void vka_stall_stacks(void);
 static void stall_stacks(void) { vka_stall_stacks(); }
 void vka_stall_stacks(void) {   // (Lichii: also the shutdown watchdog, nvn_shutdown.c)
     if (!VKA_ENV("DM_VK_STALL_STACKS", 0)) return;
+#if defined(_WIN32)   // Lichii: no signal reaches another thread there
+    VRED("DM_VK_STALL_STACKS: not on Windows (a debugger, or Lichii's crash dump, has every thread's stack)");
+#else
     void *warm[2]; backtrace(warm, 2);   // (libgcc loaded outside the handler)
     struct sigaction sa = {0}; sa.sa_handler = stall_stack_sig; sigaction(SIGRTMIN + 7, &sa, NULL);
     DIR *d = opendir("/proc/self/task"); if (!d) return;
@@ -499,6 +506,7 @@ void vka_stall_stacks(void) {   // (Lichii: also the shutdown watchdog, nvn_shut
     while ((e = readdir(d))) { long tid = atol(e->d_name); if (tid <= 0 || tid == self) continue;
         syscall(SYS_tgkill, (long)getpid(), tid, SIGRTMIN + 7); struct timespec ts = {0, 30000000}; nanosleep(&ts, NULL); }
     closedir(d);
+#endif
 }
 static void *completion_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c

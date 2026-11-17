@@ -27,14 +27,16 @@
 #include "../../../../nvn_direct.h"
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(_WIN32)   // Lichii: udmabufs and the placement swap's system calls are Linux's
 #include <linux/udmabuf.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#endif
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/syscall.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
@@ -85,6 +87,7 @@ static struct { _Atomic uintptr_t lo, hi; _Atomic uint64_t end; } g_recent[NRECE
 static _Atomic unsigned g_nrecent;
 static pthread_mutex_t g_swmu = PTHREAD_MUTEX_INITIALIZER;   // one swap at a time
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+#if !defined(_WIN32)   // Lichii: the placement swap (Linux's mmap, mremap and /proc/self/maps; Lichii's device enables no placed maps, so pools are always imports)
 static int in_swap(uintptr_t a, uintptr_t b) { uintptr_t lo = atomic_load(&g_sw_lo), hi = atomic_load(&g_sw_hi); return lo < hi && a < hi && b > lo; }
 static _Atomic long g_sw_owner;   // the thread that runs the swap (gettid), 0 when none
 // A fault the swap's own thread takes in its range is not a writer to hold back: nothing would end the swap, and the thread (with g_pl, the dirty tracker's hold and the swap's
@@ -351,6 +354,9 @@ static int prot_known(prun *r, int *n, uintptr_t lo, uintptr_t hi) {   // 1 = th
     for (int i = 0; i < *n; i++) if (r[i].prot < 0) return 0;
     return 1;
 }
+#else
+static void swap_hooks(void) {}
+#endif
 
 // ---------- Placing and giving back ----------
 static VkBuffer seg_buffer(VkDeviceSize n, const void *next) {
@@ -362,6 +368,7 @@ static VkBuffer seg_buffer(VkDeviceSize n, const void *next) {
     return r ? VK_NULL_HANDLE : b;
 }
 static void unmap_placed(VkDeviceMemory m) { VkMemoryUnmapInfoKHR ui = {VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .flags = V.unmap_reserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0, .memory = m}; vk.vkUnmapMemory2KHR(V.dev, &ui); }
+#if !defined(_WIN32)
 static void copy_readable(uint8_t *to, uintptr_t lo, const prun *r, int n) {   // the readable runs of [lo, ...) into to; the rest zero
     for (int i = 0; i < n; i++) { uint8_t *d = to + (r[i].lo - lo); size_t k = r[i].hi - r[i].lo; if (r[i].prot >= 0 && (r[i].prot & PROT_READ)) memcpy(d, (const void *)r[i].lo, k); else memset(d, 0, k); }
 }
@@ -390,6 +397,8 @@ static void prefault(uintptr_t lo, uintptr_t hi) {
     g_pf_ns += mono_ns() - t0; g_pf_bytes += hi - lo; g_pf_nlog++;
 }
 
+#endif
+
 // Place [lo, hi) (no segment overlaps it; caller holds g_pl, and g_rw for writing only under DM_VK_MEM_LOCK_WHOLE). 1 = placed, 0 = failed with the range as it was; *grow = the size the driver wants when it is larger than the range
 // Where a placement's time goes (logged every 256 placements): buffer and allocation, the protections read, the copy, the maps, the prefault, the protections put back
 static uint64_t g_ph[6], g_ph_n;
@@ -399,11 +408,17 @@ static __thread uint64_t t_place_bytes, t_pend_ns;
 // VK_ERROR_INVALID_EXTERNAL_HANDLE (measured on the Steam Deck: anonymous memory imports, a MAP_SHARED or MAP_PRIVATE memfd mapping or shared anonymous memory does not).
 // There the pools are udmabufs of the memfd's own pages imported with VK_EXT_external_memory_dma_buf: still the guest's pages, coherent both ways (measured there).
 // The probe imports a page of a shared memfd mapping: on RADV a refused import leaves later ones working (measured); NVIDIA's would not (dotfiles-25x.1), but it imports it
+#if !defined(_WIN32)
 static struct udmabuf_create_list *g_ul; static uint32_t g_ulcap, g_ul_max = 1024;   // g_ul_max: udmabuf's list_limit
+#endif
 void vka_mem_import_choose(int dmabuf) {
     const size_t n = 65536; VkResult r = VK_ERROR_UNKNOWN;
+#if defined(_WIN32)   // Lichii: guest memory there is a section in the page file (common/host_memory.cpp), and a shared anonymous mapping is a view of one
+    int fd = -1; void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+#else
     int fd = memfd_create("vka-import-probe", MFD_CLOEXEC);
     void *p = fd >= 0 && !ftruncate(fd, n) ? mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+#endif
     if (p != MAP_FAILED) {
         VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
         uint32_t t = vk.vkGetMemoryHostPointerPropertiesEXT(V.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, p, &hp) ? UINT32_MAX : vka_mem_type(hp.memoryTypeBits, 0, 0);
@@ -416,6 +431,11 @@ void vka_mem_import_choose(int dmabuf) {
     }
     if (fd >= 0) close(fd);
     if (!r) return;
+#if defined(_WIN32)   // Lichii: no udmabufs
+    (void)dmabuf;
+    VRED("pool memory: the driver refuses host-pointer imports of shared memory (%d): the GPU sees no memory pool", r);
+    V.host_import = 0;
+#else
     int x = dmabuf && vk.vkGetMemoryFdPropertiesKHR, u = x ? open("/dev/udmabuf", O_RDWR | O_CLOEXEC) : -1, err = errno;
     if (u < 0) {
         VRED("pool memory: the driver refuses host-pointer imports of shared memory (%d), and %s%s: the GPU sees no memory pool", r,
@@ -430,8 +450,12 @@ void vka_mem_import_choose(int dmabuf) {
     long ll = 0; f = fopen("/sys/module/udmabuf/parameters/list_limit", "r");
     if (f) { if (fscanf(f, "%ld", &ll) == 1 && ll > 0) g_ul_max = (uint32_t)ll; fclose(f); }
     VLOG("pool memory: the driver refuses host-pointer imports of shared memory (%d): pools are imported as udmabufs of the guest memory's pages, %ld MiB and %u runs at most each", r, mb, g_ul_max);
+#endif
 }
 
+#if defined(_WIN32)
+static int udmabuf_of(uintptr_t lo, VkDeviceSize n) { (void)lo; (void)n; return -1; }   // (V.udmabuf is never set there)
+#else
 // Lichii: a udmabuf of the memfd pages behind guest [lo, lo + n): one item a run of pages that follow each other in the file. -1 (logged) when a page has no file
 // behind it (the guest has not mapped it) or udmabuf refuses (more runs than its list_limit). Caller holds g_pl (the list g_ul is reused)
 // The runs behind guest [lo, lo + n) appended to g_ul after its first *cnt items (the first one continuing the last item where the file does). 0 (logged) when a page has no file behind it
@@ -453,6 +477,7 @@ static int ul_create(uint32_t cnt, uintptr_t lo, VkDeviceSize n) {   // the udma
     return d;
 }
 static int udmabuf_of(uintptr_t lo, VkDeviceSize n) { uint32_t cnt = 0; return ul_add(&cnt, lo, n) ? ul_create(cnt, lo, n) : -1; }
+#endif
 
 // Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host or, where the driver refuses
 // that (V.udmabuf), as a udmabuf of the same pages with VK_EXT_external_memory_dma_buf. A host-pointer import is made of a view of its own (nvn_direct_map_view: the same
@@ -523,6 +548,9 @@ fail:
 }   // this thread's bytes placed and time in pend_wait (mtl_pool_add's attribution: other threads place while it waits)
 static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     if (V.host_import) return import_seg(lo, hi);
+#if defined(_WIN32)
+    (void)grow; return 0;   // (no placed maps: V.placed is never set there)
+#else
     VkDeviceSize n = hi - lo; seg_t s = {lo, hi, .refs = 1}; VkResult r; uint64_t p0 = mono_ns(), p1, p2, p3, p4, p5;
     if (!(s.buf = seg_buffer(n, NULL))) { VRED("pool memory %#lx+%#llx: vkCreateBuffer failed", (unsigned long)lo, (unsigned long long)n); return 0; }
     VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, s.buf, &mr);
@@ -582,6 +610,7 @@ static int place(uintptr_t lo, uintptr_t hi, VkDeviceSize *grow) {
     if (!lock_whole()) pthread_rwlock_unlock(&g_rw);
     vka_mem_grew(n);   // (its log line outside the table's lock: no log line under a lock another logging thread may wait for)
     return 1;
+#endif
 }
 
 // Segments taken out of the table, to be given back once the lock is dropped
@@ -676,6 +705,9 @@ static int pack_leave(pack_t *p, VkDeviceSize n) {
     return 1;
 }
 static void pack_free(pack_t *p, uint64_t fence) { import_free_after(fence, p->buf, p->mem, NULL, 0); free(p); }   // its memory once the GPU is past fence
+#if defined(_WIN32)
+static void pack_maybe(void) {}   // (packs are udmabufs)
+#else
 // A pack of the segments at g_sg[idx[0..n)] (their runs are g_ul's first cnt items, size bytes in all): imported, and the segments moved into it. Caller holds g_pl
 static int pack_make(const int *idx, int n, uint32_t cnt, VkDeviceSize size) {
     int fd = ul_create(cnt, g_sg[idx[0]].lo, size); if (fd < 0) return 0;
@@ -765,6 +797,7 @@ static void pack_maybe(void) {
         VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports (DM_VK_PACK)",
              (unsigned long long)rounds, packed, nsolo, made, bytes / 1048576.0, (mono_ns() - t0) / 1e6, np, dead / 1048576.0, nimp);
 }
+#endif
 static void unplace(const seg_t *sp) {
     seg_t s = *sp; size_t n = s.hi - s.lo;
     uint64_t fence = vka_fence_last();
@@ -791,6 +824,7 @@ static void unplace(const seg_t *sp) {
         static int nlog; if (nlog++ < 4) VLOG("pool memory %#lx+%#zx: import given back (%.2f GiB imported)", (unsigned long)s.lo, n, vka_mem_placed_bytes(NULL) / 1073741824.0);
         return;
     }
+#if !defined(_WIN32)   // (a placed segment: never there)
     prun pr[MAXRUN]; int npr = prot_runs(s.lo, s.hi, pr, MAXRUN), exact = prot_known(pr, &npr, s.lo, s.hi);
     swap_begin(s.lo, s.hi);
     prot_readonly(pr, npr);
@@ -833,6 +867,7 @@ static void unplace(const seg_t *sp) {
     swap_end();
     uint64_t left = vka_mem_placed_bytes(NULL);
     static int nlog; if (nlog++ < 4) VLOG("pool memory %#lx+%#zx given back as anonymous memory (%.2f GiB placed)", (unsigned long)s.lo, n, left / 1073741824.0);
+#endif
 }
 static void unplace_all(segvec *v) { for (int i = 0; i < v->n; i++) { unplace(&v->s[i]); pend_done(v->s[i].lo, v->s[i].hi); } free(v->s); *v = (segvec){0}; }
 
@@ -929,14 +964,20 @@ static __thread lcache *t_lc;
 // lookups run ~10 times a draw (profile p2: the lookup 8 % of the replay thread, the resolver in it). The first thread that records a submission (vka_mem_rec_thread) owns it
 // for the life of the process; any other thread keeps its own TLS cache, so the global one is only ever touched by its owner (DM_VK_LC_GLOBAL=0: TLS for every thread)
 static lcache g_rlc; static _Atomic(void *) g_rlc_tp;
+#if defined(_WIN32)   // Lichii: a thread-local variable's address names the thread there (clang targets no thread pointer for Windows)
+static __thread char t_thread_id;
+#define THREAD_POINTER() ((void *)&t_thread_id)
+#else
+#define THREAD_POINTER() __builtin_thread_pointer()
+#endif
 void vka_mem_rec_thread(void) {
-    void *tp = __builtin_thread_pointer(), *none = NULL;
+    void *tp = THREAD_POINTER(), *none = NULL;
     if (!atomic_load_explicit(&g_rlc_tp, memory_order_relaxed) && VKA_ENV("DM_VK_LC_GLOBAL", 1)) atomic_compare_exchange_strong(&g_rlc_tp, &none, tp);
 }
 static const seg_t *lookup(uintptr_t a, seg_t *tmp) {   // the segment holding a, or NULL
     a = key(a);
     lcache *c;
-    if (__builtin_thread_pointer() == atomic_load_explicit(&g_rlc_tp, memory_order_relaxed)) c = &g_rlc;
+    if (THREAD_POINTER() == atomic_load_explicit(&g_rlc_tp, memory_order_relaxed)) c = &g_rlc;
     else { c = t_lc; if (!c) c = t_lc = calloc(1, sizeof *c); }
     uint64_t gen = atomic_load_explicit(&g_sg_gen, memory_order_acquire);
     seg_t *e = c ? &c->s[(a >> 16) & (NLC - 1)] : NULL;

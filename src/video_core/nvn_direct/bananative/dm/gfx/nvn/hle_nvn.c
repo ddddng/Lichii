@@ -86,6 +86,7 @@ static void nvn_init_slots(void) {
     unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0, hit = 0;
     for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
     for (unsigned k = 0; k < nim; k++) {
+        if (!im[k].name) continue;   // Lichii: padding a COFF linker left between the table's pieces (plat_windows.c)
         unsigned i = 0;
         while (i < NVN_NFUNC && strcmp(nvn_names[i], im[k].name)) i++;
         if (i == NVN_NFUNC) die("NVN implementation %s is not in main's name table", im[k].name);

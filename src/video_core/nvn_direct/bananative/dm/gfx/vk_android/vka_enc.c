@@ -13,8 +13,10 @@
 // Single producer (the replay thread), single consumer (the encoder thread); the consumer spins for a short while when the ring runs empty and then sleeps on a futex.
 #if defined(__ANDROID__)
 #include "vka.h"
+#if !defined(_WIN32)
 #include <linux/futex.h>
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,8 +57,13 @@ uint64_t vka_enc_waits(void) { return atomic_load(&g_wait_all); }
 typedef struct { uint32_t id, size; } hdr;   // size: the whole record, 8-byte multiple
 #define A8(n) (((size_t)(n) + 7) & ~(size_t)7)
 
+#if defined(_WIN32)   // Lichii: an address wait (plat_windows.c), with the futex's results
+static long fwait(_Atomic uint32_t *a, uint32_t v) { return plat_addr_wait(a, v, 1000); }
+static void fwake(_Atomic uint32_t *a) { plat_addr_wake_one(a); }
+#else
 static long fwait(_Atomic uint32_t *a, uint32_t v) { struct timespec t = {1, 0}; return syscall(SYS_futex, (uint32_t *)a, FUTEX_WAIT_PRIVATE, v, &t, NULL, 0); }   // (bounded: the waits check again)   // (bounded: the waits check again)
 static void fwake(_Atomic uint32_t *a) { syscall(SYS_futex, (uint32_t *)a, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0); }
+#endif
 // Waits (low power) until *a may have changed from old: the exclusive monitor on its cache line wakes WFE when another core writes it (the event stream bounds the wait)
 static inline uint64_t wait_change(_Atomic uint64_t *a, uint64_t old) {
 #if defined(__x86_64__)   // dotfiles-o72.4 harness: a pause instead of WFE
