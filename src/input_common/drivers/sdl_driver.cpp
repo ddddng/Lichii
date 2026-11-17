@@ -22,6 +22,9 @@
 #include "input_common/drivers/sdl_driver.h"
 #include "input_common/helpers/dualsense_haptics.h"
 #include "input_common/helpers/rumble_mapping.h"
+#ifdef HAVE_SWITCH2_BLE
+#include "input_common/drivers/switch2_ble.h"
+#endif
 
 namespace InputCommon {
 
@@ -656,7 +659,8 @@ public:
                 break;
             }
             if (SDL_GetGamepadVendor(sdl_controller.get()) == 0x057E &&
-                SDL_GetGamepadProduct(sdl_controller.get()) == 0x2069) {
+                SDL_GetGamepadProduct(sdl_controller.get()) == 0x2069 &&
+                !SDL_IsJoystickVirtual(SDL_GetGamepadID(sdl_controller.get()))) {
                 return "Nintendo Switch 2 Pro Controller";
             }
             const auto name = SDL_GetGamepadName(sdl_controller.get());
@@ -937,6 +941,9 @@ void SDLDriver::PumpEvents() {
     if (!initialized) {
         return;
     }
+#ifdef HAVE_SWITCH2_BLE
+    switch2_ble->Pump();
+#endif
     SDL_PumpEvents();
     const auto now = std::chrono::steady_clock::now();
     if (now - last_motion_stall_check < std::chrono::milliseconds{250}) {
@@ -1121,9 +1128,15 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
         }
         SDL_free(joysticks);
     }
+#ifdef HAVE_SWITCH2_BLE
+    switch2_ble = std::make_unique<Switch2Ble>();
+#endif
 }
 
 SDLDriver::~SDLDriver() {
+#ifdef HAVE_SWITCH2_BLE
+    switch2_ble.reset();
+#endif
     CloseJoysticks();
     SDL_RemoveEventWatch(&SDLEventWatcher, this);
 
