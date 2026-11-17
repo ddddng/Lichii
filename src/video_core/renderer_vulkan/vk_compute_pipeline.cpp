@@ -325,7 +325,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             ReportPipelineBuildFailure(exception.GetResult());
             std::scoped_lock lock{build_mutex};
             is_built = true;
-            build_condvar.notify_one();
+            build_condvar.notify_all();
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
@@ -347,7 +347,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         spv_module.reset();
         std::scoped_lock lock{build_mutex};
         is_built = true;
-        build_condvar.notify_one();
+        build_condvar.notify_all();
         if (shader_notify) {
             shader_notify->MarkShaderComplete();
         }
@@ -372,7 +372,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                               shader_hash, what);
                     std::scoped_lock lock{build_mutex};
                     is_built = true;
-                    build_condvar.notify_one();
+                    build_condvar.notify_all();
                     if (shader_notify) {
                         shader_notify->MarkShaderComplete();
                     }
@@ -423,12 +423,20 @@ bool ComputePipeline::CanReplaceOcarinaUpscale() const {
            std::ranges::none_of(info.storage_buffers_descriptors, &Shader::StorageBufferDescriptor::is_written);
 }
 
-bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
-                                Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                BufferCache& buffer_cache, TextureCache& texture_cache,
-                                TextureCacheRuntime& texture_runtime,
-                                std::optional<ByteAddressedShadow>& shadow,
-                                BindCommand* deferred_bind) {
+bool ComputePipeline::WaitBuilt(std::chrono::microseconds timeout) {
+    if (jobs) {
+        jobs->Promote(job, VideoCommon::ShaderJobPriority::NeedNow);
+    }
+    std::unique_lock lock{build_mutex};
+    return build_condvar.wait_for(lock, timeout,
+                                  [this] { return is_built.load(std::memory_order::relaxed); });
+}
+
+ComputePipeline::ConfigureResult ComputePipeline::Configure(
+    Tegra::Engines::KeplerCompute& kepler_compute, Tegra::MemoryManager& gpu_memory,
+    Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
+    TextureCacheRuntime& texture_runtime, PipelineCache& pipelines,
+    std::optional<ByteAddressedShadow>& shadow, BindCommand* deferred_bind) {
     shadow.reset();
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
@@ -668,6 +676,20 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     std::ranges::for_each(info.texture_buffer_descriptors, add_buffer);
     std::ranges::for_each(info.image_buffer_descriptors, add_buffer);
 
+    // Decided before the bindings below mark the outputs GPU-written.
+    if (!is_built.load(std::memory_order::relaxed) && kepler_compute.IsNativeMode()) {
+        const bool images_hold_gpu_data =
+            std::ranges::all_of(written_images, [&](VideoCommon::ImageViewId id) {
+                const Image* const image = texture_cache.GetImageView(id).BackingImage();
+                return image == nullptr ||
+                       True(image->flags & VideoCommon::ImageFlagBits::GpuModified);
+            });
+        if (pipelines.SkipUnbuiltDispatch(
+                *this, images_hold_gpu_data && buffer_cache.ComputeWritesHoldGpuData())) {
+            return ConfigureResult::Skipped;
+        }
+    }
+
     part.emplace(Zone::ComputeBuffers);
     buffer_cache.UpdateComputeBuffers();
     buffer_cache.BindHostComputeBuffers();
@@ -705,7 +727,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
         LOG_CRITICAL(Render_Vulkan, "Compute descriptor count mismatch: expected {}, got {}",
                      num_descriptor_entries, guest_descriptor_queue.UpdateCount());
-        return false;
+        return ConfigureResult::Failed;
     }
 
     if (!is_built.load(std::memory_order::relaxed)) {
@@ -750,7 +772,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
         if (!alloc.host) {
             LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping dispatch");
-            return false;
+            return ConfigureResult::Failed;
         }
         WriteDescriptorBuffer(device, descriptor_buffer_layout, descriptor_data, alloc.host);
         descriptor_buffer_offset = alloc.offset;
@@ -816,7 +838,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     } else {
         scheduler.Record(std::move(bind));
     }
-    return true;
+    return ConfigureResult::Ready;
 }
 
 } // namespace Vulkan
