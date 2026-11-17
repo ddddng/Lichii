@@ -8,7 +8,8 @@ addresses turned into host pointers (fastmem arena + address) on the way in and 
 Signatures: Banana Native's prototypes (bananative/dm/gfx/nvn/nvn_protos.h, MIT) and hle_nvn.c's
 NVN_NOPROTO ones, which win (nvn_protos.h has a few wrong). Run after updating bananative/:
     python3 gen_dispatch.py
-It fails on what the dispatch cannot pass: arguments on the stack, structs returned through x8,
+Integer arguments past x7 are read from the guest's stack (stack_word). It fails on what the
+dispatch cannot pass: float arguments on the stack, structs returned through x8,
 structs passed by value other than the separate handles, pointers to structs holding addresses
 it has no rule for."""
 import os
@@ -103,16 +104,17 @@ def main():
                 continue
             i = ints
             ints += 1
+            xi = f'x[{i}]' if i < 8 else f'stack_word({i - 8})'
             if 'PFN' in a:
-                expr = f'({a})(uintptr_t)x[{i}]'  # guest code: kept, never called
+                expr = f'({a})(uintptr_t){xi}'  # guest code: kept, never called
             elif stars == 0 and b in WORD_STRUCTS:
-                expr = f'({a}){{x[{i}]}}'
+                expr = f'({a}){{{xi}}}'
             elif stars == 0 and b in ADDRESSES:
-                expr = f'({a})host_addr(x[{i}])'
+                expr = f'({a})host_addr({xi})'
             elif stars == 0 and b in structs:
                 sys.exit(f'{name}: struct {b} by value')
             elif stars == 0 and b != 'NVNnativeWindow':
-                expr = f'({a})x[{i}]'
+                expr = f'({a}){xi}'
                 if b in ('int', 'int32_t', 'uint32_t', 'size_t', 'uint64_t', 'int64_t', 'ptrdiff_t'):
                     last_int = i
             elif b in ARRAYS and stars == 1 or (stars == 2 and b != 'char'):
@@ -120,15 +122,15 @@ def main():
                     sys.exit(f'{name}: array argument {i} without a count before it')
                 helper = ARRAYS.get(b, 'xl_pointers') if stars == 1 else 'xl_pointers'
                 kept = 1 if name in KEPT_ARRAYS else 0
-                expr = f'({a}){helper}(x[{i}], (int)x[{last_int}], {scratch}, {kept})'
+                expr = f'({a}){helper}({xi}, (int)x[{last_int}], {scratch}, {kept})'
                 scratch += 1
             else:
                 if b in structs and not structs[b] and b not in PLAIN_STRUCTS:
                     sys.exit(f'{name}: pointer to {b}, a struct with no rule for the addresses it may hold')
-                expr = f'({a})host_ptr(x[{i}])'
+                expr = f'({a})host_ptr({xi})'
             exprs.append(expr)
-        if ints > 8 or floats > 8:
-            sys.exit(f'{name}: arguments on the stack ({ints} integer, {floats} float)')
+        if floats > 8:
+            sys.exit(f'{name}: float arguments on the stack ({floats})')
         if scratch > 2:
             sys.exit(f'{name}: more than two translated arrays')
         rb = base(ret)

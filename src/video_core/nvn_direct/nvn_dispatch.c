@@ -128,6 +128,10 @@ static void* xl_mapping_requests(uint64_t a, int n, int k, int kept) {
     return out;
 }
 
+// The guest's stack pointer at the call (nvn_direct_call): integer arguments past x7 are its 8-byte words
+static _Thread_local uint64_t t_guest_sp;
+static uint64_t stack_word(int k) { uint64_t w; memcpy(&w, host_ptr(t_guest_sp + 8 * (uint64_t)k), 8); return w; }
+
 typedef uint64_t (*dispatch_fn)(void* fn, const uint64_t* x, const uint64_t* v, uint64_t* v0);
 #define D(name, flags, body)                                                                       \
     static uint64_t d_##name(void* fn, const uint64_t* x, const uint64_t* v, uint64_t* v0) {      \
@@ -255,8 +259,9 @@ uint64_t nvn_direct_calls(const char* name) {
     for (int i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], name)) return atomic_load(&g_calls[i]);
     return 0;
 }
-uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t* v0) {
+uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t lr, uint64_t sp, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
+    t_guest_sp = sp;
     if (calls_on()) atomic_fetch_add_explicit(&g_calls[slot], 1, memory_order_relaxed);
     return g_slot[slot].d->d(g_slot[slot].fn, x, v, v0);
 }
