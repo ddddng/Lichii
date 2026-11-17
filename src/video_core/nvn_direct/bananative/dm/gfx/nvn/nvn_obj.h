@@ -15,7 +15,8 @@
 typedef struct { uint32_t flags; } dev_builder_t;                       FITS(dev_builder_t, NVNdeviceBuilder);
 typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; } dev_t_;  FITS(dev_t_, NVNdevice);
 
-typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
+// rt_set / rt_sz: SetRayTracingMemorySize (Lichii; in the padding, the NVN1 builder has no room for more)
+typedef struct { NVNdevice *dev; uint32_t flags : 31, rt_set : 1; int32_t rt_sz; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
 enum { NVN_QUEUE_WAITS = 32 };   // Lichii: QueueWaitSync fences kept for a queue's next submission
 typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial, last_fence; int nwait; uint64_t wait_fence[NVN_QUEUE_WAITS]; } queue_t;   // last_fence: its last submission's (Lichii: QueueFenceSync); wait_fence: QueueWaitSync's fences for its next submission (Lichii)  FITS(queue_t, NVNqueue);
