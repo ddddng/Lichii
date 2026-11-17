@@ -931,7 +931,7 @@ void TextureCache<P>::NoteOverlapWriteback(const ImageBase& image, bool lost, u6
         auto& ranges = overlap_writeback_ranges[page];
         ranges.erase(std::remove_if(ranges.begin(), ranges.end(),
                                     [&](const WritebackRange& range) {
-                                        return range.tick <= image_tick &&
+                                        return range.tick <= image_tick && (lost || !range.lost) &&
                                                begin <= range.begin && range.end <= end;
                                     }),
                      ranges.end());
