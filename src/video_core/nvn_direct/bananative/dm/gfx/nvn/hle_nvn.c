@@ -759,12 +759,12 @@ NVN(nvnSamplerBuilderSetWrapMode, void, NVNsamplerBuilder *b, NVNwrapMode s, NVN
 NVN(nvnSamplerBuilderSetLodClamp, void, NVNsamplerBuilder *b, float lo, float hi) { SB(b)->lod_min = lo; SB(b)->lod_max = hi; }
 NVN(nvnSamplerBuilderSetLodBias, void, NVNsamplerBuilder *b, float v) { SB(b)->lod_bias = v; }
 NVN(nvnSamplerBuilderSetCompare, void, NVNsamplerBuilder *b, NVNcompareMode m, NVNcompareFunc f) { SB(b)->cmp_mode = m; SB(b)->cmp_func = f; }
-NVN(nvnSamplerBuilderSetBorderColor, void, NVNsamplerBuilder *b, const float *c) { memcpy(SB(b)->border, c, 16); }
-// Metal's fixed border colours are selected numerically, also for integer textures. Bit-casting integer 1 to float would select transparent black instead of opaque black/white.
-NVN(nvnSamplerBuilderSetBorderColori, void, NVNsamplerBuilder *b, const int *c) { for (int i = 0; i < 4; i++) SB(b)->border[i] = (float)c[i]; }
-NVN(nvnSamplerBuilderSetBorderColorui, void, NVNsamplerBuilder *b, const uint32_t *c) { for (int i = 0; i < 4; i++) SB(b)->border[i] = (float)c[i]; }
+NVN(nvnSamplerBuilderSetBorderColor, void, NVNsamplerBuilder *b, const float *c) { memcpy(SB(b)->border, c, 16); SB(b)->border_int = 0; }
+// Metal's fixed border colours are selected numerically, also for integer textures (samp_border). Bit-casting integer 1 to float would select transparent black instead of opaque black/white.
+NVN(nvnSamplerBuilderSetBorderColori, void, NVNsamplerBuilder *b, const int *c) { memcpy(SB(b)->border, c, 16); SB(b)->border_int = 1; }
+NVN(nvnSamplerBuilderSetBorderColorui, void, NVNsamplerBuilder *b, const uint32_t *c) { memcpy(SB(b)->border, c, 16); SB(b)->border_int = 2; }
 NVN(nvnSamplerBuilderSetMaxAnisotropy, void, NVNsamplerBuilder *b, float v) { SB(b)->aniso = v; }
-NVN(nvnSamplerBuilderSetLodSnap, void, NVNsamplerBuilder *b, float v) { (void)b; (void)v; }   // No Metal equivalent, ignored
+NVN(nvnSamplerBuilderSetLodSnap, void, NVNsamplerBuilder *b, float v) { ((samp_builder_t *)b)->lod_snap = v; }   // No Metal equivalent: kept for the getter
 NVN(nvnSamplerBuilderGetMinMagFilter, void, const NVNsamplerBuilder *b, NVNminFilter *mi, NVNmagFilter *ma) {
     const samp_par *o = &((const samp_builder_t *)b)->p; *mi = (NVNminFilter)o->minf; *ma = (NVNmagFilter)o->magf;
 }
@@ -775,7 +775,7 @@ NVN(nvnSamplerBuilderGetLodClamp, void, const NVNsamplerBuilder *b, float *lo, f
     const samp_par *o = &((const samp_builder_t *)b)->p; *lo = o->lod_min; *hi = o->lod_max;
 }
 NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b) {
-    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; return 1;
+    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; o->lod_snap = ((const samp_builder_t *)b)->lod_snap; return 1;
 }
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
@@ -920,7 +920,7 @@ NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p,
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     const ev_builder_t *s = (const ev_builder_t *)b;
     if (!s->pool || !s->pool->mem) { LOG("[RED] EventInitialize has no storage"); return 0; }
-    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off)}; return 1;
+    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off), s->pool, s->off}; return 1;
 }
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
@@ -938,21 +938,22 @@ NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_si
 // ---------- Queue ----------
 #define QB(b) ((queue_builder_t *)(b))
 NVN(nvnQueueBuilderSetDefaults, void, NVNqueueBuilder *b) {
-    NVNdevice *dev = QB(b)->dev; memset(b, 0, sizeof(queue_builder_t)); QB(b)->dev = dev;
-    QB(b)->cmd_sz = 65536; QB(b)->comp_sz = 262144; QB(b)->ctl_sz = 16384; QB(b)->flush = 4096;   // Device defaults
+    NVNdevice *dev = QB(b)->dev; memset(b, 0, sizeof(queue_builder_t)); QB(b)->dev = dev; QB(b)->prio = 100;
 }
+static void qb_set(NVNqueueBuilder *b, int k, size_t n) { QB(b)->sz[k] = (uint32_t)n; QB(b)->set[k] = 1; }
+static uint64_t qb_size(const queue_builder_t *o, int k) { static const uint32_t def[4] = {65536, 262144, 16384, 4096}; return o->set[k] ? o->sz[k] : def[k]; }   // Device defaults for those not set
 NVN(nvnQueueBuilderSetDevice, void, NVNqueueBuilder *b, NVNdevice *d) { QB(b)->dev = d; }
 NVN(nvnQueueBuilderSetFlags, void, NVNqueueBuilder *b, int f) { QB(b)->flags = f; }
-NVN(nvnQueueBuilderSetCommandMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->cmd_sz = n; }
-NVN(nvnQueueBuilderSetComputeMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->comp_sz = n; }
-NVN(nvnQueueBuilderSetControlMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->ctl_sz = n; }
-NVN(nvnQueueBuilderSetCommandFlushThreshold, void, NVNqueueBuilder *b, size_t n) { QB(b)->flush = n; }
+NVN(nvnQueueBuilderSetCommandMemorySize, void, NVNqueueBuilder *b, size_t n) { qb_set(b, QB_CMD, n); }
+NVN(nvnQueueBuilderSetComputeMemorySize, void, NVNqueueBuilder *b, size_t n) { qb_set(b, QB_COMP, n); }
+NVN(nvnQueueBuilderSetControlMemorySize, void, NVNqueueBuilder *b, size_t n) { qb_set(b, QB_CTL, n); }
+NVN(nvnQueueBuilderSetCommandFlushThreshold, void, NVNqueueBuilder *b, size_t n) { qb_set(b, QB_FLUSH, n); }
 // Queue memory: the sum of the command + compute + control blocks rounded to 4 KiB (the host does not use it; the game only needs to allocate this size)
 NVN(nvnQueueBuilderGetQueueMemorySize, size_t, const NVNqueueBuilder *b) {
     const queue_builder_t *o = (const queue_builder_t *)b;
-    return (o->cmd_sz + o->comp_sz + o->ctl_sz + 4095) & ~(size_t)4095;
+    return (qb_size(o, QB_CMD) + qb_size(o, QB_COMP) + qb_size(o, QB_CTL) + 4095) & ~(size_t)4095;
 }
-NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = n; }
+NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = (uint32_t)n; }
 NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     NVNdevice *d = ((const queue_builder_t *)b)->dev;
     // NVN emits SET_WINDOW_ORIGIN / FLIP_Y into the queue's initial GPU state.
@@ -1366,8 +1367,8 @@ NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, 
     if (sid) sid += (uint64_t)CB(c)->samp_base;
     *REC(c, OP_DRAW_TEX, p_draw_tex) = (p_draw_tex){tid | sid << 20, *d, *s};
 }
-NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 0; }
-NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 1; }   // Link's Awakening
+NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 0; CB(c)->copy_row = st; }
+NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 1; CB(c)->copy_image = st; }   // Link's Awakening
 NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { memcpy(REC(c, OP_BLEND_COLOR, p_blend_color)->rgba, v, 16); }
 
 // ---------- State objects: packed in place (nvn_obj.h) ----------
@@ -1395,12 +1396,16 @@ NVN(nvnChannelMaskStateSetChannelMask, void, NVNchannelMaskState *s, int i, uint
     uint32_t m = (B(r) ? 1 : 0) | (B(g) ? 2 : 0) | (B(b) ? 4 : 0) | (B(a) ? 8 : 0);
     chmask_st *o = ST(chmask_st, s); o->mask = (o->mask & ~(0xfu << (4 * i))) | m << (4 * i);
 }
-NVN(nvnMultisampleStateSetDefaults, void, NVNmultisampleState *s) { memset(s, 0, sizeof(ms_st)); ST(ms_st, s)->enable = 1; }
+NVN(nvnMultisampleStateSetDefaults, void, NVNmultisampleState *s) { memset(s, 0, sizeof(ms_st)); ST(ms_st, s)->enable = 1; memset(ST(ms_loc_st, s)->loc, 0x88, sizeof ST(ms_loc_st, s)->loc); }
 NVN(nvnMultisampleStateSetMultisampleEnable, void, NVNmultisampleState *s, uint32_t e) { ST(ms_st, s)->enable = B(e) != 0; }
 NVN(nvnMultisampleStateSetSamples, void, NVNmultisampleState *s, int n) { ST(ms_st, s)->samples = (uint8_t)n; }
 NVN(nvnMultisampleStateSetAlphaToCoverageEnable, void, NVNmultisampleState *s, uint32_t e) { ST(ms_st, s)->a2c = B(e) != 0; }
 NVN(nvnMultisampleStateSetSampleLocationsEnable, void, NVNmultisampleState *s, uint32_t e) { ST(ms_st, s)->sl_en = B(e) != 0; }
-NVN(nvnMultisampleStateSetSampleLocations, void, NVNmultisampleState *s, int start, int n, const float *v) { (void)s; (void)start; (void)n; (void)v; }
+// Kept as the driver keeps them (ms_loc_st): each coordinate rounded to 1/16 pixel and clamped to 0..15/16. The replay does not program sample locations
+static uint8_t ms_loc_nibble(float v) { int n = (int)((double)(v * 16.f) + 0.5); return (uint8_t)(n < 0 ? 0 : n > 15 ? 15 : n); }
+NVN(nvnMultisampleStateSetSampleLocations, void, NVNmultisampleState *s, int start, int n, const float *v) {
+    for (int i = 0; i < n; i++) if ((unsigned)(start + i) < 16) ST(ms_loc_st, s)->loc[start + i] = (uint8_t)(ms_loc_nibble(v[2 * i]) | ms_loc_nibble(v[2 * i + 1]) << 4);
+}
 NVN(nvnMultisampleStateGetSamples, int, const NVNmultisampleState *s) { return ((const ms_st *)s)->samples; }
 NVN(nvnMultisampleStateGetMultisampleEnable, NVNboolean, const NVNmultisampleState *s) { return ((const ms_st *)s)->enable; }
 NVN(nvnPolygonStateSetDefaults, void, NVNpolygonState *s) { *ST(poly_st, s) = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0}; }
@@ -1785,7 +1790,7 @@ NVN(nvnSamplerGetReductionFilter, NVNsamplerReduction, const NVNsampler *s) { re
 // whether two samplers have the same state (games use it to deduplicate sampler pool entries)
 NVN(nvnSamplerCompare, NVNboolean, const NVNsampler *a, const NVNsampler *b) {
     const samp_par *x = SP(a), *y = SP(b);
-    return x->minf == y->minf && x->magf == y->magf && x->ws == y->ws && x->wt == y->wt && x->wr == y->wr && x->cmp_mode == y->cmp_mode && x->cmp_func == y->cmp_func && x->reduction == y->reduction &&
+    return x->minf == y->minf && x->magf == y->magf && x->ws == y->ws && x->wt == y->wt && x->wr == y->wr && x->cmp_mode == y->cmp_mode && x->cmp_func == y->cmp_func && x->reduction == y->reduction && x->border_int == y->border_int &&
            x->lod_min == y->lod_min && x->lod_max == y->lod_max && x->lod_bias == y->lod_bias && x->aniso == y->aniso && !memcmp(x->border, y->border, sizeof x->border);
 }
 
@@ -1898,8 +1903,8 @@ NVN(nvnTextureViewGetSwizzle, NVNboolean, const NVNtextureView *v, NVNtextureSwi
     return w->set_swizzle;
 }
 NVN(nvnTextureGetDepthStencilMode, NVNtextureDepthStencilMode, const NVNtexture *t) { return ((const tex_t *)t)->stencil ? NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL : NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH; }
-// Queue priority: the host has one Metal queue
-NVN_NOPROTO(nvnQueueBuilderSetQueuePriority, void, NVNqueueBuilder *b, int prio) { (void)b; (void)prio; }
+// Queue priority: kept for the getter (the replay gives every queue the same priority)
+NVN_NOPROTO(nvnQueueBuilderSetQueuePriority, void, NVNqueueBuilder *b, int prio) { QB(b)->prio = prio; }
 // The driver's external graphics debugger switch (Nsight / NVN debugger attach): Super Smash Bros. Ultimate fetches it with nvnDeviceGetProcAddress(NULL, …) before creating its device and calls
 // it without a null check (main+0x37fe92c); the host has no debugger to attach
 NVN_NOPROTO(nvnSetExternalDebuggerEnabledNVX, void, NVNboolean enable) { (void)enable; }
@@ -1932,9 +1937,12 @@ NVN(nvnDeviceRegisterFastClearDepth, NVNboolean, NVNdevice *d, float v) { (void)
 // The size of the driver's cache for shaders it compiles from intermediate code (The Great Ace Attorney Chronicles sets 10 at startup); the host compiles nothing at run time
 NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (void)n; }
 
-// Window: number of active swapchain textures (the host rotates through the count given at creation; logged once)
-NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
-NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
+// Window: number of active swapchain textures (0 at the builder: all of them). Kept for the getters; the host rotates through all of the window's textures
+NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { ((win_builder_t *)b)->active = n; }
+NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) {
+    if (((win_t *)w)->active != n) LOG("[nvn] the game sets %d active window textures of %d (the host rotates through all of them)", n, ((win_t *)w)->ntex);
+    ((win_t *)w)->active = n;
+}
 
 // Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
 // It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
@@ -1965,17 +1973,21 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
 
 // NVN2 (Switch 2) creates programs from a builder: SetDefaults, SetDevice, SetShaders(count, NVNshaderData[]) and then nvnProgramInitializeFromBuilder (Donkey Kong Bananza). The stages are
 // 16-byte {data, control} pairs as in NVN, so initializing from the builder is nvnProgramInitialize + nvnProgramSetShaders. The builder only keeps the caller's array, which the game keeps
-// until it initializes the program (its stack frame), as other NVN builders keep their pointers
-typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n; } prog_builder_t;
+// until it initializes the program (its stack frame), as other NVN builders keep their pointers. Lichii: the array as the game wrote it (its addresses), which GetShaders returns;
+// InitializeFromBuilder turns them into host pointers. sample_shading, dbg, link / nlink: SetSampleShading, SetDebugDataHashes, SetSubroutineLinkage (s1-state section)
+typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n, sample_shading, nlink; const void *dbg, *link; } prog_builder_t;
 NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
 NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev = d; }
-NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
+NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const void *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
 NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
     const prog_builder_t *o = (const prog_builder_t *)b;
-    return h_nvnProgramInitialize(p, o->dev) && (!o->n || h_nvnProgramSetShaders(p, o->n, o->sd));
+    if (o->n < 0 || o->n > 6) { LOG("[RED] ProgramInitializeFromBuilder stage count %d", o->n); return 0; }
+    NVNshaderData sd[6];
+    for (int i = 0; i < o->n; i++) sd[i] = (NVNshaderData){nvn_direct_host_of(o->sd[i].data), (const void *)(uintptr_t)nvn_direct_host_of((uint64_t)(uintptr_t)o->sd[i].control)};
+    return h_nvnProgramInitialize(p, o->dev) && (!o->n || h_nvnProgramSetShaders(p, o->n, sd));
 }
-// A queue NVN2 ties to a primary queue (Donkey Kong Bananza's second queue): the host executes every queue's submits in order on its one Metal queue, so the tie needs no work
-NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *primary) { (void)b; (void)primary; }
+// A queue NVN2 ties to a primary queue (Donkey Kong Bananza's second queue): the host executes every queue's submits in order on its one Metal queue, so the tie needs no work (kept for the getter)
+NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *primary) { QB(b)->primary = primary; }
 
 // ---------- Native images ----------
 // A decoded video picture as a texture (nn::gs::NativeImageHandle → nvnNativeImage → nvnTextureInitializeFromNativeImage; Fire Emblem Fortune's Weave's movies, main+0x1900da8, RGBA8). These are not in
@@ -2345,3 +2357,187 @@ int nvn_host_signal_sync(void *nvnsync) {
     o->fence = 0; o->fenced = 1; return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush
+
+// ---------- s1-state: object state and queries ----------
+// Getters return what the matching setter stored, or the driver's default, and the queries answer as NVN2's driver does (Mario Kart World's and Ocarina of Time's sdk, read
+// statically: lab script .cache/lab/25x/lanes2/s1). Where the driver keeps state the host has no use for (debug labels, checkpoints, GL interop), it answers as the driver does without them.
+
+// Device
+NVN_NOPROTO(nvnDeviceBuilderGetFlags, int, const NVNdeviceBuilder *b) { return (int)((const dev_builder_t *)b)->flags; }
+NVN_NOPROTO(nvnDeviceGetFlags, int, const NVNdevice *d) { return (int)((const dev_t_ *)d)->flags; }
+NVN(nvnDeviceSetDebugLabel, void, NVNdevice *d, const char *l) { (void)d; (void)l; }   // (the driver keeps no label either)
+// The driver's IDs count up from 0, process-wide
+NVN(nvnDeviceGenerateDebugDomainId, NVNdebugDomainId, const NVNdevice *d, const char *name) { static atomic_int next; (void)d; (void)name; return atomic_fetch_add(&next, 1); }
+NVN(nvnDeviceWalkDebugDatabase, void, const NVNdevice *d, NVNdebugObjectType t, PFNNVNWALKDEBUGDATABASECALLBACKPROC cb, void *data) { (void)d; (void)t; (void)cb; (void)data; }   // the release driver's is empty
+NVN(nvnDeviceIsExternalDebuggerAttached, NVNboolean, const NVNdevice *d) { (void)d; return 0; }
+// NVN1's device with deferred finalizes (NVN_DEVICE_FLAG_DEFERRED_FINALIZE): the host finalizes every object at once, so none waits here
+NVN(nvnDeviceApplyDeferredFinalizes, void, NVNdevice *d, int age) { (void)d; (void)age; }
+// Checkpoints (GPU progress markers for crash dumps): the release driver answers true and keeps nothing; it ignores its arguments, the device the only one read here
+NVN_NOPROTO(nvnDeviceSetAutomaticCheckpointsEnable, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+NVN_NOPROTO(nvnDeviceSetAutomaticCheckpointsSamplingInterval, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+NVN_NOPROTO(nvnDeviceSetAutomaticCheckpointsByDebugGroup, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+NVN_NOPROTO(nvnDeviceSetAutomaticCheckpointsMask, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+NVN_NOPROTO(nvnDeviceSetCheckpointCallStacksEnable, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+NVN_NOPROTO(nvnDeviceSetCheckpointMaxCallStacksDepth, NVNboolean, NVNdevice *d) { (void)d; return 1; }
+// Fast clear values: on the console a clear to a registered value is a compression hint, which the host does not need. The driver keeps a table per device and answers each
+// registration with the value's index in it (−1 when it fails); the host keeps its own table (dev_t_ fc_*), with room for NVN_FAST_CLEARS values of each kind: a value
+// registered again keeps its index. A depth index is only given to 0 and 1 (Ocarina of Time's driver); colours are matched by their four words, whatever the format
+static int fast_clear(uint32_t *table, int32_t *n, int words, const uint32_t *v) {
+    for (int i = 0; i < *n; i++) if (!memcmp(table + i * words, v, (size_t)words * 4)) return i;
+    if (*n == NVN_FAST_CLEARS) return -1;
+    memcpy(table + *n * words, v, (size_t)words * 4); return (*n)++;
+}
+static int fast_clear_color(NVNdevice *d, const void *c) { dev_t_ *o = (dev_t_ *)d; return fast_clear(&o->fc_color[0][0], &o->fc_ncolor, 4, c); }
+static int fast_clear_depth(NVNdevice *d, float v) { dev_t_ *o = (dev_t_ *)d; uint32_t u; memcpy(&u, &v, 4); return v == 0.f || v == 1.f ? fast_clear(o->fc_depth, &o->fc_ndepth, 1, &u) : -1; }
+static int fast_clear_stencil(NVNdevice *d, int s) { dev_t_ *o = (dev_t_ *)d; uint32_t u = (uint32_t)s & 0xff; return fast_clear(o->fc_stencil, &o->fc_nstencil, 1, &u); }
+NVN(nvnDeviceRegisterFastClearColori, NVNboolean, NVNdevice *d, const int *c, NVNformat f) { (void)f; return fast_clear_color(d, c) >= 0; }
+NVN(nvnDeviceRegisterFastClearColorui, NVNboolean, NVNdevice *d, const uint32_t *c, NVNformat f) { (void)f; return fast_clear_color(d, c) >= 0; }
+NVN_NOPROTO(nvnDeviceRegisterFastClearColorIndex, int, NVNdevice *d, const float *c, NVNformat f) { (void)f; return fast_clear_color(d, c); }
+NVN_NOPROTO(nvnDeviceRegisterFastClearColoriIndex, int, NVNdevice *d, const int *c, NVNformat f) { (void)f; return fast_clear_color(d, c); }
+NVN_NOPROTO(nvnDeviceRegisterFastClearColoruiIndex, int, NVNdevice *d, const uint32_t *c, NVNformat f) { (void)f; return fast_clear_color(d, c); }
+NVN_NOPROTO(nvnDeviceRegisterFastClearDepthIndex, int, NVNdevice *d, float v) { return fast_clear_depth(d, v); }
+NVN_NOPROTO(nvnDeviceRegisterFastClearStencil, NVNboolean, NVNdevice *d, int s) { return fast_clear_stencil(d, s) >= 0; }
+NVN_NOPROTO(nvnDeviceRegisterFastClearStencilIndex, int, NVNdevice *d, int s, NVNformat f) { (void)f; return fast_clear_stencil(d, s); }
+// The bytes of command memory a recording takes: its records up to its END, through the JUMPs that link its segments (the driver's handle carries this size)
+NVN_NOPROTO(nvnDeviceGetCommandHandleMemorySize, size_t, const NVNdevice *d, NVNcommandHandle h) {
+    (void)d;
+    size_t n = 0;
+    for (const uint8_t *p = (const uint8_t *)(uintptr_t)h; p;) {
+        op_hdr r; memcpy(&r, p, sizeof r);
+        if (r.size < 8 || r.size & 7) { LOG("[RED] DeviceGetCommandHandleMemorySize: handle %#llx has a record of %u bytes", (unsigned long long)h, r.size); return n; }
+        n += r.size;
+        if (r.op == OP_END) break;
+        if (r.op == OP_JUMP) { memcpy(&p, p + 8, 8); continue; }
+        p += r.size;
+    }
+    return n;
+}
+// A bindless uniform buffer handle as NVN2's driver encodes it: the buffer's size in 16-byte units from bit 45, its address in 16-byte units below (the game's address)
+NVN_NOPROTO(nvnDeviceGetUniformBufferHandle, uint64_t, const NVNdevice *d, NVNbufferAddress a, size_t size) {
+    (void)d; return (((uint64_t)size + 15) >> 4 << 45) | nvn_direct_guest_of(a) >> 4;
+}
+
+// Queue. NVN's counters measure the queue's own memory (SetQueueMemory): the bytes the driver wrote there for the queue's submissions since the last reset (command and control
+// rings; compute: its own count). The host never writes the queue's memory (its submissions replay the command buffers' records), so the counts are 0 and a reset has nothing to note
+NVN(nvnQueueGetTotalCommandMemoryUsed, size_t, NVNqueue *q) { (void)q; return 0; }
+NVN(nvnQueueGetTotalControlMemoryUsed, size_t, NVNqueue *q) { (void)q; return 0; }
+NVN(nvnQueueGetTotalComputeMemoryUsed, size_t, NVNqueue *q) { (void)q; return 0; }
+NVN(nvnQueueResetMemoryUsageCounts, void, NVNqueue *q) { (void)q; }
+#define CQB(b) ((const queue_builder_t *)(b))
+NVN_NOPROTO(nvnQueueBuilderGetDevice, NVNdevice *, const NVNqueueBuilder *b) { return CQB(b)->dev; }
+NVN_NOPROTO(nvnQueueBuilderGetFlags, int, const NVNqueueBuilder *b) { return (int)CQB(b)->flags; }
+NVN_NOPROTO(nvnQueueBuilderGetQueuePriority, int, const NVNqueueBuilder *b) { return CQB(b)->prio; }
+NVN_NOPROTO(nvnQueueBuilderGetPrimaryQueue, NVNqueue *, const NVNqueueBuilder *b) { return CQB(b)->primary; }
+// The size as set (0 unset) and whether it was set
+static NVNboolean qb_get(const NVNqueueBuilder *b, int k, int *size) { *size = (int)CQB(b)->sz[k]; return CQB(b)->set[k]; }
+NVN_NOPROTO(nvnQueueBuilderGetCommandMemorySize, NVNboolean, const NVNqueueBuilder *b, int *size) { return qb_get(b, QB_CMD, size); }
+NVN_NOPROTO(nvnQueueBuilderGetComputeMemorySize, NVNboolean, const NVNqueueBuilder *b, int *size) { return qb_get(b, QB_COMP, size); }
+NVN_NOPROTO(nvnQueueBuilderGetControlMemorySize, NVNboolean, const NVNqueueBuilder *b, int *size) { return qb_get(b, QB_CTL, size); }
+NVN_NOPROTO(nvnQueueBuilderGetCommandFlushThreshold, NVNboolean, const NVNqueueBuilder *b, int *size) { return qb_get(b, QB_FLUSH, size); }
+NVN_NOPROTO(nvnQueueBuilderGetMemorySize, int, const NVNqueueBuilder *b) { return (int)CQB(b)->mem_sz; }
+NVN_NOPROTO(nvnQueueBuilderGetMemory, void *, const NVNqueueBuilder *b) { return CQB(b)->mem; }
+
+// Memory pool, buffer, texture and sampler builders and objects. Debug IDs: the release driver's are 0
+#define CPB(b) ((const pool_builder_t *)(b))
+NVN_NOPROTO(nvnMemoryPoolBuilderGetDevice, NVNdevice *, const NVNmemoryPoolBuilder *b) { return CPB(b)->dev; }
+NVN_NOPROTO(nvnMemoryPoolBuilderGetMemory, void *, const NVNmemoryPoolBuilder *b) { return CPB(b)->mem; }   // (nvn_protos.h has it returning void)
+NVN(nvnMemoryPoolBuilderGetSize, size_t, const NVNmemoryPoolBuilder *b) { return (size_t)CPB(b)->size; }
+NVN(nvnMemoryPoolBuilderGetFlags, NVNmemoryPoolFlags, const NVNmemoryPoolBuilder *b) { return (NVNmemoryPoolFlags)CPB(b)->flags; }
+NVN_NOPROTO(nvnBufferBuilderGetDevice, NVNdevice *, const NVNbufferBuilder *b) { return ((const buf_builder_t *)b)->dev; }
+NVN(nvnBufferGetDebugID, uint64_t, const NVNbuffer *buf) { (void)buf; return 0; }
+NVN(nvnTextureGetDebugID, uint64_t, const NVNtexture *t) { (void)t; return 0; }
+NVN(nvnSamplerGetDebugID, uint64_t, const NVNsampler *s) { (void)s; return 0; }
+#define CTB(b) ((const tex_builder_t *)(b))
+NVN_NOPROTO(nvnTextureBuilderGetDevice, NVNdevice *, const NVNtextureBuilder *b) { return CTB(b)->dev; }
+NVN(nvnTextureBuilderGetSwizzle, void, const NVNtextureBuilder *b, NVNtextureSwizzle *r, NVNtextureSwizzle *g, NVNtextureSwizzle *bl, NVNtextureSwizzle *a) {
+    unsigned w = CTB(b)->set_swz ? CTB(b)->swz : 2u | 3u << 3 | 4u << 6 | 5u << 9;   // identity R G B A unless set (tex_swz)
+    *r = (NVNtextureSwizzle)(w & 7); *g = (NVNtextureSwizzle)(w >> 3 & 7); *bl = (NVNtextureSwizzle)(w >> 6 & 7); *a = (NVNtextureSwizzle)(w >> 9 & 7);
+}
+NVN(nvnTextureBuilderGetDepthStencilMode, NVNtextureDepthStencilMode, const NVNtextureBuilder *b) { return CTB(b)->stencil ? NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL : NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH; }
+NVN(nvnTextureBuilderGetPackagedTextureData, const void *, const NVNtextureBuilder *b) { return CTB(b)->pkg_data; }
+// The driver keeps the layout's first 12 bits (the block height and the two fields after it) and writes them back as one 32-bit word; returns whether a layout was set
+NVN_NOPROTO(nvnTextureBuilderGetPackagedTextureLayout, NVNboolean, const NVNtextureBuilder *b, NVNpackagedTextureLayout *l) {
+    const tex_builder_t *o = CTB(b);
+    uint32_t w = o->has_layout ? (uint32_t)(o->layout[0] | o->layout[1] << 8) & 0xfff : 0;
+    memcpy(l->layout, &w, 4);
+    return o->has_layout;
+}
+NVN(nvnTextureBuilderGetGLTextureName, uint32_t, const NVNtextureBuilder *b) { return CTB(b)->gl_name; }
+// The view's offset into the storage the builder describes, as nvnTextureGetViewOffset gives it for a texture
+NVN_NOPROTO(nvnTextureBuilderGetViewOffset, ptrdiff_t, const NVNtextureBuilder *b, const NVNtextureView *v) {
+    const view_t *w = (const view_t *)v;
+    if (!w) return 0;
+    nvn_texlayout L; nvn_tex_layout(&CTB(b)->d, &L);
+    uint64_t off = w->set_levels ? nvn_tex_level_offset(&CTB(b)->d, (unsigned)w->base_level) : 0;
+    if (w->set_layers) off += (uint64_t)w->min_layer * L.layer_size;
+    return (ptrdiff_t)off;
+}
+#define CSB(b) (&((const samp_builder_t *)(b))->p)
+NVN_NOPROTO(nvnSamplerBuilderGetDevice, NVNdevice *, const NVNsamplerBuilder *b) { return ((const samp_builder_t *)b)->dev; }
+NVN(nvnSamplerBuilderGetLodBias, float, const NVNsamplerBuilder *b) { return CSB(b)->lod_bias; }
+NVN(nvnSamplerBuilderGetCompare, void, const NVNsamplerBuilder *b, NVNcompareMode *m, NVNcompareFunc *f) { *m = (NVNcompareMode)CSB(b)->cmp_mode; *f = (NVNcompareFunc)CSB(b)->cmp_func; }
+NVN(nvnSamplerBuilderGetMaxAnisotropy, float, const NVNsamplerBuilder *b) { return CSB(b)->aniso; }
+NVN(nvnSamplerBuilderGetReductionFilter, NVNsamplerReduction, const NVNsamplerBuilder *b) { return (NVNsamplerReduction)CSB(b)->reduction; }
+NVN(nvnSamplerBuilderGetLodSnap, float, const NVNsamplerBuilder *b) { return ((const samp_builder_t *)b)->lod_snap; }
+// The border colour's four words as set, whichever setter set them (the driver keeps the words alone)
+NVN(nvnSamplerBuilderGetBorderColor, void, const NVNsamplerBuilder *b, float *c) { memcpy(c, CSB(b)->border, 16); }
+NVN(nvnSamplerBuilderGetBorderColori, void, const NVNsamplerBuilder *b, int *c) { memcpy(c, CSB(b)->border, 16); }
+NVN(nvnSamplerBuilderGetBorderColorui, void, const NVNsamplerBuilder *b, uint32_t *c) { memcpy(c, CSB(b)->border, 16); }
+NVN(nvnSamplerGetBorderColori, void, const NVNsampler *s, int *c) { memcpy(c, SP(s)->border, 16); }
+NVN(nvnSamplerGetBorderColorui, void, const NVNsampler *s, uint32_t *c) { memcpy(c, SP(s)->border, 16); }
+
+// State objects
+NVN(nvnBlendStateSetAdvancedNormalizedDst, void, NVNblendState *s, uint32_t n) { ST(blend_st, s)->adv_dst_free = !B(n); }   // kept: the replay's fixed-function factors read a normalized target as it is
+NVN(nvnBlendStateGetAdvancedNormalizedDst, NVNboolean, const NVNblendState *s) { return !((const blend_st *)s)->adv_dst_free; }
+NVN_NOPROTO(nvnMultisampleStateSetCoverageTruncationEnable, void, NVNmultisampleState *s, uint32_t e) { ST(ms_st, s)->cov_trunc = B(e) != 0; }   // kept: Vulkan has no coverage truncation
+NVN_NOPROTO(nvnMultisampleStateGetCoverageTruncationEnable, NVNboolean, const NVNmultisampleState *s) { return ((const ms_st *)s)->cov_trunc; }
+NVN_NOPROTO(nvnMultisampleStateGetSampleLocations, void, const NVNmultisampleState *s, int start, int n, float *v) {
+    for (int i = 0; i < n; i++) {
+        uint8_t l = (unsigned)(start + i) < 16 ? ((const ms_loc_st *)s)->loc[start + i] : 0x88;
+        v[2 * i] = (float)(l & 15) / 16.f; v[2 * i + 1] = (float)(l >> 4) / 16.f;
+    }
+}
+// The pixel grid the sample locations repeat over, by the larger of the sample and raster sample counts; other counts write nothing (the driver's table)
+NVN(nvnMultisampleStateGetSampleLocationsGrid, void, NVNmultisampleState *s, int *w, int *h) {
+    const ms_st *o = (const ms_st *)s; unsigned n = o->samples > o->raster_samples ? o->samples : o->raster_samples;
+    int gw, gh;
+    switch (n) { case 0: case 1: gw = 4; gh = 4; break; case 2: gw = 2; gh = 4; break; case 4: gw = 2; gh = 2; break; case 8: gw = 1; gh = 2; break; case 16: gw = 1; gh = 1; break; default: return; }
+    *w = gw; *h = gh;
+}
+
+// Command buffer
+NVN(nvnCommandBufferGetCopyRowStride, ptrdiff_t, const NVNcommandBuffer *c) { return (ptrdiff_t)((const cmd_t *)c)->copy_row; }
+NVN(nvnCommandBufferGetCopyImageStride, ptrdiff_t, const NVNcommandBuffer *c) { return (ptrdiff_t)((const cmd_t *)c)->copy_image; }
+NVN(nvnCommandBufferGetMemoryCallback, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->cb; }
+NVN_NOPROTO(nvnCommandBufferGetMemoryCallbackData, void *, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->cb_data; }   // (nvn_protos.h has it returning void)
+
+// Syncs and GL: there is no GL on the host. Initializing from a GL sync fails as the driver's does when it has no GL: the sync is initialized unfenced and the error is 4;
+// a GL sync of an NVN sync fails with 4, the driver's answer for a sync it cannot express (and, fenced, after writing 0 for the GL sync)
+NVN_NOPROTO(nvnSyncInitializeFromFencedGLSync, NVNboolean, NVNsync *s, NVNdevice *d, uint32_t gl, int *err) {
+    (void)gl; h_nvnSyncInitialize(s, d);
+    if (err) *err = 4;
+    return 0;
+}
+NVN_NOPROTO(nvnSyncCreateGLSync, int, const NVNsync *s, uint64_t *gl) {
+    if (((const sync_t *)s)->fenced) *gl = 0;
+    return 4;
+}
+NVN_NOPROTO(nvnEventBuilderGetStorage, NVNmemoryPool *, const NVNeventBuilder *b, int64_t *off) { *off = ((const ev_builder_t *)b)->off; return (NVNmemoryPool *)((const ev_builder_t *)b)->pool; }
+NVN_NOPROTO(nvnEventGetMemoryPool, NVNmemoryPool *, const NVNevent *e) { return (NVNmemoryPool *)((const ev_t *)e)->pool; }
+NVN_NOPROTO(nvnEventGetMemoryOffset, int64_t, const NVNevent *e) { return ((const ev_t *)e)->off; }
+
+// Program builder (prog_builder_t): the arrays are the game's, returned as it gave them
+#define CPRB(b) ((const prog_builder_t *)(b))
+NVN_NOPROTO(nvnProgramBuilderGetDevice, NVNdevice *, const void *b) { return CPRB(b)->dev; }
+NVN_NOPROTO(nvnProgramBuilderGetShaders, const NVNshaderData *, const void *b) { return CPRB(b)->sd; }
+NVN_NOPROTO(nvnProgramBuilderGetShaderCount, int, const void *b) { return CPRB(b)->n; }
+NVN_NOPROTO(nvnProgramBuilderSetSampleShading, void, void *b, int mode) { ((prog_builder_t *)b)->sample_shading = mode; }   // kept: see nvnProgramSetSampleShading
+NVN_NOPROTO(nvnProgramBuilderGetSampleShading, int, const void *b) { return CPRB(b)->sample_shading; }
+NVN_NOPROTO(nvnProgramBuilderSetDebugDataHashes, void, void *b, int n, const void *hashes) { (void)n; ((prog_builder_t *)b)->dbg = hashes; }   // (no getter reads the count)
+NVN_NOPROTO(nvnProgramBuilderGetDebugDataHashes, const void *, const void *b) { return CPRB(b)->dbg; }
+NVN_NOPROTO(nvnProgramBuilderSetSubroutineLinkage, void, void *b, int n, const void *maps) { ((prog_builder_t *)b)->nlink = n; ((prog_builder_t *)b)->link = maps; }
+NVN_NOPROTO(nvnProgramBuilderGetSubroutineLinkage, const void *, const void *b) { return CPRB(b)->link; }
+NVN_NOPROTO(nvnProgramBuilderGetSubroutineLinkageCount, int, const void *b) { return CPRB(b)->nlink; }
+// A ray tracing program's scratch per warp (the driver asks its ray tracing pipeline, made from the builder's ray tracing modules, for its stack size): 0 for any other program,
+// and the host makes no ray tracing programs
+NVN_NOPROTO(nvnProgramGetScratchBytesPerWarp, int, const NVNprogram *p) { (void)p; return 0; }

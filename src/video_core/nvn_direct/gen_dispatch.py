@@ -5,8 +5,8 @@
 guest call's registers (AArch64: integer arguments in x0-x7, float ones in v0-v7), with the guest's
 addresses turned into host pointers (fastmem arena + address) on the way in and back on the way out.
 
-Signatures: Banana Native's prototypes (bananative/dm/gfx/nvn/nvn_protos.h, MIT) and hle_nvn.c's
-NVN_NOPROTO ones, which win (nvn_protos.h has a few wrong). Run after updating bananative/:
+Signatures: Banana Native's prototypes (bananative/dm/gfx/nvn/nvn_protos.h, MIT) and the NVN_NOPROTO
+ones of hle_nvn.c and nvn_window.c, which win (nvn_protos.h has a few wrong). Run after updating bananative/:
     python3 gen_dispatch.py
 Arguments past x7 / v7 come from the guest's stack (s[], one 8-byte slot each, in order).
 It fails on what the dispatch cannot pass: structs returned through x8,
@@ -38,8 +38,6 @@ ARRAYS = {
 PLAIN_STRUCTS = {'NVNcopyRegion', 'NVNdrawTextureRegion', 'NVNpackagedTextureLayout', 'NVNrectangle',
                  'NVNtextureSparseTileLayout', 'NVNqueueErrorInfo', 'NVNcounterData',
                  'NVNsubroutineLinkageMapPtr', 'NVNseparateTextureHandle', 'NVNseparateSamplerHandle'}
-# Calls whose array the front end keeps past the call: their host copy is never freed.
-KEPT_ARRAYS = {'nvnProgramBuilderSetShaders'}
 # Calls Lichii's hook answers itself (name lookups).
 HOOK_OWN = {'nvnBootstrapLoader', 'nvnDeviceGetProcAddress'}
 
@@ -51,7 +49,7 @@ def protos():
         if m:
             args = [a.strip() for a in m.group(3).split(',')] if m.group(3).strip() else []
             out[m.group(2)] = (m.group(1).strip(), [a for a in args if a != 'void'])
-    src = open(os.path.join(NVN, 'hle_nvn.c')).read()
+    src = open(os.path.join(NVN, 'hle_nvn.c')).read() + open(os.path.join(HERE, 'nvn_window.c')).read()
     for m in re.finditer(r'^NVN_NOPROTO\((\w+),\s*([^,]+),\s*([^)]*)\)', src, re.M):
         args = []
         for a in m.group(3).split(','):
@@ -128,8 +126,7 @@ def main():
                 if last_int is None:
                     sys.exit(f'{name}: array argument {i} without a count before it')
                 helper = ARRAYS.get(b, 'xl_pointers') if stars == 1 else 'xl_pointers'
-                kept = 1 if name in KEPT_ARRAYS else 0
-                expr = f'({a}){helper}({i}, (int){last_int}, {scratch}, {kept})'
+                expr = f'({a}){helper}({i}, (int){last_int}, {scratch})'
                 scratch += 1
             else:
                 if b in structs and not structs[b] and b not in PLAIN_STRUCTS:

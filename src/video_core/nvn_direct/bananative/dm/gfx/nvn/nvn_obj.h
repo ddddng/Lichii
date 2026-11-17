@@ -13,9 +13,14 @@
 #define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " exceeds the reserved size of " #H)
 
 typedef struct { uint32_t flags; } dev_builder_t;                       FITS(dev_builder_t, NVNdeviceBuilder);
-typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; } dev_t_;  FITS(dev_t_, NVNdevice);
+// fc_*: the fast clear values registered so far (hle_nvn.c fast_clear), in registration order: their positions are the indices nvnDeviceRegisterFastClear*Index return
+enum { NVN_FAST_CLEARS = 64 };
+typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; uint32_t fc_color[NVN_FAST_CLEARS][4], fc_depth[NVN_FAST_CLEARS], fc_stencil[NVN_FAST_CLEARS]; int32_t fc_ncolor, fc_ndepth, fc_nstencil; } dev_t_;  FITS(dev_t_, NVNdevice);
 
-typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
+// The sizes start unset (0) and each setter marks its own set (set[QB_*]), as NVN2's driver does (Mario Kart World's sdk: SetDefaults clears them, the getters return the size and the flag);
+// prio: SetQueuePriority, 100 by default (the driver's); primary: SetPrimaryQueue
+enum { QB_CMD, QB_COMP, QB_CTL, QB_FLUSH };
+typedef struct { NVNdevice *dev; void *mem; NVNqueue *primary; uint32_t flags, sz[4], mem_sz; int32_t prio; uint8_t set[4]; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
 enum { NVN_QUEUE_WAITS = 32 };   // Lichii: QueueWaitSync fences kept for a queue's next submission
 typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial, last_fence; int nwait; uint64_t wait_fence[NVN_QUEUE_WAITS]; } queue_t;   // last_fence: its last submission's (Lichii: QueueFenceSync); wait_fence: QueueWaitSync's fences for its next submission (Lichii)  FITS(queue_t, NVNqueue);
@@ -33,6 +38,7 @@ typedef struct {
     const void *pkg_data;                // TextureBuilderSetPackagedTextureData: copied into the storage at TextureInitialize (13 Sentinels)
     uint8_t set_swz : 1, stencil : 1; uint16_t swz;   // TextureBuilderSetSwizzle: r | g << 3 | b << 6 | a << 9 (NVN and Metal channel enums have the same values: 0 zero 1 one 2 R 3 G 4 B 5 A);
                                          // stencil: TextureBuilderSetDepthStencilMode STENCIL (the texture reads the stencil of its depth-stencil storage, as a stencil-mode view does)
+    uint32_t gl_name;                    // TextureBuilderSetGLTextureName (no GL on the host: kept for the getter)
 } tex_builder_t;                                                                             FITS(tex_builder_t, NVNtextureBuilder);
 // Field order packed to 0x80: newer SDKs (SMBW, NVN 55) allocate NVNtexture as 0x80 bytes (allocated from main 0x978c3c, initialized at 0x978cd4);
 // the former 0x88 wrote past the object's end and corrupted the adjacent heap block's free list. has_layout sits in the alignment gap after d, layout and serial fill up to 0x80.
@@ -50,21 +56,32 @@ FITS(view_t, NVNtextureView);
 _Static_assert(sizeof(view_t) <= 16, "view_t exceeds the newer SDKs' NVNtextureView (16 bytes)");
 
 // Sampler parameters (one copy shared by builder and object)
-typedef struct { uint8_t minf, magf, ws, wt, wr, cmp_mode, cmp_func, reduction; float lod_min, lod_max, lod_bias, aniso, border[4]; } samp_par;   // Enum values are all < 256; reduction takes the padding byte
-typedef struct { NVNdevice *dev; samp_par p; } samp_builder_t;                                FITS(samp_builder_t, NVNsamplerBuilder);
-typedef struct { uint32_t magic; samp_par p; } samp_t;                                        FITS(samp_t, NVNsampler);
+// border: the four words the game set, as the driver keeps them (SetBorderColor's floats, SetBorderColori / ui's integers); border_int: 1 int, 2 uint, 0 float (samp_border)
+typedef struct { uint8_t minf, magf, ws, wt, wr, cmp_mode : 4, border_int : 2, cmp_func, reduction; float lod_min, lod_max, lod_bias, aniso; uint32_t border[4]; } samp_par;   // Enum values are all < 256; reduction takes the padding byte
+static inline void samp_border(const samp_par *p, float rgba[4]) {   // the border colour as numbers
+    for (int i = 0; i < 4; i++) { float f; memcpy(&f, &p->border[i], 4); rgba[i] = p->border_int == 1 ? (float)(int32_t)p->border[i] : p->border_int == 2 ? (float)p->border[i] : f; }
+}
+typedef struct { NVNdevice *dev; samp_par p; float lod_snap; } samp_builder_t;                FITS(samp_builder_t, NVNsamplerBuilder);   // lod_snap: SetLodSnap (no Vulkan equivalent: kept for the getters)
+typedef struct { uint32_t magic; samp_par p; float lod_snap; } samp_t;                        FITS(samp_t, NVNsampler);
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t;   FITS(ev_t, NVNevent);   // pool, off: its storage (EventGetMemoryPool / Offset)
 
-typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
+// tex: the game's array of SetTextures, read at WindowInitialize as the driver does; active: SetNumActiveTextures (0 = all, kept for the getters); color_space: SetColorSpace.
+// NVN2's builder (0x60 bytes in its driver) goes on with the HDR metadata (win_hdr_t at WIN_BUILDER_HDR), which an NVN1 builder (0x40) has no room for: only NVN2 touches it
+typedef struct { NVNdevice *dev; void *native; NVNtexture *const *tex; int32_t ntex, interval, active, color_space; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
+// HDR metadata as nvnWindow{Builder,}SetHdr{Display,Content}Metadata take it: display = the red, green, blue and white points (x, y each) and two luminances, content = two light levels.
+// The driver's defaults: BT.709 primaries and D65, 0.03 and 1000; 200 and 60
+typedef struct { float display[10], content[2]; } win_hdr_t;
+#define WIN_BUILDER_HDR 0x28
+_Static_assert(sizeof(win_builder_t) <= WIN_BUILDER_HDR && WIN_BUILDER_HDR + sizeof(win_hdr_t) <= 0x60, "an NVN2 window builder is 0x60 bytes");
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], pfence[4], last_pfence; } win_t;   // ticket[i]: ticket of the most recent present of image i; pfence[i]: the last fence reserved when it was presented; last_pfence: that of the last present (Lichii: the acquire's sync)
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], pfence[4], last_pfence; int32_t active; win_hdr_t hdr; } win_t;   // active: SetNumActiveTextures (kept for the getter); hdr: NVN2's metadata   // ticket[i]: ticket of the most recent present of image i; pfence[i]: the last fence reserved when it was presented; last_pfence: that of the last present (Lichii: the acquire's sync)
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
@@ -81,16 +98,21 @@ typedef struct {
     uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
+    int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer as well as a record (GetCopyRowStride / GetCopyImageStride)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
 typedef struct { uint32_t blend_en : 8, logic_op : 4, alpha_func : 4; } color_st;            FITS(color_st, NVNcolorState);
 typedef struct { uint32_t mask; } chmask_st;            /* 4 bits per target: r=1 g=2 b=4 a=8, bit set = write */ FITS(chmask_st, NVNchannelMaskState);
-// adv: NVN advanced blend mode (0 = none); adv_npm: the source is not premultiplied (SetAdvancedPremultipliedSrc(false)); adv_ovl: overlap mode (0 = uncorrelated, the default)
-typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3, adv : 6, adv_npm : 1, adv_ovl : 2; } blend_st;
+// adv: NVN advanced blend mode (0 = none); adv_npm: the source is not premultiplied (SetAdvancedPremultipliedSrc(false)); adv_ovl: overlap mode (0 = uncorrelated, the default);
+// adv_dst_free: the destination is not normalized (SetAdvancedNormalizedDst(false); normalized is the driver's default)
+typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3, adv : 6, adv_npm : 1, adv_ovl : 2, adv_dst_free : 1; } blend_st;
 FITS(blend_st, NVNblendState);
-typedef struct { uint8_t enable, samples, a2c, a2c_dither, raster_samples, cov_mod, cov2color_en, cov2color_out, sl_en, sl_grid; } ms_st;
-FITS(ms_st, NVNmultisampleState);
+// The bytes a bind records (p_bind_state); the sample locations follow outside them (ms_loc_st). cov_trunc: SetCoverageTruncationEnable
+typedef struct { uint8_t enable : 1, a2c : 1, a2c_dither : 1, cov2color_en : 1, sl_en : 1, sl_grid : 1, cov_trunc : 1; uint8_t samples, raster_samples, cov_mod, cov2color_out; } ms_st;
+// loc: SetSampleLocations as NVN2's driver keeps them, one byte per sample: x in the low nibble, y in the high one, in 1/16 pixel (0x88, the centre, by default)
+typedef struct { ms_st st; uint8_t loc[16]; } ms_loc_st;
+FITS(ms_loc_st, NVNmultisampleState);
 typedef struct { uint32_t cull : 2, front : 1, mode : 2, offset_en : 3; } poly_st;           FITS(poly_st, NVNpolygonState);
 typedef struct {
     uint64_t dt : 1, dw : 1, df : 4, st : 1, sf_f : 4, sf_b : 4,
