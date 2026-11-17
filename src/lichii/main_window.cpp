@@ -702,6 +702,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // Once FixProfiles has read the configured NAND and -u may have picked another user.
     Common::Nextendo::MigrateAccountFile(
         Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
+    // Builds before profile deletion cleared the account left the deleted profiles' accounts.
+    for (auto& token : Common::Nextendo::RemoveOrphanAccounts(
+             QtCommon::system->GetProfileManager().FindExistingProfileUUIDs())) {
+        void(QtConcurrent::run(
+            [client_id = Settings::values.nextendo_client_id.GetValue(), token = std::move(token)] {
+                Common::Nextendo::RevokeToken(client_id, token);
+            }));
+    }
     nextendo_session_timer.start(std::chrono::minutes{2});
     KeepNextendoSessionAlive();
 

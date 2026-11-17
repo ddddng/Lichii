@@ -799,6 +799,39 @@ void ClearAccount(const Common::UUID& profile) {
     ClearAccountLocked(profile);
 }
 
+std::vector<std::string> RemoveOrphanAccounts(std::span<const Common::UUID> profiles) {
+    std::vector<std::string> refresh_tokens;
+    if (profiles.empty()) {
+        return refresh_tokens;
+    }
+    std::scoped_lock lock{account_mutex};
+    std::vector<Common::UUID> orphans;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator{
+             FS::GetEdenPath(FS::EdenPath::ConfigDir) / "nextendo", ec}) {
+        const auto& path = entry.path();
+        const std::string stem = path.stem().string();
+        if (path.extension() != ".json" || stem.size() != 36) {
+            continue;
+        }
+        const Common::UUID profile{stem};
+        if (profile.IsValid() && AccountPath(profile) == path &&
+            std::ranges::find(profiles, profile) == profiles.end()) {
+            orphans.push_back(profile);
+        }
+    }
+    for (const auto& profile : orphans) {
+        if (const auto account = LoadAccountLocked(profile);
+            account && !account->refresh_token.empty()) {
+            refresh_tokens.push_back(account->refresh_token);
+        }
+        ClearAccountLocked(profile);
+        LOG_INFO(Common, "Removed the Nextendo account of deleted profile {}",
+                 profile.FormattedString());
+    }
+    return refresh_tokens;
+}
+
 void MigrateAccountFile(const Common::UUID& profile) {
     if (profile.IsInvalid()) {
         return;

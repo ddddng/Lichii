@@ -107,6 +107,10 @@ u64 ParseBaasNsa(std::string_view text);
 std::optional<Account> LoadAccount(const Common::UUID& profile);
 void SaveAccount(const Common::UUID& profile, const Account& account);
 void ClearAccount(const Common::UUID& profile);
+// Removes the accounts of profiles not in profiles, the ones a profile deletion left behind, and
+// returns their refresh tokens to revoke. Removes nothing when profiles is empty, which is what a
+// profile list that could not be read looks like.
+std::vector<std::string> RemoveOrphanAccounts(std::span<const Common::UUID> profiles);
 // Moves the account of builds that kept a single one to profile, unless profile has one already.
 void MigrateAccountFile(const Common::UUID& profile);
 

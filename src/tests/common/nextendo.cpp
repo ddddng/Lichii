@@ -25,6 +25,7 @@
 #include "common/nextendo.h"
 #include "common/nextendo_game_catalog.h"
 #include "common/settings.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "tests/common/restore_eden_path.h"
 
 namespace Nextendo = Common::Nextendo;
@@ -1036,6 +1037,50 @@ TEST_CASE("Nextendo: each profile keeps its own account", "[common]") {
     REQUIRE_FALSE(Nextendo::LoadAccount(OtherProfile).has_value());
     REQUIRE(Nextendo::LoadAccount(Profile)->refresh_token == "refresh.old");
     REQUIRE(Nextendo::CachedFriends(Profile).friends.size() == 2);
+}
+
+TEST_CASE("Nextendo: deleting a profile removes its account", "[common]") {
+    FakeNextendo fake;
+    const auto config = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir);
+    struct NandInConfig {
+        std::filesystem::path previous = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir);
+        explicit NandInConfig(const std::filesystem::path& config) {
+            Common::FS::SetEdenPath(Common::FS::EdenPath::NANDDir, config);
+        }
+        ~NandInConfig() {
+            Tests::RestoreEdenPath(Common::FS::EdenPath::NANDDir, previous);
+        }
+    } nand{config};
+
+    Service::Account::ProfileManager manager;
+    REQUIRE(manager.CreateNewUser(Profile, "one").IsSuccess());
+    REQUIRE(manager.CreateNewUser(OtherProfile, "two").IsSuccess());
+    Nextendo::SaveAccount(Profile, SocialSignedIn());
+    Nextendo::SaveAccount(OtherProfile, OtherSignedIn());
+
+    REQUIRE(manager.RemoveUser(OtherProfile));
+    REQUIRE_FALSE(std::filesystem::exists(
+        config / "nextendo" / fmt::format("{}.json", OtherProfile.FormattedString())));
+    REQUIRE_FALSE(Nextendo::LoadAccount(OtherProfile).has_value());
+    REQUIRE(Nextendo::LoadAccount(Profile)->refresh_token == "refresh.old");
+}
+
+TEST_CASE("Nextendo: accounts of deleted profiles are removed", "[common]") {
+    FakeNextendo fake;
+    const auto other_file = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir) /
+                            "nextendo" / fmt::format("{}.json", OtherProfile.FormattedString());
+    Nextendo::SaveAccount(Profile, SocialSignedIn());
+    Nextendo::SaveAccount(OtherProfile, OtherSignedIn());
+
+    REQUIRE(Nextendo::RemoveOrphanAccounts(std::span<const Common::UUID>{}).empty());
+    REQUIRE(std::filesystem::exists(other_file));
+
+    const std::array kept{Profile};
+    REQUIRE(Nextendo::RemoveOrphanAccounts(kept) == std::vector<std::string>{"refresh.other"});
+    REQUIRE_FALSE(std::filesystem::exists(other_file));
+    REQUIRE_FALSE(Nextendo::LoadAccount(OtherProfile).has_value());
+    REQUIRE(Nextendo::LoadAccount(Profile)->refresh_token == "refresh.old");
+    REQUIRE(Nextendo::RemoveOrphanAccounts(kept).empty());
 }
 
 TEST_CASE("Nextendo: the heartbeat runs for the profile in use only", "[common]") {
