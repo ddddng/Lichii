@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "core/hle/service/bcat/backend/backend.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
 
@@ -19,6 +20,7 @@ class FileSystemController;
 namespace Service::BCAT {
 class BcatBackend;
 class IBcatService;
+class IDeliveryCacheProgressService;
 class IDeliveryCacheStorageService;
 
 class IServiceCreator final : public ServiceFramework<IServiceCreator> {
@@ -35,8 +37,14 @@ private:
     Result CreateDeliveryCacheStorageServiceWithApplicationId(
         u64 application_id, OutInterface<IDeliveryCacheStorageService> out_interface);
 
+    Result CreateDeliveryCacheProgressService(
+        ClientProcessId process_id, OutInterface<IDeliveryCacheProgressService> out_interface);
+
     std::unique_ptr<BcatBackend> backend;
     Service::FileSystem::FileSystemController& fsc;
+    // For command 3, which games from before RequestSyncDeliveryCache call: the cache is
+    // already local, so it is always done.
+    ProgressServiceBackend legacy_progress;
 };
 
 } // namespace Service::BCAT
