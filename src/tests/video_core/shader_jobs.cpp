@@ -618,6 +618,49 @@ TEST_CASE("RunOrWait runs a queued job on the waiting thread", "[video_core][sha
     REQUIRE(blocker.Status() == ShaderJobStatus::Done);
 }
 
+TEST_CASE("RunOrWait runs the driver stage after waiting out a worker's CPU stage",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate driver_gate;
+    auto driving = std::make_shared<std::promise<void>>();
+    auto driver_busy = driving->get_future();
+    const auto blocker = scheduler.Submit(TwoStageJob(
+        NeedNow, [](ShaderJobContext&) {},
+        [&driver_gate, driving] {
+            driving->set_value();
+            driver_gate.Wait();
+        }));
+    driver_busy.wait();
+    Gate cpu_gate;
+    auto entered = std::make_shared<std::promise<void>>();
+    auto in_cpu = entered->get_future();
+    std::thread::id driver_thread;
+    const auto job = scheduler.Submit(TwoStageJob(
+        Soon,
+        [&cpu_gate, entered](ShaderJobContext&) {
+            entered->set_value();
+            cpu_gate.Wait();
+        },
+        [&] { driver_thread = std::this_thread::get_id(); }));
+    in_cpu.wait();
+    std::thread::id waiter_thread;
+    std::thread waiter{[&] {
+        waiter_thread = std::this_thread::get_id();
+        scheduler.RunOrWait(job);
+    }};
+    std::this_thread::sleep_for(20ms);
+    cpu_gate.Open();
+    // The only driver worker is busy, so the job finishes only if the waiter builds it.
+    const bool done = job.WaitFor(5s);
+    driver_gate.Open();
+    waiter.join();
+    scheduler.RunOrWait(blocker);
+
+    REQUIRE(done);
+    REQUIRE(driver_thread == waiter_thread);
+    REQUIRE(blocker.Status() == ShaderJobStatus::Done);
+}
+
 #ifdef __linux__
 TEST_CASE("Shader job workers are named by stage", "[video_core][shader_jobs]") {
     ShaderJobScheduler scheduler{Config(1, 1)};
