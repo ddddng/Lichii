@@ -405,6 +405,11 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
 std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::MemoryManager& memory,
                                                              GPUVAddr address, u64 device_address,
                                                              AcquireUnsettled& why) const {
+    // Unaligned, it reads part of two words, neither of which a note names (NoteSemaphoreWrite).
+    if (device_address % sizeof(u32) != 0) {
+        why = AcquireUnsettled::Unknown;
+        return std::nullopt;
+    }
     auto& shadow = Tegra::Nx2MirrorShadow::Get();
     // Mirrored releases into a diverted word change what acquires read there without a note.
     if (memory.OverlapsSyncpointShim(address, sizeof(u32)) || shadow.Diverts(device_address)) {

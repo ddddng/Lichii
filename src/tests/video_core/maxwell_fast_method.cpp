@@ -2401,10 +2401,10 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     SCOPE_EXIT {
         release = true;
     };
-    const auto semaphore = [&](u32 payload, u32 trigger) {
+    const auto semaphore = [&](u32 payload, u32 trigger, GPUVAddr address = word) {
         const std::array<std::pair<u32, u32>, 4> methods{{
-            {0x4, static_cast<u32>(word >> 32)},
-            {0x5, static_cast<u32>(word)},
+            {0x4, static_cast<u32>(address >> 32)},
+            {0x5, static_cast<u32>(address)},
             {0x6, payload},
             {0x7, trigger},
         }};
@@ -2495,6 +2495,11 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     fences.RunFence();
     CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 2);
     CHECK(f.memory.Read<u32>(word) == 10);
+    // Unaligned, it reads part of two words: no note names what it finds.
+    semaphore(0, Equal, word + 2);
+    CHECK_FALSE(dma_pusher.puller.HasPendingAcquire());
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 3);
 
     // A release the front did not note may land yet.
     const u64 unnoted = unsettled(AcquireUnsettled::Unnoted);
