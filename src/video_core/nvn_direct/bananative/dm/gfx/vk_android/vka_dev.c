@@ -70,6 +70,7 @@ int vka_dev_ext(const char *name) { for (uint32_t i = 0; i < g_adopt.extension_c
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 
 static void *completion_main(void *arg);
+static pthread_t g_complete_th; static int g_complete_up; static _Atomic int g_complete_stop, g_complete_left;   // Lichii: vka_complete_stop
 static int init_once(void) {
     // Lichii: the replay runs on Lichii's Vulkan device (nvn_direct_adopt_device): its instance, physical device, device and the graphics family's queues; it makes none of
     // its own. Without a device handed over there is no replay device and submissions run their CPU-side effects only (the null backend)
@@ -249,8 +250,8 @@ static int init_once(void) {
     if ((r = vk.vkCreateSemaphore(V.dev, &sci, NULL, &V.tl))) { VRED("timeline semaphore %d", r); return 0; }
     for (int i = 0; V.multi && i < V.nq; i++) if ((r = vk.vkCreateSemaphore(V.dev, &sci, NULL, &V.qtl[i]))) { VRED("queue timeline %d: %d: one queue", i, r); V.multi = 0; V.nq = 1; V.q = V.qs[0]; }
     VLOG("queues: %d of the family's (%s)", V.nq, V.multi ? "NVN queues on all but the last, the host's work on the last; waits between them on the GPU" : "one FIFO for every NVN queue");
-    pthread_t th; if (pthread_create(&th, NULL, completion_main, NULL)) { VRED("cannot start the completion thread"); return 0; }
-    pthread_detach(th);
+    if (pthread_create(&g_complete_th, NULL, completion_main, NULL)) { VRED("cannot start the completion thread"); return 0; }
+    g_complete_up = 1;
     VLOG("device %s, Vulkan %u.%u.%u, driver %#x; placed maps %s (range %s, alignment %llu), host memory import %s, buffer device address %s, update-after-bind %s, display timing %s; guest memory type %u (%#x), max allocation %llu MiB, at most %u allocations",
          V.props.deviceName, VK_API_VERSION_MAJOR(V.props.apiVersion), VK_API_VERSION_MINOR(V.props.apiVersion), VK_API_VERSION_PATCH(V.props.apiVersion), V.props.driverVersion,
          V.placed ? "yes" : "no", V.placed_range ? "yes" : "no", (unsigned long long)V.placed_align, V.host_import ? "yes" : "no", V.bda ? "yes" : "no", V.uab ? "yes" : "no", V.display_timing ? "yes" : "no",
@@ -472,7 +473,8 @@ static void *completion_main(void *arg) {
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
     for (;;) {
         pthread_mutex_lock(&g_fmu);
-        while (g_done >= g_submitted) pthread_cond_wait(&g_scv, &g_fmu);
+        while (g_done >= g_submitted && !atomic_load(&g_complete_stop)) pthread_cond_wait(&g_scv, &g_fmu);
+        if (g_done >= g_submitted) { pthread_mutex_unlock(&g_fmu); break; }   // (Lichii: vka_complete_stop, once everything submitted is run)
         // Wait for the next fence, not the last one handed to the queue: each fence is published (and its waiters woken) when the GPU reaches it. Waiting for the last one
         // held every earlier fence back until all work queued at that moment had run: Donkey Kong Bananza waits for its previous frame's last fence after queueing two
         // submissions of the next frame, so its wait ended only when those were done too. DM_VK_DONE_LAST=1 (live) waits for the last one, as before, for A/B runs
@@ -521,7 +523,19 @@ static void *completion_main(void *arg) {
         pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
         while (run) { after_rec *a = run; run = a->next; a->fn(a->arg); free(a); }
     }
+    atomic_store(&g_complete_left, 1);
     return NULL;
+}
+// Lichii (nvn_direct_park, after vka_stop and the worker idle): the device and guest memory go away next, so the completion thread runs the effects and deferred work of
+// what was submitted (every fence reads as done) and leaves; joined here
+int vka_complete_stop(uint64_t timeout_ns) {
+    if (!g_complete_up) return 1;
+    pthread_mutex_lock(&g_fmu); atomic_store(&g_complete_stop, 1); pthread_cond_broadcast(&g_scv); pthread_mutex_unlock(&g_fmu);
+    uint64_t t0 = now_ns();
+    while (!atomic_load(&g_complete_left) && now_ns() - t0 < timeout_ns) usleep(1000);
+    if (!atomic_load(&g_complete_left)) return 0;
+    pthread_join(g_complete_th, NULL); g_complete_up = 0;
+    return 1;
 }
 
 // ---------- Scratch memory ----------

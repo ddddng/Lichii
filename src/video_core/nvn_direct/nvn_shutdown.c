@@ -10,13 +10,16 @@
 //   nothing more is replayed or submitted and every fence reads as done.
 // - nvn_direct_park, before Lichii's device and the renderer objects the replay calls back into
 //   (the ASTC decode) are destroyed: the replay worker finishes what it holds, pipeline builds
-//   and speculative shader translations stop, and the pipeline cache is saved a last time. None
-//   of the replay's threads uses the device after that.
+//   and speculative shader translations stop, the pipeline cache is saved a last time, and the
+//   completion thread runs what was submitted and leaves. None of the replay's threads uses the
+//   device or guest memory after that. A thread that does not stop within its bound (stuck in the
+//   driver) ends the process instead: the device must not go away under it.
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "bananative/dm/gfx/vk_android/vka.h"
 #include "nvn_direct.h"
@@ -62,8 +65,17 @@ void nvn_direct_park(void) {
     const int worker = vka_worker_idle(bound);
     const int builds = vka_pso_park(bound);
     const int translations = vka_rc_park(bound);
+    const int completion = worker && builds && translations && vka_complete_stop(bound);
     const double ms = (now_ns() - t0) / 1e6;
-    if (worker && builds && translations) VLOG("parked for the shutdown in %.0f ms: the replay worker is idle, no pipeline is being built or shader translated, the pipeline cache is saved", ms);
-    else VRED("parked for the shutdown in %.0f ms: the replay worker %s, pipeline builds %s, speculative translations %s; the device may still be in use", ms,
-              worker ? "is idle" : "is still replaying", builds ? "stopped" : "still running", translations ? "stopped" : "still running");
+    if (completion) {
+        VLOG("parked for the shutdown in %.0f ms: the replay worker is idle, no pipeline is being built or shader translated, the pipeline cache is saved, the completion thread has left", ms);
+        return;
+    }
+    VRED("parked for the shutdown in %.0f ms: the replay worker %s, pipeline builds %s, speculative translations %s, the completion thread %s; the device is still in use: the process exits", ms,
+         worker ? "is idle" : "is still replaying", builds ? "stopped" : "still running", translations ? "stopped" : "still running",
+         !(worker && builds && translations) ? "was not stopped" : "is still running");
+    vka_stall_stacks();
+    // Not abort or exit: the replay's own fatal exit (dm_host_shutdown's abort) has been seen to hang
+    // the process, and exit handlers and destructors would destroy the device under those threads.
+    _exit(1);
 }
