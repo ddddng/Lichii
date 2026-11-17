@@ -1173,8 +1173,10 @@ namespace {
 /// Direct mode's present (nvnQueuePresentTexture, dotfiles-25x.7): the replay's image goes to
 /// Lichii's presenter as a layer whose address names the frame (AccelerateDisplay finds it), and
 /// the present's bookkeeping is nx2:vi2's (Service::Nx2PresentBookkeeping): counts, capture,
-/// speed limiter, perf stats, pacing to the vblank.
+/// speed limiter, perf stats, pacing to the vblank, and as nx2:vi2's Composite the display
+/// HDR-change check.
 void PresentDirect(Core::System& system, State& state) {
+    Service::Nx2NotifyHdrChange();
     if (!state.present) {
         state.present.emplace(system);
     }
