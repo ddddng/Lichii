@@ -1906,7 +1906,7 @@ static int read_texels_gpu(vka_img *im, unsigned level, unsigned layer0, const N
         VkBufferImageCopy c = {0, 0, 0, {asp, lv, is3d ? 0 : layer0 + (uint32_t)r->zoffset, is3d ? 1 : (uint32_t)nz}, {r->xoffset, r->yoffset, is3d ? r->zoffset : 0},
                                {(uint32_t)r->width, (uint32_t)r->height, is3d ? (uint32_t)nz : 1}};
         vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, h.b, 1, &c);
-        if ((ok = vcap_cb_run(cb)))
+        if ((ok = vcap_cb_run(cb, &h, im)))   // (a 30 s timeout keeps h and im until the GPU is done: the free below then frees nothing)
             for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + (size_t)z * img + y * row, h.p + ((size_t)z * hb + y) * wb, wb);
     }
     vcap_hbuf_free(&h);
