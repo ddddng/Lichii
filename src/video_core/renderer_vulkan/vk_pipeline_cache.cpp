@@ -2525,23 +2525,6 @@ void PipelineCache::EvictUnusedPipelines() {
     translated_again = 0;
 }
 
-namespace {
-/// Whether the draw writes any color: a draw with every color write masked is depth-only.
-bool WritesColor(const Maxwell& regs) noexcept {
-    const u32 count =
-        std::min<u32>(regs.rt_control.count, static_cast<u32>(Maxwell::NumRenderTargets));
-    for (u32 i = 0; i < count; ++i) {
-        const u32 rt_index = regs.rt_control.Map(i);
-        if (rt_index < Maxwell::NumRenderTargets &&
-            regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
-            regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw != 0) {
-            return true;
-        }
-    }
-    return false;
-}
-} // Anonymous namespace
-
 NativePendingMode PipelineCache::NativeMode() const {
     // EDEN_NX2_ASYNC_DISCARD=1: skip native work whose pipeline is still building instead of
     // waiting for it (experimental; the draw may be missing for a frame or more).
@@ -2595,14 +2578,25 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
     const auto& regs = maxwell3d->regs;
-    // A native draw counts as depth-tested only when it also writes color into a render target 0
-    // first written in an earlier frame, which the title redraws every frame: Mario Kart World
+    // A native draw counts as depth-tested only when every render target it writes color into
+    // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
     // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
     // doesn't test (Eglantine #874). Mesh draws always wait.
+    const auto writes_color = [&regs](u32 rt_index) {
+        return rt_index < Maxwell::NumRenderTargets &&
+               regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
+               regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw != 0;
+    };
     const bool depth_tested =
         native ? mode != NativePendingMode::Wait && regs.zeta_enable != 0 &&
                      regs.depth_test_enable != 0 && !regs.IsMeshEnabled() &&
-                     WritesColor(regs) && texture_cache.ColorTargetWrittenBeforeThisFrame()
+                     ColorWritesHaveHistory(
+                         std::min<u32>(regs.rt_control.count,
+                                       static_cast<u32>(Maxwell::NumRenderTargets)),
+                         [&regs](u32 i) { return regs.rt_control.Map(i); }, writes_color,
+                         [this](u32 rt_index) {
+                             return texture_cache.ColorTargetWrittenBeforeThisFrame(rt_index);
+                         })
                : regs.zeta_enable != 0;
     // Native draws are judged by the heuristic only when a mode other than Wait is chosen.
     const bool can_discard = CanDiscardPendingDraw(
