@@ -43,7 +43,11 @@ static void *vram_trace_main(void *a) {
 int vka_async_pipelines(void) { return g_adopt.async_pipelines; }
 uint32_t vka_scale_up = 1, vka_scale_shift;
 int nvn_direct_adopt_device(const nvn_direct_device *d) {
-    pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
+    // (the array of extension names is the caller's, for the call: the replay keeps its own copy; the names live as long as the device)
+    const char **ext = malloc((d->extension_count ? d->extension_count : 1) * sizeof *ext); if (!ext) return 0;
+    if (d->extension_count) memcpy(ext, d->extensions, d->extension_count * sizeof *ext);
+    pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopt.extensions = ext; ext = NULL; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
+    free(ext);
     { char e[16]; const int lab = vka_env_str("DM_VK_ASYNC_PSO", e, sizeof e);
       VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (%s)", (lab ? atoi(e) != 0 : g_adopt.async_pipelines) ? "on" : "off",
            lab ? "DM_VK_ASYNC_PSO" : "asynchronous shader building setting"); }
