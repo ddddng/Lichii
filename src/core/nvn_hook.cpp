@@ -843,7 +843,7 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
     std::array<u64, 8> x, v;
     ReadArguments(jit, x, v);
     u64 v0 = 0;
-    jit.SetRegister(0, nvn_direct_call(target.front, x.data(), v.data(), lr, &v0));
+    jit.SetRegister(0, nvn_direct_call(target.front, x.data(), v.data(), jit.GetSP(), lr, &v0));
     if (nvn_direct_float_args(target.front)) {
         jit.SetVector(0, {v0, 0});
     }
@@ -1288,10 +1288,11 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
             args[1] = 0; // (answered from the state now, without a host wait)
         }
     }
-    // No halting call takes or returns floats (checked at the first one).
+    // No halting call takes or returns floats (checked at the first one), and none of HaltingCalls
+    // takes arguments on the stack (sp 0).
     const std::array<u64, 8> v{};
     u64 v0 = 0;
-    args[0] = nvn_direct_call(target.front, args.data(), v.data(), t_halted_lr, &v0);
+    args[0] = nvn_direct_call(target.front, args.data(), v.data(), 0, t_halted_lr, &v0);
     if (sync_wait && waited && args[0] == 0) {
         args[0] = 1; // NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED: it was signalled while waiting
     }
