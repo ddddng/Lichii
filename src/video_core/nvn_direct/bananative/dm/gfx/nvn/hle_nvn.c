@@ -414,16 +414,20 @@ NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { p
 // default 8×8 white texture overwrote the UI's textures, and the title menu's labels, the name entry and other menus drew as plain bars or not at all. The scene also registers each draw's
 // textures into fresh IDs of a ring in its large pool (8,729 and up a few seconds in); with the table's capacity taken from the last pool alone, those all read as empty slots and the screen was black
 enum { NDPOOL = 16 };
-static struct dpool_base { const void *pool; int base; } g_tpb[NDPOOL], g_spb[NDPOOL];
+static struct dpool_base { const void *pool; int base, cap; } g_tpb[NDPOOL], g_spb[NDPOOL];   // cap: the entries its extent holds
 static int g_ntpb, g_nspb, g_tnext, g_snext;
 static pthread_mutex_t g_dpool_mu = PTHREAD_MUTEX_INITIALIZER;
-static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize)
+static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize, or a fresh one when it is initialized again larger)
     pthread_mutex_lock(&g_dpool_mu);
     int i = 0; while (i < *nt && t[i].pool != pool) i++;
+    const int cap = (n + 255) & ~255;
     if (i == *nt) {
         if (*nt == NDPOOL) { pthread_mutex_unlock(&g_dpool_mu); LOG("[RED] %s pools exceed %d: later ones share the first pool's numbering", kind, NDPOOL); return 0; }
-        t[i] = (struct dpool_base){pool, *next}; (*nt)++; *next += (n + 255) & ~255;
+        t[i] = (struct dpool_base){pool, *next, cap}; (*nt)++; *next += cap;
         if (i) LOG("[nvn] pool #%d (%s, %d entries): numbered from %d in the host table, separate from the earlier pools", i + 1, kind, n, t[i].base);
+    } else if (cap > t[i].cap) {   // its old extent would run into the next pool's
+        t[i].base = *next; t[i].cap = cap; *next += cap;
+        LOG("[nvn] pool #%d (%s) initialized again with %d entries: numbered from %d in the host table", i + 1, kind, n, t[i].base);
     }
     int b = t[i].base; pthread_mutex_unlock(&g_dpool_mu); return b;
 }
