@@ -69,6 +69,7 @@
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/memory.h"
+#include "video_core/host_vsync.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
@@ -2038,6 +2039,9 @@ public:
     }
 
     ~INx2Vi2Session() override {
+        // The display stops starting frames for this session's events; other sessions keep
+        // theirs.
+        VideoCore::HostVsync::RemoveListener(m_vsync.get());
         {
             std::scoped_lock lk{g_nx2_hdr_change_checks.mutex};
             std::erase_if(g_nx2_hdr_change_checks.checks,
@@ -2142,7 +2146,8 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24], w[7], w[8]);
         const auto composited = std::chrono::steady_clock::now();
-        m_present.PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess(), m_presents);
+        m_present.PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess(), m_presents,
+                               m_vsync.get());
         const auto paced = std::chrono::steady_clock::now();
         Core::NvnHook::OnPresent(present);
         if (const u32 recorder = w[18] & 0xf; recorder != 0) {
@@ -3041,10 +3046,16 @@ private:
                 [vsync_state = m_vsync, &kernel = system.Kernel(), VblankInterval](
                     s64 scheduled,
                     std::chrono::nanoseconds late) -> std::optional<std::chrono::nanoseconds> {
+                    // While the display starts frames (HostVsync), this timer only steps in when
+                    // it stops doing so. HostVsync decides and signals under its own lock, which
+                    // it takes before this session's, as StartFrame does.
+                    VideoCore::HostVsync::TimerTick(vsync_state.get(), VblankInterval, [&] {
+                        std::scoped_lock lk{vsync_state->mutex};
+                        for (auto* vsync : vsync_state->events) {
+                            vsync->Signal(kernel);
+                        }
+                    });
                     std::scoped_lock lk{vsync_state->mutex};
-                    for (auto* vsync : vsync_state->events) {
-                        vsync->Signal(kernel);
-                    }
                     if (Common::DkbFrameTrace::Enabled()) {
                         const s64 observed = scheduled + late.count();
                         ++vsync_state->trace_callbacks;
@@ -3078,6 +3089,18 @@ private:
                     return std::nullopt;
                 });
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
+            if (VideoCore::HostVsync::Enabled()) {
+                // The host's display can start this session's frames (PaceToVblank says when):
+                // each frame on screen then signals its vsync events, from the presenter's thread
+                // as host1x syncpoint actions signal theirs from the GPU thread.
+                VideoCore::HostVsync::AddListener(
+                    m_vsync.get(), [vsync_state = m_vsync, &kernel = system.Kernel()] {
+                        std::scoped_lock lk{vsync_state->mutex};
+                        for (auto* vsync : vsync_state->events) {
+                            vsync->Signal(kernel);
+                        }
+                    });
+            }
         }
     }
 
@@ -4327,17 +4350,22 @@ private:
     }
 
     // Mirrors Eden's guest syncpoint values into the shared RO page. Returns true if any changed.
-    bool UpdateSyncptValues() {
+    bool UpdateSyncptValues(std::array<u64, 0x40>* changed_ids = nullptr) {
         auto& manager = system.Host1x().GetSyncpointManager();
         bool changed = false;
         manager.WithGuestValuesStable([&] {
             for (u32 id = 0; id < std::min(m_syncpt_count, HostSyncpoints); ++id) {
-                const u64 value = manager.GetGuestSyncpointValue(id);
+                const u32 value = manager.GetGuestSyncpointValue(id);
                 const u64 address = m_syncpt_ro + SyncptValuesOffset + id * 8;
                 if (m_syncpt_memory->Read64(address) != value) {
                     m_syncpt_memory->Write64(address, value);
                     changed = true;
                 }
+                if (changed_ids != nullptr && id / 64 < changed_ids->size() &&
+                    m_syncpt_polled_values[id] != value) {
+                    (*changed_ids)[id / 64] |= u64{1} << (id % 64);
+                }
+                m_syncpt_polled_values[id] = value;
             }
         });
         return changed;
@@ -4355,12 +4383,16 @@ private:
         for (u32 w = 0; w < words; ++w) {
             armed[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
         }
-        UpdateSyncptValues();
+        std::array<u64, 0x40> changed_ids{};
+        UpdateSyncptValues(&changed_ids);
         bool acked = false;
         for (u32 w = 0; w < words; ++w) {
             const u64 ro_address = m_syncpt_ro + SyncptRoBitsOffset + w * 8;
             if (m_syncpt_memory->Read64(ro_address) != armed[w]) {
                 m_syncpt_memory->Write64(ro_address, armed[w]);
+                acked = true;
+            }
+            if (w < changed_ids.size() && (armed[w] & changed_ids[w]) != 0) {
                 acked = true;
             }
         }
@@ -4840,6 +4872,7 @@ private:
     u64 m_syncpt_rw{};
     u64 m_syncpt_ro{};
     u32 m_syncpt_count{};
+    std::array<u32, HostSyncpoints> m_syncpt_polled_values{};
     std::shared_ptr<Core::Timing::EventType> m_syncpt_poll;
 };
 
