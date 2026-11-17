@@ -61,13 +61,10 @@ struct DownloadLandingState {
 ///
 /// Each side fences between its store (the landing, the collected write) and its load (the
 /// collected writes, the landing): either the download finds the write, or the write finds the
-/// landing. One landing is published at a time: the buffer cache's land under its lock and the
-/// texture cache's under its own, so each waits for the one before to end. Nothing is locked
-/// inside a landing that is held while waiting for one.
+/// landing. Downloads land under the buffer cache's lock, so one landing is published at a time.
 class DownloadLanding {
 public:
-    explicit DownloadLanding(DAddr begin, DAddr end) {
-        mutex.lock();
+    explicit DownloadLanding(DAddr begin, DAddr end) noexcept {
         state.begin.store(begin, std::memory_order_relaxed);
         state.end.store(end, std::memory_order_relaxed);
         state.sequence.fetch_add(1, std::memory_order_seq_cst);
@@ -75,7 +72,6 @@ public:
     }
     ~DownloadLanding() {
         state.sequence.fetch_add(1, std::memory_order_release);
-        mutex.unlock();
     }
     DownloadLanding(const DownloadLanding&) = delete;
     DownloadLanding& operator=(const DownloadLanding&) = delete;
@@ -113,7 +109,6 @@ private:
     }
 
     static inline DownloadLandingState state;
-    static inline std::mutex mutex;
 };
 
 /// EDEN_NX2_READ_CHECK: the latest writes from the GPU's side that ReadDownloadsMayCover
