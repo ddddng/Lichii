@@ -108,7 +108,9 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DEPTH_BOUNDS, OP_WAIT_EVENT, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DEPTH_BOUNDS, OP_WAIT_EVENT,
+    OP_DLSS, OP_COOPVEC_CONVERT,   // Lichii: NVN2's DLSS evaluation and cooperative-vector matrix conversion (hle_nvn.c "s4-dlss")
+    OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
 typedef struct { int32_t n; const tex_t *color[8]; view_t cview[8]; uint8_t has_cview[8]; const tex_t *depth; view_t dview; uint8_t has_dview; } p_set_rt;
@@ -196,6 +198,14 @@ typedef struct { uint16_t compute, offset; uint32_t size; uint8_t data[]; } p_pu
 typedef struct { int32_t index, pad; uint64_t addr, size; } p_tf_bind;   // BindTransformFeedbackBuffer(s): one record per buffer (index 0-3)
 typedef struct { int32_t what, pad; uint64_t ctl; } p_tf_state;          // what: 0 begin, 1 end, 2 pause, 3 resume; ctl = the game's 32-byte control buffer
 typedef struct { int32_t on; } p_rast_discard;
+// Lichii: nvnCommandBufferEvaluateDlss as the replay runs it (vka_dlss.c): the input colour's subrectangle resampled into the output's, sampled jitter pixels away (a spatial
+// upscale; the snapshots of color and output follow the record)
+typedef struct { const tex_t *color, *output; view_t cv, ov; uint8_t has_cv, has_ov, reset, _pad; int32_t in_base[2], in_size[2], out_base[2], out_size[2]; float jitter[2]; uint64_t net; } p_dlss;
+// Lichii: a cooperative-vector matrix layout (NVN2's, from its driver: hle_nvn.c "s4-dlss"), and nvnCommandBufferConvertCooperativeVectorMatrix's record
+typedef struct { uint64_t stride; uint32_t type, layout; } coopvec_desc;
+typedef struct { uint64_t src, dst; coopvec_desc sd, dd; int32_t rows, cols; } p_coopvec_convert;
+// The conversion on the CPU (hle_nvn.c), between host pointers; the replay runs it once the submission's earlier GPU work is done
+void nvn_coopvec_convert(const uint8_t *src, const coopvec_desc *sd, uint8_t *dst, const coopvec_desc *dd, uint32_t rows, uint32_t cols);
 
 // Entry point of the Metal replay layer (nvn_mtl.m): replays a set of command handles into the current submission
 void mtl_exec(const uint8_t *handle);
