@@ -74,17 +74,19 @@ void nvn_dirty_add_range(const void* mem, size_t size) {
     if (!size || nvn_direct_guest_of(lo) == lo || !track_on()) return; // not guest memory (a host segment)
     span_t* s = calloc(1, sizeof *s);
     const size_t pages = (size + PAGE_SIZE - 1 + (lo & (PAGE_SIZE - 1))) >> PAGE_SHIFT;
+    if (s) { s->gen = calloc(pages, sizeof *s->gen); s->armed = calloc(pages, 1); s->host = calloc(pages, 1); }
+    if (!s || !s->gen || !s->armed || !s->host) goto fail;
     s->lo = lo & ~(uintptr_t)(PAGE_SIZE - 1);
     s->hi = hi;
-    s->gen = calloc(pages, sizeof *s->gen);
-    s->armed = calloc(pages, 1);
-    s->host = calloc(pages, 1);
     atomic_store(&s->live, 1);
     pthread_mutex_lock(&g_mu);
     pthread_rwlock_wrlock(&g_rw);
     if (g_nspans == g_capspans) {
-        g_capspans = g_capspans ? 2 * g_capspans : 256;
-        g_spans = realloc(g_spans, (size_t)g_capspans * sizeof *g_spans);
+        const int cap = g_capspans ? 2 * g_capspans : 256;
+        span_t** spans = realloc(g_spans, (size_t)cap * sizeof *g_spans);
+        if (!spans) { pthread_rwlock_unlock(&g_rw); pthread_mutex_unlock(&g_mu); goto fail; }
+        g_spans = spans;
+        g_capspans = cap;
     }
     int i = g_nspans;
     while (i > 0 && g_spans[i - 1]->lo > s->lo) { g_spans[i] = g_spans[i - 1]; i--; }
@@ -92,6 +94,10 @@ void nvn_dirty_add_range(const void* mem, size_t size) {
     g_nspans++;
     pthread_rwlock_unlock(&g_rw);
     pthread_mutex_unlock(&g_mu);
+    return;
+fail:
+    if (s) { free(s->gen); free(s->armed); free(s->host); free(s); }
+    LOG("[RED] pool %p+%#zx: out of memory for its write tracking: CPU writes to its textures after their first upload are not seen", mem, size);
 }
 
 // Arms (on) or disarms the pages [p, q] of s that are not already so, in runs (caller holds g_mu)
