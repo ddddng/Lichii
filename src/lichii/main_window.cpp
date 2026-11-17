@@ -702,10 +702,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // Once FixProfiles has read the configured NAND and -u may have picked another user.
     Common::Nextendo::MigrateAccountFile(
         Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
-    if (const auto orphans = Common::Nextendo::OrphanAccounts(
-            QtCommon::system->GetProfileManager().FindExistingProfileUUIDs());
-        !orphans.empty() && !Settings::values.nextendo_orphans_asked.GetValue()) {
-        Settings::values.nextendo_orphans_asked = true;
+    auto orphans = Common::Nextendo::OrphanAccounts(
+        QtCommon::system->GetProfileManager().FindExistingProfileUUIDs());
+    std::erase_if(orphans, [kept = Settings::values.nextendo_kept_accounts.GetValue()](
+                               const Common::UUID& profile) {
+        return kept.find(profile.FormattedString()) != std::string::npos;
+    });
+    if (!orphans.empty()) {
         const auto answer = QMessageBox::question(
             this, tr("Nextendo Sign-ins"),
             tr("Lichii found Nextendo sign-ins for %n profile(s) this NAND doesn't have. Profiles "
@@ -724,6 +727,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                         }));
                 }
             }
+        } else {
+            std::string kept = Settings::values.nextendo_kept_accounts.GetValue();
+            for (const auto& profile : orphans) {
+                kept += fmt::format("{}{}", kept.empty() ? "" : ",", profile.FormattedString());
+            }
+            Settings::values.nextendo_kept_accounts = kept;
         }
     }
     nextendo_session_timer.start(std::chrono::minutes{2});
