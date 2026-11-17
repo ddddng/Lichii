@@ -309,6 +309,13 @@ public:
     /// Mark an image as modified from the GPU
     void MarkModification(ImageId id) noexcept;
 
+    /// Mark the image behind a view a shader writes through as a storage image
+    void MarkStorageWrite(ImageViewId id) noexcept;
+
+    /// Whether a view's image is absent or holds a shader's storage writes over every level it
+    /// covers, with nothing newer (no clear, render pass, copy or CPU write since).
+    [[nodiscard]] bool StorageViewHoldsShaderWrites(ImageViewId id) const noexcept;
+
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
@@ -372,6 +379,10 @@ public:
     /// Find a framebuffer with the currently bound render targets
     /// UpdateRenderTargets should be called before this
     Framebuffer* GetFramebuffer();
+
+    /// Whether render target 0 was first written in an earlier frame: a target the title draws
+    /// every frame, rather than one it fills once (Eglantine #874).
+    [[nodiscard]] bool ColorTargetWrittenBeforeThisFrame() noexcept;
 
     [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
         return render_targets;

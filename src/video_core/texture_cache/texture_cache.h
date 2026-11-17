@@ -872,6 +872,24 @@ void TextureCache<P>::MarkModification(ImageId id) noexcept {
 }
 
 template <class P>
+void TextureCache<P>::MarkStorageWrite(ImageViewId id) noexcept {
+    const ImageViewBase& view = slot_image_views[id];
+    if (!view.image_id) {
+        return;
+    }
+    ImageBase& image = slot_images[view.image_id];
+    const u32 levels_before = image.storage_written_levels;
+    MarkModification(image);
+    NoteStorageWrite(image, levels_before, view.range);
+}
+
+template <class P>
+bool TextureCache<P>::StorageViewHoldsShaderWrites(ImageViewId id) const noexcept {
+    const ImageViewBase& view = slot_image_views[id];
+    return !view.image_id || HoldsStorageWrites(slot_images[view.image_id], view.range);
+}
+
+template <class P>
 bool TextureCache<P>::PublishComputeCollisionImage(u32 index) {
     const auto view_id = VisitImageView(index, true);
     if (!view_id || !slot_image_views[view_id].image_id) {
@@ -1388,6 +1406,42 @@ typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
     last_framebuffer_id = framebuffer_id;
     last_framebuffer_serial = render_targets_serial;
     return &slot_framebuffers[framebuffer_id];
+}
+
+template <class P>
+bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame() noexcept {
+    if (!maxwell3d) {
+        return false;
+    }
+    const auto& regs = maxwell3d->regs;
+    if (regs.rt_control.count == 0) {
+        return false;
+    }
+    const auto& rt = regs.rt[0];
+    const GPUVAddr gpu_addr = rt.Address();
+    if (gpu_addr == 0 || rt.format == Tegra::RenderTargetFormat::NONE) {
+        return false;
+    }
+    std::scoped_lock lock{mutex};
+    ImageId image_id{};
+    if (!maxwell3d->dirty.flags[Dirty::RenderTargets] &&
+        !maxwell3d->dirty.flags[Dirty::ColorBuffer0]) {
+        image_id = rt_image_id[0];
+    } else {
+        const ImageInfo info(rt, regs.anti_alias_samples_mode);
+        if (info.format == PixelFormat::Invalid || info.size.width == 0 || info.size.height == 0 ||
+            info.size.depth == 0 || info.size.width > 65536 || info.size.height > 65536 ||
+            info.size.depth > 2048 || info.resources.layers <= 0 ||
+            info.resources.layers > 2048) {
+            return false;
+        }
+        image_id = FindImage(info, gpu_addr, RelaxedOptions{});
+    }
+    if (!image_id) {
+        return false;
+    }
+    const ImageBase& image = slot_images[image_id];
+    return image.first_written_frame != 0 && image.first_written_frame < frame_tick + 1;
 }
 
 template <class P>
@@ -4557,6 +4611,7 @@ void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_vi
 template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
+    image.storage_written_levels = 0;
     SetModificationTick(slot_images, image, ++modification_tick);
 }
 
@@ -4599,6 +4654,7 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     }
     SetModificationTick(slot_images, image, most_recent_tick);
     image.newest_alias_tick = most_recent_tick;
+    image.storage_written_levels = 0;
     if (any_modified) {
         image.flags |= ImageFlagBits::GpuModified;
     }
@@ -4680,6 +4736,9 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         }
         MarkModification(image);
+        if (!clearing_render_targets && image.first_written_frame == 0) {
+            image.first_written_frame = frame_tick + 1;
+        }
     }
     lru_cache.Touch(image.lru_index, frame_tick);
 }
