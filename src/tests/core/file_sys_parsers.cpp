@@ -17,6 +17,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/logging.h"
+#include "common/scope_exit.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
@@ -32,6 +34,7 @@
 #include "core/file_sys/partition_filesystem.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/loader.h"
 
@@ -352,6 +355,103 @@ TEST_CASE("NSP without programs reports no missing key", "[core][file_sys]") {
           Loader::ResultStatus::ErrorNSPMissingProgramNCA);
 }
 
+std::vector<u8> MakeDiscoveryNca(u64 title_id, NcaHeader::ContentType type,
+                                 const std::vector<u8>& partition) {
+    std::vector<u8> bytes(0xC00);
+    NcaHeader header{};
+    header.magic = NcaHeader::MagicDecrypted;
+    header.content_type = type;
+    header.program_id = title_id;
+    header.sdk_addon_version = 0x000C0000;
+    header.fs_info[0].start_sector = 6;
+    header.fs_info[0].end_sector = 6 + static_cast<u32>((partition.size() + 0x1FF) / 0x200);
+    NcaFsHeader fs{};
+    fs.version = 2;
+    fs.fs_type = NcaFsHeader::FsType::PartitionFs;
+    fs.hash_type = NcaFsHeader::HashType::None;
+    fs.encryption_type = NcaFsHeader::EncryptionType::None;
+    Put(bytes, 0, header);
+    Put(bytes, sizeof(header), fs);
+    bytes.insert(bytes.end(), partition.begin(), partition.end());
+    bytes.resize(size_t{header.fs_info[0].end_sector} * 0x200);
+    return bytes;
+}
+
+TEST_CASE("NSP discovery skips unreadable NCA metadata", "[core][file_sys][nca_discovery]") {
+    if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
+        SKIP("A header key is installed");
+    }
+    Common::Log::Initialize();
+    Common::Log::SetRingCapacity(1024);
+    SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
+
+    constexpr u64 TitleId = 0x0100000000010000;
+    const std::string program_name = "0123456789abcdef0123456789abcdef.nca";
+    std::vector<std::pair<std::string, std::vector<u8>>> files;
+    const std::vector<u8> unreadable(0xC00, 0xA5);
+
+    SECTION("Encrypted metadata without keys retains its error without a title ID") {
+        for (unsigned i = 0; i < 61; ++i) {
+            files.emplace_back(std::to_string(i) + ".cnmt.nca", unreadable);
+        }
+        const NSP nsp{MakeFile(MakePfs0WithFiles(files))};
+        CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::ErrorMissingHeaderKey);
+        CHECK(nsp.GetProgramTitleID() == 0);
+        CHECK(nsp.GetProgramTitleIDs().empty());
+    }
+
+    SECTION("Content records are checked before their NCA metadata is read") {
+        CNMTHeader header{};
+        header.title_id = TitleId;
+        header.type = TitleType::Application;
+        header.table_offset = sizeof(OptionalHeader);
+        header.number_content_entries = 1;
+        ContentRecord record{};
+        record.nca_id = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+                         0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF};
+        record.type = ContentRecordType::Program;
+        const CNMT cnmt{header, {}, {record}, {}};
+        files.emplace_back("meta.cnmt.nca",
+                           MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Meta,
+                                            MakePfs0WithFiles({{"test.cnmt", cnmt.Serialize()}})));
+
+        SECTION("An unreadable program retains its missing-key diagnostic") {
+            files.emplace_back(program_name, unreadable);
+            const NSP nsp{MakeFile(MakePfs0WithFiles(files))};
+            CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::ErrorMissingHeaderKey);
+            CHECK(nsp.GetProgramTitleIDs().empty());
+        }
+        SECTION("An unreadable metadata sibling does not mask a valid program") {
+            files.emplace_back("bad.cnmt.nca", unreadable);
+            files.emplace_back(program_name,
+                               MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Program,
+                                                MakePfs0WithFiles({{"main", {0}}})));
+            const NSP nsp{MakeFile(MakePfs0WithFiles(files))};
+            CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::Success);
+            CHECK(nsp.GetProgramTitleID() == TitleId);
+            CHECK(nsp.GetProgramTitleIDs() == std::vector<u64>{TitleId});
+        }
+        SECTION("An initialized update retains its metadata without a base RomFS") {
+            auto program = MakeDiscoveryNca(TitleId, NcaHeader::ContentType::Program,
+                                            MakePfs0WithFiles({{"main", {0}}}));
+            NcaFsHeader fs{};
+            std::memcpy(&fs, program.data() + NcaHeader::Size, sizeof(fs));
+            fs.encryption_type = NcaFsHeader::EncryptionType::AesCtrEx;
+            Put(program, NcaHeader::Size, fs);
+            files.emplace_back(program_name, std::move(program));
+            const NSP nsp{MakeFile(MakePfs0WithFiles(files))};
+            CHECK(nsp.GetProgramStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS);
+            CHECK(nsp.GetProgramTitleIDs() == std::vector<u64>{TitleId});
+            CHECK(nsp.GetNCA(TitleId, ContentRecordType::Program) != nullptr);
+        }
+    }
+
+    for (const auto& line : Common::Log::ReadRing(0)) {
+        INFO(line.text);
+        CHECK(line.text.find("m_body_storage != nullptr") == std::string::npos);
+    }
+}
+
 TEST_CASE("NCA rejects a file shorter than its header", "[core][file_sys]") {
     auto reader = std::make_shared<NcaReader>();
     REQUIRE(reader->Initialize(MakeFile(std::vector<u8>(0x100)), GetCryptoConfiguration(),
@@ -561,6 +661,36 @@ std::vector<u8> MakeXci(const std::vector<std::string>& partitions) {
 TEST_CASE("XCI with a secure partition parses", "[core][file_sys]") {
     XCI xci{MakeFile(MakeXci({"update", "normal", "secure"}))};
     REQUIRE(xci.GetStatus() == Loader::ResultStatus::Success);
+}
+
+TEST_CASE("XCI discovery skips unreadable normal-partition NCAs",
+          "[core][file_sys][nca_discovery]") {
+    if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
+        SKIP("A header key is installed");
+    }
+    Common::Log::Initialize();
+    Common::Log::SetRingCapacity(256);
+    SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
+
+    auto bytes = MakeXci({"normal", "secure"});
+    const auto normal = MakePfs0WithFiles({{"unreadable.nca", std::vector<u8>(0xC00, 0xA5)}});
+    constexpr size_t RootEntries = 0x210;
+    constexpr size_t RootData = RootEntries + 2 * 0x40 + sizeof("normal\0secure");
+    const size_t original_size = bytes.size() - RootData;
+    bytes.resize(RootData);
+    Put(bytes, RootEntries + 8, static_cast<u64>(normal.size()));
+    Put(bytes, RootEntries + 0x40, static_cast<u64>(normal.size()));
+    bytes.insert(bytes.end(), normal.begin(), normal.end());
+    bytes.resize(bytes.size() + original_size / 2);
+    Put(bytes, RootData + normal.size(), Common::MakeMagic('H', 'F', 'S', '0'));
+    Put(bytes, 0x138, static_cast<u64>(bytes.size() - 0x200));
+
+    const XCI xci{MakeFile(std::move(bytes))};
+    CHECK(xci.GetStatus() == Loader::ResultStatus::Success);
+    for (const auto& line : Common::Log::ReadRing(0)) {
+        INFO(line.text);
+        CHECK(line.text.find("m_body_storage != nullptr") == std::string::npos);
+    }
 }
 
 TEST_CASE("XCI rejects a card without a secure partition", "[core][file_sys]") {
