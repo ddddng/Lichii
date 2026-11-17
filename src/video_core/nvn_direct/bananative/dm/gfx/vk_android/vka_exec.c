@@ -875,6 +875,33 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_barrier(g_cb);
 }
 
+// Lichii: nvnCommandBufferConvertCooperativeVectorMatrix, on the CPU as the console's driver converts (hle_nvn.c nvn_coopvec_convert), once the GPU has done what the
+// submission recorded before it: the part ends there, signalling a timeline of its own, and the replay waits for that. The parts after it see the CPU's writes (the
+// queue submit makes host writes visible). Without a part left (NCHUNK), or without the GPU, it converts at once
+static void coopvec_convert(const p_coopvec_convert *c) {
+    static VkSemaphore sem; static uint64_t val;
+    if (g_cb && !sem) {
+        VkSemaphoreTypeCreateInfo ti = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+        VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti};
+        if (vk.vkCreateSemaphore(V.dev, &si, NULL, &sem)) { sem = VK_NULL_HANDLE; VRED_ONCE("cooperative-vector conversion: no timeline semaphore: converted without waiting for the GPU"); }
+    }
+    if (g_cb && sem) {
+        vka_rp_end();
+        int signalled = g_psy.ns < PWS;
+        if (signalled) { g_psy.ss[g_psy.ns] = sem; g_psy.sv[g_psy.ns++] = ++val; }
+        if (signalled && chunk()) {
+            vka_enc_sync();   // (the part is submitted on the encoder thread when it is on)
+            VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &sem, .pValues = &val};
+            VkResult r = vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns());
+            if (r) VRED("cooperative-vector conversion: the submission's work before it not done in %.1f s (%d): converted anyway", vka_hang_ns() / 1e9, r);
+        } else {
+            if (signalled) g_psy.ns--, val--;
+            VRED_ONCE("cooperative-vector conversion in a submission of more than %d parts: converted without waiting for the GPU", NCHUNK);
+        }
+    }
+    nvn_coopvec_convert((const uint8_t *)(uintptr_t)c->src, &c->sd, (uint8_t *)(uintptr_t)c->dst, &c->dd, (uint32_t)c->rows, (uint32_t)c->cols);
+}
+
 static void not_yet(uint32_t op) {
     g_stat_skipped++;
     VRED_ONCE("DrawTexture (op %u) is not on Vulkan yet: skipped from now on", op);
@@ -1236,6 +1263,8 @@ static int walk(walk_t *w) {
         case OP_DRAW_IDX: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
         case OP_DISPATCH: if (g_cb) vka_dispatch(&S.d, a); break;
         case OP_DRAW_TEX: not_yet(h.op); break;
+        case OP_DLSS: if (g_cb) { vka_dlss_eval(g_cb, a); g_stat_ops++; } break;
+        case OP_COOPVEC_CONVERT: coopvec_convert(a); break;
         default: break;   // state: taken by vka_state_op above
         }
         if (h.size < 8) { VRED("command record of size %u at %p (op %u): the list is cut here", h.size, (const void *)p, h.op); w->n--; continue; }

@@ -32,6 +32,8 @@ add_library(nvn_direct STATIC
     ${BN}/gfx/vk_android/vka_capture.c
     ${BN}/gfx/vk_android/vka_ctl.c
     ${BN}/gfx/vk_android/vka_dev.c
+    ${BN}/gfx/vk_android/vka_dlss.c
+    ${BN}/gfx/vk_android/vka_dlss_spv.h
     ${BN}/gfx/vk_android/vka_draw.c
     ${BN}/gfx/vk_android/vka_enc.c
     ${BN}/gfx/vk_android/vka_exec.c

@@ -2704,3 +2704,460 @@ NVN_NOPROTO(nvnProgramBuilderGetProgramRayTracingFlags, uint32_t, const void *b)
 NVN_NOPROTO(nvnQueueBuilderSetRayTracingMemorySize, void, NVNqueueBuilder *b, int n) { QB(b)->sz[QB_RT] = n; QB(b)->set[QB_RT] = 1; }
 NVN_NOPROTO(nvnQueueBuilderGetRayTracingMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { *n = ((const queue_builder_t *)b)->sz[QB_RT]; return ((const queue_builder_t *)b)->set[QB_RT]; }
 NVN_NOPROTO(nvnQueueGetTotalRayTracingMemoryUsed, uint64_t, const NVNqueue *q) { (void)q; return 0; }
+
+// ---------- s4-dlss: NVN2's DLSS, dirty tile maps and cooperative-vector matrices ----------
+// Lichii. nvn.h has no prototypes for these: the signatures, the object layouts and every rule below were read from the NVN2 driver in Ocarina of Time's sdk NSO
+// (OoT's driver has all of them; Mario Kart World's lacks the dirty tile map parameters and the cooperative vectors), at the sdk offsets named. The objects are
+// kept in the game's memory in the driver's layout, so their getters read back what the setters stored.
+
+// The DLSS network builder (nvnDlssNetworkBuilderSetDefaults sdk+0x65ab90 and its setters): 0xc0 bytes
+typedef struct {
+    NVNdevice *dev;                  // 0x00 (SetDefaults keeps it)
+    const NVNtexturePool *pool;      // 0x08 SetTextureIDs
+    void *mem; uint64_t mem_size;    // 0x10 SetStorage
+    uint32_t flags; int32_t method, preset, w, h, max_entries;   // 0x20; w, h: the output resolution; max_entries 1 by default
+    int32_t ids[32];                 // 0x38 SetTextureIDs: the texture pool entries the driver's network uses
+    uint64_t debug;                  // 0xb8 zeroed by SetDefaults (Initialize reads a debug block through it)
+} dlss_builder_t;
+_Static_assert(sizeof(dlss_builder_t) == 0xc0 && offsetof(dlss_builder_t, ids) == 0x38, "the driver's DLSS network builder");
+// The network: the driver's takes 0x258 bytes (nvnDlssNetworkInitialize sdk+0x659b40 clears that much). The host keeps what it was built with, its output resolution
+// (Resize) and, for the replay and the log, a serial, its evaluations and history resets
+typedef struct { dlss_builder_t b; uint64_t serial, evaluations, resets; int32_t out_w, out_h; } dlss_net_t;
+enum { DLSS_NET_BYTES = 0x258 };
+_Static_assert(sizeof(dlss_net_t) <= DLSS_NET_BYTES, "the DLSS network exceeds the driver's");
+// The evaluation parameters (nvnDlssParametersSetDefaults sdk+0x65ad60 and its setters): 0xc0 bytes
+typedef struct {
+    const NVNtexture *color; const NVNtextureView *color_view;         // 0x00
+    const NVNtexture *output; const NVNtextureView *output_view;       // 0x10
+    const NVNtexture *motion; const NVNtextureView *motion_view;       // 0x20
+    const NVNtexture *depth; const NVNtextureView *depth_view;         // 0x30
+    const NVNtexture *bias; const NVNtextureView *bias_view;           // 0x40 the bias current colour mask
+    float jitter[2], mv_scale[2], pre_exposure; uint32_t _pad0;        // 0x50
+    const NVNtexture *exposure; const NVNtextureView *exposure_view;   // 0x68
+    uint8_t reset, _pad1[3]; int32_t eval_index;                       // 0x78
+    int32_t in_size[2], color_base[2], depth_base[2], mv_base[2], bias_base[2], out_base[2];   // 0x80 subrectangles
+    uint32_t overlay_debug_layer, overlay_full_screen, overlay_show_nans, overlay_jitter_debug;   // 0xb0, all ~0 by default
+} dlss_params_t;
+_Static_assert(sizeof(dlss_params_t) == 0xc0 && offsetof(dlss_params_t, jitter) == 0x50 && offsetof(dlss_params_t, exposure) == 0x68 && offsetof(dlss_params_t, reset) == 0x78 &&
+               offsetof(dlss_params_t, in_size) == 0x80 && offsetof(dlss_params_t, out_base) == 0xa8 && offsetof(dlss_params_t, overlay_debug_layer) == 0xb0, "the driver's DLSS parameters");
+// The network's flags are NGX's DLSS feature flags (0x1 HDR, 0x40 auto exposure; evaluations take the pre-exposure only without either, sdk+0x65a980) plus the driver's
+// own: bit 28 makes evaluations take the output subrectangle's base (sdk+0x65a9d0), bit 29 adds storage (GetStorageSize)
+enum { DLSS_FLAG_OUTPUT_BASE = 1u << 28, DLSS_FLAG_EXTRA_STORAGE = 1u << 29 };
+
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, void *b) { dlss_builder_t *o = b; NVNdevice *d = o->dev; memset(o, 0, sizeof *o); o->dev = d; o->max_entries = 1; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, void *b, NVNdevice *d) { ((dlss_builder_t *)b)->dev = d; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetDevice, NVNdevice *, const void *b) { return ((const dlss_builder_t *)b)->dev; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, void *b, uint32_t f) { ((dlss_builder_t *)b)->flags = f; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetFlags, uint32_t, const void *b) { return ((const dlss_builder_t *)b)->flags; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, void *b, int w, int h) { ((dlss_builder_t *)b)->w = w; ((dlss_builder_t *)b)->h = h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOutputResolution, void, const void *b, int *w, int *h) { if (w) *w = ((const dlss_builder_t *)b)->w; if (h) *h = ((const dlss_builder_t *)b)->h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, void *b, int m) { ((dlss_builder_t *)b)->method = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetMethod, int, const void *b) { return ((const dlss_builder_t *)b)->method; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, void *b, int p) { ((dlss_builder_t *)b)->preset = p; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetPreset, int, const void *b) { return ((const dlss_builder_t *)b)->preset; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, void *b, int n) { ((dlss_builder_t *)b)->max_entries = n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetMaxEvaluationEntries, int, const void *b) { return ((const dlss_builder_t *)b)->max_entries; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, void *b, void *mem, size_t n) { ((dlss_builder_t *)b)->mem = mem; ((dlss_builder_t *)b)->mem_size = n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetMemory, void *, const void *b) { return ((const dlss_builder_t *)b)->mem; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetMemorySize, size_t, const void *b) { return ((const dlss_builder_t *)b)->mem_size; }
+// The pool and its 32 entries (sdk+0x65acb0: 0x80 bytes of IDs). The driver writes the descriptors of its network's textures there; the host's network has none
+NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, void *b, const NVNtexturePool *pool, const int *ids) { dlss_builder_t *o = b; o->pool = pool; if (ids) memcpy(o->ids, ids, sizeof o->ids); }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetTextureIDs, void, const void *b, int *ids) { if (ids) memcpy(ids, ((const dlss_builder_t *)b)->ids, sizeof ((const dlss_builder_t *)b)->ids); }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetTexturePool, const NVNtexturePool *, const void *b) { return ((const dlss_builder_t *)b)->pool; }
+// The output is this many times the input by the method (Fire Emblem Fortune's Weave's choice at main+0x1913c24: 0 for 2x, 1 for 3x, 2 for 1x; from nxnative's hle_nvn.c, MIT)
+static int dlss_factor(int method) { return method == 1 ? 3 : method == 2 ? 1 : 2; }
+static int dlss_ceil_div(int v, int d) { return (v + d - 1) / d; }
+// sdk+0x659ae0 asks the driver's DLSS backend with the builder's output size and method, and passes six pointers: the optimal input size, then the smallest and the
+// largest input (Xenoblade Chronicles 2 checks lower <= input <= upper before it evaluates: nxnative). The backend's numbers are NVIDIA's; the host answers the method's
+// scale and the range of DLSS's modes, a third of the output (ultra performance) up to the output (DLAA), which its upscale takes alike
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, NVNboolean, const void *b, int *ow, int *oh, int *minw, int *minh, int *maxw, int *maxh) {
+    const dlss_builder_t *o = b; const int f = dlss_factor(o->method);
+    if (ow) *ow = dlss_ceil_div(o->w, f);
+    if (oh) *oh = dlss_ceil_div(o->h, f);
+    if (minw) *minw = dlss_ceil_div(o->w, 3);
+    if (minh) *minh = dlss_ceil_div(o->h, 3);
+    if (maxw) *maxw = o->w;
+    if (maxh) *maxh = o->h;
+    return 1;
+}
+static uint64_t dlss_texture_bytes(const dlss_builder_t *b, NVNformat f) {   // page-aligned, as the driver sizes its network's textures
+    NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetDevice(&tb, b->dev);
+    h_nvnTextureBuilderSetSize2D(&tb, b->w, b->h); h_nvnTextureBuilderSetFormat(&tb, f);
+    return ((uint64_t)h_nvnTextureBuilderGetStorageSize(&tb) + 0xfff) & ~0xfffull;
+}
+// sdk+0x659fc0, as the driver computes it, so the game sets aside what the console's would. Its inputs: the method (1 or not), the preset (8 or 9 or not), the output
+// size, flag bit 29, the maximum evaluation entries (64 KB each), the storage of two output-sized textures (RG16F, RGBA16F) and two bits of the device's internal
+// state (device+8 & 0xc00) the host does not have: taken as 0, which on the console selects the smaller sizes
+static uint64_t dlss_storage_size(const dlss_builder_t *b) {
+    #define PAGE_DOWN(v) ((v) & ~0xfffull)
+    const uint64_t w = (uint64_t)(int64_t)b->w, h = (uint64_t)(int64_t)b->h, entries = (uint64_t)(int64_t)b->max_entries << 16;
+    const int m1 = b->method == 1, p8 = (b->preset & ~1) == 8, extra = (b->flags & DLSS_FLAG_EXTRA_STORAGE) != 0;
+    const uint64_t s = (w + 0x40) * (h + 0x40), wide = (2 * w + 0x80) * (h + 0x40);
+    uint64_t x, y, z, r;
+    if (p8) x = m1 ? (entries | 0x2000) : 2 * PAGE_DOWN(wide + 0x357ff) + entries + 0x4000;
+    else x = dlss_texture_bytes(b, NVN_FORMAT_RG16F) + entries + 0x3000;
+    y = m1 ? 0xdc000 + x + 0x1b000 : p8 ? 0xdc000 + x + 0x1b000 : 0xef000 + x + 0x8000;
+    if (extra) y += PAGE_DOWN(s + 0x63abf) + PAGE_DOWN(s + 0xfff) + 0x2000;
+    y += 0x27000;
+    if (extra) y += PAGE_DOWN(s + 0xfff) + 0x1000;
+    z = m1 ? 0xdc000 + y + 0x2000 : p8 ? 0xdc000 + y + PAGE_DOWN(s + 0xfff) + 0x3000 : 0xdc000 + y + 0x2000;
+    if (extra) z += PAGE_DOWN(wide + 0xc657f) + 0x1000;
+    if (!p8) z += dlss_texture_bytes(b, NVN_FORMAT_RGBA16F) + 0x1000;
+    const uint64_t t = PAGE_DOWN(s + 0x2c82d), q = z + t + 0x1000, u = PAGE_DOWN(7 * s + 0x7b6fff);
+    r = (!m1 && p8 ? 2 * PAGE_DOWN(2 * s + 0x357ff) + q + 0x2000 : q) + u;
+    if (p8) r += t + 0xc000;
+    else r = dlss_texture_bytes(b, NVN_FORMAT_RG16F) + t + r + 0x5000 + 0x8000 + PAGE_DOWN(7 * s + 0x7f53ff) + 0x1000;
+    return (r + 0xfff) & ~0xfffull;
+    #undef PAGE_DOWN
+}
+NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const void *b) { return (size_t)dlss_storage_size(b); }
+// sdk+0x659b40 clears the network and the storage it is given (it makes a memory pool of it for its network): done alike. The backend's failure is its only false; the
+// host's stand-in does not fail
+NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, void *n, const void *b) {
+    dlss_net_t *o = n; const dlss_builder_t *bb = b;
+    memset(o, 0, DLSS_NET_BYTES);
+    o->b = *bb; o->serial = nvn_new_serial(); o->out_w = bb->w; o->out_h = bb->h;
+    if (bb->mem && bb->mem_size) { dm_guest_write_prepare(bb->mem, bb->mem_size); memset(bb->mem, 0, bb->mem_size); }
+    LOG("[nvn] DLSS network %llu: %dx%d, method %d (input 1/%d), preset %d, flags %#x, %d evaluation entries: a spatial upscale stands in (no NVIDIA network on the host)",
+        (unsigned long long)o->serial, bb->w, bb->h, bb->method, dlss_factor(bb->method), bb->preset, bb->flags, bb->max_entries);
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkFinalize, void, void *n) { dlss_net_t *o = n; OLOG("DLSS network %llu finalized after %llu evaluations, %llu history resets", (unsigned long long)o->serial, (unsigned long long)o->evaluations, (unsigned long long)o->resets); o->serial = 0; }
+// sdk+0x6599d0: a new output resolution no larger than the one the network was made with (else false, the network unchanged)
+NVN_NOPROTO(nvnDlssNetworkResize, NVNboolean, void *n, int w, int h) {
+    dlss_net_t *o = n;
+    if (w > o->b.w || h > o->b.h) return 0;
+    o->out_w = w; o->out_h = h;
+    return 1;
+}
+NVN_NOPROTO(nvnDlssParametersSetDefaults, void, void *p) {
+    dlss_params_t *o = p; memset(o, 0, sizeof *o);
+    o->mv_scale[0] = o->mv_scale[1] = 1; o->pre_exposure = 1;
+    o->overlay_debug_layer = o->overlay_full_screen = o->overlay_show_nans = o->overlay_jitter_debug = ~0u;
+}
+NVN_NOPROTO(nvnDlssParametersSetInputColor, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->color = t; ((dlss_params_t *)p)->color_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->output = t; ((dlss_params_t *)p)->output_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->motion = t; ((dlss_params_t *)p)->motion_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetDepth, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->depth = t; ((dlss_params_t *)p)->depth_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorMask, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->bias = t; ((dlss_params_t *)p)->bias_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetExposureTexture, void, void *p, const NVNtexture *t, const NVNtextureView *v) { ((dlss_params_t *)p)->exposure = t; ((dlss_params_t *)p)->exposure_view = v; }
+NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, void *p, float x, float y) { ((dlss_params_t *)p)->jitter[0] = x; ((dlss_params_t *)p)->jitter[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetJitterOffset, void, const void *p, float *x, float *y) { if (x) *x = ((const dlss_params_t *)p)->jitter[0]; if (y) *y = ((const dlss_params_t *)p)->jitter[1]; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, void *p, float x, float y) { ((dlss_params_t *)p)->mv_scale[0] = x; ((dlss_params_t *)p)->mv_scale[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetMotionVectorScale, void, const void *p, float *x, float *y) { if (x) *x = ((const dlss_params_t *)p)->mv_scale[0]; if (y) *y = ((const dlss_params_t *)p)->mv_scale[1]; }
+NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, void *p, int x, int y) { ((dlss_params_t *)p)->in_size[0] = x; ((dlss_params_t *)p)->in_size[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetInputSubrectangleSize, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->in_size[0]; if (y) *y = ((const dlss_params_t *)p)->in_size[1]; }
+NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, void *p, int x, int y) { ((dlss_params_t *)p)->color_base[0] = x; ((dlss_params_t *)p)->color_base[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetInputColorSubrectangleBase, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->color_base[0]; if (y) *y = ((const dlss_params_t *)p)->color_base[1]; }
+NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, void *p, int x, int y) { ((dlss_params_t *)p)->depth_base[0] = x; ((dlss_params_t *)p)->depth_base[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetDepthSubrectangleBase, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->depth_base[0]; if (y) *y = ((const dlss_params_t *)p)->depth_base[1]; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, void *p, int x, int y) { ((dlss_params_t *)p)->mv_base[0] = x; ((dlss_params_t *)p)->mv_base[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetMotionVectorSubrectangleBase, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->mv_base[0]; if (y) *y = ((const dlss_params_t *)p)->mv_base[1]; }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorSubrectangleBase, void, void *p, int x, int y) { ((dlss_params_t *)p)->bias_base[0] = x; ((dlss_params_t *)p)->bias_base[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetBiasCurrentColorSubrectangleBase, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->bias_base[0]; if (y) *y = ((const dlss_params_t *)p)->bias_base[1]; }
+NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, void *p, int x, int y) { ((dlss_params_t *)p)->out_base[0] = x; ((dlss_params_t *)p)->out_base[1] = y; }
+NVN_NOPROTO(nvnDlssParametersGetOutputSubrectangleBase, void, const void *p, int *x, int *y) { if (x) *x = ((const dlss_params_t *)p)->out_base[0]; if (y) *y = ((const dlss_params_t *)p)->out_base[1]; }
+NVN_NOPROTO(nvnDlssParametersSetPreExposure, void, void *p, float e) { ((dlss_params_t *)p)->pre_exposure = e; }
+NVN_NOPROTO(nvnDlssParametersGetPreExposure, float, const void *p) { return ((const dlss_params_t *)p)->pre_exposure; }
+NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, void *p, uint32_t on) { ((dlss_params_t *)p)->reset = (uint8_t)B(on); }
+NVN_NOPROTO(nvnDlssParametersGetHistoryReset, NVNboolean, const void *p) { return ((const dlss_params_t *)p)->reset; }
+NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, void *p, int i) { ((dlss_params_t *)p)->eval_index = i; }
+NVN_NOPROTO(nvnDlssParametersGetEvaluationIndex, int, const void *p) { return ((const dlss_params_t *)p)->eval_index; }
+// NVIDIA's debug overlays drawn over the output: kept, and drawn by nothing on the host
+NVN_NOPROTO(nvnDlssParametersSetOverlayDebugLayer, void, void *p, uint32_t v) { ((dlss_params_t *)p)->overlay_debug_layer = v; }
+NVN_NOPROTO(nvnDlssParametersSetOverlayFullScreen, void, void *p, uint32_t v) { ((dlss_params_t *)p)->overlay_full_screen = v; }
+NVN_NOPROTO(nvnDlssParametersSetOverlayShowNans, void, void *p, uint32_t v) { ((dlss_params_t *)p)->overlay_show_nans = v; }
+NVN_NOPROTO(nvnDlssParametersSetOverlayJitterDebug, void, void *p, uint32_t v) { ((dlss_params_t *)p)->overlay_jitter_debug = v; }
+// An evaluation (sdk+0x65a4e0 hands the parameters to NVIDIA's network): the replay resamples the input colour's subrectangle into the output's, at the evaluation's
+// jitter (vka_dlss.c). As the driver: an input size of 0x0 is the input colour texture's size, the output's size is the network's output resolution and its base
+// counts only with flag bit 28. The network keeps no history on the host, so a history reset only counts; the motion vectors, depth, bias mask and exposure feed
+// NVIDIA's temporal network alone. The pre-exposure stays out of it too: DLSS's output is in its input's (pre-exposed) range
+NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, void *n, const void *p) {
+    dlss_net_t *net = n; const dlss_params_t *o = p;
+    if (!o || !o->color || !o->output) { ONCE_LOG("[RED] EvaluateDlss without an input or output colour texture: nothing evaluated"); return; }
+    p_dlss *r = REC_SNAP(c, OP_DLSS, p_dlss, 2);
+    r->color = tex_snap(r, SNAP_OFF(p_dlss), 0, o->color, nvn_caller()); copy_view(&r->cv, &r->has_cv, o->color_view);
+    r->output = tex_snap(r, SNAP_OFF(p_dlss), 1, o->output, nvn_caller()); copy_view(&r->ov, &r->has_ov, o->output_view);
+    const int no_size = !o->in_size[0] && !o->in_size[1];
+    r->in_size[0] = no_size ? (int32_t)((const tex_t *)o->color)->d.width : o->in_size[0];
+    r->in_size[1] = no_size ? (int32_t)((const tex_t *)o->color)->d.height : o->in_size[1];
+    memcpy(r->in_base, o->color_base, sizeof r->in_base);
+    if (net->b.flags & DLSS_FLAG_OUTPUT_BASE) memcpy(r->out_base, o->out_base, sizeof r->out_base);
+    r->out_size[0] = net->out_w; r->out_size[1] = net->out_h;
+    memcpy(r->jitter, o->jitter, sizeof r->jitter);
+    r->reset = o->reset != 0; r->net = net->serial;
+    net->evaluations++; if (o->reset) net->resets++;
+}
+
+// The dirty tile map parameters (nvnDirtyTileMapParametersSetDefaults sdk+0x64fd60 and its setters): 0x74 bytes. The driver hands them to the GPU as they are; what
+// the console's GPU computes from them is not in the driver (below)
+typedef struct {
+    const NVNtexture *tex; const NVNtextureView *view;   // 0x00
+    NVNcopyRegion region;                                 // 0x10
+    int32_t input_select;     // 0x28 SetInputs' second value: the GPU command's word at +0x44, which a depth / stencil texture's mask replaces (sdk+0x64fc58)
+    int32_t color_count;      // 0x2c SetConstantColorTable's second value (given to the GPU only for byte maps)
+    uint64_t out;             // 0x30 the map's buffer address
+    int32_t out_row_pitch, out_layer_stride;   // 0x38 (0: from the region and the tile size)
+    uint64_t out_extra;       // 0x40 SetOutputs' last value
+    uint64_t color_table;     // 0x48
+    uint64_t color_extra;     // 0x50 SetConstantColorTable's last value
+    int32_t color_stride;     // 0x58 its third (1 by default)
+    int32_t tile_w, tile_h;   // 0x5c SetInputs' third and fourth (16 x 16 by default)
+    uint32_t input_flags;     // 0x64 SetInputs' first: bit 0 a bit per tile instead of a byte
+    int32_t depth_mask, stencil_mask;   // 0x68
+    uint8_t expand[4];        // 0x70 SetExpandFootprint: four booleans, each multiplies a side by the texture's sample or block size (sdk+0x64fcac)
+} dirty_tile_params_t;
+_Static_assert(sizeof(dirty_tile_params_t) == 0x78 && offsetof(dirty_tile_params_t, input_select) == 0x28 && offsetof(dirty_tile_params_t, out) == 0x30 &&
+               offsetof(dirty_tile_params_t, color_stride) == 0x58 && offsetof(dirty_tile_params_t, input_flags) == 0x64 && offsetof(dirty_tile_params_t, expand) == 0x70, "the driver's dirty tile map parameters");
+enum { DIRTY_TILE_PARAMS_BYTES = 0x74 };   // what the driver's SetDefaults writes (the struct's tail is padding)
+enum { DIRTY_TILE_BITS = 1 };
+static uint64_t guest_of(const void *host) { return host ? nvn_direct_guest_of((uint64_t)(uintptr_t)host) : 0; }
+NVN_NOPROTO(nvnDirtyTileMapParametersSetDefaults, void, void *p) {
+    dirty_tile_params_t *o = p; memset(o, 0, DIRTY_TILE_PARAMS_BYTES);
+    o->color_stride = 1; o->tile_w = o->tile_h = 16;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetTexture, void, void *p, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) {
+    dirty_tile_params_t *o = p; o->tex = t; o->view = v; if (r) o->region = *r;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersGetTexture, void, const void *p, uint64_t *t, uint64_t *v, NVNcopyRegion *r) {
+    const dirty_tile_params_t *o = p;
+    if (t) *t = guest_of(o->tex);
+    if (v) *v = guest_of(o->view);
+    if (r) *r = o->region;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetInputs, void, void *p, uint32_t flags, int select, int tile_w, int tile_h) {
+    dirty_tile_params_t *o = p; o->input_flags = flags; o->input_select = select; o->tile_w = tile_w; o->tile_h = tile_h;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersGetInputs, void, const void *p, uint32_t *flags, int *select, int *tile_w, int *tile_h) {
+    const dirty_tile_params_t *o = p;
+    if (flags) *flags = o->input_flags;
+    if (select) *select = o->input_select;
+    if (tile_w) *tile_w = o->tile_w;
+    if (tile_h) *tile_h = o->tile_h;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetOutputs, void, void *p, uint64_t out, int row_pitch, int layer_stride, uint64_t extra) {
+    dirty_tile_params_t *o = p; o->out = out; o->out_row_pitch = row_pitch; o->out_layer_stride = layer_stride; o->out_extra = extra;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersGetOutputs, void, const void *p, uint64_t *out, int *row_pitch, int *layer_stride, uint64_t *extra) {
+    const dirty_tile_params_t *o = p;
+    if (out) *out = o->out;
+    if (row_pitch) *row_pitch = o->out_row_pitch;
+    if (layer_stride) *layer_stride = o->out_layer_stride;
+    if (extra) *extra = o->out_extra;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetConstantColorTable, void, void *p, uint64_t table, int count, int stride, uint64_t extra) {
+    dirty_tile_params_t *o = p; o->color_table = table; o->color_count = count; o->color_stride = stride; o->color_extra = extra;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersGetConstantColorTable, void, const void *p, uint64_t *table, int *count, int *stride, uint64_t *extra) {
+    const dirty_tile_params_t *o = p;
+    if (table) *table = o->color_table;
+    if (count) *count = o->color_count;
+    if (stride) *stride = o->color_stride;
+    if (extra) *extra = o->color_extra;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetDepthStencilMask, void, void *p, int depth, int stencil) { ((dirty_tile_params_t *)p)->depth_mask = depth; ((dirty_tile_params_t *)p)->stencil_mask = stencil; }
+NVN_NOPROTO(nvnDirtyTileMapParametersGetDepthStencilMask, void, const void *p, int *depth, int *stencil) {
+    if (depth) *depth = ((const dirty_tile_params_t *)p)->depth_mask;
+    if (stencil) *stencil = ((const dirty_tile_params_t *)p)->stencil_mask;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersSetExpandFootprint, void, void *p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    uint8_t *e = ((dirty_tile_params_t *)p)->expand; e[0] = (uint8_t)a; e[1] = (uint8_t)b; e[2] = (uint8_t)c; e[3] = (uint8_t)d;
+}
+NVN_NOPROTO(nvnDirtyTileMapParametersGetExpandFootprint, void, const void *p, uint8_t *a, uint8_t *b, uint8_t *c, uint8_t *d) {
+    const uint8_t *e = ((const dirty_tile_params_t *)p)->expand;
+    if (a) *a = e[0];
+    if (b) *b = e[1];
+    if (c) *c = e[2];
+    if (d) *d = e[3];
+}
+// The map's shape (sdk+0x64faa0): tiles of tile_w x tile_h texels over the region, a byte per tile, or a bit per tile (input flag bit 0, the lowest bit the first
+// tile); rows out_row_pitch bytes apart (0: just the row's bytes), and for a region of 2 or more layers, layers out_layer_stride apart (0: just the layer's rows)
+typedef struct { uint32_t row_bytes, rows, layers, pitch, stride; uint8_t last; } dirty_tile_shape;
+static int dirty_tile_shape_of(const dirty_tile_params_t *o, dirty_tile_shape *s) {
+    if (o->tile_w <= 0 || o->tile_h <= 0 || o->region.width <= 0 || o->region.height <= 0) return 0;
+    const uint32_t bits = o->input_flags & DIRTY_TILE_BITS, tiles = ((uint32_t)o->region.width + (uint32_t)o->tile_w - 1) / (uint32_t)o->tile_w;
+    s->row_bytes = bits ? (tiles + 7) / 8 : tiles;
+    s->last = bits && tiles % 8 ? (uint8_t)((1u << tiles % 8) - 1) : 0xff;
+    s->rows = ((uint32_t)o->region.height + (uint32_t)o->tile_h - 1) / (uint32_t)o->tile_h;
+    s->pitch = o->out_row_pitch ? (uint32_t)o->out_row_pitch : s->row_bytes;
+    s->layers = o->region.depth >= 2 ? (uint32_t)o->region.depth : 1;
+    s->stride = s->layers > 1 ? (o->out_layer_stride ? (uint32_t)o->out_layer_stride : s->rows * s->pitch) : 0;
+    return 1;
+}
+// The console's GPU computes the map in a command of its own (the driver records opcode 0x5b with these parameters and the texture's internals, sdk+0x64fad0), whose
+// test for a dirty tile is not in the driver. The host marks every tile of the region dirty (each byte 0xff, or each tile's bit set): a reader that skips the clean
+// tiles then redoes them all, which costs work but never loses any. In command order, through inline buffer updates (the bytes between rows are left as they are)
+static void dirty_tile_map(NVNcommandBuffer *c, const dirty_tile_params_t *o) {
+    ONCE_LOG("[RED] ComputeDirtyTileMap: the host marks every tile dirty (what the console's GPU tests is unknown)");
+    dirty_tile_shape s;
+    if (!o->out || !dirty_tile_shape_of(o, &s)) { ONCE_LOG("[RED] ComputeDirtyTileMap with no output, an empty region or a zero tile size: nothing written"); return; }
+    const uint64_t out = nvn_direct_host_of(o->out);
+    const int packed = s.pitch == s.row_bytes && (s.layers == 1 || s.stride == s.rows * s.pitch);
+    const size_t n = packed ? (size_t)s.row_bytes * s.rows * s.layers : s.row_bytes;
+    uint8_t *bytes = malloc(n); if (!bytes) die("dirty tile map allocation failed");
+    memset(bytes, 0xff, n);
+    for (size_t r = 0; r < n / s.row_bytes; r++) bytes[(r + 1) * s.row_bytes - 1] = s.last;
+    if (packed) h_nvnCommandBufferUpdateUniformBuffer(c, out, n, 0, n, bytes);
+    else for (uint32_t l = 0; l < s.layers; l++) for (uint32_t r = 0; r < s.rows; r++) h_nvnCommandBufferUpdateUniformBuffer(c, out + (uint64_t)l * s.stride + (uint64_t)r * s.pitch, n, 0, n, bytes);
+    free(bytes);
+}
+NVN_NOPROTO(nvnCommandBufferComputeDirtyTileMapEx, void, NVNcommandBuffer *c, const void *p) { dirty_tile_map(c, p); }
+// sdk+0x64fa30: Ex with the defaults bar the texture, the second input and the outputs, a bit per tile (flags 0x80000001) and 16 x 16 tiles
+NVN_NOPROTO(nvnCommandBufferComputeDirtyTileMap, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, int select, uint64_t out, int row_pitch, int layer_stride) {
+    dirty_tile_params_t o; memset(&o, 0, sizeof o);
+    o.tex = t; o.view = v; if (r) o.region = *r;
+    o.input_select = select; o.out = out; o.out_row_pitch = row_pitch; o.out_layer_stride = layer_stride;
+    o.tile_w = o.tile_h = 16; o.input_flags = 0x80000001u;
+    dirty_tile_map(c, &o);
+}
+
+// Cooperative-vector matrices: the layouts of the console's GPU, ported from its driver (nvnDeviceGetCooperativeVectorMatrixSize sdk+0x651a30, the CPU conversion
+// nvnDeviceConvertCooperativeVectorMatrix sdk+0x6510c0 and its helpers sdk+0x6571b0 / +0x657300 / +0x657420), so a matrix comes out as the console's would.
+// Component types: 0 fp16, 1 fp32, 2 8-bit, 3 32-bit, 4 8-bit, 5 32-bit (the integer ones copy as they are), 8 fp8 E4M3, 9 fp8 E5M2. Layouts: 0 row-major,
+// 1 column-major (stride bytes between rows / columns), 2 inferencing-optimal, 3 training-optimal (16-byte chunks of 8 rows in 128-byte blocks, 4 blocks to 512 bytes,
+// training's with 512 bytes after each such group)
+static const uint32_t g_cv_shift[6] = {1, 2, 0, 2, 0, 2};   // log2 of the component's bytes (sdk+0xc8065c)
+static uint32_t cv_shift(uint32_t type) { return type <= 5 ? g_cv_shift[type] : 0; }
+static uint32_t cv_udiv(uint32_t a, uint32_t b) { return b ? a / b : 0; }   // (AArch64's: x / 0 = 0)
+// fp32 has no optimal layout: it is row-major with rows 16 bytes aligned; fp8 in an optimal layout is stored as fp16
+static void cv_effective(const coopvec_desc *d, uint32_t cols, coopvec_desc *e) {
+    *e = *d;
+    if ((d->layout & ~1u) != 2) return;
+    if ((d->type & ~1u) == 8) e->type = 0;
+    else if (d->type == 1) { e->layout = 0; e->stride = ((uint64_t)cols * 4 + 15) & 0x7fffffff0ull; }
+}
+static uint32_t cv_tail(uint32_t blocks) { uint32_t t = blocks & 3; return t == 0 || t == 3 ? 4 : t; }   // the blocks in the last group
+static uint64_t cv_bytes(const coopvec_desc *e, uint32_t rows, uint32_t cols) {   // one copy
+    if (!rows || !cols) return 0;
+    const uint32_t sh = cv_shift(e->type);
+    if (e->layout == 0) return e->stride * (rows - 1) + (uint32_t)(cols << sh);
+    if (e->layout == 1) return e->stride * (cols - 1) + (uint32_t)(rows << sh);
+    if (e->layout != 2 && e->layout != 3) return 0;
+    uint32_t blocks = ((cols + (16u >> sh) - 1) >> (4 - sh)) * ((rows + 7) >> 3);
+    if ((blocks & 3) == 3) blocks++;
+    uint32_t n = blocks << 7;
+    if (e->layout == 3) n += ((n + 0x180) & ~0x1ffu) - 0x200;
+    return n;
+}
+// 8-bit components in the inferencing-optimal layout take two copies, the second with columns swizzled (cv_swizzle)
+static int cv_copies(const coopvec_desc *e) { return 1 + (e->layout == 2 && (e->type == 2 || e->type == 4 || e->type > 5)); }
+static uint32_t cv_swizzle(uint32_t c) { return (c & ~0xeu) | ((c >> 1) & 6) | ((c >> 1) & 1) << 3; }
+// The row and column of the component at byte off of a matrix (0: padding)
+static int cv_position(const coopvec_desc *e, uint32_t rows, uint32_t cols, uint32_t off, int copy, uint32_t *row, uint32_t *col) {
+    const uint32_t sh = cv_shift(e->type), stride = (uint32_t)e->stride;
+    if (e->layout == 0 || e->layout == 1) {
+        const uint32_t q = cv_udiv(off, stride), in = (off - q * stride) >> sh;
+        *row = e->layout ? in : q; *col = e->layout ? q : in;
+        return *row < rows && *col < cols;
+    }
+    if (e->layout != 2 && e->layout != 3) return 0;
+    const uint32_t chunks = (cols + (16u >> sh) - 1) >> (4 - sh), blocks = chunks * ((rows + 7) >> 3);
+    if (e->layout == 3) { if (off & 0x200) return 0; off -= (off >> 10) << 9; }
+    const uint32_t group = off >> 9, in = off & 0x1ff, gsize = group == blocks >> 2 ? cv_tail(blocks) : 4;
+    const uint32_t blk = ((gsize - 1) & (in >> 2)) + group * 4, word = in >> ((gsize >> 1) + 2), rb = cv_udiv(blk, chunks), ch = blk - rb * chunks;
+    *row = (word >> 2) + rb * 8;
+    *col = (word & 3) * (4u >> sh) + ((off & 3) >> sh) + (ch << (4 - sh));
+    return *row < rows && (copy ? cv_swizzle(*col) : *col) < cols;
+}
+// The byte offset of a component of a matrix
+static uint64_t cv_offset(const coopvec_desc *e, uint32_t rows, uint32_t cols, uint32_t row, uint32_t col, int copy) {
+    const uint32_t sh = cv_shift(e->type);
+    if (copy) col = cv_swizzle(col);
+    if (e->layout == 0) return (uint32_t)(col << sh) + e->stride * row;
+    if (e->layout == 1) return (uint32_t)(row << sh) + e->stride * col;
+    if (e->layout != 2 && e->layout != 3) return 0;
+    const uint32_t per = 16u >> sh, chunks = (cols + per - 1) >> (4 - sh), blocks = chunks * ((rows + 7) >> 3);
+    const uint32_t blk = chunks * (row >> 3) + (col >> (4 - sh)), word = ((col & (per - 1)) >> (2 - sh)) + ((row & 7) << 2);
+    const uint32_t group = blk >> 2, gsize = group == blocks >> 2 ? cv_tail(blocks) : 4;
+    return (uint64_t)(group << 9) + ((col & ((4u >> sh) - 1)) << sh) + (e->layout == 3 ? group << 9 : 0) + (gsize * word + (blk & 3)) * 4;
+}
+// fp16, E4M3 and E5M2 (mantissa and exponent bits); E4M3 has no infinity and one NaN pattern (0x7f / 0xff)
+static int cv_float_bits(uint32_t type, uint32_t *m, uint32_t *e) {
+    if (type == 0) { *m = 10; *e = 5; return 1; }
+    if (type == 8) { *m = 3; *e = 4; return 1; }
+    if (type == 9) { *m = 2; *e = 5; return 1; }
+    return 0;
+}
+static float cv_load(const uint8_t *p, uint32_t type) {
+    float f; uint32_t m, e;
+    if (type == 1) { memcpy(&f, p, 4); return f; }
+    if (!cv_float_bits(type, &m, &e)) return 0;
+    const uint32_t v = type ? p[0] : (uint32_t)p[0] | (uint32_t)p[1] << 8, sign = (v >> (m + e)) & 1, emax = (1u << e) - 1;
+    uint32_t mant = v & ((1u << m) - 1), ex = (v >> m) & emax, bits;
+    if (!(v & ~(1u << (m + e)))) return 0;   // either zero: +0
+    if (type == 8 && (v & 0x7f) == 0x7f) bits = 0x7fffffffu;
+    else if (type != 8 && ex == emax) bits = 0x7f800000u | (mant ? 0x7fffffu : 0);
+    else {
+        int x = (int)ex;
+        if (!ex) { x = 1; while (!(mant & (1u << m))) { mant <<= 1; x--; } mant &= ~(1u << m); }
+        bits = (uint32_t)(x - (int)(emax >> 1) + 127) << 23 | mant << (23 - m);
+    }
+    bits |= sign << 31;
+    memcpy(&f, &bits, 4); return f;
+}
+// Rounded to nearest even; past the largest exponent: infinity (E4M3: NaN, unless the exponent is just its top one); a NaN: the positive all-ones pattern; values
+// below half the smallest denormal's mantissa range: signed zero
+static void cv_store(uint8_t *p, float f, uint32_t type) {
+    uint32_t m, e;
+    if (type == 1) { memcpy(p, &f, 4); return; }
+    if (!cv_float_bits(type, &m, &e)) return;
+    uint32_t bits; memcpy(&bits, &f, 4);
+    const uint32_t emax = (1u << e) - 1, bias = (1u << (e - 1)) - 1, fe = bits >> 23 & 0xff, fm = bits & 0x7fffff;
+    uint32_t sign = bits >> 31, E, M, zero = f == 0.0f;
+    if (fe == 0xff) { E = emax; M = 0; if (type == 8 || fm) { sign = 0; M = (1u << m) - 1; } }
+    else {
+        const int x = (int)fe - 127 + (int)bias;
+        if (x > 0) {
+            uint32_t r = fm + ((1u << (22 - m)) - 1) + (fm >> (23 - m) & 1);
+            E = (uint32_t)x; if (r & 0x800000) { r = 0; E++; }
+            M = r >> (23 - m);
+        } else if ((uint32_t)-x > m) { E = 0; M = 0; zero = 1; }
+        else {
+            const uint32_t full = fm | 0x800000, shift = 24 - m - (uint32_t)x;   // (23 - m) + (1 - x)
+            E = 0; M = (full + ((1u << (shift - 1)) - 1) + (full >> shift & 1)) >> shift;
+        }
+        if (E >= emax) {
+            if (type != 8) { E = emax; M = 0; }
+            else if (E > emax) { E = emax; M = (1u << m) - 1; sign = 0; }
+        }
+    }
+    const uint32_t v = zero ? sign << (m + e) : sign << (m + e) | E << m | M;
+    if (type == 0) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); } else p[0] = (uint8_t)v;
+}
+void nvn_coopvec_convert(const uint8_t *src, const coopvec_desc *sd, uint8_t *dst, const coopvec_desc *dd, uint32_t rows, uint32_t cols) {
+    coopvec_desc s, d; cv_effective(sd, cols, &s); cv_effective(dd, cols, &d);
+    const int src_fp8 = (sd->type & ~1u) == 8 && (sd->layout & ~1u) == 2, dst_fp8 = (dd->type & ~1u) == 8 && (dd->layout & ~1u) == 2;
+    const int convert = s.type != d.type || src_fp8 || dst_fp8, copies = cv_copies(&d);
+    const uint64_t n = cv_bytes(&d, rows, cols);
+    const uint32_t ssize = 1u << cv_shift(s.type), dsize = 1u << cv_shift(d.type);
+    if (!n) return;
+    dm_guest_write_prepare(dst, n * (uint64_t)copies);
+    for (int k = 0; k < copies; k++) {
+        uint8_t *const out = dst + n * (uint64_t)k;
+        for (uint64_t off = 0; off < n; off += dsize) {
+            uint32_t row, col;
+            if (!cv_position(&d, rows, cols, (uint32_t)off, k, &row, &col)) { memset(out + off, 0, dsize); continue; }
+            const uint8_t *const in = src + cv_offset(&s, rows, cols, row, col, k);
+            if (!convert) { memcpy(out + off, in, ssize); continue; }
+            float f = cv_load(in, s.type);
+            if (dst_fp8) { uint8_t q[4] = {0}; cv_store(q, f, dd->type); f = cv_load(q, dd->type); }   // fp8's precision, kept as fp16
+            cv_store(out + off, f, d.type);
+        }
+    }
+}
+NVN_NOPROTO(nvnDeviceGetCooperativeVectorMatrixSize, size_t, const NVNdevice *dev, const void *desc, int rows, int cols) {
+    (void)dev; coopvec_desc e; cv_effective(desc, (uint32_t)cols, &e);
+    return (size_t)(cv_bytes(&e, (uint32_t)rows, (uint32_t)cols) * (uint64_t)cv_copies(&e));
+}
+// The sizes are the caller's; the driver reads neither and writes the destination's whole size
+NVN_NOPROTO(nvnDeviceConvertCooperativeVectorMatrix, NVNboolean, const NVNdevice *dev, const void *src, size_t src_size, const void *src_desc, void *dst, size_t dst_size, const void *dst_desc, int rows, int cols) {
+    (void)dev; (void)src_size; (void)dst_size;
+    nvn_coopvec_convert(src, src_desc, dst, dst_desc, (uint32_t)rows, (uint32_t)cols);
+    return 1;
+}
+// sdk+0x64df10 records it for the GPU (opcode 0x6e); the replay runs the same CPU conversion once the GPU has done the submission's work before it (vka_exec.c)
+NVN_NOPROTO(nvnCommandBufferConvertCooperativeVectorMatrix, void, NVNcommandBuffer *c, NVNbufferAddress src, size_t src_size, const void *src_desc, NVNbufferAddress dst, size_t dst_size, const void *dst_desc, int rows, int cols) {
+    (void)src_size; (void)dst_size;
+    p_coopvec_convert *r = REC(c, OP_COOPVEC_CONVERT, p_coopvec_convert);
+    r->src = src; r->dst = dst; r->sd = *(const coopvec_desc *)src_desc; r->dd = *(const coopvec_desc *)dst_desc; r->rows = rows; r->cols = cols;
+}
