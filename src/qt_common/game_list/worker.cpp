@@ -31,6 +31,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/submission_package.h"
 #include "core/loader/loader.h"
+#include "core/loader/nca.h"
 #include "core/loader/nx.h"
 
 #include "qt_common/config/uisettings.h"
@@ -527,7 +528,14 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
             std::vector<u64> program_ids;
             loader->ReadProgramIds(program_ids);
 
-            const auto addEntry = [this, physical_name,
+            const bool title_container =
+                file_type == Loader::FileType::XCI || file_type == Loader::FileType::XCZ ||
+                file_type == Loader::FileType::NSP || file_type == Loader::FileType::NSZ;
+            const bool can_forward =
+                (!title_container || !program_ids.empty()) &&
+                (file_type != Loader::FileType::NCA ||
+                 Loader::AppLoader_NCA::IdentifyType(file) == Loader::FileType::NCA);
+            const auto addEntry = [this, physical_name, can_forward,
                                    parent_dir](std::unique_ptr<Loader::AppLoader>& app_loader,
                                                const u64 id) {
                 std::vector<u8> icon;
@@ -572,21 +580,19 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                 RecordEvent([=](GameListModel* model) {
                     model->AddEntry(pending->Release(), parent_dir);
                 });
-                if (id != 0) {
+                if (can_forward && id != 0) {
                     application_paths.try_emplace(id, physical_name);
                 }
             };
 
-            if (res2 == Loader::ResultStatus::Success && program_ids.size() > 1 &&
-                (file_type == Loader::FileType::XCI || file_type == Loader::FileType::XCZ ||
-                 file_type == Loader::FileType::NSP || file_type == Loader::FileType::NSZ)) {
+            if (title_container && !program_ids.empty() &&
+                (program_ids.size() > 1 || res2 != Loader::ResultStatus::Success ||
+                 program_ids.front() != program_id)) {
                 for (const auto id : program_ids) {
-                    if ((id & 0xFFF) != 0 &&
-                        std::ranges::find(program_ids, id & ~0xFFFULL) != program_ids.end()) {
-                        continue;
-                    }
                     loader = Loader::GetLoader(system, file, id);
-                    if (!loader) {
+                    u64 resolved{};
+                    if (!loader || loader->ReadProgramId(resolved) != Loader::ResultStatus::Success ||
+                        resolved != id) {
                         continue;
                     }
 

@@ -9,6 +9,7 @@
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/loader.h"
+#include "core/loader/nca.h"
 
 namespace Service::NS {
 
@@ -34,10 +35,15 @@ std::unique_ptr<Loader::AppLoader> OpenGameListApplication(Core::System& system,
     if (vfs == nullptr) {
         return nullptr;
     }
-    auto loader = Loader::GetLoader(system, Core::GetGameFileFromPath(vfs, path), application_id);
+    const auto file = Core::GetGameFileFromPath(vfs, path);
+    auto loader = Loader::GetLoader(system, file, application_id);
     u64 opened_id{};
     if (loader == nullptr || loader->ReadProgramId(opened_id) != Loader::ResultStatus::Success ||
         opened_id != application_id) {
+        return nullptr;
+    }
+    if (loader->GetFileType() == Loader::FileType::NCA &&
+        Loader::AppLoader_NCA::IdentifyType(file) != Loader::FileType::NCA) {
         return nullptr;
     }
     return loader;

@@ -625,6 +625,26 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (Settings::values.use_dev_keys.GetValue()) {
         Core::Crypto::KeyManager::Instance().ReloadKeys();
     }
+
+    std::optional<Core::LaunchParams> launch;
+    if (QStringList args = QApplication::arguments(); args.size() >= 2) {
+        QList<QByteArray> qba{};
+        for (auto const& e : args) {
+            qba.push_back(e.toUtf8());
+        }
+        std::vector<char*> args_cstr{};
+        for (auto& e : qba) {
+            args_cstr.push_back(e.data());
+        }
+        launch =
+            Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+    }
+    const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
+                             launch->launch_qlaunch;
+    if (!launch_home) {
+        game_list->PopulateAsync(UISettings::values.game_dirs);
+    }
+
     if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
         UISettings::values.show_whats_new.GetValue()) {
         QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
@@ -687,19 +707,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // to prevent the UI from blowing up.
     UpdateUITheme();
 
-    std::optional<Core::LaunchParams> launch;
-    if (QStringList args = QApplication::arguments(); args.size() >= 2) {
-        QList<QByteArray> qba{};
-        for (auto const& e : args)
-            qba.push_back(e.toUtf8());
-        std::vector<char*> args_cstr{};
-        for (auto& e : qba)
-            args_cstr.push_back(e.data());
-
-        launch =
-            Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
-    }
-
     // Once FixProfiles has read the configured NAND and -u may have picked another user.
     Common::Nextendo::MigrateAccountFile(
         Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
@@ -743,17 +750,15 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     nextendo_session_timer.start(std::chrono::minutes{2});
     KeepNextendoSessionAlive();
 
-    const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
-                             launch->launch_qlaunch;
     if (launch_home) {
-        connect(
+        startup_qlaunch_connection = connect(
             game_list, &GameList::PopulatingCompleted, this,
             [this] {
                 LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
             },
             Qt::SingleShotConnection);
+        game_list->PopulateAsync(UISettings::values.game_dirs);
     }
-    game_list->PopulateAsync(UISettings::values.game_dirs);
 
     if (launch) {
         const auto& lp = *launch;
@@ -2365,6 +2370,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (boot_in_progress || close_pending) {
         return;
     }
+    disconnect(startup_qlaunch_connection);
     boot_in_progress = true;
     game_list->SetScanEnabled(false);
     QElapsedTimer boot_timer;
