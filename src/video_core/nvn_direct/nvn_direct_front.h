@@ -46,6 +46,8 @@ void nvn_direct_alias_release(void* range);
 /// address): its backing memory, which write tracking never protects. Anything else (a host
 /// segment): unchanged. The value must not cross a page.
 void* nvn_direct_writable(uint64_t host);
+/// Writable backing for one guest arena page, or NULL for an unmapped or non-guest address.
+void* nvn_direct_guest_backing(uint64_t host);
 /// Where the replay reads guest memory at host (an arena pointer): its backing memory, which a
 /// guest unmap never takes away, NULL when the guest has not mapped the page (the arena's page is
 /// then inaccessible). In a virtual pool's range: unchanged, NULL where nothing is mapped.
