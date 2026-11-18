@@ -486,7 +486,8 @@ void ArtworkTest::LazyGalleryAndPageLimit() {
 void ArtworkTest::InstallWritesOnlyExactLocalId() {
     const QTemporaryDir user;
     QVERIFY(user.isValid());
-    Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir, user.path().toStdString());
+    Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir,
+                            std::filesystem::path(user.path().toStdU16String()));
     constexpr u64 chosen_id = 0x040000AABBCC0000;
     constexpr u64 other_id = 0x040000AABBCE0000;
     QImage old_image(64, 64, QImage::Format_RGB32);
