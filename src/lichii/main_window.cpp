@@ -3963,6 +3963,13 @@ void MainWindow::OnExecuteProgram(std::size_t program_index) {
 }
 
 void MainWindow::OnLaunchInNewSession(u64 program_id) {
+    // A request queued while its session stops would run inside ShutdownGame's event loop and boot
+    // under the outer shutdown, which then takes the new session's thread for a stuck one.
+    if (!emulation_running || QtCommon::system->IsShuttingDown()) {
+        LOG_WARNING(Frontend, "Dropping HOME Menu launch of {:016X}: its session is stopping",
+                    program_id);
+        return;
+    }
     auto* const model = game_list->GetModel();
     const auto matches =
         model->match(model->index(0, 0), GameListItemPath::ProgramIdRole,
