@@ -102,6 +102,11 @@ uint64_t nvn_direct_alias_pages(void* to, uint64_t host, uint64_t size) {
     return missing;
 }
 #endif
+void* nvn_direct_guest_backing(uint64_t host) {
+    if (host < g_arena || host - g_arena >= g_guest_size || !g_memory.backing) return NULL;
+    return g_memory.backing(g_memory.context, host - g_arena);
+}
+
 void* nvn_direct_writable(uint64_t host) {
     const uint64_t guest = guest_addr(host);
     if (guest >= g_guest_size || !g_memory.backing) return (void*)(uintptr_t)host_addr(host);

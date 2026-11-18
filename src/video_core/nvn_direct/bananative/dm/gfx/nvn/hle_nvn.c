@@ -662,16 +662,29 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
     pthread_mutex_unlock(&g_fl_mu);
     return r;
 }
+static uint8_t *copy_packaged_texture(const tex_builder_t *s, uint64_t size);
+
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
+    nvn_texlayout layout;
+    nvn_tex_layout(&s->d, &layout);
+    uint8_t *packaged = NULL;
+    if (s->pkg_data) {
+        packaged = copy_packaged_texture(s, layout.size);
+        if (!packaged) {
+            static atomic_flag warned = ATOMIC_FLAG_INIT;
+            if (!atomic_flag_test_and_set(&warned)) LOG("[RED] TextureInitialize: packaged texture storage is unavailable");
+            return 0;
+        }
+    }
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
-    nvn_tex_layout(&o->d, &o->L);
-    o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
+    o->L = layout;
+    o->mem = s->pkg_data ? packaged : s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);
     if (o->mem) pc_use(o->pool, 't', o->off, o->L.size);
     if (o->mem && o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) mtl_pool_need(o->mem, o->L.size, "a linear texture");   // its GPU content is copied back into the storage (vka_tex_writeback)
@@ -683,8 +696,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
             (unsigned long long)o->off, o->d.target, o->d.format, o->d.flags, o->d.samples, o->d.width, o->d.height, o->d.depth, o->d.levels, o->d.stride, (unsigned long long)o->L.size); }
     }
     // See SetPackagedTextureData. Linear textures are not re-uploaded as packaged: they are created on the pool buffer (tex_linear), whatever the pool's CPU access, and read what was copied in
-    if (s->pkg_data && o->mem) {
-        memcpy(o->mem, s->pkg_data, o->L.size);
+    if (packaged) {
         if (!(o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) mtl_tex_cpu_written(o);
     }
     OLOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)t, o->d.width, o->d.height, o->d.depth,
@@ -1719,6 +1731,58 @@ static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
 }
 // Page table of a sparse pool (see above). Caller holds g_vp_mu
 static const vpte *vpt_get(const struct vpool *v, uint64_t o) { const vpte *l = v->pt[o >> 21]; return l ? &l[(o >> 12) & (VPT_LEAF - 1)] : NULL; }
+
+static uint8_t *copy_packaged_texture(const tex_builder_t *s, uint64_t size) {
+    if (!s->pool || !size || s->off < 0) return NULL;
+    const uintptr_t src = (uintptr_t)s->pkg_data;
+    if (size > UINTPTR_MAX - src) return NULL;
+    uint8_t *result = NULL;
+    nvn_pool_use(1);
+    pthread_mutex_lock(&g_pl_mu);
+    const pool_t *pool = s->pool;
+    if (!pl_find(pool) || !pool->mem || (uint64_t)s->off > pool->size ||
+        size > pool->size - (uint64_t)s->off || pool->size > UINTPTR_MAX - (uintptr_t)pool->mem) goto done;
+    const uintptr_t dst = (uintptr_t)pool->mem + (uint64_t)s->off;
+    const int virtual = (pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) != 0;
+    if (virtual) pthread_mutex_lock(&g_vp_mu);
+    const struct vpool *v = virtual ? pool->vp : NULL;
+    if (!virtual || (v && v->pool == pool && v->base == pool->mem && v->size == pool->size)) {
+        int ok = 1;
+        for (int write = 0; write < 2 && ok; ++write) {
+            for (uint64_t i = 0; i < size;) {
+                uintptr_t at = dst + i;
+                if (v) {
+                    const uint64_t offset = (uint64_t)s->off + i;
+                    const vpte *entry = vpt_get(v, offset);
+                    if (!entry || !entry->phys || ((uintptr_t)entry->phys & 0xfff)) { ok = 0; break; }
+                    at = (uintptr_t)entry->phys + (offset & 0xfff);
+                }
+                const void *from = nvn_direct_guest_backing(src + i);
+                void *to = nvn_direct_guest_backing(at);
+                if (!from || !to) { ok = 0; break; }
+                uint64_t n = 0x1000 - (at & 0xfff);
+                const uint64_t src_left = 0x1000 - ((src + i) & 0xfff);
+                if (n > src_left) n = src_left;
+                if (n > size - i) n = size - i;
+                if (write) {
+                    memmove(to, from, n);
+                    if (virtual) dm_guest_write_prepare((void *)at, n);
+                }
+                i += n;
+            }
+        }
+        if (ok) {
+            if (!virtual) dm_guest_write_prepare((void *)dst, size);
+            result = (uint8_t *)dst;
+        }
+    }
+    if (virtual) pthread_mutex_unlock(&g_vp_mu);
+done:
+    pthread_mutex_unlock(&g_pl_mu);
+    nvn_pool_use(0);
+    return result;
+}
+
 static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t *phys) {
     uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
     for (uint64_t o = 0; o < size; o += 0x1000) {
