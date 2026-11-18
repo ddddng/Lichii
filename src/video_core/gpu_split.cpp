@@ -35,6 +35,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_back_idle_trace.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -443,6 +444,10 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
         return SettledWord{queued->payload, queued->position};
     }
     const u32 guest = memory.Read<u32>(address);
+    if (Tegra::Nx2ListIndirect::IsPlaceholder(guest)) {
+        why = AcquireUnsettled::Writes;
+        return std::nullopt;
+    }
     return SettledWord{shadow.Read(device_address, guest).value_or(guest), std::nullopt};
 }
 

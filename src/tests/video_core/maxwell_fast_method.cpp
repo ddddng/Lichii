@@ -40,6 +40,7 @@
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
@@ -1910,6 +1911,18 @@ public:
         reports.clear();
     }
 
+    void FlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) override {
+        if (MustFlushRegion(address, size, which)) {
+            memory.Write<u32>(owed_word->first, owed_word->second);
+            owed_word.reset();
+        }
+    }
+    bool MustFlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) override {
+        return owed_word && size == sizeof(u32) &&
+               True(which & VideoCommon::CacheType::BufferCache) &&
+               memory.GpuToCpuAddress(owed_word->first) == address;
+    }
+
     void Draw(bool, u32) override {}
     void DrawTexture() override {}
     void Clear(u32) override {}
@@ -1924,10 +1937,6 @@ public:
     void SignalReference() override {}
     void ReleaseFences(bool) override {}
     void FlushAll() override {}
-    void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
-    bool MustFlushRegion(DAddr, u64, VideoCommon::CacheType) override {
-        return false;
-    }
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override {
         return {addr, addr + size, false};
     }
@@ -1957,6 +1966,7 @@ public:
     };
     Tegra::MemoryManager& memory;
     std::vector<Report> reports;
+    std::optional<std::pair<GPUVAddr, u32>> owed_word;
 };
 
 } // Anonymous namespace
@@ -2597,6 +2607,33 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     CHECK(unsettled(AcquireUnsettled::Elsewhere) == elsewhere + 1);
     Tegra::Nx2MirrorShadow::Get().Clear();
     Tegra::Nx2RemoveSemaphoreRegion(word & ~GPUVAddr{0xfff});
+
+    // A list word the back owes reads as its placeholder until it lands (Nx2NoteOwedListWord),
+    // bit 31 set: what memory holds there decides nothing.
+    const u64 owed = unsettled(AcquireUnsettled::Writes);
+    f.memory.Write<u32>(word, Tegra::Nx2ListIndirect::Placeholder(1, 0));
+    release = false;
+    split.Defer(
+        [&release, before = stats.drained.load()] {
+            while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Noted);
+    split.Defer([&fences, address = word] { fences.owed_word.emplace(address, 2); }, 0,
+                VideoCommon::GpuSplit::Writes::Noted);
+    split.Publish();
+    CHECK_FALSE(acquire(Mask, 0x80000000));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == owed + 1);
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    CHECK(f.memory.Read<u32>(word) == 2);
+    CHECK_FALSE(fences.owed_word);
+    fences.owed_word.reset();
+    f.memory.Write<u32>(word, 0x80000000);
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
 }
 
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",
