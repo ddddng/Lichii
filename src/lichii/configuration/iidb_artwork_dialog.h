@@ -37,13 +37,16 @@ private:
     void ResetGallery();
     void LoadPage();
     void LoadVisibleThumbnail();
+    void UpdateThumbnailNotice();
     void ClearPreview();
     void Preview();
     void UpdateRequestControls();
 
+    enum class Thumbnail { Pending, Attempted, Limited };
+
     struct GalleryItem {
         Asset asset;
-        bool thumbnail_checked = false;
+        Thumbnail thumbnail = Thumbnail::Pending;
     };
 
     const QByteArray& key;

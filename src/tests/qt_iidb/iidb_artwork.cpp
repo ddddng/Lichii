@@ -462,16 +462,30 @@ void ArtworkTest::ThumbnailCooldownDoesNotRetry() {
     dialog.show();
     QVERIFY(QTest::qWaitForWindowExposed(&dialog));
     QVERIFY(ConfirmMatch(dialog, *service.api));
-    service.api->last->Complete(200, Gallery(u"iisu_boxart"_s, {}, 1, 1, true));
+    service.api->last->Complete(200, Gallery(u"iisu_boxart"_s, u"next"_s, 1, 1, true));
     QTRY_COMPARE(service.images->requests.size(), 1);
-    auto* view = dialog.findChild<QListWidget*>(u"iidbGallery"_s)->viewport();
+    auto* list = dialog.findChild<QListWidget*>(u"iidbGallery"_s);
+    auto* view = list->viewport();
+    auto* notice = dialog.findChild<QLabel*>(u"iidbThumbnailStatus"_s);
     const auto original_size = view->size();
     service.images->last->Complete(429, {}, -1, "0");
     QCoreApplication::processEvents();
     QCOMPARE(view->size(), original_size);
-    QVERIFY(dialog.findChild<QLabel*>(u"iidbThumbnailStatus"_s)->isVisible());
+    QVERIFY(notice->isVisible());
     dialog.resize(dialog.width(), dialog.height() + 20);
     QCoreApplication::processEvents();
+    QCOMPARE(service.images->requests.size(), 1);
+    QVERIFY(notice->isVisible());
+
+    dialog.findChild<QPushButton*>(u"iidbMore"_s)->click();
+    QVERIFY(service.api->last && !service.api->last->isFinished());
+    service.api->last->Complete(200, Gallery(u"iisu_boxart"_s, {}, Client::PageSize, 2));
+    list->scrollToBottom();
+    QCoreApplication::processEvents();
+    QVERIFY(!notice->isVisible());
+    list->scrollToTop();
+    QCoreApplication::processEvents();
+    QVERIFY(notice->isVisible());
     QCOMPARE(service.images->requests.size(), 1);
 }
 
