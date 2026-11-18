@@ -1631,11 +1631,17 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
         use_history ? std::array{1.0f / static_cast<f32>(output->Width()),
                                  1.0f / static_cast<f32>(output->Height())}
                     : std::array{0.0f, 0.0f};
-    const bool done = rasterizer->AccelerateTemporalUpscale(
-        surface(*input), surface(*output), motion_surface,
-        use_history && depth ? &*depth : nullptr,
-        jitter ? jitter->offset : std::array{0.0f, 0.0f}, motion_scale, use_history,
-        std::array{width, height});
+    const auto upscale = [&](const Texture::TICEntry* upscale_depth) {
+        return rasterizer->AccelerateTemporalUpscale(
+            surface(*input), surface(*output), motion_surface, upscale_depth,
+            jitter ? jitter->offset : std::array{0.0f, 0.0f}, motion_scale, use_history,
+            std::array{width, height});
+    };
+    bool done = upscale(use_history && depth ? &*depth : nullptr);
+    if (!done && use_history && depth) {
+        // The depth can still be refused after it was prepared; the stand-in runs without it.
+        done = upscale(nullptr);
+    }
     static u32 last_width{};
     if (width != last_width) {
         last_width = width;

@@ -2249,25 +2249,17 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
                                           ImageView* depth, std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale, bool use_history) {
-    // Which backend drew the DLSS output and why, logged when that changes.
-    const auto report = [](std::string_view backend, std::string_view reason,
-                           PixelFormat format = PixelFormat::Invalid) {
-        static std::string_view last_backend, last_reason;
-        static PixelFormat last_format = PixelFormat::Invalid;
-        if (backend == last_backend && reason == last_reason && format == last_format) {
+    // Which backend drew the DLSS output and why, logged when that changes. A rejection is not
+    // logged: the caller may retry without history or depth, and the retry reports what drew.
+    const auto report = [this](std::string_view backend, std::string_view reason) {
+        if (backend == last_upscale_backend && reason == last_upscale_reason) {
             return;
         }
-        last_backend = backend;
-        last_reason = reason;
-        last_format = format;
-        if (format == PixelFormat::Invalid) {
-            LOG_INFO(Render_Vulkan, "DLSS replacement drawn by {}: {}", backend, reason);
-        } else {
-            LOG_INFO(Render_Vulkan, "DLSS replacement drawn by {}: {} {}", backend, reason, format);
-        }
+        last_upscale_backend = backend;
+        last_upscale_reason = reason;
+        LOG_INFO(Render_Vulkan, "DLSS replacement drawn by {}: {}", backend, reason);
     };
     if (dst.Samples() != VK_SAMPLE_COUNT_1_BIT || ImageAspectMask(dst.format) != VK_IMAGE_ASPECT_COLOR_BIT) {
-        report("nothing (native output)", "output check failed");
         return false;
     }
     const auto plain = [](const ImageView& view) {
@@ -2296,7 +2288,6 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
         !VideoCommon::DlssContract::ValidGeometry(render_size,
                                                  {output_extent.width, output_extent.height},
                                                  jitter, motion_scale)) {
-        report("nothing (native output)", "colour, output or region size check failed");
         return false;
     }
     // When the game renders only a region of the input (render_size smaller than the input), its
@@ -2309,16 +2300,11 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
     if (use_history && (!plain(motion_vectors) || !fits(motion_vectors, render_size) ||
                         motion_vectors.format != PixelFormat::R16G16_FLOAT ||
                         !same_size(motion_vectors))) {
-        report("nothing (native output)", "motion vector check failed");
         return false;
     }
     if (use_history && depth &&
-        !VideoCommon::DlssContract::IsUpscalerDepthFormat(depth->format)) {
-        report("nothing (native output)", "depth format", depth->format);
-        return false;
-    }
-    if (use_history && depth && (!plain(*depth) || !fits(*depth, render_size) || !same_size(*depth))) {
-        report("nothing (native output)", "depth size or layout check failed");
+        (!VideoCommon::DlssContract::IsUpscalerDepthFormat(depth->format) || !plain(*depth) ||
+         !fits(*depth, render_size) || !same_size(*depth))) {
         return false;
     }
     if (use_history && depth && UpscaleWithFsr3(dst_framebuffer, input_color, motion_vectors, *depth, render_size,
