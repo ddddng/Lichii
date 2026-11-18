@@ -405,7 +405,7 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
 
 std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::MemoryManager& memory,
                                                              GPUVAddr address, u64 device_address,
-                                                             AcquireUnsettled& why) const {
+                                                             AcquireUnsettled& why) {
     // Unaligned, it reads part of two words, neither of which a note names (NoteSemaphoreWrite).
     if (device_address % sizeof(u32) != 0) {
         why = AcquireUnsettled::Unknown;
@@ -421,6 +421,7 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
         why = AcquireUnsettled::Unnoted;
         return std::nullopt;
     }
+    FlushState();
     // Shader stores are placed nowhere, and the back marks the pages they write GPU-written only
     // as it runs them (NoteCacheWrite): each one sent may write the word.
     const u64 others =
