@@ -436,6 +436,10 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
         return std::nullopt;
     }
     if (queued) {
+        if (queued->fenced) {
+            why = AcquireUnsettled::Fenced;
+            return std::nullopt;
+        }
         return SettledWord{queued->payload, queued->position};
     }
     const u32 guest = memory.Read<u32>(address);
@@ -1065,15 +1069,16 @@ void GpuSplit::ReportAcquire() {
              "Acquires: {} passed without a drain ({} by a queued release), {} resumed by a "
              "latch, {} drained ({} by the 1 ms valve; {} equal or mask (of them on a word queued "
              "work may still change: {} read elsewhere, {} released an unknown value, {} with "
-             "other writes queued, {} with unnoted releases), {} by the settings, {} "
-             "unmapped or GPU-written word, {} queued release unknown or short), {} polls waited "
+             "other writes queued, {} with unnoted releases, {} released by a fence yet to "
+             "run), {} by the settings, {} unmapped or GPU-written word, {} queued release "
+             "unknown or short), {} polls waited "
              "without a drain in 10 s; polls: {} of acquires, {} of GPU-written list copies; "
              "back: {} waits for work, {} slept, {:.1f} ms spinning; {} early publishes, {} idle "
              "hooks asked by polls",
              passed, by_queued, latched, drained, valve_drains, drain_operation, unsettled[0],
-             unsettled[1], unsettled[2], unsettled[3], drain_settings, drain_word, drain_queued,
-             polls, acquire_polls, list_polls, back_waits, back_sleeps, spin_ms, early_publishes,
-             settles);
+             unsettled[1], unsettled[2], unsettled[3], unsettled[4], drain_settings, drain_word,
+             drain_queued, polls, acquire_polls, list_polls, back_waits, back_sleeps, spin_ms,
+             early_publishes, settles);
     LOG_INFO(HW_GPU,
              "GPU thread waits for suspended channels in 10 s: {} in hardware, {} in the OS, {} "
              "ended by a wake, {} by a store to a semaphore word; channels that moved without "
