@@ -41,6 +41,7 @@ constexpr std::size_t LocalHeaderSize = 30;
 constexpr std::size_t CentralHeaderSize = 46;
 constexpr std::size_t EndSize = 22;
 constexpr u16 MaxCommentSize = 0xFFFF;
+constexpr std::size_t Sha256HexLength = 64;
 
 // System titles (0100000000000000 to 0100000000001FFF) have no package.
 constexpr u64 LastSystemTitle = 0x0100000000001FFF;
@@ -155,9 +156,19 @@ void WriteFile(const fs::path& path, std::span<const char> data) {
     }
 }
 
+// The hash an install recorded, or nothing when the marker isn't a regular file of one hash.
 std::string InstalledHash(const fs::path& target) {
-    std::ifstream in{target / HashFileName, std::ios::binary};
-    return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    const auto path = target / HashFileName;
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) != Sha256HexLength || ec) {
+        return {};
+    }
+    std::string hash(Sha256HexLength, '\0');
+    std::ifstream in{path, std::ios::binary};
+    if (!in.read(hash.data(), static_cast<std::streamsize>(hash.size()))) {
+        return {};
+    }
+    return hash;
 }
 
 bool HasDirectories(const fs::path& target) {
@@ -364,7 +375,14 @@ void Install(const Contents& contents, const fs::path& target, std::string_view 
     const auto backup = BackupPath(target);
     RecoverInterruptedLocked(target);
     std::error_code ec;
+    // The backup may be the only copy of the previous cache; keep it for the next recovery.
+    if (fs::is_directory(backup, ec) && !HasDirectories(target)) {
+        throw std::runtime_error("Cannot restore the previous BCAT cache");
+    }
     fs::remove_all(stage, ec);
+    if (ec || fs::exists(stage, ec)) {
+        throw std::runtime_error("Cannot clear the BCAT staging folder");
+    }
     try {
         for (const auto& [name, data] : contents) {
             const auto path = stage / name;
@@ -417,12 +435,12 @@ Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
         return Outcome::Failed;
     }
     const auto hash = Sha256Hex(response->body);
-    if (InstalledHash(target) == hash && HasDirectories(target)) {
-        LOG_INFO(Service_BCAT, "Nextendo BCAT: {:016X}: package {} unchanged", title_id,
-                 hash.substr(0, 12));
-        return Outcome::Unchanged;
-    }
     try {
+        if (InstalledHash(target) == hash && HasDirectories(target)) {
+            LOG_INFO(Service_BCAT, "Nextendo BCAT: {:016X}: package {} unchanged", title_id,
+                     hash.substr(0, 12));
+            return Outcome::Unchanged;
+        }
         const auto contents = ReadPackage(response->body, title_id);
         Install(contents, target, hash);
         LOG_INFO(Service_BCAT, "Nextendo BCAT: {:016X}: installed package {}: {}", title_id,
