@@ -21,6 +21,7 @@
 
 #include "common/hex_util.h"
 #include "common/scope_exit.h"
+#include "core/constants.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/fssystem/fssystem_nca_header.h"
 #include "core/file_sys/nca_metadata.h"
@@ -35,6 +36,10 @@
 #include "core/hle/api_version.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_server_session.h"
+#include "core/hle/service/acc/acc.h"
+#include "core/hle/service/acc/errors.h"
+#include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/glue/time/time_zone_binary.h"
 #include "core/hle/service/hle_ipc.h"
@@ -223,6 +228,243 @@ std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesyst
 }
 
 } // namespace
+
+TEST_CASE("Native HOME accounts do not persist across Core and ACC lifetimes",
+          "[core][native_home_accounts]") {
+    using Common::FS::EdenPath;
+    using namespace Service::Account;
+
+    ScopedSystemTestContext environment;
+    const auto nand = Common::FS::GetEdenPath(EdenPath::NANDDir);
+    const auto config = nand / "config";
+    const auto previous_config = Common::FS::GetEdenPath(EdenPath::ConfigDir);
+    const auto previous_save = Common::FS::GetEdenPath(EdenPath::SaveDir);
+    const auto previous_backend = Settings::values.renderer_backend.GetValue();
+    const auto previous_auto_stub = Settings::values.use_auto_stub.GetValue();
+    REQUIRE(std::filesystem::create_directories(config / "nextendo"));
+    Common::FS::SetEdenPath(EdenPath::ConfigDir, config);
+    Common::FS::SetEdenPath(EdenPath::SaveDir, nand);
+    Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
+    Settings::values.use_auto_stub.SetValue(true);
+    SCOPE_EXIT {
+        Settings::values.use_auto_stub.SetValue(previous_auto_stub);
+        Settings::values.renderer_backend.SetValue(previous_backend);
+        Tests::RestoreEdenPath(EdenPath::SaveDir, previous_save);
+        Tests::RestoreEdenPath(EdenPath::ConfigDir, previous_config);
+    };
+    const auto avators = nand / "system/save/8000000000000010/su/avators";
+    const auto orphan = nand / "user/save/0000000000000000/11111111111111111111111111111111";
+    REQUIRE(std::filesystem::create_directories(orphan));
+
+    const auto legacy_id = Common::UUID::MakeRandomWithSeed(37);
+    Settings::values.current_user.SetValue(7);
+    const auto empty = SnapshotProfile(nand);
+    {
+        Core::System scratch{ProfileStorage::Scratch};
+        CHECK(scratch.GetProfileManager().GetUserCount() == 1);
+        CHECK_FALSE(scratch.GetProfileManager().UserSaveFileRead());
+        CHECK(Settings::values.current_user.GetValue() == 7);
+        CHECK(SnapshotProfile(nand) == empty);
+    }
+    CHECK(SnapshotProfile(nand) == empty);
+    {
+        Core::System legacy;
+        CHECK(Settings::values.current_user.GetValue() == 0);
+        auto& profiles = legacy.GetProfileManager();
+        REQUIRE(profiles.CreateNewUser(legacy_id, "Legacy").IsSuccess());
+        profiles.WriteUserSaveFile();
+        REQUIRE(std::filesystem::exists(avators / "profiles.dat"));
+        CHECK_FALSE(CreateScratchSystemAccountService(legacy));
+    }
+
+    for (const auto& [path, bytes] : std::array{
+             std::pair{avators / (legacy_id.FormattedString() + ".jpg"), "legacy avatar"},
+             std::pair{config / "nextendo" / (legacy_id.FormattedString() + ".json"),
+                       "synthetic linked-account sentinel"},
+         }) {
+        std::ofstream file{path, std::ios::binary};
+        REQUIRE(file.is_open());
+        file << bytes;
+    }
+    Settings::values.current_user.SetValue(7);
+    const auto shared = SnapshotProfile(nand);
+    {
+        Core::System scratch{ProfileStorage::Scratch};
+        auto& profiles = scratch.GetProfileManager();
+        REQUIRE(profiles.GetUserCount() == 1);
+        CHECK(!profiles.UserExists(legacy_id));
+        CHECK(profiles.FindOrphanedProfiles().empty());
+        CHECK(SnapshotProfile(nand) == shared);
+
+        IpcTestWindow window;
+        Service::AM::FrontendAppletParameters launch{};
+        CHECK(scratch.Load(window, {}, launch) == Core::SystemResultStatus::ErrorSystemFiles);
+        REQUIRE(scratch.Initialize());
+        auto& kernel = scratch.Kernel();
+        Kernel::KThread bootstrap{kernel};
+        REQUIRE(Kernel::KThread::InitializeDummyThread(scratch, &bootstrap, nullptr).IsSuccess());
+        kernel.SetCurrentEmuThread(&bootstrap);
+        REQUIRE(scratch.InitializeForGpuReplay(window, 0) == Core::SystemResultStatus::Success);
+        SCOPE_EXIT {
+            scratch.ShutdownMainProcess();
+            kernel.SetCurrentEmuThread(nullptr);
+            kernel.UnregisterKernelObject(&bootstrap);
+        };
+        auto* process = Kernel::KProcess::Create(kernel);
+        REQUIRE(process);
+        REQUIRE(process->LoadFromMetadata(kernel, FileSys::ProgramMetadata::GetDefault(), 0x1000,
+                                          {}, 0).IsSuccess());
+        Kernel::KProcess::Register(kernel, process);
+        SCOPE_EXIT { process->Close(kernel); };
+        Kernel::KScopedResourceReservation reservation{
+            kernel, process, Kernel::LimitableResource::ThreadCountMax};
+        REQUIRE(reservation.Succeeded());
+        auto* client = Kernel::KThread::Create(kernel);
+        REQUIRE(client);
+        REQUIRE(Kernel::KThread::InitializeUserThread(scratch, client, {}, 0, {}, 44, 0, process)
+                    .IsSuccess());
+        reservation.Commit();
+        Kernel::KThread::Register(kernel, client);
+        SCOPE_EXIT {
+            kernel.GlobalSchedulerContext().RemoveThread(client);
+            client->Close(kernel);
+        };
+        Kernel::KProcessAddress heap{};
+        REQUIRE(process->GetPageTable().SetMaxHeapSize(0x4000).IsSuccess());
+        REQUIRE(process->GetPageTable().SetHeapSize(&heap, 0x4000).IsSuccess());
+        const auto buffer_address = GetInteger(heap);
+        Kernel::KServerSession session{kernel};
+        std::optional<std::jthread> server_thread;
+        Service::ServerManager server{scratch};
+        server_thread.emplace(
+            kernel.RunOnHostCoreProcess("scratch-account-test", [&] { server.LoopProcess(); }));
+        auto manager = std::make_shared<Service::SessionRequestManager>(kernel, server);
+        auto account = CreateScratchSystemAccountService(scratch);
+        REQUIRE(account);
+        manager->SetSessionHandler(std::move(account));
+        manager->ConvertToDomain();
+        auto& memory = process->GetMemory();
+        const auto tls = GetInteger(client->GetTlsAddress());
+        REQUIRE(tls != 0);
+
+        const auto input = [](const auto& value) {
+            return std::span{reinterpret_cast<const u8*>(&value), sizeof(value)};
+        };
+        const auto request = [&](u32 object, u32 method, std::span<const u8> raw = {},
+                                 u32 in_size = 0, u32 out_size = 0, bool image_input = false) {
+            std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> words{};
+            IPC::CommandHeader header{};
+            header.type.Assign(IPC::CommandType::Request);
+            header.num_buf_x_descriptors.Assign(image_input);
+            header.num_buf_a_descriptors.Assign(in_size != 0);
+            header.num_buf_b_descriptors.Assign(out_size != 0);
+            header.data_size.Assign(static_cast<u32>(12 + raw.size() / sizeof(u32)));
+            std::memcpy(words.data(), &header, sizeof(header));
+            size_t word = 2;
+            if (image_input) {
+                IPC::BufferDescriptorX buffer{};
+                buffer.size.Assign(sizeof(UserData));
+                buffer.address_bits_0_31 = static_cast<u32>(buffer_address);
+                buffer.address_bits_32_35.Assign(static_cast<u32>((buffer_address >> 32) & 0xf));
+                buffer.address_bits_36_38.Assign(static_cast<u32>((buffer_address >> 36) & 0x7));
+                std::memcpy(words.data() + word, &buffer, sizeof(buffer));
+                word += 2;
+            }
+            if (in_size || out_size) {
+                IPC::BufferDescriptorABW buffer{};
+                buffer.size_bits_0_31 = in_size + out_size;
+                buffer.address_bits_0_31 = static_cast<u32>(buffer_address);
+                buffer.address_bits_32_35.Assign(static_cast<u32>((buffer_address >> 32) & 0xf));
+                buffer.address_bits_36_38.Assign(static_cast<u32>((buffer_address >> 36) & 0x7));
+                std::memcpy(words.data() + word, &buffer, sizeof(buffer));
+                word += 3;
+            }
+            word = (word + 3) & ~size_t{3};
+            IPC::DomainMessageHeader domain{};
+            domain.command.Assign(IPC::DomainMessageHeader::CommandType::SendMessage);
+            domain.size.Assign(static_cast<u32>(4 * sizeof(u32) + raw.size()));
+            domain.object_id = object;
+            std::memcpy(words.data() + word, &domain, sizeof(domain));
+            words[word + 4] = 0x49434653;
+            words[word + 6] = method;
+            std::copy(raw.begin(), raw.end(), reinterpret_cast<u8*>(words.data() + word + 8));
+            memory.WriteBlock(tls, words.data(), sizeof(words));
+            Service::HLERequestContext ctx{kernel, memory, &session, client};
+            ctx.SetSessionRequestManager(manager);
+            REQUIRE(ctx.PopulateFromIncomingCommandBuffer(words.data()).IsSuccess());
+            REQUIRE(manager->CompleteSyncRequest(&session, ctx).IsSuccess());
+            memory.ReadBlock(tls, words.data(), sizeof(words));
+            REQUIRE(words[8] == 0x4f434653);
+            return words;
+        };
+
+        const auto count = request(1, 0);
+        CHECK(count[10] == ResultSuccess.raw);
+        CHECK(count[12] == 1);
+        CHECK(request(1, 102, input(legacy_id))[10] == ResultUnknown.raw);
+        const auto created = request(1, 200);
+        REQUIRE(created[10] == ResultSuccess.raw);
+        Common::UUID created_id{};
+        std::memcpy(&created_id, created.data() + 12, sizeof(created_id));
+        REQUIRE(profiles.UserExists(created_id));
+        CHECK(request(1, 201, input(created_id))[10] == ResultSuccess.raw);
+        const struct {
+            u64_le position;
+            Common::UUID uuid;
+        } move{0, created_id};
+        CHECK(request(1, 204, input(move))[10] == ResultSuccess.raw);
+        CHECK(profiles.GetUser(0) == created_id);
+
+        const auto edit = request(1, 205, input(created_id));
+        REQUIRE(edit[10] == ResultSuccess.raw);
+        const u32 editor = edit[12];
+        REQUIRE(editor > 1);
+        ProfileBase replacement{.user_uuid = legacy_id, .username = {'S', 'c', 'r', 'a', 't', 'c', 'h'}};
+        const UserData data{.icon_id = 37};
+        memory.WriteBlock(buffer_address, &data, sizeof(data));
+        REQUIRE(request(editor, 100, input(replacement), sizeof(data))[10] == ResultSuccess.raw);
+        CHECK(profiles.UserExists(legacy_id));
+        CHECK_FALSE(profiles.UserExists(created_id));
+
+        const auto collision_edit = request(1, 205, input(legacy_id));
+        REQUIRE(collision_edit[10] == ResultSuccess.raw);
+        const u32 collision_editor = collision_edit[12];
+        CHECK(request(collision_editor, 101, input(replacement), sizeof(data), 0, true)[10] ==
+              ResultAccountUpdateFailed.raw);
+        const auto read_avatar = request(collision_editor, 11, {}, 0,
+                                         Core::Constants::ACCOUNT_BACKUP_JPEG.size());
+        REQUIRE(read_avatar[10] == ResultSuccess.raw);
+        CHECK(read_avatar[12] == Core::Constants::ACCOUNT_BACKUP_JPEG.size());
+        std::array<u8, Core::Constants::ACCOUNT_BACKUP_JPEG.size()> avatar{};
+        memory.ReadBlock(buffer_address, avatar.data(), avatar.size());
+        CHECK(avatar == Core::Constants::ACCOUNT_BACKUP_JPEG);
+        CHECK(request(1, 203, input(legacy_id))[10] == ResultSuccess.raw);
+        CHECK_FALSE(profiles.UserExists(legacy_id));
+        CHECK(profiles.GetUserCount() == 1);
+        CHECK(Settings::values.current_user.GetValue() == 7);
+        CHECK(SnapshotProfile(nand) == shared);
+    }
+    CHECK(SnapshotProfile(nand) == shared);
+    CHECK(Settings::values.current_user.GetValue() == 7);
+    {
+        Core::System fresh{ProfileStorage::Scratch};
+        CHECK_FALSE(fresh.GetProfileManager().UserExists(legacy_id));
+        CHECK(fresh.GetProfileManager().GetUserCount() == 1);
+    }
+    CHECK(SnapshotProfile(nand) == shared);
+
+    const auto new_legacy_id = Common::UUID::MakeRandomWithSeed(38);
+    {
+        Core::System legacy;
+        auto& profiles = legacy.GetProfileManager();
+        REQUIRE(profiles.UserExists(legacy_id));
+        REQUIRE(profiles.CreateNewUser(new_legacy_id, "Persisted").IsSuccess());
+        profiles.WriteUserSaveFile();
+    }
+    Core::System reopened;
+    CHECK(reopened.GetProfileManager().UserExists(new_legacy_id));
+    CHECK(SnapshotProfile(nand) != shared);
+}
 
 TEST_CASE("Native HOME SET uses a scratch profile without changing shared settings",
           "[core][native_home_settings]") {
