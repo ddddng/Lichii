@@ -21,6 +21,7 @@
 #include "common/scratch_buffer.h"
 #include "common/thread_worker.h"
 #include "common/sparse_large_vector.h"
+#include "video_core/buffer_cache/nx2_lazy_untrack.h"
 
 namespace Core {
 
@@ -180,6 +181,10 @@ public:
         deferred_cached_updates.fetch_sub(1, std::memory_order_release);
     }
 
+    /// Frame tick of the GPU back thread's held untracks (VideoCommon::Nx2LazyUntrack): drops
+    /// the counts held for two frames.
+    void TickHeldPages(bool log_stats);
+
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
 
@@ -212,6 +217,9 @@ private:
 
     // Internal helper that performs the update assuming the caller already holds the necessary lock.
     void UpdatePagesCachedCountNoLock(DAddr addr, size_t size, s32 delta);
+
+    /// Drops the counts of held pages (Nx2LazyUntrack) under the range lock.
+    void DropHeldPages(std::span<const std::pair<DAddr, size_t>> runs);
 
 private:
     static constexpr size_t device_virtual_bits = Traits::device_virtual_bits;
@@ -332,6 +340,7 @@ private:
     Common::RangeMutex counter_guard;
     std::mutex mapping_guard;
     std::atomic<u32> deferred_cached_updates{};
+    VideoCommon::Nx2LazyUntrack lazy_untrack;
 
     /// Taken before mapping_guard. The pages KeepWrites keeps, by device page; null reads zero.
     std::mutex kept_mutex;

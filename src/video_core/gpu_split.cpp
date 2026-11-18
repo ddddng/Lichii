@@ -28,6 +28,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "video_core/buffer_cache/nx2_lazy_untrack.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
@@ -870,6 +871,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     const StutterTrace::ThreadScope stutter_thread{StutterTrace::Thread::Back};
     Common::SetCurrentThreadName("GPUBack");
     on_back_thread = true;
+    Nx2LazyUntrack::t_hold = Nx2LazyUntrack::Enabled();
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();

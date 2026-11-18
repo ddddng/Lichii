@@ -342,6 +342,11 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
     Core::Memory::Memory* process_memory = registered_processes[asid.id];
     size_t start_page_d = address >> Memory::LICHII_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::LICHII_PAGESIZE) >> Memory::LICHII_PAGEBITS;
+    // A held drop belongs to the backing it was held under: tracking the page again over the
+    // new one would cancel it, and the new backing would never be protected.
+    if (lazy_untrack.Any()) {
+        DropHeldPages(lazy_untrack.Take(address, size));
+    }
     std::scoped_lock lk(kept_mutex, mapping_guard);
 
     tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
@@ -397,6 +402,10 @@ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
     device_inter->InvalidateRegion(address, size);
     while (deferred_cached_updates.load(std::memory_order_acquire) != 0) {
         std::this_thread::yield();
+    }
+    // After InvalidateRegion untracked the range: no page in it can be held again.
+    if (lazy_untrack.Any()) {
+        DropHeldPages(lazy_untrack.Take(address, size));
     }
     std::scoped_lock lk(kept_mutex, mapping_guard);
     if (!kept_pages.empty()) {
@@ -920,6 +929,18 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     if (ranges.empty()) {
         return;
     }
+    if (delta < 0 && VideoCommon::Nx2LazyUntrack::t_hold) {
+        DropHeldPages(lazy_untrack.Hold(ranges));
+        return;
+    }
+    VideoCommon::Nx2LazyUntrack::Runs untracked;
+    if (delta > 0 && lazy_untrack.Any()) {
+        untracked = lazy_untrack.Consume(ranges);
+        if (untracked.empty()) {
+            return;
+        }
+        ranges = untracked;
+    }
     // Runs already sorted with gaps between them (the buffer tracker's) are what the sort and
     // merge below would produce: use them as they are instead of two heap copies.
     const bool separated =
@@ -974,6 +995,27 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     for (const auto& [addr, size] : coalesced) {
         UpdatePagesCachedCountNoLock(addr, size, delta);
     }
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::DropHeldPages(std::span<const std::pair<DAddr, size_t>> runs) {
+    if (runs.empty()) {
+        return;
+    }
+    const auto [low, high] = std::ranges::minmax_element(
+        runs, [](const auto& a, const auto& b) { return a.first < b.first; });
+    const DAddr lock_begin = low->first;
+    const DAddr lock_end = high->first + high->second;
+    Common::ScopedRangeLock lk(counter_guard, lock_begin,
+                               static_cast<size_t>(lock_end - lock_begin));
+    for (const auto& [addr, size] : runs) {
+        UpdatePagesCachedCountNoLock(addr, size, -1);
+    }
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::TickHeldPages(bool log_stats) {
+    DropHeldPages(lazy_untrack.Tick(log_stats));
 }
 
 template <typename Traits>
