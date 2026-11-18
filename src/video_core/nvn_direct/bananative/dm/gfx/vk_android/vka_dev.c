@@ -371,6 +371,7 @@ typedef struct { uint64_t fence; void *ops; int n; void (*run)(void *, int); } p
 static post_rec g_post[POST_RING];
 typedef struct after_rec { struct after_rec *next; uint64_t fence; void (*fn)(void *); void *arg; } after_rec;
 static after_rec *g_after;
+static int g_device_idle;
 static uint64_t g_fence, g_submitted, g_done;
 static uint64_t g_fdone[FQ_RING];   // with several queues: fences done, by slot (a fence past g_done may be done before the fences before it)
 static pthread_mutex_t g_fmu = PTHREAD_MUTEX_INITIALIZER;
@@ -412,7 +413,7 @@ int vka_wait_done(uint64_t fence, uint64_t timeout_ns) { return wait_fence(fence
 int vka_wait_fence(uint64_t fence, uint64_t timeout_ns) { return wait_fence(fence, timeout_ns, 1); }
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg) {
     pthread_mutex_lock(&g_fmu);
-    if (g_done >= fence) { pthread_mutex_unlock(&g_fmu); fn(arg); return; }
+    if (g_device_idle || (g_done >= fence && !vka_hung())) { pthread_mutex_unlock(&g_fmu); fn(arg); return; }
     after_rec *a = malloc(sizeof *a); *a = (after_rec){g_after, fence, fn, arg}; g_after = a;
     pthread_mutex_unlock(&g_fmu);
 }
@@ -538,7 +539,9 @@ static void *completion_main(void *arg) {
         pthread_mutex_lock(&g_fmu);
         if (v > g_done) __atomic_store_n(&g_done, v, __ATOMIC_RELEASE);
         after_rec *run = NULL, **pp = &g_after;
-        while (*pp) { after_rec *a = *pp; if (a->fence <= g_done) { *pp = a->next; a->next = run; run = a; } else pp = &a->next; }
+        if (!vka_hung()) {
+            while (*pp) { after_rec *a = *pp; if (a->fence <= g_done) { *pp = a->next; a->next = run; run = a; } else pp = &a->next; }
+        }
         pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
         while (run) { after_rec *a = run; run = a->next; a->fn(a->arg); free(a); }
     }
@@ -801,7 +804,7 @@ void vka_exec_destroy(void); void vka_draw_destroy(void); void vka_enc_destroy(v
 void vka_dlss_destroy(void); void vka_nan_destroy(void); void vka_gprof_destroy(void); void nvn_present_destroy(void); void vka_census_line(void);
 void vka_destroy(void) {
     atomic_store(&g_hung, 0);   // (the GPU is idle: what a hang or the stop kept from being freed goes now, and what is deferred from now on runs at once)
-    pthread_mutex_lock(&g_fmu); after_rec *run = g_after; g_after = NULL; __atomic_store_n(&g_done, g_fence, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_fmu);
+    pthread_mutex_lock(&g_fmu); g_device_idle = 1; after_rec *run = g_after; g_after = NULL; __atomic_store_n(&g_done, g_fence, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_fmu);
     while (run) { after_rec *a = run; run = a->next; a->fn(a->arg); free(a); }
     nvn_present_destroy();
     vka_capture_destroy(); vka_ctl_destroy(); vka_dlss_destroy(); vka_nan_destroy(); vka_gprof_destroy();

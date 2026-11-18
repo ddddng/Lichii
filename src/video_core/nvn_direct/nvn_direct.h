@@ -292,7 +292,7 @@ typedef struct nvn_direct_frame {
 int nvn_direct_present_take(nvn_direct_frame* frame);
 
 /// On Lichii's GPU thread: the frame taken with id (the newest one held if it was let go
-/// already), once the GPU finished drawing it (waits, bounded). 0: no frame was ever taken.
+/// already), once the GPU finished drawing it (waits, bounded). 0: no usable frame.
 int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
 
 /// Whether an implemented slot's call would wait for the replay's GPU now:

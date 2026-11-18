@@ -449,7 +449,7 @@ inline static bool isDarkMode() {
 }
 #endif // _WIN32
 
-MainWindow::MainWindow(bool has_broken_vulkan)
+MainWindow::MainWindow(bool has_broken_vulkan, bool relaunch_global_settings)
     : ui{std::make_unique<Ui::MainWindow>()},
       input_subsystem{std::make_shared<InputCommon::InputSubsystem>()}, user_data_migrator{this} {
     QtCommon::Init(this);
@@ -757,7 +757,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
 
         if (!lp.filepath.empty()) {
-            BootGame(QString::fromStdString(lp.filepath), ApplicationAppletParameters());
+            BootGame(QString::fromStdString(lp.filepath), ApplicationAppletParameters(),
+                     relaunch_global_settings ? StartGameType::Global : StartGameType::Normal);
         } else if (lp.launch_setup) {
             LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::Starter), std::nullopt);
         } else if (lp.launch_qlaunch) {
@@ -2410,6 +2411,13 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto loader =
         Loader::GetLoader(*QtCommon::system, v_file, params.program_id, params.program_index);
 
+    bool loaded_game_settings = false;
+    SCOPE_EXIT {
+        if (loaded_game_settings && !emulation_running) {
+            Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
+            QtCommon::system->HIDCore().ReloadInputDevices();
+        }
+    };
     if (loader != nullptr && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success &&
         type == StartGameType::Normal) {
         // Load per game settings
@@ -2419,6 +2427,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                           ? Common::FS::PathToUTF8String(file_path.filename())
                                           : fmt::format("{:016X}", title_id);
         QtConfig per_game_config(config_file_name, Config::ConfigType::PerGameConfig);
+        loaded_game_settings = true;
         QtCommon::system->HIDCore().ReloadInputDevices();
         QtCommon::system->ApplySettings();
     }
@@ -2426,14 +2435,6 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
-
-    if (params.program_id == 0 && params.program_index == 0 &&
-        params.launch_type == Service::AM::LaunchType::FrontendInitiated &&
-        Core::NvnHook::DirectNeedsFreshProcess() && RelaunchForGame(filename)) {
-        Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
-        close_pending = true;
-        return;
-    }
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
         const Core::Frontend::ProfileSelectParameters parameters{
@@ -2451,6 +2452,13 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // game startup only. If the user stops emulation and starts a new one, go back to the expected
     // behavior of asking.
     user_flag_cmd_line = false;
+
+    if (params.program_id == 0 && params.program_index == 0 &&
+        params.launch_type == Service::AM::LaunchType::FrontendInitiated &&
+        Core::NvnHook::DirectNeedsFreshProcess() && RelaunchForGame(filename, type)) {
+        close_pending = true;
+        return;
+    }
 
     FileSys::VirtualFile prepared_romfs;
     if (loader && loader->GetFileType() == Loader::FileType::DeconstructedRomDirectory) {
@@ -2523,6 +2531,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                 return tr("the game is 32-bit");
             case RendererChoice::NoNvn:
                 return tr("the game does not use NVN");
+            case RendererChoice::NoFastmem:
+                return tr("it needs a usable fastmem arena");
             case RendererChoice::ReplayFailed:
                 return tr("it could not start on this GPU");
             case RendererChoice::EarlierBoot:
@@ -2727,6 +2737,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     loading_screen->Prepare(QtCommon::system->GetAppLoader());
     loading_screen->show();
 
+    current_game_start_type = type;
     emulation_running = true;
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
@@ -3896,7 +3907,7 @@ void MainWindow::OnStartGame() {
     Common::FeralGamemode::Start();
 }
 
-bool MainWindow::RelaunchForGame(const QString& filename) {
+bool MainWindow::RelaunchForGame(const QString& filename, StartGameType type) {
     const QString appimage = qEnvironmentVariable("APPIMAGE");
     const QString program =
         appimage.isEmpty() ? QCoreApplication::applicationFilePath() : appimage;
@@ -3908,9 +3919,13 @@ bool MainWindow::RelaunchForGame(const QString& filename) {
     auto environment = UpdateDialog::RestartEnvironment();
     environment.insert(QStringLiteral("LICHII_RELAUNCH_WAIT_PID"),
                        QString::number(QCoreApplication::applicationPid()));
+    environment.insert(QStringLiteral("LICHII_RELAUNCH_GLOBAL_SETTINGS"),
+                       type == StartGameType::Global ? QStringLiteral("1") : QStringLiteral("0"));
     QStringList carried;
-    for (const auto& key : environment.keys()) {
+    const auto inherited_environment = QProcessEnvironment::systemEnvironment();
+    for (const auto& key : inherited_environment.keys()) {
         if (key.startsWith(QStringLiteral("EDEN_NX2_"))) {
+            environment.insert(key, inherited_environment.value(key));
             carried << key;
         }
     }
@@ -3945,7 +3960,7 @@ void MainWindow::OnRestartGame() {
         // Make a copy since ShutdownGame edits game_path
         const auto current_game = QString(current_game_path);
         ShutdownGame();
-        BootGame(current_game, ApplicationAppletParameters());
+        BootGame(current_game, ApplicationAppletParameters(), current_game_start_type);
     }
 }
 

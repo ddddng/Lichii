@@ -514,26 +514,6 @@ try
     };
     Report();
 #ifdef LICHII_NVN_DIRECT
-    if (device.IsNvnDirect()) {
-        // ASTC the device cannot sample: decoded and re-compressed to BC on the GPU (.8).
-        if (!device.IsOptimalAstcSupported() && device.IsKhrPushDescriptorSupported()) {
-            nvn_direct_astc.emplace(device, memory_allocator);
-        }
-        const PipelineCache& pipeline_cache = rasterizer.GetPipelineCache();
-        nvn_direct_shaders.emplace(device, pipeline_cache.GetProfile(), pipeline_cache.GetHostInfo());
-        nvn_direct_memory.reset(new NvnDirectMemory{&device, NvmlProcessMemory{device}});
-        if (!AdoptNvnDirect(dld, *instance, device, scheduler,
-                            nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
-                            *nvn_direct_memory, gpu_.ShaderNotify())) {
-            // Before the game runs: it falls back to GPU emulation on this device rather than
-            // run with nothing to show.
-            nvn_direct_memory.reset();
-            nvn_direct_shaders.reset();
-            nvn_direct_astc.reset();
-            device.EndNvnDirect();
-            Core::NvnHook::DirectFailed();
-        }
-    }
     if (const char* trace = std::getenv("EDEN_NX2_VRAM_TRACE");
         trace != nullptr && std::strcmp(trace, "1") == 0) {
         vram_trace = std::jthread([this](std::stop_token stop) {
@@ -551,6 +531,21 @@ try
             }
         });
     }
+    if (device.IsNvnDirect()) {
+        Core::NvnHook::TraceStartup("before replay setup");
+        if (!device.IsOptimalAstcSupported() && device.IsKhrPushDescriptorSupported()) {
+            nvn_direct_astc.emplace(device, memory_allocator);
+        }
+        const PipelineCache& pipeline_cache = rasterizer.GetPipelineCache();
+        nvn_direct_shaders.emplace(device, pipeline_cache.GetProfile(), pipeline_cache.GetHostInfo());
+        nvn_direct_memory.reset(new NvnDirectMemory{&device, NvmlProcessMemory{device}});
+        if (!AdoptNvnDirect(dld, *instance, device, scheduler,
+                            nvn_direct_astc ? &*nvn_direct_astc : nullptr, *nvn_direct_shaders,
+                            *nvn_direct_memory, gpu_.ShaderNotify())) {
+            throw std::runtime_error{"NVN direct replay rejected the Vulkan device"};
+        }
+        Core::NvnHook::DirectStarted();
+    }
 #endif
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
@@ -558,21 +553,52 @@ try
 }
 
 RendererVulkan::~RendererVulkan() {
-    scheduler.RegisterOnSubmit([] {});
 #ifdef LICHII_NVN_DIRECT
     // NVN2 direct mode: the replay's threads leave the device (and the ASTC
     // decode it calls back into) before both go away, and its objects go once the device is idle.
     if (device.IsNvnDirect()) {
         nvn_direct_park();
-        void(device.GetLogical().WaitIdle());
+        scheduler.WaitWorker();
+        present_manager.WaitPresent();
+        scheduler.RegisterOnSubmit([] {});
+        const auto result = device.GetLogical().WaitIdle();
+        if (result == VK_ERROR_DEVICE_LOST) {
+            device.ReportLoss();
+        }
+        if (result != VK_SUCCESS) {
+            LOG_CRITICAL(Render_Vulkan, "NVN direct: the device did not reach idle ({})",
+                         static_cast<int>(result));
+            Common::Log::Flush();
+            std::_Exit(EXIT_FAILURE);
+        }
         nvn_direct_destroy();
         return;
     }
 #endif
+    scheduler.RegisterOnSubmit([] {});
     void(device.GetLogical().WaitIdle());
 }
 
 void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
+#ifdef LICHII_NVN_DIRECT
+    nvn_direct_frame replay_frame{};
+    if (device.IsNvnDirect()) {
+        if (framebuffers.size() != 1) {
+            return;
+        }
+        const auto address = framebuffers.front().address + framebuffers.front().offset;
+        if ((address & NVN_DIRECT_FRAME_TAG) == 0 ||
+            !nvn_direct_present_frame(address & ~NVN_DIRECT_FRAME_TAG, &replay_frame)) {
+            return;
+        }
+        rasterizer.SetDirectDisplayFrame(&replay_frame);
+    }
+    SCOPE_EXIT {
+        if (device.IsNvnDirect()) {
+            rasterizer.SetDirectDisplayFrame(nullptr);
+        }
+    };
+#endif
     const bool trace = Common::DkbFrameTrace::Enabled();
     const auto entered = trace ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
@@ -603,6 +629,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Present};
         return present_manager.GetRenderFrame();
     }();
+    frame->replay_image = device.IsNvnDirect();
     const auto acquired = trace ? std::chrono::steady_clock::now()
                                 : std::chrono::steady_clock::time_point{};
 

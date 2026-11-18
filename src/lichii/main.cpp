@@ -3,6 +3,8 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -12,6 +14,7 @@
 #include "common/fs/path_util.h"
 #include "nx2_switches.h"
 #include "startup_checks.h"
+#include "util/relaunch_wait.h"
 
 #if LICHII_ROOM
 #include <cstring>
@@ -21,12 +24,8 @@
 #include "qt_common/gui_settings.h"
 #endif
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <signal.h>
+#ifndef _WIN32
 #include <sys/resource.h>
-#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -120,31 +119,29 @@ static void SetUpNvidiaShaderDiskCache() {
 }
 #endif
 
-/// A Lichii that relaunched itself for a game (MainWindow::RelaunchForGame) names its process in
-/// LICHII_RELAUNCH_WAIT_PID: wait up to a minute for it to exit, so this one reads the settings it
-/// wrote on close and has the user dir, the log and the debug server port to itself.
-static void WaitForRelaunchingProcess() {
-    const char* const value = std::getenv("LICHII_RELAUNCH_WAIT_PID");
-    if (value == nullptr) {
-        return;
-    }
-    const unsigned long pid = std::strtoul(value, nullptr, 10);
-#ifdef _WIN32
-    _putenv_s("LICHII_RELAUNCH_WAIT_PID", "");
-    if (const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid))) {
-        WaitForSingleObject(process, 60'000);
-        CloseHandle(process);
-    }
-#else
-    unsetenv("LICHII_RELAUNCH_WAIT_PID");
-    for (int i = 0; i < 600 && pid != 0 && kill(static_cast<pid_t>(pid), 0) == 0; ++i) {
-        usleep(100'000);
-    }
-#endif
-}
-
 int main(int argc, char* argv[]) {
-    WaitForRelaunchingProcess();
+    bool relaunch_global_settings = false;
+    if (const char* pid = std::getenv("LICHII_RELAUNCH_WAIT_PID")) {
+        const bool exited = Lichii::WaitForRelaunchingProcess(pid, std::chrono::seconds{60});
+        relaunch_global_settings = qgetenv("LICHII_RELAUNCH_GLOBAL_SETTINGS") == "1";
+        qunsetenv("LICHII_RELAUNCH_GLOBAL_SETTINGS");
+#ifdef _WIN32
+        _putenv_s("LICHII_RELAUNCH_WAIT_PID", "");
+#else
+        unsetenv("LICHII_RELAUNCH_WAIT_PID");
+#endif
+        if (!exited) {
+            std::fputs("Lichii did not confirm the previous process exited; relaunch canceled.\n",
+                       stderr);
+#ifdef _WIN32
+            MessageBoxW(nullptr,
+                        L"Lichii could not confirm the previous process exited. Close it before "
+                        L"starting Lichii again.",
+                        L"Lichii", MB_OK | MB_ICONWARNING);
+#endif
+            return EXIT_FAILURE;
+        }
+    }
 #if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
     SetUpNvidiaShaderDiskCache();
 #endif
@@ -280,7 +277,7 @@ int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "C");
 
     try {
-        MainWindow main_window{has_broken_vulkan};
+        MainWindow main_window{has_broken_vulkan, relaunch_global_settings};
         main_window.show();
         app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window,
                     &MainWindow::OnAppFocusStateChanged);
