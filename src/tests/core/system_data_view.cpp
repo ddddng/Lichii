@@ -77,7 +77,8 @@ std::vector<u8> MakeTimeZoneRule(u8 utc_offset_seconds) {
     return bytes;
 }
 
-FileSys::VirtualDir TimeZoneRomFS(std::string_view version, const std::vector<u8>& rule) {
+FileSys::VirtualDir TimeZoneRomFS(std::string_view version, const std::vector<u8>& rule,
+                                 std::string_view locations = "GMT\n") {
     using FileSys::VectorVfsDirectory;
     using FileSys::VectorVfsFile;
     using FileSys::VirtualDir;
@@ -92,7 +93,8 @@ FileSys::VirtualDir TimeZoneRomFS(std::string_view version, const std::vector<u8
         std::vector<VirtualFile>{
             std::make_shared<VectorVfsFile>(std::vector<u8>(version.begin(), version.end()),
                                             "version.txt"),
-            std::make_shared<VectorVfsFile>(std::vector<u8>{'G', 'M', 'T', '\n'}, "binaryList.txt"),
+            std::make_shared<VectorVfsFile>(
+                std::vector<u8>(locations.begin(), locations.end()), "binaryList.txt"),
         },
         std::vector<VirtualDir>{zoneinfo});
 }
@@ -299,6 +301,12 @@ TEST_CASE("The startup time-zone mount never substitutes legacy system data",
     REQUIRE(isolated.GetTimeZoneVersion(version).IsSuccess());
     CHECK(std::string_view{version.data()} == "isolated");
     CHECK(isolated.GetTimeZoneCount() == 1);
+    std::array<LocationName, 1> locations{};
+    u32 location_count{};
+    REQUIRE(isolated.GetTimeZoneLocationList(location_count, locations, locations.size(), 0)
+                .IsSuccess());
+    CHECK(location_count == 1);
+    CHECK(locations[0] == gmt);
     REQUIRE(isolated.GetTimeZoneRule(rule, rule_size, gmt).IsSuccess());
     CHECK(std::ranges::equal(rule, isolated_rule));
     CHECK(isolated.GetTimeZoneRule(rule, rule_size, LocationName{"../version.txt"}) ==
@@ -310,6 +318,13 @@ TEST_CASE("The startup time-zone mount never substitutes legacy system data",
               {SystemDataAsset::TimeZoneBinary, std::move(incomplete)},
           })) == FileSys::ResultTargetNotFound);
     CHECK_FALSE(isolated.GetConfiguredLocation());
+
+    const auto malformed_catalog = std::string{"GMT\n"} + std::string(40, 'x') + "\n";
+    CHECK(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{
+              {SystemDataAsset::TimeZoneBinary,
+               TimeZoneRomFS("bad-list", isolated_rule, malformed_catalog)},
+          })) == Service::PSC::Time::ResultFailed);
+    CHECK_FALSE(isolated.IsValid(gmt));
 
     CHECK(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{
               {SystemDataAsset::TimeZoneBinary, TimeZoneRomFS("short", {1})},

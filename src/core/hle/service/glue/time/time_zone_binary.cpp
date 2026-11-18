@@ -87,7 +87,14 @@ Result TimeZoneBinary::ValidateIsolatedData() {
     R_UNLESS(location, FileSys::ResultTargetNotFound);
     Service::PSC::Time::RuleVersion version{};
     R_TRY(GetTimeZoneVersion(version));
-    R_UNLESS(GetTimeZoneCount() > 0, FileSys::ResultTargetNotFound);
+    const auto expected_count = GetTimeZoneCount();
+    R_UNLESS(expected_count > 0, FileSys::ResultTargetNotFound);
+    std::vector<Service::PSC::Time::LocationName> locations(expected_count);
+    u32 parsed_count{};
+    R_TRY(GetTimeZoneLocationList(parsed_count, locations, locations.size(), 0));
+    R_UNLESS(parsed_count == expected_count &&
+                 std::ranges::all_of(locations, [](const auto& name) { return name[0] != '\0'; }),
+             Service::PSC::Time::ResultFailed);
 
     std::span<const u8> rule;
     size_t rule_size{};
