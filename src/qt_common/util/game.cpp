@@ -19,6 +19,7 @@
 #include <QBuffer>
 #include <QDesktopServices>
 #include <QFile>
+#include <QImageReader>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUrl>
@@ -696,8 +697,45 @@ std::vector<u8> ReadCustomArtwork(u64 program_id) {
     if (!file.open(QIODevice::ReadOnly) || file.size() > MaxArtworkBytes) {
         return {};
     }
-    const QByteArray bytes = file.readAll();
+    const QByteArray bytes = file.read(MaxArtworkBytes + 1);
+    if (bytes.size() > MaxArtworkBytes) {
+        return {};
+    }
     return std::vector<u8>(bytes.begin(), bytes.end());
+}
+
+std::vector<u8> ReadHomeMenuArtwork(u64 program_id) {
+    const auto artwork = ReadCustomArtwork(program_id);
+    if (artwork.empty()) {
+        return {};
+    }
+    const auto data = QByteArray::fromRawData(reinterpret_cast<const char*>(artwork.data()),
+                                             static_cast<qsizetype>(artwork.size()));
+    QBuffer input;
+    input.setData(data);
+    QImageReader reader(&input);
+    const auto size = reader.size();
+    constexpr int MaxSourceSide = 4096;
+    if (size.isEmpty() || size.width() > MaxSourceSide || size.height() > MaxSourceSide) {
+        return {};
+    }
+    auto image = reader.read();
+    if (image.isNull()) {
+        return {};
+    }
+    const int side = std::min(image.width(), image.height());
+    constexpr int IconSide = 256;
+    image = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side)
+                .scaled(IconSide, IconSide, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+    QByteArray jpeg;
+    QBuffer output(&jpeg);
+    constexpr qsizetype MaxIconBytes = 0x20000;
+    if (!output.open(QIODevice::WriteOnly) || !image.save(&output, "JPEG", 85) ||
+        jpeg.isEmpty() || jpeg.size() > MaxIconBytes) {
+        return {};
+    }
+    return {jpeg.begin(), jpeg.end()};
 }
 
 bool SaveCustomArtwork(u64 program_id, const QImage& image) {

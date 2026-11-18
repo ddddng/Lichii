@@ -191,7 +191,12 @@ TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's me
     REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
 
     ScopedSystemTestContext environment;
-    FileSys::ManualContentProvider provider;
+    std::vector<u8> artwork{1, 2, 3};
+    std::vector<u64> artwork_requests;
+    FileSys::ManualContentProvider provider{[&](u64 id) {
+        artwork_requests.push_back(id);
+        return artwork;
+    }};
     Core::System system;
     auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
     system.SetFilesystem(vfs);
@@ -214,6 +219,7 @@ TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's me
     const auto mismatched = Service::NS::GetApplicationControlMetadata(system, TitleId + 1);
     CHECK(mismatched.first == nullptr);
     CHECK(mismatched.second == nullptr);
+    CHECK(artwork_requests.empty());
 
     FileSys::Nup::MetadataEdit edit;
     edit.title_name = "After";
@@ -222,6 +228,19 @@ TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's me
     const auto metadata = Service::NS::GetApplicationControlMetadata(system, TitleId);
     REQUIRE(metadata.first != nullptr);
     CHECK(metadata.first->GetApplicationName() == "After");
+    REQUIRE(metadata.second != nullptr);
+    CHECK(metadata.second->ReadAllBytes() == artwork);
+    CHECK(artwork_requests == std::vector<u64>{TitleId});
+
+    artwork = {4, 5};
+    const auto refreshed = Service::NS::GetApplicationControlMetadata(system, TitleId);
+    REQUIRE(refreshed.second != nullptr);
+    CHECK(refreshed.second->ReadAllBytes() == artwork);
+
+    artwork.clear();
+    const auto fallback = Service::NS::GetApplicationControlMetadata(system, TitleId);
+    REQUIRE(fallback.second != nullptr);
+    CHECK(fallback.second->ReadAllBytes() == options.metadata.icon);
 }
 
 TEST_CASE("NUP add-ons are readable through the manual content provider", "[nup][nup-content]") {
