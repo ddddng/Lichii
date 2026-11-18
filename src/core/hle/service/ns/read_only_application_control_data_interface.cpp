@@ -351,7 +351,7 @@ void IReadOnlyApplicationControlDataInterface::ListApplicationTitle(HLERequestCo
         const auto t_mem_address = t_mem->GetSourceAddress();
         for (size_t i = 0; i < app_count; ++i) {
             const u64 app_id = application_ids[i];
-            const auto control = GetApplicationControlMetadata(system, app_id);
+            const auto control = GetApplicationControlMetadata(system, app_id, false);
             FileSys::LanguageEntry entry{};
             if (control.first != nullptr) {
                 entry = control.first->GetLanguageEntry();
