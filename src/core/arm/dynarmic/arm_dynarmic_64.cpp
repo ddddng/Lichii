@@ -17,7 +17,6 @@
 #include "core/core_timing.h"
 #include "core/hardware_properties.h"
 #include "core/hle/kernel/k_process.h"
-#include "core/hle/kernel/k_thread.h"
 #include "core/nvn_hook.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "dynarmic/interface/A64/config.h"
@@ -150,10 +149,7 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
     if (op == Dynarmic::A64::InstructionCacheOperation::BlockEntryHook) {
-        if (Core::NvnHook::OnBlockEntry(
-                value, *m_parent.m_jit, m_memory, m_process,
-                static_cast<u32>(
-                    Kernel::GetCurrentThread(m_parent.m_system.Kernel()).GetThreadId()))) {
+        if (Core::NvnHook::OnBlockEntry(value, *m_parent.m_jit, m_memory, m_process)) {
             // An NVN call that may block: it runs from the kernel, as an SVC.
             m_parent.m_svc = Core::NvnHook::HaltedCallSvc;
             m_parent.m_jit->HaltExecution(SupervisorCall);
