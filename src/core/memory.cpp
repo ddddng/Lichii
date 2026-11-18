@@ -43,6 +43,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/nx2_async_readback.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
@@ -1059,6 +1060,7 @@ struct Memory::Impl {
     }
 
     void WriteToRasterizer(VAddr v_address, size_t size) {
+        VideoCommon::Nx2FastDraw::NoteCpuWrite();
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
@@ -1109,6 +1111,7 @@ struct Memory::Impl {
     };
 
     void InvalidateGPUMemory(u8* p, size_t size) {
+        VideoCommon::Nx2FastDraw::NoteCpuWrite();
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.

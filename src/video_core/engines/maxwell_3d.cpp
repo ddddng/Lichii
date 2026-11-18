@@ -1254,8 +1254,16 @@ bool Maxwell3D::WriteBoundConstantBuffer(u32 offset, const void* data, u32 bytes
         return false;
     }
     const DAddr device = bound.device + offset;
-    FastDraw::NoteConstantData(begin, begin + bytes);
-    FastDraw::NoteDeviceData(device, device + bytes);
+    // Data memory already holds changes neither the texture handles nor the uniforms a delta draw
+    // keeps from the draw before (Donkey Kong Bananza writes most of its handles again unchanged).
+    // GPU-written pages can be newer than memory, and memory can be newer than what the last full
+    // resolve read (a guest CPU write or sync since): writes there count.
+    if (Tegra::Nx2MayBeGpuWritten(device, bytes) ||
+        !memory_manager.ConstantBufferDataMatches(device, data, bytes) ||
+        !FastDraw::HandleMemoryUnchanged()) {
+        FastDraw::NoteConstantData(begin, begin + bytes);
+        FastDraw::NoteDeviceData(device, device + bytes);
+    }
     memory_manager.WriteConstantBufferData(device, data, bytes);
     return true;
 }
