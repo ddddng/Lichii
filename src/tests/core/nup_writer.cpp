@@ -154,6 +154,29 @@ std::map<std::string, std::string> PackedTree(const FileSys::VirtualDir& dir) {
 
 constexpr u64 TitleId = 0x0400ABCD00010000ULL;
 
+TEST_CASE("A NUP without its program metadata has no forwarder ID", "[nup][home_menu]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/base.bin", "base");
+    const auto archive = tmp.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    auto bytes = ReadAll(archive);
+    const auto toc = Le(bytes, 8, 8);
+    const auto name = bytes.find("main.npdm", toc);
+    REQUIRE(name != std::string::npos);
+    bytes[name] = 'x';
+    const auto hash = Sha256(std::string_view{bytes}.substr(toc, Le(bytes, 0x10, 8)));
+    std::copy(hash.begin(), hash.end(), bytes.begin() + 0x18);
+
+    Loader::AppLoader_NUP loader{std::make_shared<FileSys::VectorVfsFile>(
+        std::vector<u8>(bytes.begin(), bytes.end()), "Game.nup")};
+    u64 id{};
+    CHECK(loader.ReadProgramId(id) != Loader::ResultStatus::Success);
+}
+
 TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's metadata",
           "[nup][home_menu]") {
     TempDir tmp;
