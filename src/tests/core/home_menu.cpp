@@ -146,10 +146,10 @@ FileSys::VirtualDir MakeHomeExeFS(bool switch2, u64 title_id, FileSys::PoolParti
 
 class CountingContentProvider final : public FileSys::ManualContentProvider {
 public:
-    std::unique_ptr<FileSys::NCA> GetEntry(u64 title_id,
-                                           FileSys::ContentRecordType type) const override {
+    FileSys::VirtualFile GetEntryRaw(u64 title_id,
+                                     FileSys::ContentRecordType type) const override {
         ++lookups;
-        return ManualContentProvider::GetEntry(title_id, type);
+        return ManualContentProvider::GetEntryRaw(title_id, type);
     }
 
     mutable size_t lookups{};
