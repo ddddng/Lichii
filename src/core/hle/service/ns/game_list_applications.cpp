@@ -22,9 +22,10 @@ const FileSys::ManualContentProvider* GameListProvider(Core::System& system) {
 
 } // namespace
 
-FileSys::VirtualFile GetGameListApplicationFile(Core::System& system, u64 application_id) {
+std::optional<FileSys::GameListApplication> GetGameListApplication(Core::System& system,
+                                                                 u64 application_id) {
     const auto* const provider = GameListProvider(system);
-    return provider != nullptr ? provider->GetApplicationFile(application_id) : nullptr;
+    return provider != nullptr ? provider->GetApplicationFile(application_id) : std::nullopt;
 }
 
 std::vector<u64> ListGameListApplications(Core::System& system) {
@@ -37,26 +38,30 @@ FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& syst
     const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
                                    system.GetContentProvider()};
     auto metadata = pm.GetControlMetadata();
-    if (metadata.first != nullptr) {
+    if (metadata.first != nullptr && metadata.second != nullptr) {
         return metadata;
     }
 
-    const auto file = GetGameListApplicationFile(system, application_id);
-    const auto loader = file != nullptr ? Loader::GetLoader(system, file, application_id) : nullptr;
+    const auto application = GetGameListApplication(system, application_id);
+    const auto loader =
+        application ? Loader::GetLoader(system, application->file, application_id) : nullptr;
     if (loader == nullptr) {
         return metadata;
     }
 
-    auto nacp = std::make_unique<FileSys::NACP>();
-    if (loader->ReadControlData(*nacp) != Loader::ResultStatus::Success) {
-        return metadata;
+    if (metadata.first == nullptr) {
+        auto nacp = std::make_unique<FileSys::NACP>();
+        if (loader->ReadControlData(*nacp) == Loader::ResultStatus::Success) {
+            metadata.first = std::move(nacp);
+        }
     }
-    std::vector<u8> icon;
-    FileSys::VirtualFile icon_file;
-    if (loader->ReadIcon(icon) == Loader::ResultStatus::Success && !icon.empty()) {
-        icon_file = std::make_shared<FileSys::VectorVfsFile>(std::move(icon), "icon");
+    if (metadata.second == nullptr) {
+        std::vector<u8> icon;
+        if (loader->ReadIcon(icon) == Loader::ResultStatus::Success && !icon.empty()) {
+            metadata.second = std::make_shared<FileSys::VectorVfsFile>(std::move(icon), "icon");
+        }
     }
-    return {std::move(nacp), std::move(icon_file)};
+    return metadata;
 }
 
 } // namespace Service::NS
