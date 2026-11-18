@@ -9,6 +9,7 @@
 #include "core/hle/service/am/applet.h"
 #include "core/hle/service/am/applet_data_broker.h"
 #include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/am/service/application_accessor.h"
 #include "core/hle/service/am/service/library_applet_accessor.h"
 #include "core/hle/service/am/service/storage.h"
@@ -145,11 +146,20 @@ Result IApplicationAccessor::GetCurrentLibraryApplet(
 
 Result IApplicationAccessor::TerminateAllLibraryApplets() {
     LOG_INFO(Service_AM, "called");
-    std::scoped_lock lk{m_applet->lock};
-    for (const auto& child_applet : m_applet->child_applets) {
-        std::scoped_lock lk2{child_applet->lock};
-        child_applet->process->Terminate();
-        child_applet->terminate_result = AM::ResultLibraryAppletTerminated;
+    std::list<std::shared_ptr<Applet>> child_applets;
+    {
+        std::scoped_lock lk{m_applet->lock};
+        child_applets = m_applet->child_applets;
+    }
+    for (const auto& child_applet : child_applets) {
+        {
+            std::scoped_lock lk{child_applet->lock};
+            child_applet->process->Terminate();
+            child_applet->terminate_result = AM::ResultLibraryAppletTerminated;
+        }
+        if (child_applet->frontend) {
+            child_applet->frontend->RequestExit();
+        }
     }
     R_SUCCEED();
 }

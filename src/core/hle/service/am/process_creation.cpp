@@ -8,7 +8,6 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/patch_manager.h"
-#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/service/am/process_creation.h"
@@ -120,16 +119,7 @@ bool IsSwitch2Application(Core::System& system, u64 program_id) {
     if (!nca_raw) {
         nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
     }
-    if (!nca_raw) {
-        return false;
-    }
-
-    const FileSys::NCA nca{nca_raw};
-    const auto exefs = nca.GetExeFS();
-    const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-    FileSys::ProgramMetadata metadata;
-    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-           metadata.IsSwitch2();
+    return nca_raw != nullptr && Core::FindSwitch2Program(nca_raw, program_id, 0).has_value();
 }
 
 bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id) {

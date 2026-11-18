@@ -210,6 +210,12 @@ std::optional<u64> FindSwitch2Program(const FileSys::VirtualFile& file, u64 prog
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
         return Switch2ProgramId(metadata, npdm);
     }
+    if (type == Loader::FileType::NCA) {
+        const FileSys::NCA nca{file};
+        const auto exefs = nca.GetStatus() == Loader::ResultStatus::Success ? nca.GetExeFS() : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return Switch2ProgramId(metadata, npdm);
+    }
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
     return Switch2ProgramId(metadata, npdm);
