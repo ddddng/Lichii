@@ -921,6 +921,14 @@ private:
         bool sparse_compatible{};
     };
     std::array<FindMemo, 256> find_memos{};
+    /// Storage ranges VirtualRangeCache found in one segment (ResolveMultiRangeStorage).
+    struct SingleRangeMemo {
+        const Tegra::MemoryManager* memory{};
+        u64 map_serial{};
+        GPUVAddr gpu_addr{};
+        u32 size{};
+    };
+    std::array<SingleRangeMemo, 64> single_ranges{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
     u64 buffer_deletions = 0;
     /// EDEN_NX2_BUFFER_TRACE: buffers created (with the buffers they joined) and collected, logged

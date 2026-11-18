@@ -2792,10 +2792,26 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
+        // Ranges found in one segment, until a map changes: the query is a hash lookup, for
+        // every storage binding of every draw.
+        const u64 map_serial = gpu_memory->MapSerial();
+        SingleRangeMemo& memo = single_ranges[(binding.gpu_addr >> 8) % single_ranges.size()];
+        const bool memo_hit = memo.memory == gpu_memory && memo.map_serial == map_serial &&
+                              memo.gpu_addr == binding.gpu_addr && binding.size <= memo.size;
+        if (memo_hit && !Nx2Perf::Verify()) {
+            return;
+        }
         const VirtualSegments* found =
             virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
         if (!found || found->size() < 2) {
+            if (found) {
+                memo = {gpu_memory, map_serial, binding.gpu_addr, binding.size};
+            }
             return;
+        }
+        if (memo_hit) {
+            LOG_ERROR(HW_GPU, "Nx2Perf storage range: {:#x}+{:#x} remembered in one segment, has {}",
+                      binding.gpu_addr, binding.size, found->size());
         }
         const VirtualSegments segments = *found;
         const u32 first = static_cast<u32>(pool.size());
