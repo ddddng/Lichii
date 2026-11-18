@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Lichii contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -22,6 +24,7 @@
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/api_version.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/glue/time/time_zone_binary.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ns/platform_service_manager.h"
 #include "core/hle/service/server_manager.h"
@@ -39,6 +42,7 @@ using Service::Set::FirmwareVersionFormat;
 using Service::Set::ISystemSettingsServer;
 
 constexpr u64 VersionTitle = 0x0100000000000809;
+constexpr u64 TimeZoneTitle = 0x010000000000080E;
 
 FileSys::VirtualDir SingleFile(std::vector<u8> bytes, std::string name) {
     return std::make_shared<FileSys::VectorVfsDirectory>(std::vector<FileSys::VirtualFile>{
@@ -60,6 +64,37 @@ FileSys::VirtualDir FontRomFS(size_t words, size_t font_index) {
     size_t offset = 0;
     Service::NS::EncryptSharedFont(std::vector<u32>(words, 0x12345678), bytes, offset);
     return SingleFile(std::move(bytes), Service::NS::SHARED_FONTS[font_index].second);
+}
+
+std::vector<u8> MakeTimeZoneRule(u8 utc_offset_seconds) {
+    std::vector<u8> bytes(54);
+    std::memcpy(bytes.data(), "TZif", 4);
+    bytes[39] = 1;
+    bytes[43] = 4;
+    bytes[47] = utc_offset_seconds;
+    std::memcpy(bytes.data() + 50, "GMT", 3);
+    bytes.insert(bytes.end(), {'\n', 'G', 'M', 'T', '0', '\n'});
+    return bytes;
+}
+
+FileSys::VirtualDir TimeZoneRomFS(std::string_view version, const std::vector<u8>& rule) {
+    using FileSys::VectorVfsDirectory;
+    using FileSys::VectorVfsFile;
+    using FileSys::VirtualDir;
+    using FileSys::VirtualFile;
+    const auto etc = std::make_shared<VectorVfsDirectory>(
+        std::vector<VirtualFile>{std::make_shared<VectorVfsFile>(rule, "GMT")},
+        std::vector<VirtualDir>{}, "Etc");
+    const auto zoneinfo = std::make_shared<VectorVfsDirectory>(
+        std::vector<VirtualFile>{std::make_shared<VectorVfsFile>(rule, "GMT")},
+        std::vector<VirtualDir>{etc}, "zoneinfo");
+    return std::make_shared<VectorVfsDirectory>(
+        std::vector<VirtualFile>{
+            std::make_shared<VectorVfsFile>(std::vector<u8>(version.begin(), version.end()),
+                                            "version.txt"),
+            std::make_shared<VectorVfsFile>(std::vector<u8>{'G', 'M', 'T', '\n'}, "binaryList.txt"),
+        },
+        std::vector<VirtualDir>{zoneinfo});
 }
 
 void WriteLegacyRecord(const FileSys::VirtualDir& registered, u64 title,
@@ -211,4 +246,82 @@ TEST_CASE("System data is selected before NS loads fonts and SET serves firmware
     REQUIRE(legacy_set.GetFirmwareVersion2(&version).IsSuccess());
     CHECK(version.major == 7);
     CHECK(font_query(legacy_ns, 2, standard) == 4);
+}
+
+TEST_CASE("The startup time-zone mount never substitutes legacy system data",
+          "[core][native_home_time_data]") {
+    using Service::Glue::Time::TimeZoneBinary;
+    using Service::PSC::Time::LocationName;
+    using Service::PSC::Time::RuleVersion;
+    using Service::PSC::Time::ResultTimeZoneParseFailed;
+    ScopedSystemTestContext environment;
+    Core::System system;
+    REQUIRE(system.Initialize());
+    auto& fsc = system.GetFileSystemController();
+    const auto original_sd = Common::FS::GetEdenPath(Common::FS::EdenPath::SDMCDir);
+    const auto original_zone = Settings::values.time_zone_index.GetValue();
+    Common::FS::SetEdenPath(Common::FS::EdenPath::SDMCDir,
+                           Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir));
+    Settings::values.time_zone_index.SetValue(Settings::TimeZone::Gmt);
+    SCOPE_EXIT {
+        Settings::values.time_zone_index.SetValue(original_zone);
+        Tests::RestoreEdenPath(Common::FS::EdenPath::SDMCDir, original_sd);
+    };
+    fsc.CreateFactories(*system.GetFilesystem());
+
+    TimeZoneBinary legacy{system};
+    const LocationName gmt{"GMT"};
+    REQUIRE(legacy.Mount().IsSuccess());
+    CHECK(legacy.IsValid(gmt));
+    CHECK(legacy.GetTimeZoneCount() > 1);
+    const auto registered =
+        fsc.GetSystemNANDContentDirectory()->GetSubdirectory("registered");
+    REQUIRE(registered);
+    const auto legacy_rule = MakeTimeZoneRule(60);
+    WriteLegacyRecord(registered, TimeZoneTitle, TimeZoneRomFS("legacy", legacy_rule), 3);
+    fsc.GetSystemNANDContents()->Refresh();
+
+    REQUIRE(legacy.Mount().IsSuccess());
+    RuleVersion version{};
+    REQUIRE(legacy.GetTimeZoneVersion(version).IsSuccess());
+    CHECK(std::string_view{version.data()} == "legacy");
+    std::span<const u8> rule;
+    size_t rule_size{};
+    REQUIRE(legacy.GetTimeZoneRule(rule, rule_size, gmt).IsSuccess());
+    CHECK(std::ranges::equal(rule, legacy_rule));
+
+    const auto isolated_rule = MakeTimeZoneRule(120);
+    TimeZoneBinary isolated{system};
+    REQUIRE(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{
+                {SystemDataAsset::TimeZoneBinary, TimeZoneRomFS("isolated", isolated_rule)},
+            })).IsSuccess());
+    CHECK(isolated.GetConfiguredLocation() == gmt);
+    REQUIRE(isolated.GetTimeZoneVersion(version).IsSuccess());
+    CHECK(std::string_view{version.data()} == "isolated");
+    CHECK(isolated.GetTimeZoneCount() == 1);
+    REQUIRE(isolated.GetTimeZoneRule(rule, rule_size, gmt).IsSuccess());
+    CHECK(std::ranges::equal(rule, isolated_rule));
+    CHECK(isolated.GetTimeZoneRule(rule, rule_size, LocationName{"../version.txt"}) ==
+          FileSys::ResultTargetNotFound);
+
+    auto incomplete = TimeZoneRomFS("incomplete", isolated_rule);
+    REQUIRE(incomplete->GetSubdirectory("zoneinfo")->DeleteFile("GMT"));
+    CHECK(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{
+              {SystemDataAsset::TimeZoneBinary, std::move(incomplete)},
+          })) == FileSys::ResultTargetNotFound);
+    CHECK_FALSE(isolated.GetConfiguredLocation());
+
+    CHECK(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{
+              {SystemDataAsset::TimeZoneBinary, TimeZoneRomFS("short", {1})},
+          })) == ResultTimeZoneParseFailed);
+    CHECK_FALSE(isolated.IsValid(gmt));
+    CHECK(isolated.Mount(std::make_shared<const SystemDataView>(SystemDataView::Records{})) ==
+          FileSys::ResultTargetNotFound);
+    CHECK(isolated.GetTimeZoneVersion(version) == FileSys::ResultTargetNotFound);
+    CHECK(isolated.GetTimeZoneRule(rule, rule_size, gmt) == FileSys::ResultTargetNotFound);
+
+    REQUIRE(legacy.GetTimeZoneVersion(version).IsSuccess());
+    CHECK(std::string_view{version.data()} == "legacy");
+    REQUIRE(legacy.GetTimeZoneRule(rule, rule_size, gmt).IsSuccess());
+    CHECK(std::ranges::equal(rule, legacy_rule));
 }
