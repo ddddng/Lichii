@@ -24,6 +24,7 @@ add_executable(tests
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
+    video_core/host_vsync.cpp
     core/mii_model.cpp
     core/nx2_streamplay.cpp
     core/nx2_gpu_only_regions.cpp
@@ -183,6 +184,7 @@ add_executable(tests
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
     video_core/vulkan_buffer_oom.cpp
+    video_core/pipeline_layout_cache.cpp
     video_core/shader_precache.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
@@ -240,6 +242,7 @@ add_executable(tests
     core/core_timing.cpp
     core/host_wait_margin.cpp
     core/local_redirect.cpp
+    core/nextendo_bcat.cpp
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp

@@ -173,6 +173,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applet_web_browser_types.h"
+#include "core/hle/service/bcat/backend/nextendo.h"
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
@@ -2487,6 +2488,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         watcher.setFuture(QtConcurrent::run([&loader, title_id] {
             Common::NplnPatchCatalog::PrepareForGame(
                 title_id, [&] { return loader->ReadMainBuildIdHex(*QtCommon::system); });
+            Service::BCAT::Nextendo::PrepareForGame(title_id);
         }));
         progress.show();
         loop.exec();
@@ -3967,6 +3969,13 @@ void MainWindow::OnExecuteProgram(std::size_t program_index) {
 }
 
 void MainWindow::OnLaunchInNewSession(u64 program_id) {
+    // A request queued while its session stops would run inside ShutdownGame's event loop and boot
+    // under the outer shutdown, which then takes the new session's thread for a stuck one.
+    if (!emulation_running || QtCommon::system->IsShuttingDown()) {
+        LOG_WARNING(Frontend, "Dropping HOME Menu launch of {:016X}: its session is stopping",
+                    program_id);
+        return;
+    }
     auto* const model = game_list->GetModel();
     const auto matches =
         model->match(model->index(0, 0), GameListItemPath::ProgramIdRole,
