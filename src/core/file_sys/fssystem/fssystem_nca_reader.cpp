@@ -70,9 +70,10 @@ Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfigurat
         header_decryption_keys;
     for (size_t i = 0; i < NcaCryptoConfiguration::HeaderEncryptionKeyCount; i++) {
         crypto_cfg.generate_key(header_decryption_keys[i].data(),
-                                AesXtsStorageForNcaHeader::KeySize,
+                                header_decryption_keys[i].size(),
                                 crypto_cfg.header_encrypted_encryption_keys[i].data(),
-                                AesXtsStorageForNcaHeader::KeySize, HeaderKeyTypeValues[i]);
+                                crypto_cfg.header_encrypted_encryption_keys[i].size(),
+                                HeaderKeyTypeValues[i]);
     }
 
     // Create the header storage.
