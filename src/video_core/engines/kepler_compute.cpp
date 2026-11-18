@@ -23,6 +23,7 @@
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "core/core.h"
 #include "video_core/gpu_split.h"
+#include "video_core/dlss_contract.h"
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/front_qmd.h"
 #include "video_core/nx2_profile.h"
@@ -43,6 +44,7 @@
 #include "video_core/macro_turing_jit.h"
 #endif
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines {
@@ -1487,11 +1489,15 @@ void KeplerCompute::RememberDlssMotionVectors() {
     dlss_motion_color = color->Address();
     const u32 depth_offset = dlss_chain.render_region ? 0x288 : 0x298;
     const auto depth = cbuf.size.Value() >= 0x29c ? image(depth_offset) : std::nullopt;
-    if (depth && depth->format == Texture::TextureFormat::Z32 && depth->Address() != 0 &&
-        same_grid(*depth) && depth->IsBlockLinear()) {
+    if (!depth || depth->Address() == 0 || !same_grid(*depth) || !depth->IsBlockLinear()) {
+        return;
+    }
+    // The same mapping the texture cache applies to this TIC, so both accept the same depths.
+    const auto depth_format = VideoCommon::PixelFormatFromTextureInfo(
+        depth->format, depth->r_type, depth->g_type, depth->b_type, depth->a_type,
+        depth->srgb_conversion != 0);
+    if (VideoCommon::DlssContract::IsUpscalerDepthFormat(depth_format)) {
         dlss_depth = *depth;
-    } else {
-        dlss_depth.reset();
     }
 }
 
@@ -1619,10 +1625,12 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
         motion_surface = surface(*motion);
         motion_surface.format = Tegra::RenderTargetFormat::R16G16_FLOAT;
     }
-    // The game's motion vectors point from the previous position to the current one (a rightward
-    // pan gives negative x while the scene moves left), the reverse of what the upscale expects.
+    // Measured: the vectors at cb0+0x290 are in output pixels and point to the previous position
+    // (prev = cur + mv); the raw cb0+0x284 buffer has the opposite sign (the prepass scales it by -1080).
     const std::array<f32, 2> motion_scale =
-        use_history ? std::array{-1.0f, -1.0f} : std::array{0.0f, 0.0f};
+        use_history ? std::array{1.0f / static_cast<f32>(output->Width()),
+                                 1.0f / static_cast<f32>(output->Height())}
+                    : std::array{0.0f, 0.0f};
     const bool done = rasterizer->AccelerateTemporalUpscale(
         surface(*input), surface(*output), motion_surface,
         use_history && depth ? &*depth : nullptr,
