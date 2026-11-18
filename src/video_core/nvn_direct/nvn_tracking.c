@@ -35,7 +35,8 @@ enum { PAGE_SHIFT = 12 };
 // A registered pool. Kept (live 0) after it goes, until the teardown: images hold its pointer
 // (nvn_dirty_span).
 typedef struct {
-    uintptr_t lo, hi; // host pointers into the arena
+    const void* pool;
+    uintptr_t lo, hi, prefix_hi; // bytes in the arena, and the maximum hi through this span
     _Atomic uint64_t* gen; // per page: generation of the last CPU write seen (0: none)
     uint8_t* armed;        // per page: Lichii tracks writes to it (under g_mu)
     uint8_t* host;         // per page: the front end writes it in place (nvn_direct_host_written): never armed
@@ -51,13 +52,22 @@ static pthread_rwlock_t g_rw = PTHREAD_RWLOCK_INITIALIZER;
 static _Atomic uint64_t g_now = 1;
 static _Atomic uint64_t g_faults, g_preps;
 
-static span_t* find_locked(uintptr_t a, size_t len) {
-    int lo = 0, hi = g_nspans - 1, hit = -1;
-    while (lo <= hi) {
-        const int m = (lo + hi) / 2;
-        if (g_spans[m]->lo <= a) { hit = m; lo = m + 1; } else hi = m - 1;
+static uintptr_t page_lo(uintptr_t a) { return a & ~(uintptr_t)(PAGE_SIZE - 1); }
+static uintptr_t page_hi(uintptr_t e) { return page_lo(e - 1) + PAGE_SIZE; }
+
+static int first_after(uintptr_t a) {
+    int lo = 0, hi = g_nspans;
+    while (lo < hi) {
+        const int m = lo + (hi - lo) / 2;
+        if (g_spans[m]->prefix_hi <= a) lo = m + 1;
+        else hi = m;
     }
-    return hit >= 0 && a + len <= g_spans[hit]->hi ? g_spans[hit] : NULL;
+    return lo;
+}
+
+static span_t* find_locked(uintptr_t a, size_t len) {
+    const int i = first_after(a + len - 1);
+    return i < g_nspans && g_spans[i]->lo <= a ? g_spans[i] : NULL;
 }
 static span_t* find(uintptr_t a, size_t len) {
     pthread_rwlock_rdlock(&g_rw);
@@ -66,14 +76,25 @@ static span_t* find(uintptr_t a, size_t len) {
     return s;
 }
 
-void nvn_dirty_add_range(const void* mem, size_t size) {
+static void update_prefix(int i) {
+    uintptr_t hi = i ? g_spans[i - 1]->prefix_hi : 0;
+    for (; i < g_nspans; i++) {
+        span_t* s = g_spans[i];
+        if (s->hi > hi) hi = s->hi;
+        if (s->prefix_hi == hi) break;
+        s->prefix_hi = hi;
+    }
+}
+
+void nvn_dirty_add_range(const void* pool, const void* mem, size_t size) {
     const uintptr_t lo = (uintptr_t)mem, hi = lo + size;
     if (!size || nvn_direct_guest_of(lo) == lo) return; // not guest memory (a host segment)
     span_t* s = calloc(1, sizeof *s);
     const size_t pages = (size + PAGE_SIZE - 1 + (lo & (PAGE_SIZE - 1))) >> PAGE_SHIFT;
     if (s) { s->gen = calloc(pages, sizeof *s->gen); s->armed = calloc(pages, 1); s->host = calloc(pages, 1); }
     if (!s || !s->gen || !s->armed || !s->host) goto fail;
-    s->lo = lo & ~(uintptr_t)(PAGE_SIZE - 1);
+    s->pool = pool;
+    s->lo = lo;
     s->hi = hi;
     atomic_store(&s->live, 1);
     pthread_mutex_lock(&g_mu);
@@ -85,10 +106,26 @@ void nvn_dirty_add_range(const void* mem, size_t size) {
         g_spans = spans;
         g_capspans = cap;
     }
+    // A page has one generation and protection state even if it belongs to several pools.
+    const uintptr_t base = page_lo(lo), end = page_hi(hi);
+    uintptr_t copied = base;
+    for (int k = first_after(base); k < g_nspans && g_spans[k]->lo < end && copied < end; k++) {
+        const span_t* other = g_spans[k];
+        if (other->hi <= copied) continue;
+        const uintptr_t ob = page_lo(other->lo), oe = page_hi(other->hi);
+        const uintptr_t b = ob > copied ? ob : copied, e = oe < end ? oe : end;
+        const uintptr_t dst = (b - base) >> PAGE_SHIFT, src = (b - ob) >> PAGE_SHIFT;
+        const size_t n = (e - b) >> PAGE_SHIFT;
+        for (size_t j = 0; j < n; j++) atomic_store(&s->gen[dst + j], atomic_load(&other->gen[src + j]));
+        memcpy(s->armed + dst, other->armed + src, n);
+        memcpy(s->host + dst, other->host + src, n);
+        copied = e;
+    }
     int i = g_nspans;
     while (i > 0 && g_spans[i - 1]->lo > s->lo) { g_spans[i] = g_spans[i - 1]; i--; }
     g_spans[i] = s;
     g_nspans++;
+    update_prefix(i);
     pthread_rwlock_unlock(&g_rw);
     pthread_mutex_unlock(&g_mu);
     return;
@@ -97,39 +134,71 @@ fail:
     LOG("[RED] pool %p+%#zx: out of memory for its write tracking: CPU writes to its textures after their first upload are not seen", mem, size);
 }
 
-// Arms (on) or disarms the pages [p, q] of s that are not already so, in runs (caller holds g_mu)
-static void arm_pages(span_t* s, uintptr_t p, uintptr_t q, int on) {
+// Arms or disarms pages in [lo, hi) in runs (caller holds g_mu).
+static void arm_pages(span_t* s, uintptr_t lo, uintptr_t hi, int on) {
+    const uintptr_t base = page_lo(s->lo);
+    const uintptr_t p = (lo - base) >> PAGE_SHIFT, q = (hi - base) >> PAGE_SHIFT;
     uintptr_t run = 0;
     int open = 0;
-    for (uintptr_t i = p; i <= q + 1; i++) {
-        const int change = i <= q && s->armed[i] != on && !(on && s->host[i]);
+    for (uintptr_t i = p; i <= q; i++) {
+        const int change = i < q && s->armed[i] != on && !(on && s->host[i]);
         if (change) {
             s->armed[i] = (uint8_t)on;
             if (!open) { run = i; open = 1; }
             continue;
         }
         if (open) {
-            nvn_direct_track_pages(nvn_direct_guest_of(s->lo + (run << PAGE_SHIFT)), (i - run) << PAGE_SHIFT, on);
+            nvn_direct_track_pages(nvn_direct_guest_of(base + (run << PAGE_SHIFT)), (i - run) << PAGE_SHIFT, on);
             open = 0;
         }
     }
 }
 
-void nvn_dirty_remove_range(const void* mem) {
+// Update all copies of an arm bit, but change the protection only on the first span over a page.
+static void arm_shared(int first, uintptr_t lo, uintptr_t hi, int on) {
+    uintptr_t done = lo;
+    for (int i = first; i < g_nspans && g_spans[i]->lo < hi; i++) {
+        span_t* s = g_spans[i];
+        if (s->hi <= lo) continue;
+        const uintptr_t base = page_lo(s->lo), end = page_hi(s->hi);
+        uintptr_t b = base > lo ? base : lo;
+        const uintptr_t e = end < hi ? end : hi;
+        for (; b < e && b < done; b += PAGE_SIZE) {
+            const uintptr_t j = (b - base) >> PAGE_SHIFT;
+            s->armed[j] = (uint8_t)(on && !s->host[j]);
+        }
+        if (b < e) {
+            arm_pages(s, b, e, on);
+            done = e;
+        }
+    }
+}
+
+void nvn_dirty_remove_range(const void* pool) {
     pthread_mutex_lock(&g_mu);
     pthread_rwlock_wrlock(&g_rw);
     span_t* s = NULL;
     for (int i = 0; i < g_nspans; i++) {
-        if (g_spans[i]->lo != ((uintptr_t)mem & ~(uintptr_t)(PAGE_SIZE - 1))) continue;
+        if (g_spans[i]->pool != pool) continue;
         s = g_spans[i];
         memmove(&g_spans[i], &g_spans[i + 1], (size_t)(g_nspans - i - 1) * sizeof *g_spans);
         g_nspans--;
+        update_prefix(i);
+        atomic_store(&s->live, 0);
         break;
     }
     pthread_rwlock_unlock(&g_rw);
     if (s) {
-        arm_pages(s, 0, ((s->hi - s->lo - 1) >> PAGE_SHIFT), 0);
-        atomic_store(&s->live, 0);
+        const uintptr_t lo = page_lo(s->lo), hi = page_hi(s->hi);
+        uintptr_t b = lo;
+        for (int i = first_after(lo); i < g_nspans && g_spans[i]->lo < hi && b < hi; i++) {
+            const span_t* other = g_spans[i];
+            if (other->hi <= b) continue;
+            const uintptr_t ob = page_lo(other->lo);
+            if (b < ob) arm_pages(s, b, ob, 0);
+            b = page_hi(other->hi);
+        }
+        if (b < hi) arm_pages(s, b, hi, 0);
         if (g_ngone == g_capgone) {
             const int cap = g_capgone ? 2 * g_capgone : 256;
             span_t** gone = realloc(g_gone, (size_t)cap * sizeof *g_gone);
@@ -162,14 +231,17 @@ void nvn_tracking_destroy(void) {
 
 void nvn_direct_host_written(const void* mem, size_t size) {
     if (!size) return;
+    const uintptr_t lo = page_lo((uintptr_t)mem), hi = page_hi((uintptr_t)mem + size);
     pthread_mutex_lock(&g_mu);
-    span_t* s = find((uintptr_t)mem, size);
-    if (s) {
-        const uintptr_t a = (uintptr_t)mem;
-        const uintptr_t p = (a - s->lo) >> PAGE_SHIFT, q = (a + size - 1 - s->lo) >> PAGE_SHIFT;
-        arm_pages(s, p, q, 0);
-        for (uintptr_t i = p; i <= q; i++) s->host[i] = 1;
+    const int first = first_after(lo);
+    for (int i = first; i < g_nspans && g_spans[i]->lo < hi; i++) {
+        span_t* s = g_spans[i];
+        if (s->hi <= lo) continue;
+        const uintptr_t base = page_lo(s->lo), end = page_hi(s->hi);
+        const uintptr_t b = base > lo ? base : lo, e = end < hi ? end : hi;
+        memset(s->host + ((b - base) >> PAGE_SHIFT), 1, (e - b) >> PAGE_SHIFT);
     }
+    arm_shared(first, lo, hi, 0);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -179,12 +251,9 @@ uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 
 void nvn_dirty_protect(const void* addr, size_t len) {
     if (!len) return;
+    const uintptr_t a = (uintptr_t)addr, lo = page_lo(a), hi = page_hi(a + len);
     pthread_mutex_lock(&g_mu);
-    span_t* s = find((uintptr_t)addr, len);
-    if (s) {
-        const uintptr_t a = (uintptr_t)addr;
-        arm_pages(s, (a - s->lo) >> PAGE_SHIFT, (a + len - 1 - s->lo) >> PAGE_SHIFT, 1);
-    }
+    if (find_locked(a, len)) arm_shared(first_after(lo), lo, hi, 1);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -214,27 +283,30 @@ int nvn_dirty_take(nvn_dirty_range* out, int max) {
     return n;
 }
 
-// A CPU write Lichii saw on guest [address, address + size): new generation, pages disarmed, in
-// every span the range touches (spans change only under g_mu, which is held).
+// A CPU write gives every span covering a touched page the same generation, then disarms the page.
 static void written(uintptr_t a, size_t len) {
     if (!len) return;
-    const uintptr_t e = a + len;
+    const uintptr_t lo = page_lo(a), hi = page_hi(a + len);
     pthread_mutex_lock(&g_mu);
-    int k = 0, lo = 0, hi = g_nspans - 1;
-    while (lo <= hi) {
-        const int m = (lo + hi) / 2;
-        if (g_spans[m]->lo <= a) { k = m; lo = m + 1; } else hi = m - 1;
-    }
+    const int first = first_after(lo);
     uint64_t g = 0;
-    for (; k < g_nspans && g_spans[k]->lo < e; k++) {
-        span_t* s = g_spans[k];
-        if (s->hi <= a) continue;
-        if (!g) g = atomic_fetch_add(&g_now, 1) + 1;
-        const uintptr_t b = a > s->lo ? a : s->lo, end = e < s->hi ? e : s->hi;
-        const uintptr_t p = (b - s->lo) >> PAGE_SHIFT, q = (end - 1 - s->lo) >> PAGE_SHIFT;
-        for (uintptr_t i = p; i <= q; i++) atomic_store(&s->gen[i], g);
-        arm_pages(s, p, q, 0);
-        wlog_add(s->lo + (p << PAGE_SHIFT), s->lo + ((q + 1) << PAGE_SHIFT));
+    uintptr_t logged = lo;
+    for (int i = first; i < g_nspans && g_spans[i]->lo < hi; i++) {
+        span_t* s = g_spans[i];
+        if (s->hi <= lo) continue;
+        if (!g) g = atomic_load(&g_now) + 1;
+        const uintptr_t base = page_lo(s->lo), end = page_hi(s->hi);
+        const uintptr_t b = base > lo ? base : lo, e = end < hi ? end : hi;
+        const uintptr_t p = (b - base) >> PAGE_SHIFT, q = (e - base) >> PAGE_SHIFT;
+        for (uintptr_t j = p; j < q; j++) atomic_store(&s->gen[j], g);
+        if (e > logged) {
+            wlog_add(b > logged ? b : logged, e);
+            logged = e;
+        }
+    }
+    if (g) {
+        arm_shared(first, lo, hi, 0);
+        atomic_store(&g_now, g);
     }
     pthread_mutex_unlock(&g_mu);
 }
@@ -260,7 +332,8 @@ int nvn_dirty_since_span(const void* span, const void* addr, size_t len, uint64_
     const uintptr_t a = (uintptr_t)addr;
     if (!s || !atomic_load(&s->live) || a < s->lo || a + len > s->hi) s = find(a, len);
     if (!s) return 1; // untracked: uploaded again rather than shown stale
-    const uintptr_t p = (a - s->lo) >> PAGE_SHIFT, q = (a + len - 1 - s->lo) >> PAGE_SHIFT;
+    const uintptr_t base = page_lo(s->lo);
+    const uintptr_t p = (a - base) >> PAGE_SHIFT, q = (a + len - 1 - base) >> PAGE_SHIFT;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&s->gen[i]) > stamp) return 1;
     return 0;
 }
@@ -275,12 +348,13 @@ int nvn_dirty_bounds_since(const void* span, const void* addr, size_t len, uint6
     if (!s || !atomic_load(&s->live) || a < s->lo || a + len > s->hi) s = find(a, len);
     if (!s) return 1;
     uintptr_t f = UINTPTR_MAX, l = 0;
-    const uintptr_t p = (a - s->lo) >> PAGE_SHIFT, q = (a + len - 1 - s->lo) >> PAGE_SHIFT;
+    const uintptr_t base = page_lo(s->lo);
+    const uintptr_t p = (a - base) >> PAGE_SHIFT, q = (a + len - 1 - base) >> PAGE_SHIFT;
     for (uintptr_t i = p; i <= q; i++) {
         if (atomic_load(&s->gen[i]) > stamp) { if (f == UINTPTR_MAX) f = i; l = i; }
     }
     if (f == UINTPTR_MAX) return 0;
-    const uintptr_t b0 = s->lo + (f << PAGE_SHIFT), b1 = s->lo + ((l + 1) << PAGE_SHIFT);
+    const uintptr_t b0 = base + (f << PAGE_SHIFT), b1 = base + ((l + 1) << PAGE_SHIFT);
     *lo = b0 > a ? b0 - a : 0;
     *hi = b1 - a < len ? b1 - a : len;
     return 1;
