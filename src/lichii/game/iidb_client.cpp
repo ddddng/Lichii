@@ -69,8 +69,12 @@ QUrl AssetUrl(const QJsonValue& value) {
     if (text.isEmpty() || text.size() > MaxUrlLength || text != text.trimmed()) {
         return {};
     }
-    const auto url = QUrl::fromEncoded(text.toUtf8(), QUrl::StrictMode);
-    return IsAssetUrl(url) ? url : QUrl{};
+    auto url = QUrl::fromEncoded(text.toUtf8(), QUrl::StrictMode);
+    if (!IsAssetUrl(url)) {
+        return {};
+    }
+    url.setPort(-1);
+    return url;
 }
 
 QUrl ApiUrl(const QString& endpoint, const QUrlQuery& query = {}) {
@@ -130,8 +134,8 @@ QString ErrorText(Error error) {
     case Error::NotFound:
         return QCoreApplication::translate("IiDB", "iiDB could not find that game or image.");
     case Error::RateLimited:
-        return QCoreApplication::translate(
-            "IiDB", "iiDB is rate limiting requests. Wait before trying again.");
+        return QCoreApplication::translate("IiDB",
+                                           "iiDB asked Lichii to wait before trying again.");
     case Error::TimedOut:
         return QCoreApplication::translate("IiDB",
                                            "The iiDB request timed out. Try again when ready.");
@@ -161,7 +165,7 @@ bool RateLimits::Blocked(bool image) const {
 void RateLimits::Observe(bool image, const QByteArray& retry_after) {
     using namespace std::chrono;
     const auto now = steady_clock::now();
-    const auto header = retry_after.trimmed();
+    auto header = retry_after.trimmed();
     auto delay = seconds{5};
     if (!header.isEmpty() &&
         std::ranges::all_of(header, [](char c) { return c >= '0' && c <= '9'; })) {
@@ -173,10 +177,15 @@ void RateLimits::Observe(bool image, const QByteArray& retry_after) {
             return;
         }
         delay = seconds{value};
-    } else if (const auto date =
-                   QDateTime::fromString(QString::fromLatin1(header), Qt::RFC2822Date);
-               date.isValid()) {
-        delay = seconds{std::max<qint64>(0, QDateTime::currentDateTimeUtc().secsTo(date) + 1)};
+    } else {
+        if (header.endsWith(" GMT")) {
+            header.chop(4);
+            header.append(" +0000");
+        }
+        const auto date = QDateTime::fromString(QString::fromLatin1(header), Qt::RFC2822Date);
+        if (date.isValid()) {
+            delay = seconds{std::max<qint64>(0, QDateTime::currentDateTimeUtc().secsTo(date) + 1)};
+        }
     }
     if (delay >= duration_cast<seconds>(steady_clock::time_point::max() - now)) {
         retry_until[image] = steady_clock::time_point::max();
@@ -293,7 +302,7 @@ void Client::Gallery(const QByteArray& key, ParentId parent, Category category,
                 const auto original = AssetUrl(record.value("url"_L1));
                 const auto length = record.value("file_size_bytes"_L1).toInteger();
                 if (id <= 0 || record.value("type"_L1).toString() != type || original.isEmpty() ||
-                    length > ArtworkImage::MaxBytes) {
+                    length > ArtworkImage::MaxBytes || record.value("is_animated"_L1).toBool()) {
                     result.skipped_assets = true;
                     continue;
                 }
@@ -362,7 +371,7 @@ void Client::Get(bool image, const QUrl& url, const QByteArray& key, qint64 limi
     struct Transfer {
         QByteArray bytes;
         Error error = Error::None;
-        bool rate_limit_seen = false;
+        bool cooldown_seen = false;
     };
     auto transfer = std::make_shared<Transfer>();
     const auto read = [reply, limit, transfer] {
@@ -383,38 +392,39 @@ void Client::Get(bool image, const QUrl& url, const QByteArray& key, qint64 limi
         transfer->error = Error::TimedOut;
         reply->abort();
     });
-    connect(reply, &QNetworkReply::metaDataChanged, this, [this, image, reply, transfer] {
-        if (!transfer->rate_limit_seen &&
-            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 429) {
-            rate_limits.Observe(image, reply->rawHeader("Retry-After"));
-            transfer->rate_limit_seen = true;
+    const auto observe_cooldown = [this, image, reply, transfer] {
+        const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto retry_after = reply->rawHeader("Retry-After");
+        if (!transfer->cooldown_seen &&
+            (status == 429 || (status == 503 && !retry_after.trimmed().isEmpty()))) {
+            rate_limits.Observe(image, retry_after);
+            transfer->cooldown_seen = true;
         }
-    });
+    };
+    connect(reply, &QNetworkReply::metaDataChanged, this, observe_cooldown);
     connect(reply, &QNetworkReply::readyRead, this, [reply, transfer, read] {
         read();
         if (transfer->error != Error::None) {
             reply->abort();
         }
     });
-    connect(reply, &QNetworkReply::finished, this,
-            [this, image, reply, timer, transfer, read, done = std::move(done)] {
-                (image ? image_reply : api_reply) = nullptr;
-                timer->stop();
-                const auto status =
-                    reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                Error error = HttpError(status, image);
-                if (error == Error::RateLimited && !transfer->rate_limit_seen) {
-                    rate_limits.Observe(image, reply->rawHeader("Retry-After"));
-                } else if ((status == 0 || status == 200) && transfer->error != Error::None) {
-                    error = transfer->error;
-                } else if (error == Error::None) {
-                    read();
-                    error =
-                        reply->error() == QNetworkReply::NoError ? transfer->error : Error::Network;
-                }
-                reply->deleteLater();
-                done(error == Error::None ? std::move(transfer->bytes) : QByteArray{}, error);
-            });
+    connect(
+        reply, &QNetworkReply::finished, this,
+        [this, image, reply, timer, transfer, read, observe_cooldown, done = std::move(done)] {
+            (image ? image_reply : api_reply) = nullptr;
+            timer->stop();
+            const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            observe_cooldown();
+            Error error = transfer->cooldown_seen ? Error::RateLimited : HttpError(status, image);
+            if ((status == 0 || status == 200) && transfer->error != Error::None) {
+                error = transfer->error;
+            } else if (error == Error::None) {
+                read();
+                error = reply->error() == QNetworkReply::NoError ? transfer->error : Error::Network;
+            }
+            reply->deleteLater();
+            done(error == Error::None ? std::move(transfer->bytes) : QByteArray{}, error);
+        });
 }
 
 void Client::CancelReply(QNetworkReply*& active) {

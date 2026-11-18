@@ -51,7 +51,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     title_label->setBuddy(title);
     search_button = new QPushButton(tr("Search"), this);
     search_button->setObjectName(u"iidbSearch"_s);
-    auto* key_button = new QPushButton(tr("API Key…"), this);
+    key_button = new QPushButton(tr("API Key…"), this);
     search_row->addWidget(title_label);
     search_row->addWidget(title, 1);
     search_row->addWidget(search_button);
@@ -89,6 +89,10 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     gallery->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     gallery->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browsing->addWidget(gallery, 1);
+    thumbnail_status = new QLabel(this);
+    thumbnail_status->setObjectName(u"iidbThumbnailStatus"_s);
+    thumbnail_status->setWordWrap(true);
+    browsing->addWidget(thumbnail_status);
     auto* browsing_buttons = new QHBoxLayout;
     more = new QPushButton(tr("Load More"), this);
     more->setObjectName(u"iidbMore"_s);
@@ -178,9 +182,11 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     });
     connect(search_button, &QPushButton::clicked, this, &ArtworkDialog::Search);
     connect(key_button, &QPushButton::clicked, this, [this] {
-        ResetSearch();
+        const auto previous = key;
         ConfigureKey(this);
-        ResetSearch();
+        if (previous != key) {
+            ResetSearch();
+        }
     });
     connect(matches, &QComboBox::activated, this, [this](int index) {
         selected_parent = candidates.at(static_cast<size_t>(index)).id;
@@ -235,9 +241,10 @@ bool ArtworkDialog::eventFilter(QObject* watched, QEvent* event) {
     return QDialog::eventFilter(watched, event);
 }
 
-void ArtworkDialog::UpdateSearchButton() {
+void ArtworkDialog::UpdateRequestControls() {
     search_button->setEnabled(!search_loading && !key.isEmpty() &&
                               !title->text().trimmed().isEmpty());
+    key_button->setEnabled(!search_loading && !page_loading);
 }
 
 void ArtworkDialog::ResetSearch() {
@@ -247,7 +254,7 @@ void ArtworkDialog::ResetSearch() {
     matches->setEnabled(false);
     ResetGallery();
     search_loading = false;
-    UpdateSearchButton();
+    UpdateRequestControls();
     status->setText(key.isEmpty() ? ErrorText(Error::MissingKey)
                                   : tr("Search for the game by title."));
 }
@@ -255,11 +262,11 @@ void ArtworkDialog::ResetSearch() {
 void ArtworkDialog::Search() {
     ResetSearch();
     search_loading = true;
-    UpdateSearchButton();
+    UpdateRequestControls();
     status->setText(tr("Searching iiDB…"));
     client.Search(key, title->text().trimmed(), [this](std::vector<Candidate> found, Error error) {
         search_loading = false;
-        UpdateSearchButton();
+        UpdateRequestControls();
         if (error != Error::None) {
             status->setText(ErrorText(error));
             return;
@@ -302,6 +309,7 @@ void ArtworkDialog::ResetGallery() {
     pages = 0;
     more->setText(tr("Load More"));
     more->setEnabled(false);
+    thumbnail_status->hide();
     ClearPreview();
 }
 
@@ -311,12 +319,14 @@ void ArtworkDialog::LoadPage() {
         return;
     }
     page_loading = true;
+    UpdateRequestControls();
     more->setEnabled(false);
     status->setText(tr("Loading %1…").arg(categories->tabText(categories->currentIndex())));
     const auto category = Categories.at(static_cast<size_t>(categories->currentIndex()));
     client.Gallery(
         key, *selected_parent, category, next_cursor, [this](GalleryPage page, Error error) {
             page_loading = false;
+            UpdateRequestControls();
             if (error != Error::None) {
                 status->setText(ErrorText(error));
                 more->setText(tr("Retry Gallery"));
@@ -385,9 +395,11 @@ void ArtworkDialog::LoadVisibleThumbnail() {
         client.Download(entry.asset.thumbnail, true, [this, row](QByteArray bytes, Error error) {
             thumbnail_loading = false;
             if (error == Error::RateLimited) {
-                status->setText(ErrorText(error));
+                thumbnail_status->setText(tr("Thumbnails are temporarily unavailable."));
+                thumbnail_status->show();
                 return;
             }
+            thumbnail_status->hide();
             assets.at(static_cast<size_t>(row)).thumbnail_checked = true;
             if (error == Error::None) {
                 const auto image = ArtworkImage::Decode(bytes, ThumbnailSize);

@@ -11,6 +11,8 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QImage>
+#include <QImageReader>
+#include <QImageWriter>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -77,8 +79,9 @@ public:
         emit metaDataChanged();
     }
 
-    void Complete(int status, QByteArray body = {}, qint64 length = -1) {
-        Status(status, {}, length);
+    void Complete(int status, QByteArray body = {}, qint64 length = -1,
+                  const QByteArray& retry_after = {}) {
+        Status(status, retry_after, length);
         data = std::move(body);
         if (!data.isEmpty()) {
             emit readyRead();
@@ -175,27 +178,34 @@ QByteArray SyntheticImage(const char* format = "PNG", QSize size = {320, 500},
     return bytes;
 }
 
-void ConfirmMatch(ArtworkDialog& dialog, FakeNetwork& api) {
+bool ConfirmMatch(ArtworkDialog& dialog, FakeNetwork& api) {
     dialog.findChild<QPushButton*>(u"iidbSearch"_s)->click();
-    QVERIFY(api.last);
+    if (!api.last || api.requests.size() != 1) {
+        return false;
+    }
     api.last->Complete(200, Matches);
     auto* match = dialog.findChild<QComboBox*>(u"iidbMatches"_s);
-    QCOMPARE(match->currentIndex(), -1);
-    QCOMPARE(match->itemText(0), u"Fixture Quest · Fixture Console · 2024"_s);
-    QCOMPARE(api.requests.size(), 1);
+    if (match->currentIndex() != -1 ||
+        match->itemText(0) != u"Fixture Quest · Fixture Console · 2024"_s ||
+        api.requests.size() != 1) {
+        return false;
+    }
     match->setFocus();
     QTest::keyClick(match, Qt::Key_Down);
-    QCOMPARE(api.requests.size(), 2);
+    return api.requests.size() == 2 && api.last && !api.last->isFinished();
 }
 
 class ArtworkTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase();
     void NoKeyIsOffline();
     void ApiAndAssetBoundaries();
     void CancelTimeoutAndRetryAfter();
     void ByteAndPixelLimits();
+    void StaticGalleryChecks();
+    void ThumbnailCooldownDoesNotHideGalleryError();
     void CategoryChangeKeepsTitleSearch();
     void PickerStagesOnly();
     void LazyGalleryAndPageLimit();
@@ -203,6 +213,12 @@ private slots:
     void InstallWritesOnlyExactLocalId();
 #endif
 };
+
+void ArtworkTest::initTestCase() {
+    QVERIFY2(QImageReader::supportedImageFormats().contains("webp") &&
+                 QImageWriter::supportedImageFormats().contains("webp"),
+             "Install Qt's qtimageformats module with the WebP plugin to run iiDB artwork tests.");
+}
 
 void ArtworkTest::NoKeyIsOffline() {
     Service service;
@@ -264,6 +280,7 @@ void ArtworkTest::ApiAndAssetBoundaries() {
           u"https://assets.iisu.network/a#fragment"_s, u"https://assets.iisu.network/a/%2E%2E/c"_s,
           u"https://assets.iisu.network/a%2f..%2fb"_s, u"https://assets.iisu.network/a%0db"_s,
           u"https://iidb-api.iisu.network/api/v1/me/access"_s}) {
+        result = Error::None;
         service.client.Download(QUrl(url), false, download);
         QCOMPARE(result, Error::UnsafeUrl);
     }
@@ -313,11 +330,18 @@ void ArtworkTest::CancelTimeoutAndRetryAfter() {
     QCOMPARE(timer->interval(), 12000);
     QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
     QCOMPARE(result, Error::TimedOut);
-    const auto date = QDateTime::currentDateTimeUtc().addSecs(60).toString(Qt::RFC2822Date);
-    service.rate_limits.Observe(true, date.toLatin1());
+    const auto http_date = [](int seconds) {
+        auto date = QDateTime::currentDateTimeUtc().addSecs(seconds).toString(Qt::RFC2822Date);
+        return date.chopped(5).toLatin1() + "GMT";
+    };
+    service.rate_limits.Observe(true, http_date(-60));
+    QVERIFY(!service.rate_limits.Blocked(true));
+    service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
+    service.images->last->Complete(503, {}, -1, http_date(60));
+    QCOMPARE(result, Error::RateLimited);
     service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
     QCOMPARE(result, Error::RateLimited);
-    QCOMPARE(service.images->requests.size(), 1);
+    QCOMPARE(service.images->requests.size(), 2);
 }
 
 void ArtworkTest::ByteAndPixelLimits() {
@@ -339,11 +363,62 @@ void ArtworkTest::ByteAndPixelLimits() {
     QCOMPARE(result, Error::TooLarge);
 
     QVERIFY(ArtworkImage::Decode("not an image").isNull());
-    QVERIFY(ArtworkImage::Decode(SyntheticImage("PNG", {8193, 1})).isNull());
-    QVERIFY(ArtworkImage::Decode(SyntheticImage("PNG", {4097, 4096}, QImage::Format_Grayscale8))
-                .isNull());
+    const auto oversized_side = SyntheticImage("PNG", {8193, 1});
+    const auto oversized_area = SyntheticImage("PNG", {4097, 4096}, QImage::Format_Grayscale8);
+    QVERIFY(!oversized_side.isEmpty());
+    QVERIFY(!oversized_area.isEmpty());
+    QVERIFY(ArtworkImage::Decode(oversized_side).isNull());
+    QVERIFY(ArtworkImage::Decode(oversized_area).isNull());
     QCOMPARE(ArtworkImage::Decode(SyntheticImage("WEBP", {60, 80}), QSize{30, 40}).size(),
              QSize(30, 40));
+}
+
+void ArtworkTest::StaticGalleryChecks() {
+    Service service;
+    GalleryPage result;
+    Error error = Error::Busy;
+    service.client.Gallery(FakeKey, ParentId{RemoteParent}, Category::BoxArt, {},
+                           [&](GalleryPage page, Error err) {
+                               result = std::move(page);
+                               error = err;
+                           });
+    auto response = QJsonDocument::fromJson(Gallery(u"boxart"_s, {}, 3, 1, true)).object();
+    auto items = response.value("items"_L1).toArray();
+    auto animated = items.at(0).toObject();
+    animated.insert(u"is_animated"_s, true);
+    items.replace(0, animated);
+    auto same_as_original = items.at(1).toObject();
+    same_as_original.insert(u"thumbnail_url"_s,
+                            u"https://assets.iisu.network:443/synthetic/original.png"_s);
+    items.replace(1, same_as_original);
+    response.insert(u"items"_s, items);
+    service.api->last->Complete(200, QJsonDocument(response).toJson(QJsonDocument::Compact));
+    QCOMPARE(error, Error::None);
+    QVERIFY(result.skipped_assets);
+    QCOMPARE(result.assets.size(), 2u);
+    QCOMPARE(result.assets.at(0).id, 2);
+    QVERIFY(result.assets.at(0).thumbnail.isEmpty());
+    QCOMPARE(result.assets.at(1).thumbnail,
+             QUrl(u"https://assets.iisu.network/synthetic/3.webp"_s));
+}
+
+void ArtworkTest::ThumbnailCooldownDoesNotHideGalleryError() {
+    Service service;
+    ArtworkDialog dialog(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    QVERIFY(ConfirmMatch(dialog, *service.api));
+    service.api->last->Complete(200, Gallery(u"iisu_boxart"_s, u"next"_s, 1, 1, true));
+    QTRY_COMPARE(service.images->requests.size(), 1);
+    auto* more = dialog.findChild<QPushButton*>(u"iidbMore"_s);
+    more->click();
+    service.api->last->Complete(503);
+    service.images->last->Complete(429, {}, -1, "120");
+    QCOMPARE(dialog.findChild<QLabel*>(u"iidbStatus"_s)->text(), ErrorText(Error::Network));
+    QVERIFY(dialog.findChild<QLabel*>(u"iidbThumbnailStatus"_s)->isVisible());
+    QVERIFY(more->isEnabled());
+    more->click();
+    QCOMPARE(service.api->requests.size(), 4);
 }
 
 void ArtworkTest::CategoryChangeKeepsTitleSearch() {
@@ -374,7 +449,7 @@ void ArtworkTest::PickerStagesOnly() {
     dialog.show();
     QVERIFY(QTest::qWaitForWindowExposed(&dialog));
     QVERIFY(service.api->requests.isEmpty());
-    ConfirmMatch(dialog, *service.api);
+    QVERIFY(ConfirmMatch(dialog, *service.api));
     auto* categories = dialog.findChild<QTabBar*>(u"iidbCategories"_s);
     auto* gallery = dialog.findChild<QListWidget*>(u"iidbGallery"_s);
     auto* preview = dialog.findChild<QPushButton*>(u"iidbPreview"_s);
@@ -429,7 +504,7 @@ void ArtworkTest::PickerStagesOnly() {
     ArtworkDialog confirm(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
     service.api->requests.clear();
     confirm.show();
-    ConfirmMatch(confirm, *service.api);
+    QVERIFY(ConfirmMatch(confirm, *service.api));
     service.api->last->Complete(200, Gallery(u"iisu_boxart"_s));
     confirm.findChild<QListWidget*>(u"iidbGallery"_s)->setCurrentRow(0);
     confirm.findChild<QPushButton*>(u"iidbPreview"_s)->click();
@@ -444,7 +519,7 @@ void ArtworkTest::LazyGalleryAndPageLimit() {
     ArtworkDialog dialog(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
     dialog.show();
     QVERIFY(QTest::qWaitForWindowExposed(&dialog));
-    ConfirmMatch(dialog, *service.api);
+    QVERIFY(ConfirmMatch(dialog, *service.api));
     const auto type = u"iisu_boxart"_s;
     service.api->last->Complete(200, Gallery(type, u"cursor+1/%"_s, Client::PageSize, 1, true));
     QTRY_COMPARE(service.images->requests.size(), 1);
@@ -486,8 +561,9 @@ void ArtworkTest::LazyGalleryAndPageLimit() {
 void ArtworkTest::InstallWritesOnlyExactLocalId() {
     const QTemporaryDir user;
     QVERIFY(user.isValid());
-    Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir,
-                            std::filesystem::path(user.path().toStdU16String()));
+    const std::filesystem::path root(user.path().toStdU16String());
+    Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir, root);
+    QVERIFY(Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) == root);
     constexpr u64 chosen_id = 0x040000AABBCC0000;
     constexpr u64 other_id = 0x040000AABBCE0000;
     QImage old_image(64, 64, QImage::Format_RGB32);
@@ -500,7 +576,7 @@ void ArtworkTest::InstallWritesOnlyExactLocalId() {
     Service service;
     ArtworkDialog dialog(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
     dialog.show();
-    ConfirmMatch(dialog, *service.api);
+    QVERIFY(ConfirmMatch(dialog, *service.api));
     service.api->last->Complete(200, Gallery(u"iisu_boxart"_s));
     dialog.findChild<QListWidget*>(u"iidbGallery"_s)->setCurrentRow(0);
     auto* preview = dialog.findChild<QPushButton*>(u"iidbPreview"_s);
@@ -518,7 +594,7 @@ void ArtworkTest::InstallWritesOnlyExactLocalId() {
     ArtworkDialog confirm(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
     service.api->requests.clear();
     confirm.show();
-    ConfirmMatch(confirm, *service.api);
+    QVERIFY(ConfirmMatch(confirm, *service.api));
     service.api->last->Complete(200, Gallery(u"iisu_boxart"_s));
     confirm.findChild<QListWidget*>(u"iidbGallery"_s)->setCurrentRow(0);
     confirm.findChild<QPushButton*>(u"iidbPreview"_s)->click();
