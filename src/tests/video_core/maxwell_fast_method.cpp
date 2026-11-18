@@ -2372,6 +2372,7 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     constexpr u32 Equal = 0x1;
     constexpr u32 Mask = 0x8;
     constexpr u32 OneWordRelease = 0x2 | (1U << 24);
+    constexpr u32 WideRelease = 0x2; // With a timestamp: lands as the back runs it
     constexpr GPUVAddr word = MappedPages::gpu_address + 0x1000;
     constexpr DAddr word_device = MappedPages::device_address + 0x1000;
     const auto fixture = std::make_unique<Fixture>();
@@ -2463,7 +2464,7 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
             std::this_thread::yield();
         }
     });
-    semaphore(7, OneWordRelease);
+    semaphore(7, WideRelease);
     CHECK(acquire(Equal, 7));
     CHECK(acquire(Mask, 3));
     CHECK(stats.by_queued.load() == by_queued + 2);
@@ -2475,19 +2476,41 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     fences.RunFence();
     CHECK(f.memory.Read<u32>(word) == 7);
 
-    // The back ran a release whose fence has yet to run: its payload decides, not memory.
+    // The back ran a release whose fence has yet to run: memory holds the word before it until it
+    // lands, and an acquire that drains reads memory. Passed on 8 now, the channel could pass on
+    // the 7 still there next. It drains and waits for the fence.
+    const u64 unlanded = unsettled(AcquireUnsettled::Fenced);
     fenced(8, true, false);
-    CHECK(acquire(Equal, 8));
-    CHECK(stats.by_queued.load() == by_queued + 1);
-    drains(0);
-    CHECK(acquire(Equal, 7)); // Memory meets it, until the release lands: it drains
+    CHECK(acquire(Equal, 7));
     drains(1);
+    CHECK_FALSE(acquire(Equal, 8));
+    CHECK(stats.by_queued.load() == by_queued);
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Fenced) == unlanded + 2);
     fences.RunFence();
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
+    // A fence-flagged one-word release still queued, likewise.
+    release = false;
+    split.Defer([&release, before = stats.drained.load()] {
+        while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    semaphore(10, OneWordRelease);
+    CHECK_FALSE(acquire(Mask, 2));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Fenced) == unlanded + 3);
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    fences.RunFence();
+    CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
+    drains(0);
 
     // A queued release of unknown value, or of a lower bound: memory may change under it.
     const u64 unknown = unsettled(AcquireUnsettled::Unknown);
     fenced(9, false, false);
-    CHECK(acquire(Equal, 8));
+    CHECK(acquire(Equal, 10));
     drains(1);
     fences.RunFence();
     fenced(10, true, true);
