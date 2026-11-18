@@ -745,6 +745,7 @@ struct System::Impl {
     Network::NetworkInstance network_instance;
     Core::SpeedLimiter speed_limiter;
     ExecuteProgramCallback execute_program_callback;
+    LaunchInNewSessionCallback launch_in_new_session_callback;
     ExitCallback exit_callback;
     ApplicationChangedCallback application_changed_callback;
 
@@ -1219,6 +1220,18 @@ void System::ExecuteProgram(std::size_t program_index) {
     } else {
         LOG_CRITICAL(Core, "execute_program_callback must be initialized by the frontend");
     }
+}
+
+void System::RegisterLaunchInNewSessionCallback(LaunchInNewSessionCallback&& callback) {
+    impl->launch_in_new_session_callback = std::move(callback);
+}
+
+bool System::LaunchInNewSession(u64 program_id) {
+    if (!impl->launch_in_new_session_callback) {
+        return false;
+    }
+    impl->launch_in_new_session_callback(program_id);
+    return true;
 }
 
 const std::string& System::GetCurrentApplicationFilePath() const {

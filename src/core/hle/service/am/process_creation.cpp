@@ -8,6 +8,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/service/am/process_creation.h"
@@ -110,6 +111,25 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, 
         return process;
     }
     return nullptr;
+}
+
+bool IsSwitch2Application(Core::System& system, u64 program_id) {
+    auto& storage = system.GetContentProviderUnion();
+    auto nca_raw = storage.GetEntryRaw(FileSys::GetUpdateTitleID(program_id),
+                                       FileSys::ContentRecordType::Program);
+    if (!nca_raw) {
+        nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
+    }
+    if (!nca_raw) {
+        return false;
+    }
+
+    const FileSys::NCA nca{nca_raw};
+    const auto exefs = nca.GetExeFS();
+    const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+    FileSys::ProgramMetadata metadata;
+    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+           metadata.IsSwitch2();
 }
 
 bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id) {
