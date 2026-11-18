@@ -13,6 +13,7 @@
 #include <QString>
 #include <QUrl>
 
+class QDateTime;
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -73,6 +74,8 @@ public:
 
     bool Blocked(bool image, Clock::time_point now = Clock::now()) const;
     void Observe(bool image, const QByteArray& retry_after);
+    void Observe(bool image, const QByteArray& retry_after, const QDateTime& utc_now,
+                 Clock::time_point now);
 
 private:
     std::array<Clock::time_point, 2> retry_until{};

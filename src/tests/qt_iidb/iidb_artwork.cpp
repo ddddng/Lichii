@@ -204,10 +204,11 @@ private slots:
     void NoKeyIsOffline();
     void ApiAndAssetBoundaries();
     void CancelTimeoutAndRetryAfter();
-    void LegacyHttpDateCooldowns();
+    void HttpDateCooldowns();
     void ByteAndPixelLimits();
     void StaticGalleryChecks();
     void ThumbnailCooldownDoesNotHideGalleryError();
+    void ThumbnailCooldownDoesNotRetry();
     void CategoryChangeKeepsTitleSearch();
     void PickerStagesOnly();
     void LazyGalleryAndPageLimit();
@@ -341,34 +342,39 @@ void ArtworkTest::CancelTimeoutAndRetryAfter() {
     service.rate_limits.Observe(true, http_date(-60));
     QVERIFY(!service.rate_limits.Blocked(true));
     service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
-    const auto before = RateLimits::Clock::now();
     service.images->last->Complete(503, {}, -1, http_date(60));
-    const auto after = RateLimits::Clock::now();
     QCOMPARE(result, Error::RateLimited);
-    QVERIFY(service.rate_limits.Blocked(true, before + std::chrono::seconds{6}));
-    QVERIFY(!service.rate_limits.Blocked(true, after + std::chrono::seconds{62}));
     result = Error::None;
     service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
     QCOMPARE(result, Error::RateLimited);
     QCOMPARE(service.images->requests.size(), 2);
 }
 
-void ArtworkTest::LegacyHttpDateCooldowns() {
-    const auto now = QDateTime::currentDateTimeUtc();
+void ArtworkTest::HttpDateCooldowns() {
+    using namespace std::chrono_literals;
+    const auto utc = QDateTime::fromString(u"2026-11-06T13:00:00Z"_s, Qt::ISODate);
+    QVERIFY(utc.isValid());
+    const auto now = RateLimits::Clock::time_point{1000s};
     const auto locale = QLocale::c();
+    const auto imf = u"ddd, dd MMM yyyy hh:mm:ss 'GMT'"_s;
     const auto rfc850 = u"dddd, dd-MMM-yy hh:mm:ss 'GMT'"_s;
-    const auto asctime = u"ddd MMM d hh:mm:ss yyyy"_s;
-    for (const auto& format : {rfc850, asctime}) {
+    const auto asctime = u"ddd MMM  d hh:mm:ss yyyy"_s;
+    for (const auto& format : {imf, rfc850, asctime}) {
         RateLimits limits;
-        const auto before = RateLimits::Clock::now();
-        limits.Observe(false, locale.toString(now.addSecs(60), format).toLatin1());
-        const auto after = RateLimits::Clock::now();
-        QVERIFY(limits.Blocked(false, before + std::chrono::seconds{6}));
-        QVERIFY(!limits.Blocked(false, after + std::chrono::seconds{62}));
+        limits.Observe(false, locale.toString(utc.addSecs(60), format).toLatin1(), utc, now);
+        QVERIFY(limits.Blocked(false, now + 59s));
+        QVERIFY(!limits.Blocked(false, now + 62s));
     }
     RateLimits expired;
-    expired.Observe(false, locale.toString(now.addYears(51), rfc850).toLatin1());
-    QVERIFY(!expired.Blocked(false));
+    expired.Observe(false, locale.toString(utc.addYears(51), rfc850).toLatin1(), utc, now);
+    QVERIFY(!expired.Blocked(false, now));
+
+    for (const auto& malformed : {"Bogusday, 06-Nov-26 13:01:00 GMT", "Bog Nov  6 13:01:00 2026"}) {
+        RateLimits limits;
+        limits.Observe(false, malformed, utc, now);
+        QVERIFY(limits.Blocked(false, now + 4s));
+        QVERIFY(!limits.Blocked(false, now + 5s));
+    }
 }
 
 void ArtworkTest::ByteAndPixelLimits() {
@@ -448,6 +454,25 @@ void ArtworkTest::ThumbnailCooldownDoesNotHideGalleryError() {
     QVERIFY(more->isEnabled());
     more->click();
     QCOMPARE(service.api->requests.size(), 4);
+}
+
+void ArtworkTest::ThumbnailCooldownDoesNotRetry() {
+    Service service;
+    ArtworkDialog dialog(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    QVERIFY(ConfirmMatch(dialog, *service.api));
+    service.api->last->Complete(200, Gallery(u"iisu_boxart"_s, {}, 1, 1, true));
+    QTRY_COMPARE(service.images->requests.size(), 1);
+    auto* view = dialog.findChild<QListWidget*>(u"iidbGallery"_s)->viewport();
+    const auto original_size = view->size();
+    service.images->last->Complete(429, {}, -1, "0");
+    QCoreApplication::processEvents();
+    QCOMPARE(view->size(), original_size);
+    QVERIFY(dialog.findChild<QLabel*>(u"iidbThumbnailStatus"_s)->isVisible());
+    dialog.resize(dialog.width(), dialog.height() + 20);
+    QCoreApplication::processEvents();
+    QCOMPARE(service.images->requests.size(), 1);
 }
 
 void ArtworkTest::CategoryChangeKeepsTitleSearch() {

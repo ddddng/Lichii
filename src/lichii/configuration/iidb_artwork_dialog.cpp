@@ -89,9 +89,12 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     gallery->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     gallery->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browsing->addWidget(gallery, 1);
-    thumbnail_status = new QLabel(this);
+    thumbnail_status = new QLabel(tr("Thumbnails are temporarily unavailable."), this);
     thumbnail_status->setObjectName(u"iidbThumbnailStatus"_s);
     thumbnail_status->setWordWrap(true);
+    auto thumbnail_notice_policy = thumbnail_status->sizePolicy();
+    thumbnail_notice_policy.setRetainSizeWhenHidden(true);
+    thumbnail_status->setSizePolicy(thumbnail_notice_policy);
     browsing->addWidget(thumbnail_status);
     auto* browsing_buttons = new QHBoxLayout;
     more = new QPushButton(tr("Load More"), this);
@@ -394,13 +397,12 @@ void ArtworkDialog::LoadVisibleThumbnail() {
         thumbnail_loading = true;
         client.Download(entry.asset.thumbnail, true, [this, row](QByteArray bytes, Error error) {
             thumbnail_loading = false;
+            assets.at(static_cast<size_t>(row)).thumbnail_checked = true;
             if (error == Error::RateLimited) {
-                thumbnail_status->setText(tr("Thumbnails are temporarily unavailable."));
                 thumbnail_status->show();
                 return;
             }
             thumbnail_status->hide();
-            assets.at(static_cast<size_t>(row)).thumbnail_checked = true;
             if (error == Error::None) {
                 const auto image = ArtworkImage::Decode(bytes, ThumbnailSize);
                 if (!image.isNull()) {
