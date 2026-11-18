@@ -355,7 +355,7 @@ ISystemSettingsServer::ISystemSettingsServer(
     RegisterHandlers(functions);
 
     if (m_isolated_system_data) {
-        m_system_settings = DefaultSystemSettings();
+        InitializeDefaultSystemSettings(m_system_settings);
         m_system_settings.language_code = GetLanguageCodeFromIndex(
             static_cast<std::size_t>(::Settings::values.language_index.GetValue()));
         m_private_settings = DefaultPrivateSettings();
@@ -1538,7 +1538,11 @@ Result ISystemSettingsServer::GetDefaultAccountUserSettings(Out<AccountUserSetti
 
 void ISystemSettingsServer::SetupSettings() {
     auto system_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) / "system/save/8000000000000050";
-    if (!LoadSettingsFile(system_dir, []() { return DefaultSystemSettings(); })) {
+    if (!LoadSettingsFile(system_dir, [] {
+            SystemSettings settings{};
+            InitializeDefaultSystemSettings(settings);
+            return settings;
+        })) {
         ASSERT(false);
     }
 
