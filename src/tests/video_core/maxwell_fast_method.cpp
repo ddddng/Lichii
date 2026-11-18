@@ -2634,6 +2634,30 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     f.memory.Write<u32>(word, 0x80000000);
     CHECK(dma_pusher.puller.ResumeAcquire(dma_pusher));
     drains(0);
+    f.memory.Write<u32>(word, 11);
+
+    // A state block the front still holds may issue a deferred draw, whose shader stores may write
+    // the word: it is sent first, and the acquire waits for it (held until the acquire drains).
+    const u64 blocked = unsettled(AcquireUnsettled::Writes);
+    release = false;
+    split.Defer(
+        [&release, before = stats.drained.load()] {
+            while (VideoCommon::g_acquire_stats.drained.load() == before && !release.load()) {
+                std::this_thread::yield();
+            }
+        },
+        0, VideoCommon::GpuSplit::Writes::Noted);
+    split.Publish();
+    const u32 state_method = f.state_methods[10];
+    split.StateWrite(&f.fast, state_method, 0x1234,
+                     {f.fast.dirty.tables[0][state_method], f.fast.dirty.tables[1][state_method]},
+                     false, true);
+    CHECK(acquire(Equal, 11));
+    drains(1);
+    CHECK(unsettled(AcquireUnsettled::Writes) == blocked + 1);
+    CHECK(f.fast.regs.reg_array[state_method] == 0x1234);
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
 }
 
 TEST_CASE("Split front sends state writes to the back as register blocks that match single writes",
