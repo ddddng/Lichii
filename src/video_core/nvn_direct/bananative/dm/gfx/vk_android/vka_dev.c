@@ -806,6 +806,7 @@ void vka_destroy(void) {
     vk.vkDestroySemaphore(V.dev, V.tl, NULL);
     vka_census_line();
     free((void *)g_adopt.extensions);
+    __atomic_store_n(&g_state, -1, __ATOMIC_RELEASE);
 }
 #endif
 
