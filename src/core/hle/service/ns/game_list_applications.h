@@ -38,6 +38,7 @@ std::vector<u64> ListGameListApplications(Core::System& system);
 
 /// An application's NACP and icon: from its installed control data, else from its game list file.
 FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& system,
-                                                              u64 application_id);
+                                                              u64 application_id,
+                                                              bool include_icon = true);
 
 } // namespace Service::NS
