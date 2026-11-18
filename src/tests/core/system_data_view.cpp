@@ -3,7 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,10 +24,14 @@
 #include "core/file_sys/errors.h"
 #include "core/file_sys/fssystem/fssystem_nca_header.h"
 #include "core/file_sys/nca_metadata.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/romfs_factory.h"
+#include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/api_version.h"
+#include "core/hle/kernel/k_server_session.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/glue/time/time_zone_binary.h"
 #include "core/hle/service/hle_ipc.h"
@@ -30,6 +39,7 @@
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/set/system_settings_server.h"
 #include "core/hle/service/system_data_view.h"
+#include "core/loader/deconstructed_rom_directory.h"
 #include "tests/audio_core/sysmix_test_context.h"
 
 namespace {
@@ -141,6 +151,59 @@ void WriteLegacyRecord(const FileSys::VirtualDir& registered, u64 title,
         CNMT{metadata, {}, {ContentRecord{{}, nca_id, {}, ContentRecordType::Data, 0}}, {}}
             .Serialize();
     REQUIRE(meta->WriteBytes(cnmt) == cnmt.size());
+}
+
+class ObservedArchive final : public FileSys::VectorVfsFile {
+public:
+    using VectorVfsFile::VectorVfsFile;
+
+    std::size_t Read(u8* out, std::size_t size, std::size_t offset) const override {
+        ++reads;
+        return VectorVfsFile::Read(out, short_read && size != 0 ? size - 1 : size, offset);
+    }
+
+    std::size_t Write(const u8* data, std::size_t size, std::size_t offset) override {
+        ++writes;
+        return VectorVfsFile::Write(data, size, offset);
+    }
+
+    bool Resize(std::size_t size) override {
+        ++writes;
+        return VectorVfsFile::Resize(size);
+    }
+
+    mutable size_t reads{};
+    size_t writes{};
+    bool short_read{};
+};
+
+class ObservedProfile final : public FileSys::RealVfsFilesystem {
+public:
+    FileSys::VirtualFile OpenFile(std::string_view path, FileSys::OpenMode mode) override {
+        ++opens;
+        return RealVfsFilesystem::OpenFile(path, mode);
+    }
+
+    FileSys::VirtualDir OpenDirectory(std::string_view path, FileSys::OpenMode mode) override {
+        ++opens;
+        return RealVfsFilesystem::OpenDirectory(path, mode);
+    }
+
+    std::atomic<size_t> opens{};
+};
+
+std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesystem::path& root) {
+    std::map<std::filesystem::path, std::string> snapshot;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) {
+            std::ifstream file{entry.path(), std::ios::binary};
+            REQUIRE(file.is_open());
+            snapshot.emplace(entry.path(), std::string{std::istreambuf_iterator<char>{file}, {}});
+        } else {
+            snapshot.emplace(entry.path(), std::string{});
+        }
+    }
+    return snapshot;
 }
 
 } // namespace
@@ -339,4 +402,229 @@ TEST_CASE("The startup time-zone mount never substitutes legacy system data",
     CHECK(std::string_view{version.data()} == "legacy");
     REQUIRE(legacy.GetTimeZoneRule(rule, rule_size, gmt).IsSuccess());
     CHECK(std::ranges::equal(rule, legacy_rule));
+}
+
+TEST_CASE("Strict FSP binds its caller and only serves exact read-only system data",
+          "[core][native_home_fsp]") {
+    using FileSys::StorageId;
+    using Service::FileSystem::CreateFileSystemProxy;
+    using Common::FS::EdenPath;
+    constexpr u64 NativeData = 0x0400000000000AF0;
+    constexpr u64 SharedOnly = 0x0400000000000AF1;
+    constexpr u64 LegacyHome = 0x0100000000001000;
+    SysmixTests::Context context;
+    auto& system = context.system;
+    auto& kernel = system.Kernel();
+    const auto root = Common::FS::GetEdenPath(EdenPath::NANDDir);
+    constexpr std::array routed_paths{EdenPath::SDMCDir, EdenPath::SaveDir, EdenPath::LoadDir,
+                                      EdenPath::DumpDir};
+    std::array<std::filesystem::path, routed_paths.size()> previous_paths{};
+    for (size_t i = 0; i < routed_paths.size(); ++i) {
+        previous_paths[i] = Common::FS::GetEdenPath(routed_paths[i]);
+        Common::FS::SetEdenPath(routed_paths[i], root);
+    }
+    const bool previous_auto_stub = Settings::values.use_auto_stub.GetValue();
+    Settings::values.use_auto_stub.SetValue(true);
+    SCOPE_EXIT {
+        Settings::values.use_auto_stub.SetValue(previous_auto_stub);
+        for (size_t i = 0; i < routed_paths.size(); ++i) {
+            Tests::RestoreEdenPath(routed_paths[i], previous_paths[i]);
+        }
+    };
+
+    auto* owner = Kernel::KProcess::Create(kernel);
+    SCOPE_EXIT { owner->Close(kernel); };
+    REQUIRE(owner->LoadFromMetadata(kernel, FileSys::ProgramMetadata::GetDefault(), 0x1000, {}, 0)
+                .IsSuccess());
+    Kernel::KProcess::Register(kernel, owner);
+    REQUIRE(owner->GetProcessId() != 0);
+    CHECK_FALSE(owner->IsSwitch2());
+    Kernel::KProcessAddress heap{};
+    REQUIRE(owner->GetPageTable().SetMaxHeapSize(0x1000).IsSuccess());
+    REQUIRE(owner->GetPageTable().SetHeapSize(&heap, 0x1000).IsSuccess());
+    const u64 output_address = GetInteger(heap);
+
+    Kernel::KThread client{kernel};
+    Kernel::KAutoObject::Create(&client);
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &client, owner).IsSuccess());
+    SCOPE_EXIT {
+        owner->UnregisterThread(kernel, &client);
+        owner->Close(kernel);
+        kernel.UnregisterKernelObject(&client);
+    };
+    Kernel::KThread other_client{kernel};
+    Kernel::KAutoObject::Create(&other_client);
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &other_client, &*context.process)
+                .IsSuccess());
+    SCOPE_EXIT {
+        context.process->UnregisterThread(kernel, &other_client);
+        context.process->Close(kernel);
+        kernel.UnregisterKernelObject(&other_client);
+    };
+    Kernel::KServerSession session{kernel};
+    std::optional<std::jthread> server_thread;
+    Service::ServerManager server{system};
+    server_thread.emplace(kernel.RunOnHostCoreProcess("fsp-data-test", [&] { server.LoopProcess(); }));
+
+    using Manager = std::shared_ptr<Service::SessionRequestManager>;
+    const auto make_manager = [&](std::shared_ptr<Service::SessionRequestHandler> handler) {
+        auto manager = std::make_shared<Service::SessionRequestManager>(kernel, server);
+        manager->SetSessionHandler(std::move(handler));
+        manager->ConvertToDomain();
+        return manager;
+    };
+    const auto request = [&](const Manager& manager, Kernel::KThread& caller, u32 object_id,
+                             u32 command, std::span<const u32> raw = {}, bool send_pid = false,
+                             u32 out_size = 0) {
+        std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> words{};
+        IPC::CommandHeader header{};
+        header.type.Assign(IPC::CommandType::Request);
+        header.enable_handle_descriptor.Assign(send_pid);
+        header.num_buf_b_descriptors.Assign(out_size != 0);
+        header.data_size.Assign(static_cast<u32>(12 + raw.size()));
+        std::memcpy(words.data(), &header, sizeof(header));
+        size_t word = 2;
+        if (send_pid) {
+            IPC::HandleDescriptorHeader handles{};
+            handles.send_current_pid.Assign(1);
+            std::memcpy(words.data() + word, &handles, sizeof(handles));
+            word += 3;
+        }
+        if (out_size != 0) {
+            IPC::BufferDescriptorABW buffer{};
+            buffer.size_bits_0_31 = out_size;
+            buffer.address_bits_0_31 = static_cast<u32>(output_address);
+            buffer.address_bits_32_35.Assign(static_cast<u32>((output_address >> 32) & 0xf));
+            buffer.address_bits_36_38.Assign(static_cast<u32>((output_address >> 36) & 0x7));
+            std::memcpy(words.data() + word, &buffer, sizeof(buffer));
+            word += 3;
+        }
+        word = (word + 3) & ~size_t{3};
+        IPC::DomainMessageHeader domain{};
+        domain.command.Assign(IPC::DomainMessageHeader::CommandType::SendMessage);
+        domain.size.Assign(static_cast<u32>((4 + raw.size()) * sizeof(u32)));
+        domain.object_id = object_id;
+        std::memcpy(words.data() + word, &domain, sizeof(domain));
+        words[word + 4] = 0x49434653;
+        words[word + 6] = command;
+        std::copy(raw.begin(), raw.end(), words.begin() + word + 8);
+
+        Service::HLERequestContext ctx{kernel, caller.GetOwnerProcess()->GetMemory(), &session,
+                                       &caller};
+        ctx.SetSessionRequestManager(manager);
+        REQUIRE(ctx.PopulateFromIncomingCommandBuffer(words.data()).IsSuccess());
+        REQUIRE(manager->CompleteSyncRequest(&session, ctx).IsSuccess());
+        REQUIRE(ctx.CommandBuffer()[8] == 0x4f434653);
+        if (ctx.CommandBuffer()[4] != 0) {
+            REQUIRE(ctx.WriteToOutgoingCommandBuffer().IsSuccess());
+        }
+        std::array<u32, IPC::COMMAND_BUFFER_LENGTH> reply{};
+        std::copy_n(ctx.CommandBuffer(), reply.size(), reply.begin());
+        return reply;
+    };
+    const auto open = [&](const Manager& manager, StorageId storage, u64 title) {
+        return request(manager, client, 1, 202,
+                       std::array{static_cast<u32>(storage), 0u, static_cast<u32>(title),
+                                  static_cast<u32>(title >> 32)})[10];
+    };
+    const auto bind = [&](const Manager& manager, Kernel::KThread& caller, bool send_pid) {
+        return request(manager, caller, 1, 210, std::array{0u, 0u}, send_pid)[10];
+    };
+    const auto read = [&](const Manager& manager, u32 object, u64 offset, u32 length, u32 size) {
+        return request(manager, client, object, 0,
+                       std::array{static_cast<u32>(offset), static_cast<u32>(offset >> 32),
+                                  length, 0u},
+                       false, size)[10];
+    };
+
+    const auto profile = std::make_shared<ObservedProfile>();
+    system.SetFilesystem(profile);
+    auto& fsc = system.GetFileSystemController();
+    fsc.CreateFactories(*profile);
+    const auto registered = fsc.GetSystemNANDContentDirectory()->GetSubdirectory("registered");
+    REQUIRE(registered);
+    const auto legacy_romfs = SingleFile({0x17}, "asset");
+    WriteLegacyRecord(registered, NativeData, legacy_romfs, 4);
+    WriteLegacyRecord(registered, SharedOnly, legacy_romfs, 5);
+    fsc.GetSystemNANDContents()->Refresh();
+    Loader::AppLoader_DeconstructedRomDirectory empty{
+        std::make_shared<FileSys::VectorVfsDirectory>()};
+    REQUIRE(fsc.RegisterProcess(owner->GetProcessId(), LegacyHome,
+                                std::make_shared<FileSys::RomFSFactory>(
+                                    empty, system.GetContentProvider(), fsc)).IsSuccess());
+
+    const auto legacy_image = FileSys::CreateRomFS(legacy_romfs);
+    const auto isolated_image = FileSys::CreateRomFS(SingleFile({0x83}, "asset"));
+    REQUIRE(legacy_image);
+    REQUIRE(isolated_image);
+    const auto legacy_bytes = legacy_image->ReadAllBytes();
+    auto isolated_bytes = isolated_image->ReadAllBytes();
+    REQUIRE(legacy_bytes.size() == isolated_bytes.size());
+    const auto mismatch = std::mismatch(legacy_bytes.begin(), legacy_bytes.end(),
+                                        isolated_bytes.begin());
+    REQUIRE(mismatch.first != legacy_bytes.end());
+    const auto offset = static_cast<u64>(mismatch.first - legacy_bytes.begin());
+    const auto archive_size = isolated_bytes.size();
+
+    const auto initial_opens = profile->opens.load();
+    auto legacy = make_manager(CreateFileSystemProxy(system));
+    REQUIRE(bind(legacy, client, true) == ResultSuccess.raw);
+    REQUIRE(open(legacy, StorageId::NandSystem, NativeData) == ResultSuccess.raw);
+    REQUIRE(legacy->DomainHandlerCount() == 2);
+    REQUIRE(read(legacy, 2, offset, 1, 1) == ResultSuccess.raw);
+    CHECK(owner->GetMemory().Read8(output_address) == 0x17);
+    REQUIRE(open(legacy, StorageId::NandSystem, SharedOnly) == ResultSuccess.raw);
+    REQUIRE(open(legacy, StorageId::NandSystem, VersionTitle) == ResultSuccess.raw);
+    REQUIRE(open(legacy, StorageId::None, NativeData) == ResultSuccess.raw);
+    CHECK(legacy->DomainHandlerCount() == 5);
+    const auto shared_opens = profile->opens.load();
+    REQUIRE(shared_opens > initial_opens);
+    const auto original_profile = SnapshotProfile(root);
+
+    auto isolated_file = std::make_shared<ObservedArchive>(std::move(isolated_bytes), "native");
+    auto data = std::make_shared<const SystemDataView>(
+        SystemDataView::Records{},
+        SystemDataView::NativeDataArchives{{NativeData, isolated_file}, {VersionTitle, isolated_file}});
+    auto strict = make_manager(CreateFileSystemProxy(system, data, owner->GetProcessId()));
+    auto missing_view = make_manager(CreateFileSystemProxy(system, {}, owner->GetProcessId()));
+    CHECK(bind(missing_view, client, true) == FileSys::ResultPermissionDenied.raw);
+    CHECK(open(strict, StorageId::NandSystem, NativeData) == FileSys::ResultPermissionDenied.raw);
+    CHECK(bind(strict, client, false) == FileSys::ResultPermissionDenied.raw);
+    CHECK(bind(strict, other_client, true) == FileSys::ResultPermissionDenied.raw);
+    REQUIRE(bind(strict, client, true) == ResultSuccess.raw);
+    CHECK(open(strict, StorageId::NandSystem, SharedOnly) == FileSys::ResultTargetNotFound.raw);
+    CHECK(open(strict, StorageId::NandSystem, VersionTitle) == FileSys::ResultTargetNotFound.raw);
+    for (const auto denied : {StorageId::None, StorageId::SdCard, StorageId::NandUser,
+                              StorageId::Host, StorageId::GameCard}) {
+        CHECK(open(strict, denied, NativeData) == FileSys::ResultPermissionDenied.raw);
+    }
+    for (const u32 denied : {18, 22, 51, 59, 200, 999}) {
+        CHECK(request(strict, client, 1, denied)[10] == FileSys::ResultPermissionDenied.raw);
+    }
+    CHECK(strict->DomainHandlerCount() == 1);
+    CHECK(isolated_file->reads == 0);
+
+    REQUIRE(open(strict, StorageId::NandSystem, NativeData) == ResultSuccess.raw);
+    REQUIRE(strict->DomainHandlerCount() == 2);
+    const auto size = request(strict, client, 2, 4);
+    REQUIRE(size[10] == ResultSuccess.raw);
+    CHECK((static_cast<u64>(size[13]) << 32 | size[12]) == archive_size);
+    CHECK(request(strict, other_client, 2, 4)[10] == FileSys::ResultPermissionDenied.raw);
+    REQUIRE(read(strict, 2, offset, 1, 1) == ResultSuccess.raw);
+    CHECK(owner->GetMemory().Read8(output_address) == 0x83);
+    const auto reads = isolated_file->reads;
+    CHECK(read(strict, 2, offset, 2, 1) == FileSys::ResultInvalidSize.raw);
+    CHECK(read(strict, 2, archive_size, 1, 1) == FileSys::ResultOutOfRange.raw);
+    CHECK(isolated_file->reads == reads);
+    isolated_file->short_read = true;
+    CHECK(read(strict, 2, offset, 1, 1) == FileSys::ResultOutOfRange.raw);
+    for (const u32 denied : {1, 2, 3, 5}) {
+        CHECK(request(strict, client, 2, denied)[10] == FileSys::ResultPermissionDenied.raw);
+    }
+    CHECK(isolated_file->writes == 0);
+    CHECK(profile->opens.load() == shared_opens);
+    CHECK(SnapshotProfile(root) == original_profile);
+
+    REQUIRE(read(legacy, 2, offset, 1, 1) == ResultSuccess.raw);
+    CHECK(owner->GetMemory().Read8(output_address) == 0x17);
 }
