@@ -30,7 +30,10 @@
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/frontend/emu_window.h"
+#include "core/frontend/graphics_context.h"
 #include "core/hle/api_version.h"
+#include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/glue/time/time_zone_binary.h"
@@ -190,6 +193,17 @@ public:
     }
 
     std::atomic<size_t> opens{};
+};
+
+class IpcTestWindow final : public Core::Frontend::EmuWindow {
+public:
+    std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override {
+        return std::make_unique<Core::Frontend::GraphicsContext>();
+    }
+
+    bool IsShown() const override {
+        return false;
+    }
 };
 
 std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesystem::path& root) {
@@ -412,9 +426,7 @@ TEST_CASE("Strict FSP binds its caller and only serves exact read-only system da
     constexpr u64 NativeData = 0x0400000000000AF0;
     constexpr u64 SharedOnly = 0x0400000000000AF1;
     constexpr u64 LegacyHome = 0x0100000000001000;
-    SysmixTests::Context context;
-    auto& system = context.system;
-    auto& kernel = system.Kernel();
+    ScopedSystemTestContext environment;
     const auto root = Common::FS::GetEdenPath(EdenPath::NANDDir);
     constexpr std::array routed_paths{EdenPath::SDMCDir, EdenPath::SaveDir, EdenPath::LoadDir,
                                       EdenPath::DumpDir};
@@ -424,42 +436,77 @@ TEST_CASE("Strict FSP binds its caller and only serves exact read-only system da
         Common::FS::SetEdenPath(routed_paths[i], root);
     }
     const bool previous_auto_stub = Settings::values.use_auto_stub.GetValue();
+    const auto previous_backend = Settings::values.renderer_backend.GetValue();
+    const auto previous_async = Settings::values.use_asynchronous_gpu_emulation.GetValue();
     Settings::values.use_auto_stub.SetValue(true);
+    Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
+    Settings::values.use_asynchronous_gpu_emulation.SetValue(true);
     SCOPE_EXIT {
         Settings::values.use_auto_stub.SetValue(previous_auto_stub);
+        Settings::values.renderer_backend.SetValue(previous_backend);
+        Settings::values.use_asynchronous_gpu_emulation.SetValue(previous_async);
         for (size_t i = 0; i < routed_paths.size(); ++i) {
             Tests::RestoreEdenPath(routed_paths[i], previous_paths[i]);
         }
     };
 
-    auto* owner = Kernel::KProcess::Create(kernel);
+    Core::System system;
+    REQUIRE(system.Initialize());
+    auto& kernel = system.Kernel();
+    Kernel::KThread bootstrap{kernel};
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &bootstrap, nullptr).IsSuccess());
+    kernel.SetCurrentEmuThread(&bootstrap);
+    IpcTestWindow window;
+    REQUIRE(system.InitializeForGpuReplay(window, 0) == Core::SystemResultStatus::Success);
+    SCOPE_EXIT {
+        system.ShutdownMainProcess();
+        kernel.SetCurrentEmuThread(nullptr);
+        kernel.UnregisterKernelObject(&bootstrap);
+    };
+    REQUIRE(system.IsPoweredOn());
+
+    const auto make_process = [&] {
+        auto* process = Kernel::KProcess::Create(kernel);
+        REQUIRE(process);
+        REQUIRE(process->LoadFromMetadata(kernel, FileSys::ProgramMetadata::GetDefault(), 0x1000,
+                                          {}, 0).IsSuccess());
+        Kernel::KProcess::Register(kernel, process);
+        return process;
+    };
+    auto* owner = make_process();
     SCOPE_EXIT { owner->Close(kernel); };
-    REQUIRE(owner->LoadFromMetadata(kernel, FileSys::ProgramMetadata::GetDefault(), 0x1000, {}, 0)
-                .IsSuccess());
-    Kernel::KProcess::Register(kernel, owner);
+    auto* other = make_process();
+    SCOPE_EXIT { other->Close(kernel); };
     REQUIRE(owner->GetProcessId() != 0);
+    REQUIRE(owner->GetProcessId() != other->GetProcessId());
     CHECK_FALSE(owner->IsSwitch2());
     Kernel::KProcessAddress heap{};
     REQUIRE(owner->GetPageTable().SetMaxHeapSize(0x1000).IsSuccess());
     REQUIRE(owner->GetPageTable().SetHeapSize(&heap, 0x1000).IsSuccess());
     const u64 output_address = GetInteger(heap);
 
-    Kernel::KThread client{kernel};
-    Kernel::KAutoObject::Create(&client);
-    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &client, owner).IsSuccess());
-    SCOPE_EXIT {
-        owner->UnregisterThread(kernel, &client);
-        owner->Close(kernel);
-        kernel.UnregisterKernelObject(&client);
+    const auto make_client = [&](Kernel::KProcess* process) -> Kernel::KThread& {
+        Kernel::KScopedResourceReservation reservation{
+            kernel, process, Kernel::LimitableResource::ThreadCountMax};
+        REQUIRE(reservation.Succeeded());
+        auto* thread = Kernel::KThread::Create(kernel);
+        REQUIRE(thread);
+        REQUIRE(Kernel::KThread::InitializeUserThread(system, thread, {}, 0, {}, 44, 0, process)
+                    .IsSuccess());
+        reservation.Commit();
+        Kernel::KThread::Register(kernel, thread);
+        REQUIRE(GetInteger(thread->GetTlsAddress()) != 0);
+        return *thread;
     };
-    Kernel::KThread other_client{kernel};
-    Kernel::KAutoObject::Create(&other_client);
-    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &other_client, &*context.process)
-                .IsSuccess());
+    auto& client = make_client(owner);
     SCOPE_EXIT {
-        context.process->UnregisterThread(kernel, &other_client);
-        context.process->Close(kernel);
-        kernel.UnregisterKernelObject(&other_client);
+        kernel.GlobalSchedulerContext().RemoveThread(&client);
+        client.Close(kernel);
+    };
+    auto& other_client = make_client(other);
+    SCOPE_EXIT {
+        kernel.GlobalSchedulerContext().RemoveThread(&other_client);
+        other_client.Close(kernel);
     };
     Kernel::KServerSession session{kernel};
     std::optional<std::jthread> server_thread;
@@ -509,18 +556,16 @@ TEST_CASE("Strict FSP binds its caller and only serves exact read-only system da
         words[word + 6] = command;
         std::copy(raw.begin(), raw.end(), words.begin() + word + 8);
 
-        Service::HLERequestContext ctx{kernel, caller.GetOwnerProcess()->GetMemory(), &session,
-                                       &caller};
+        auto& memory = caller.GetOwnerProcess()->GetMemory();
+        const auto tls = GetInteger(caller.GetTlsAddress());
+        memory.WriteBlock(tls, words.data(), sizeof(words));
+        Service::HLERequestContext ctx{kernel, memory, &session, &caller};
         ctx.SetSessionRequestManager(manager);
         REQUIRE(ctx.PopulateFromIncomingCommandBuffer(words.data()).IsSuccess());
         REQUIRE(manager->CompleteSyncRequest(&session, ctx).IsSuccess());
-        REQUIRE(ctx.CommandBuffer()[8] == 0x4f434653);
-        if (ctx.CommandBuffer()[4] != 0) {
-            REQUIRE(ctx.WriteToOutgoingCommandBuffer().IsSuccess());
-        }
-        std::array<u32, IPC::COMMAND_BUFFER_LENGTH> reply{};
-        std::copy_n(ctx.CommandBuffer(), reply.size(), reply.begin());
-        return reply;
+        memory.ReadBlock(tls, words.data(), sizeof(words));
+        REQUIRE(words[8] == 0x4f434653);
+        return words;
     };
     const auto open = [&](const Manager& manager, StorageId storage, u64 title) {
         return request(manager, client, 1, 202,

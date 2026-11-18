@@ -3,6 +3,7 @@
 
 #include <utility>
 
+#include "core/core.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_process.h"
@@ -38,6 +39,9 @@ public:
 
         IPC::ResponseBuilder reply{ctx, 2};
         reply.Push(FileSys::ResultPermissionDenied);
+        if (this->system.IsPoweredOn()) {
+            ctx.WriteToOutgoingCommandBuffer();
+        }
         return ResultSuccess;
     }
 
