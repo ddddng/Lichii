@@ -1523,6 +1523,10 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             if (ucb) { vka_up_point(vka_up_cur(ucb)); vka_up_end(); }   // (an upload of many pieces, upload_mt, checks the batch budget only here)
             throttle = ucb != VK_NULL_HANDLE;
         }
+    } else {   // Lichii: what the texture is (fmt_of_slow logs only its format, once)
+        static uint64_t logged[4]; unsigned b = (unsigned)t->d.format & 255;
+        if (!(__atomic_fetch_or(&logged[b >> 6], 1ull << (b & 63), __ATOMIC_RELAXED) >> (b & 63) & 1))
+            VRED("texture serial %llu format %#x target %d %ux%ux%u levels %u: no image (no Vulkan format)", (unsigned long long)t->serial, t->d.format, t->d.target, t->d.width, t->d.height, t->d.depth, t->d.levels);
     }
     if (im) im->used = g_tick;
     map_put(t->serial, im);
