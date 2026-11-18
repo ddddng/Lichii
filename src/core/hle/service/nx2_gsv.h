@@ -2590,8 +2590,7 @@ private:
                                   ? std::chrono::nanoseconds{1'000'000'000LL / unpaced_cap}
                                   : PacedInterval(vblank_interval, fps_limit);
         Tegra::g_nx2_guest_frame_interval_ns.store(
-            static_cast<u64>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(interval).count()),
+            unpaced_cap == 0 ? static_cast<u64>(interval.count()) : 0,
             std::memory_order_relaxed);
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
