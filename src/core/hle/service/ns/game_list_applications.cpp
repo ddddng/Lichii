@@ -63,7 +63,11 @@ FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& syst
         return metadata;
     }
 
-    const auto path = GetGameListApplicationPath(system, application_id);
+    const auto* const provider = GameListProvider(system);
+    if (provider == nullptr) {
+        return metadata;
+    }
+    const auto path = provider->GetApplicationPath(application_id);
     const auto loader = path ? OpenGameListApplication(system, *path, application_id) : nullptr;
     if (loader == nullptr) {
         return metadata;
@@ -76,8 +80,9 @@ FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& syst
         }
     }
     if (metadata.second == nullptr) {
-        std::vector<u8> icon;
-        if (loader->ReadIcon(icon) == Loader::ResultStatus::Success && !icon.empty()) {
+        auto icon = provider->ReadApplicationIcon(application_id);
+        if (!icon.empty() ||
+            (loader->ReadIcon(icon) == Loader::ResultStatus::Success && !icon.empty())) {
             metadata.second = std::make_shared<FileSys::VectorVfsFile>(std::move(icon), "icon");
         }
     }
