@@ -1340,6 +1340,24 @@ void ManualContentProvider::ClearAllEntries() {
     multi_version_entries.clear();
 }
 
+void ManualContentProvider::ReplaceApplicationPaths(GameListApplicationPaths paths) {
+    application_paths = std::move(paths);
+}
+
+std::optional<std::string> ManualContentProvider::GetApplicationPath(u64 program_id) const {
+    const auto it = application_paths.find(program_id);
+    return it != application_paths.end() ? std::optional{it->second} : std::nullopt;
+}
+
+std::vector<u64> ManualContentProvider::ListApplicationFiles() const {
+    std::vector<u64> program_ids;
+    program_ids.reserve(application_paths.size());
+    for (const auto& [program_id, path] : application_paths) {
+        program_ids.push_back(program_id);
+    }
+    return program_ids;
+}
+
 void ManualContentProvider::Refresh() {}
 
 bool ManualContentProvider::HasEntry(u64 title_id, ContentRecordType type) const {

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,6 +52,8 @@ struct ContentProviderEntry {
 
     std::string DebugInfo() const;
 };
+
+using GameListApplicationPaths = std::map<u64, std::string>;
 
 struct ExternalUpdateEntry {
     u64 title_id;
@@ -269,6 +272,11 @@ public:
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
 
+    /// Publish the paths from the last completed game-list scan, independently of NCA entries.
+    void ReplaceApplicationPaths(GameListApplicationPaths paths);
+    std::optional<std::string> GetApplicationPath(u64 program_id) const;
+    std::vector<u64> ListApplicationFiles() const;
+
     void Refresh() override;
     bool HasEntry(u64 title_id, ContentRecordType type) const override;
     std::optional<u32> GetEntryVersion(u64 title_id) const override;
@@ -285,6 +293,7 @@ public:
 private:
     std::map<std::tuple<TitleType, ContentRecordType, u64>, VirtualFile> entries;
     std::vector<ExternalUpdateEntry> multi_version_entries;
+    GameListApplicationPaths application_paths;
 };
 
 class ExternalContentProvider : public ContentProvider {
