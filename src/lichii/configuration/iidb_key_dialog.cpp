@@ -150,6 +150,10 @@ public:
         }
         test->setToolTip(tr("Test the entered key, or the current key if the field is blank. "
                             "Testing does not save it."));
+        auto status_size_policy = test_status->sizePolicy();
+        status_size_policy.setRetainSizeWhenHidden(true);
+        test_status->setSizePolicy(status_size_policy);
+        layout->setSizeConstraint(QLayout::SetMinimumSize);
         layout->addWidget(buttons);
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
         connect(edit, &QLineEdit::textChanged, this, [this, use, test] {
@@ -188,7 +192,9 @@ public:
         });
         use->setEnabled(false);
         UpdateStorageStatus();
-        resize(465, sizeHint().height());
+        setMinimumWidth(540);
+        ensurePolished();
+        adjustSize();
     }
 
 private:
