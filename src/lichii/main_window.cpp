@@ -99,6 +99,7 @@
 #include <QInputDialog>
 #include <QMimeData>
 #include <QPalette>
+#include <QProcess>
 #include <QProgressDialog>
 #include <QScreen>
 #include <QShortcut>
@@ -745,6 +746,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     if (launch) {
         const auto& lp = *launch;
+        user_flag_cmd_line =
+            lp.selected_user && profile_manager.UserExistsIndex(*lp.selected_user);
 
         // Override fullscreen setting if gamepath or argument is provided
         if (!lp.filepath.empty() || lp.fullscreen) {
@@ -2417,6 +2420,14 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
 
+    if (params.program_id == 0 && params.program_index == 0 &&
+        params.launch_type == Service::AM::LaunchType::FrontendInitiated &&
+        Core::NvnHook::DirectNeedsFreshProcess() && RelaunchForGame(filename)) {
+        Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
+        close_pending = true;
+        return;
+    }
+
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
         const Core::Frontend::ProfileSelectParameters parameters{
             .mode = Service::AM::Frontend::UiMode::UserSelector,
@@ -3868,6 +3879,46 @@ void MainWindow::OnStartGame() {
 
     discord_rpc->Update();
     Common::FeralGamemode::Start();
+}
+
+bool MainWindow::RelaunchForGame(const QString& filename) {
+    const QString appimage = qEnvironmentVariable("APPIMAGE");
+    const QString program =
+        appimage.isEmpty() ? QCoreApplication::applicationFilePath() : appimage;
+    QStringList arguments{QStringLiteral("-g"), filename, QStringLiteral("-u"),
+                          QString::number(Settings::values.current_user.GetValue())};
+    if (ui->action_Fullscreen->isChecked()) {
+        arguments << QStringLiteral("-f");
+    }
+    auto environment = UpdateDialog::RestartEnvironment();
+    environment.insert(QStringLiteral("LICHII_RELAUNCH_WAIT_PID"),
+                       QString::number(QCoreApplication::applicationPid()));
+    QStringList carried;
+    for (const auto& key : environment.keys()) {
+        if (key.startsWith(QStringLiteral("EDEN_NX2_"))) {
+            carried << key;
+        }
+    }
+    carried.sort();
+    LOG_INFO(Frontend,
+             "Relaunching Lichii for {}: an earlier game in this process ran the NVN direct "
+             "renderer, whose replay starts once per process. User dir {}, working dir {}, "
+             "environment carried: {}",
+             filename.toStdString(), Common::FS::GetEdenPathString(Common::FS::EdenPath::EdenDir),
+             QDir::currentPath().toStdString(),
+             carried.isEmpty() ? std::string{"no EDEN_NX2_* variables"}
+                               : carried.join(QStringLiteral(" ")).toStdString());
+    QProcess process;
+    process.setProgram(program);
+    process.setArguments(arguments);
+    process.setWorkingDirectory(QDir::currentPath());
+    process.setProcessEnvironment(environment);
+    if (!process.startDetached()) {
+        LOG_ERROR(Frontend, "Could not relaunch {}: {}; the game falls back to GPU emulation",
+                  program.toStdString(), process.errorString().toStdString());
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::OnRestartGame() {

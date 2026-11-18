@@ -1032,6 +1032,15 @@ RendererChoice Choice() {
     return g_choice;
 }
 
+bool DirectNeedsFreshProcess() {
+#ifdef LICHII_NVN_DIRECT
+    return g_direct_ran && !g_replay_failed && DirectAsked() &&
+           Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
+#else
+    return false;
+#endif
+}
+
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc) {
     // Asked for when the process's JIT is made, before Install decides: HookOf answers nothing
     // while the boot has no state.

@@ -101,6 +101,11 @@ void Uninstall();
 /// The renderer Install chose for the current (or last) boot.
 [[nodiscard]] RendererChoice Choice();
 
+/// The next boot, under the current settings, asks for the direct renderer, and an earlier boot
+/// of this process ran it: its replay starts once per process, so the boot would fall back
+/// (RendererChoice::EarlierBoot) unless a fresh process runs it.
+[[nodiscard]] bool DirectNeedsFreshProcess();
+
 /// UserConfig::block_entry_hook (null when the hook is off).
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc);
 
