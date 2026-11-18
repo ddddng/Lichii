@@ -2401,7 +2401,7 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     SCOPE_EXIT {
         release = true;
     };
-    const auto semaphore = [&](u32 payload, u32 trigger, GPUVAddr address = word) {
+    const auto semaphore_at = [&](GPUVAddr address, u32 payload, u32 trigger) {
         const std::array<std::pair<u32, u32>, 4> methods{{
             {0x4, static_cast<u32>(address >> 32)},
             {0x5, static_cast<u32>(address)},
@@ -2412,6 +2412,7 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
             dma_pusher.puller.CallMethod(dma_pusher, MethodCall{method, argument});
         }
     };
+    const auto semaphore = [&](u32 payload, u32 trigger) { semaphore_at(word, payload, trigger); };
     // Whether the acquire passes at once, without the channel waiting.
     const auto acquire = [&](u32 operation, u32 value) {
         semaphore(value, operation);
@@ -2496,7 +2497,7 @@ TEST_CASE("Split front passes equal and mask acquires only on what their word se
     CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 2);
     CHECK(f.memory.Read<u32>(word) == 10);
     // Unaligned, it reads part of two words: no note names what it finds.
-    semaphore(0, Equal, word + 2);
+    semaphore_at(word + 2, 0, Equal);
     CHECK_FALSE(dma_pusher.puller.HasPendingAcquire());
     drains(1);
     CHECK(unsettled(AcquireUnsettled::Unknown) == unknown + 3);
