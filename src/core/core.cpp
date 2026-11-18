@@ -225,7 +225,10 @@ std::optional<u64> FindSwitch2Program(const FileSys::VirtualFile& file, u64 prog
 struct System::Impl {
     explicit Impl(System& system, Service::Account::ProfileStorage profile_storage)
         : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
-          reporter{system}, applet_manager{system}, frontend_applets{system},
+          reporter{system, profile_storage == Service::Account::ProfileStorage::Scratch
+                               ? Reporter::FSAccessLogPolicy::Disabled
+                               : Reporter::FSAccessLogPolicy::Disk},
+          applet_manager{system}, frontend_applets{system},
           profile_manager{std::make_shared<Service::Account::ProfileManager>(profile_storage)} {}
 
     u64 program_id;
