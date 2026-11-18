@@ -406,6 +406,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             lru_cache.ForEachItemBelow(last_tick, Cleanup);
         }
     };
+    const u64 usage_at_start = total_used_memory;
     Configure(false);
     // Images newer ones partly overwrote (BadOverlap: their bytes belong to the newer images, so
     // they are dropped without a download) get the mode's age, not the retention floor. Ocarina
@@ -427,7 +428,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
         evict_old_costly = false;
     }
     Collect();
-    if (out_of_memory || at_critical || total_used_memory >= critical_memory) {
+    // A spill collect takes the aggressive pass only while the passes above freed nothing.
+    if (out_of_memory || total_used_memory >= critical_memory ||
+        (at_critical && total_used_memory >= usage_at_start)) {
         Configure(true);
         Collect();
     }
