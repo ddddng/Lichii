@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QPointer>
@@ -203,6 +204,7 @@ private slots:
     void NoKeyIsOffline();
     void ApiAndAssetBoundaries();
     void CancelTimeoutAndRetryAfter();
+    void LegacyHttpDateCooldowns();
     void ByteAndPixelLimits();
     void StaticGalleryChecks();
     void ThumbnailCooldownDoesNotHideGalleryError();
@@ -331,17 +333,42 @@ void ArtworkTest::CancelTimeoutAndRetryAfter() {
     QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
     QCOMPARE(result, Error::TimedOut);
     const auto http_date = [](int seconds) {
-        auto date = QDateTime::currentDateTimeUtc().addSecs(seconds).toString(Qt::RFC2822Date);
-        return date.chopped(5).toLatin1() + "GMT";
+        return QLocale::c()
+            .toString(QDateTime::currentDateTimeUtc().addSecs(seconds),
+                      u"ddd, dd MMM yyyy hh:mm:ss 'GMT'"_s)
+            .toLatin1();
     };
     service.rate_limits.Observe(true, http_date(-60));
     QVERIFY(!service.rate_limits.Blocked(true));
     service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
+    const auto before = RateLimits::Clock::now();
     service.images->last->Complete(503, {}, -1, http_date(60));
+    const auto after = RateLimits::Clock::now();
     QCOMPARE(result, Error::RateLimited);
+    QVERIFY(service.rate_limits.Blocked(true, before + std::chrono::seconds{6}));
+    QVERIFY(!service.rate_limits.Blocked(true, after + std::chrono::seconds{62}));
+    result = Error::None;
     service.client.Download(AssetUrl, false, [&](QByteArray, Error err) { result = err; });
     QCOMPARE(result, Error::RateLimited);
     QCOMPARE(service.images->requests.size(), 2);
+}
+
+void ArtworkTest::LegacyHttpDateCooldowns() {
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto locale = QLocale::c();
+    const auto rfc850 = u"dddd, dd-MMM-yy hh:mm:ss 'GMT'"_s;
+    const auto asctime = u"ddd MMM d hh:mm:ss yyyy"_s;
+    for (const auto& format : {rfc850, asctime}) {
+        RateLimits limits;
+        const auto before = RateLimits::Clock::now();
+        limits.Observe(false, locale.toString(now.addSecs(60), format).toLatin1());
+        const auto after = RateLimits::Clock::now();
+        QVERIFY(limits.Blocked(false, before + std::chrono::seconds{6}));
+        QVERIFY(!limits.Blocked(false, after + std::chrono::seconds{62}));
+    }
+    RateLimits expired;
+    expired.Observe(false, locale.toString(now.addYears(51), rfc850).toLatin1());
+    QVERIFY(!expired.Blocked(false));
 }
 
 void ArtworkTest::ByteAndPixelLimits() {
@@ -412,6 +439,8 @@ void ArtworkTest::ThumbnailCooldownDoesNotHideGalleryError() {
     QTRY_COMPARE(service.images->requests.size(), 1);
     auto* more = dialog.findChild<QPushButton*>(u"iidbMore"_s);
     more->click();
+    QCOMPARE(service.api->requests.size(), 3);
+    QVERIFY(service.api->last && !service.api->last->isFinished());
     service.api->last->Complete(503);
     service.images->last->Complete(429, {}, -1, "120");
     QCOMPARE(dialog.findChild<QLabel*>(u"iidbStatus"_s)->text(), ErrorText(Error::Network));

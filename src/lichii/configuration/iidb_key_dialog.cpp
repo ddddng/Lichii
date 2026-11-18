@@ -204,7 +204,7 @@ private:
         edit->setPlaceholderText(SessionKey().isEmpty() ? tr("Paste your key")
                                                         : tr("Enter a replacement key"));
         const auto storage = CurrentCredentials().storage;
-        remember->setChecked(storage == Storage::Saved);
+        remember->setChecked(storage == Storage::Saved || storage == Storage::SaveFailed);
         switch (storage) {
         case Storage::Empty:
             storage_status->setText(tr("No key set. You can use a key for this session only."));
