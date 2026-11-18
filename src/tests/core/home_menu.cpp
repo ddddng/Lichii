@@ -183,19 +183,14 @@ TEST_CASE("The HOME Menu lists game list applications next to installed ones",
                       Installed, file);
     provider.AddEntry(FileSys::TitleType::Application, FileSys::ContentRecordType::Program,
                       InstalledSubProgram, file);
-    provider.AddApplicationFile(Installed, {file, "installed.nsp"});
-    provider.AddApplicationFile(Switch2Game, {file, "first.nup"});
-    provider.AddApplicationFile(Switch2Game, {std::make_shared<FileSys::VectorVfsFile>(),
-                                              "duplicate.nx"});
-    provider.AddApplicationFile(Switch2Edition, {file, "edition.nx"});
+    provider.ReplaceApplicationPaths({{Installed, "installed.nsp"},
+                                      {Switch2Game, "first.nup"},
+                                      {Switch2Edition, "edition.nx"}});
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &provider);
 
-    const auto forwarder = Service::NS::GetGameListApplication(system, Switch2Game);
-    REQUIRE(forwarder.has_value());
-    CHECK(forwarder->file == file);
-    CHECK(forwarder->path == "first.nup");
-    CHECK_FALSE(Service::NS::GetGameListApplication(system, 0x0400000000000000ULL));
+    CHECK(Service::NS::GetGameListApplicationPath(system, Switch2Game) == "first.nup");
+    CHECK_FALSE(Service::NS::GetGameListApplicationPath(system, 0x0400000000000000ULL));
 
     std::vector<u64> listed;
     {
@@ -210,8 +205,13 @@ TEST_CASE("The HOME Menu lists game list applications next to installed ones",
     std::ranges::sort(listed);
     CHECK(listed == std::vector<u64>{Installed, Switch2Edition, Switch2Game});
 
+    FileSys::GameListApplicationPaths next_scan{{Switch2Edition, "moved.nx"}};
     provider.ClearAllEntries();
-    CHECK(Service::NS::ListGameListApplications(system).empty());
+    CHECK(Service::NS::GetGameListApplicationPath(system, Switch2Game) == "first.nup");
+    CHECK(Service::NS::GetGameListApplicationPath(system, Switch2Edition) == "edition.nx");
+    provider.ReplaceApplicationPaths(std::move(next_scan));
+    CHECK_FALSE(Service::NS::GetGameListApplicationPath(system, Switch2Game));
+    CHECK(Service::NS::GetGameListApplicationPath(system, Switch2Edition) == "moved.nx");
 
     system.CoreTiming().ClearPendingEvents();
     system.ShutdownMainProcess();

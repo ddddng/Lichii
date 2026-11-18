@@ -22,10 +22,25 @@ const FileSys::ManualContentProvider* GameListProvider(Core::System& system) {
 
 } // namespace
 
-std::optional<FileSys::GameListApplication> GetGameListApplication(Core::System& system,
-                                                                 u64 application_id) {
+std::optional<std::string> GetGameListApplicationPath(Core::System& system, u64 application_id) {
     const auto* const provider = GameListProvider(system);
-    return provider != nullptr ? provider->GetApplicationFile(application_id) : std::nullopt;
+    return provider != nullptr ? provider->GetApplicationPath(application_id) : std::nullopt;
+}
+
+std::unique_ptr<Loader::AppLoader> OpenGameListApplication(Core::System& system,
+                                                         const std::string& path,
+                                                         u64 application_id) {
+    const auto vfs = system.GetFilesystem();
+    if (vfs == nullptr) {
+        return nullptr;
+    }
+    auto loader = Loader::GetLoader(system, Core::GetGameFileFromPath(vfs, path), application_id);
+    u64 opened_id{};
+    if (loader == nullptr || loader->ReadProgramId(opened_id) != Loader::ResultStatus::Success ||
+        opened_id != application_id) {
+        return nullptr;
+    }
+    return loader;
 }
 
 std::vector<u64> ListGameListApplications(Core::System& system) {
@@ -42,9 +57,8 @@ FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& syst
         return metadata;
     }
 
-    const auto application = GetGameListApplication(system, application_id);
-    const auto loader =
-        application ? Loader::GetLoader(system, application->file, application_id) : nullptr;
+    const auto path = GetGameListApplicationPath(system, application_id);
+    const auto loader = path ? OpenGameListApplication(system, *path, application_id) : nullptr;
     if (loader == nullptr) {
         return metadata;
     }

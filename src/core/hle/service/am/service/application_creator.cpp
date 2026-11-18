@@ -31,7 +31,7 @@ Result CreateGuestApplication(SharedPointer<IApplicationAccessor>* out_applicati
     // with no program NCA (NUP, NX) only boots from its file. Both boot in a session of their own.
     const bool own_session =
         IsSwitch2Application(system, program_id) ||
-        (nca_raw == nullptr && NS::GetGameListApplication(system, program_id).has_value());
+        (nca_raw == nullptr && NS::GetGameListApplicationPath(system, program_id).has_value());
     if (own_session) {
         if (system.LaunchInNewSession(program_id)) {
             LOG_INFO(Service_AM, "{:016X}: booting it in a new session", program_id);

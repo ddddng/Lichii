@@ -1338,22 +1338,21 @@ bool ManualContentProvider::AddEntriesFromContainer(VirtualFile file, bool only_
 void ManualContentProvider::ClearAllEntries() {
     entries.clear();
     multi_version_entries.clear();
-    application_files.clear();
 }
 
-void ManualContentProvider::AddApplicationFile(u64 program_id, GameListApplication application) {
-    application_files.try_emplace(program_id, std::move(application));
+void ManualContentProvider::ReplaceApplicationPaths(GameListApplicationPaths paths) {
+    application_paths = std::move(paths);
 }
 
-std::optional<GameListApplication> ManualContentProvider::GetApplicationFile(u64 program_id) const {
-    const auto it = application_files.find(program_id);
-    return it != application_files.end() ? std::optional{it->second} : std::nullopt;
+std::optional<std::string> ManualContentProvider::GetApplicationPath(u64 program_id) const {
+    const auto it = application_paths.find(program_id);
+    return it != application_paths.end() ? std::optional{it->second} : std::nullopt;
 }
 
 std::vector<u64> ManualContentProvider::ListApplicationFiles() const {
     std::vector<u64> program_ids;
-    program_ids.reserve(application_files.size());
-    for (const auto& [program_id, application] : application_files) {
+    program_ids.reserve(application_paths.size());
+    for (const auto& [program_id, path] : application_paths) {
         program_ids.push_back(program_id);
     }
     return program_ids;
