@@ -13,8 +13,9 @@
 #include <QVBoxLayout>
 
 #ifdef _WIN32
-#include <wincred.h>
 #include <windows.h>
+
+#include <wincred.h>
 #endif
 
 #include "lichii/game/iidb_client.h"

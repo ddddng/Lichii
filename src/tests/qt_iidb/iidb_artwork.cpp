@@ -196,6 +196,7 @@ private slots:
     void ApiAndAssetBoundaries();
     void CancelTimeoutAndRetryAfter();
     void ByteAndPixelLimits();
+    void CategoryChangeKeepsTitleSearch();
     void PickerStagesOnly();
     void LazyGalleryAndPageLimit();
 #ifdef IIDB_TEST_ARTWORK_FILES
@@ -343,6 +344,28 @@ void ArtworkTest::ByteAndPixelLimits() {
                 .isNull());
     QCOMPARE(ArtworkImage::Decode(SyntheticImage("WEBP", {60, 80}), QSize{30, 40}).size(),
              QSize(30, 40));
+}
+
+void ArtworkTest::CategoryChangeKeepsTitleSearch() {
+    Service service;
+    ArtworkDialog dialog(nullptr, u"Fixture Quest"_s, FakeKey, service.client);
+    dialog.show();
+    auto* search = dialog.findChild<QPushButton*>(u"iidbSearch"_s);
+    auto* categories = dialog.findChild<QTabBar*>(u"iidbCategories"_s);
+    search->click();
+    QVERIFY(service.api->last);
+    QVERIFY(!search->isEnabled());
+    categories->setCurrentIndex(2);
+    QVERIFY(!service.api->last->aborted);
+    QCOMPARE(service.api->requests.size(), 1);
+    service.api->last->Complete(200, Matches);
+    QVERIFY(search->isEnabled());
+    auto* match = dialog.findChild<QComboBox*>(u"iidbMatches"_s);
+    QCOMPARE(match->currentIndex(), -1);
+    QTest::keyClick(match, Qt::Key_Down);
+    QCOMPARE(service.api->requests.size(), 2);
+    const QUrlQuery query(service.api->requests.constLast().url());
+    QCOMPARE(query.queryItemValue(u"asset_type"_s), u"icon"_s);
 }
 
 void ArtworkTest::PickerStagesOnly() {
