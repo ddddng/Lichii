@@ -27,8 +27,10 @@ int nvn_direct_adopt_device(const nvn_direct_device *d) {
     // (the array of extension names is the caller's, for the call: the replay keeps its own copy; the names live as long as the device)
     const char **ext = malloc((d->extension_count ? d->extension_count : 1) * sizeof *ext); if (!ext) return 0;
     if (d->extension_count) memcpy(ext, d->extensions, d->extension_count * sizeof *ext);
-    pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopt.extensions = ext; ext = NULL; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
-    free(ext);
+    pthread_mutex_lock(&g_init_mu);
+    if (g_adopted || g_state) { pthread_mutex_unlock(&g_init_mu); free(ext); return 0; }
+    g_adopt = *d; g_adopt.extensions = ext; g_adopted = 1;
+    pthread_mutex_unlock(&g_init_mu);
     VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (asynchronous shader building setting)", g_adopt.async_pipelines ? "on" : "off");
     if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (Lichii's recompiler reads the scale)
         vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift;
@@ -38,6 +40,15 @@ int nvn_direct_adopt_device(const nvn_direct_device *d) {
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();
     if (ok && g_adopt.memory_usage) { vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); (void)b; VLOG("VRAM after the replay started: host use %.0f MiB; driver %s", u / 1048576.0, h); }
+    if (!ok) {
+        for (int i = 0; i < NVN_DIRECT_MAX_QUEUES; i++) if (V.qtl[i]) vk.vkDestroySemaphore(V.dev, V.qtl[i], NULL);
+        if (V.tl) vk.vkDestroySemaphore(V.dev, V.tl, NULL);
+#if !defined(_WIN32)
+        if (V.udmabuf) close(V.udmabuf_fd);
+#endif
+        free(ext);
+        g_adopt = (nvn_direct_device){0};
+    }
     return ok;
 }
 
