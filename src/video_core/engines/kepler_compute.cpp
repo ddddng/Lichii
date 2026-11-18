@@ -1632,16 +1632,20 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
         use_history ? std::array{1.0f / static_cast<f32>(output->Width()),
                                  1.0f / static_cast<f32>(output->Height())}
                     : std::array{0.0f, 0.0f};
-    const auto upscale = [&](const Texture::TICEntry* upscale_depth) {
+    const auto upscale = [&](bool history, const Texture::TICEntry* upscale_depth) {
         return rasterizer->AccelerateTemporalUpscale(
-            surface(*input), surface(*output), motion_surface, upscale_depth,
-            jitter ? jitter->offset : std::array{0.0f, 0.0f}, motion_scale, use_history,
-            std::array{width, height});
+            surface(*input), surface(*output), history ? motion_surface : Fermi2D::Surface{},
+            upscale_depth, jitter ? jitter->offset : std::array{0.0f, 0.0f},
+            history ? motion_scale : std::array{0.0f, 0.0f}, history, std::array{width, height});
     };
-    bool done = upscale(use_history && depth_fits ? &*depth : nullptr);
-    if (!done && use_history && depth_fits) {
-        // The depth can still be refused after it was prepared; the stand-in runs without it.
-        done = upscale(nullptr);
+    // Each refusal drops one input: the depth (it can be refused after it was prepared), then the
+    // history, which leaves the spatial draw the region always had.
+    bool done = use_history && depth_fits && upscale(true, &*depth);
+    if (!done && use_history) {
+        done = upscale(true, nullptr);
+    }
+    if (!done) {
+        done = upscale(false, nullptr);
     }
     static u32 last_width{};
     if (width != last_width) {
