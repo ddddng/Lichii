@@ -440,7 +440,16 @@ struct System::Impl {
         System& system, Frontend::EmuWindow& emu_window,
         std::shared_ptr<const Service::SystemDataView> isolated_system_data = {}) {
         std::shared_ptr<Service::Glue::Time::TimeZoneBinary> isolated_time_zone;
+        u64 isolated_process_id{};
         if (isolated_system_data) {
+            constexpr u64 NativeHomeProgramId = 0x0400000000001000;
+            const auto* process = kernel.ApplicationProcess();
+            if (!process || !process->IsSwitch2() || process->IsApplication() ||
+                process->GetProgramId() != NativeHomeProgramId || process->GetProcessId() == 0) {
+                LOG_ERROR(Core, "Isolated system data requires the native HOME process");
+                return SystemResultStatus::ErrorSystemFiles;
+            }
+            isolated_process_id = process->GetProcessId();
             isolated_time_zone = std::make_shared<Service::Glue::Time::TimeZoneBinary>(system);
             const auto result = isolated_time_zone->Mount(isolated_system_data);
             if (result.IsFailure()) {
@@ -458,7 +467,8 @@ struct System::Impl {
 
         service_manager = std::make_shared<Service::SM::ServiceManager>(kernel);
         services.emplace(service_manager, system, stop_event.get_token(),
-                         std::move(isolated_system_data), std::move(isolated_time_zone));
+                         std::move(isolated_system_data), std::move(isolated_time_zone),
+                         isolated_process_id);
 
         is_powered_on = true;
         exit_locked = false;
