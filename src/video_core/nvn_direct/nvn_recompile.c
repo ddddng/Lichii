@@ -125,7 +125,7 @@ static const rc_control* rc_control_of(uint64_t key) {
 
 // Loops the recompiler's safety check ended (Lichii's 8192 iterations; RuntimeInfo::loop_guard_binding): each shader with loops has a word in static
 // memory the check sets, looked at every 4096 draws and dispatches and logged once per shader: a loop that would not end has wrong inputs, which the
-// check hides (dotfiles-25x.15: the library's modules have no such check, and such a loop hangs the GPU)
+// check hides (the library's modules have no such check, and such a loop hangs the GPU)
 typedef struct { uint64_t key; const volatile uint32_t* word; int noted; } rc_guard;
 static rc_guard* g_guards; static size_t g_nguards, g_guards_cap;
 static void guard_add(uint64_t key, const vka_span* s) {
@@ -580,7 +580,7 @@ vka_shader* vka_rc_shader(const prog_t* p, unsigned i, uint64_t key, uint32_t pr
 static rc_shader* rc_by_slot(uint64_t key, uint64_t slot, int depth_ok) {
     rc_shader* r = rc_lookup(slot);
     if (r) return depth_ok || !rc_depth_stage(r->st) ? r : NULL;
-    // Lichii (dotfiles-25x.13): not met in this run yet: made from the translation an earlier run kept (prewarm, pipelines made ahead), and kept for the frame path
+    // Lichii: not met in this run yet: made from the translation an earlier run kept (prewarm, pipelines made ahead), and kept for the frame path
     nvn_direct_shader o; uint64_t vin_types; const rc_control* control; const uint8_t* c1; uint32_t c1_len; int gl_depth; uint32_t prim;
     if (!disk_get(slot, &o, &vin_types, &gl_depth, &prim, &control, &c1, &c1_len) || (!depth_ok && rc_depth_stage((int)control->stage))) return NULL;
     r = calloc(1, sizeof *r); r->st = (int)control->stage; r->prim = prim;
@@ -605,7 +605,7 @@ vka_shader* vka_rc_by_key(uint64_t key, int gl_depth) {
 }
 
 // ---------- Speculative translations ----------
-// Lichii (dotfiles-25x.13): a vertex or pixel shader the game sets (nvnProgramSetShaders) that no earlier run kept is translated on a background thread without a draw's
+// Lichii: a vertex or pixel shader the game sets (nvnProgramSetShaders) that no earlier run kept is translated on a background thread without a draw's
 // state (constant buffer words read as 0, no textures) and its stage library made in the most common state (vka_lib_ahead_shader), then let go of: only the pipeline cache
 // keeps it. The draw still translates the shader with its own state and makes its own library, so what is drawn is always the draw's own translation; when the two SPIR-V
 // modules are the same (2 in 3 of those made in time in mkw-race: about 2 in 3 vertex and 2 in 5 pixel shaders) that library is a cache hit instead of a compile on

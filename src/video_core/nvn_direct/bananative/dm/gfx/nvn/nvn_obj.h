@@ -131,8 +131,8 @@ enum {
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
     OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DEPTH_BOUNDS, OP_WAIT_EVENT,
-    OP_DLSS, OP_COOPVEC_CONVERT,   // Lichii: NVN2's DLSS evaluation and cooperative-vector matrix conversion (hle_nvn.c "s4-dlss")
-    OP_PATCH_SIZE, OP_TESS_LEVELS, OP_SAMPLE_MASK, OP_RASTER, OP_WAIT_SYNC, OP_VRS_IMAGE, OP_VRS_PALETTE, OP_DEBUG_LABEL, OP_ENABLE_COND, OP_EXCL_SCISSOR, OP_BIND_DEFER, OP_PUSH_DEFER,   // Lichii (dotfiles-25x.100)
+    OP_DLSS, OP_COOPVEC_CONVERT,   // Lichii: NVN2's DLSS evaluation and cooperative-vector matrix conversion (hle_nvn.c "DLSS, dirty tile maps and cooperative-vector matrices")
+    OP_PATCH_SIZE, OP_TESS_LEVELS, OP_SAMPLE_MASK, OP_RASTER, OP_WAIT_SYNC, OP_VRS_IMAGE, OP_VRS_PALETTE, OP_DEBUG_LABEL, OP_ENABLE_COND, OP_EXCL_SCISSOR, OP_BIND_DEFER, OP_PUSH_DEFER,   // Lichii
     OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
@@ -198,7 +198,7 @@ typedef struct { float factor, units, clamp; } p_poly_offset;
 // p_draw.prim of an NVN2 nvnCommandBufferDrawMeshTasks (first, count: task workgroups, or mesh workgroups for a program without a task shader): outside NVN's primitives.
 // Recorded on Android only, where the Vulkan replay draws it through a mesh pipeline (vka_draw.c); the Mac host keeps the unimplemented stub (after switch2mac, MIT)
 #define NVN_PRIM_MESH 0x100
-// Lichii: the other mesh draws (hle_nvn.c, lane s3). Indirect: ind = the records, {count, first} for NVN_PRIM_MESH, {x, y, z} for NVN_PRIM_MESH_3D; a multi-draw is one record
+// Lichii: the other mesh draws (hle_nvn.c). Indirect: ind = the records, {count, first} for NVN_PRIM_MESH, {x, y, z} for NVN_PRIM_MESH_3D; a multi-draw is one record
 // with mdi_max draws mdi_stride bytes apart and mdi_cnt the u32 count's address (0: all mdi_max), mdi_i 0. NVN_PRIM_MESH_3D direct: x, y, z in count, instances, base_instance
 #define NVN_PRIM_MESH_3D 0x101
 typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i, mdi_max, mdi_stride, pad; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw of at most mdi_max records mdi_stride bytes apart (drawn only while mdi_i < the u32 at mdi_cnt)
@@ -227,12 +227,12 @@ typedef struct { int32_t on; } p_rast_discard;
 // Lichii: nvnCommandBufferEvaluateDlss as the replay runs it (vka_dlss.c): the input colour's subrectangle resampled into the output's, sampled jitter pixels away (a spatial
 // upscale; the snapshots of color and output follow the record)
 typedef struct { const tex_t *color, *output; view_t cv, ov; uint8_t has_cv, has_ov, reset, _pad; int32_t in_base[2], in_size[2], out_base[2], out_size[2]; float jitter[2]; uint64_t net; } p_dlss;
-// Lichii: a cooperative-vector matrix layout (NVN2's, from its driver: hle_nvn.c "s4-dlss"), and nvnCommandBufferConvertCooperativeVectorMatrix's record
+// Lichii: a cooperative-vector matrix layout (NVN2's, from its driver: hle_nvn.c "DLSS, dirty tile maps and cooperative-vector matrices"), and nvnCommandBufferConvertCooperativeVectorMatrix's record
 typedef struct { uint64_t stride; uint32_t type, layout; } coopvec_desc;
 typedef struct { uint64_t src, dst; coopvec_desc sd, dd; int32_t rows, cols; } p_coopvec_convert;
 // The conversion on the CPU (hle_nvn.c), between host pointers; the replay runs it once the submission's earlier GPU work is done
 void nvn_coopvec_convert(const uint8_t *src, const coopvec_desc *sd, uint8_t *dst, const coopvec_desc *dd, uint32_t rows, uint32_t cols);
-// Lichii (dotfiles-25x.100): the command-buffer state hle_nvn.c's "s2-cmd" section records
+// Lichii: the command-buffer state hle_nvn.c's "Command-buffer state" section records
 typedef struct { int32_t n; } p_patch_size;                       // SetPatchSize: control points per patch
 typedef struct { int32_t outer; float v[4]; } p_tess_levels;      // Set{Inner,Outer}TessellationLevels: two inner (outer 0) or four outer levels
 typedef struct { uint32_t mask; } p_sample_mask;                  // SetSampleMask: the low 16 bits

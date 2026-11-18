@@ -148,7 +148,7 @@ static uint64_t g_tick;   // the VRAM budget's clock (vka_tex_budget): one tick 
 static int g_zwant;   // (under g_tmu) img_create_ may make a zero-shared image: vka_tex_get's new image whose content is ST_ZERO ("Zero-shared images" below)
 static int g_swant;   // (under g_tmu) img_create_ may make it at the render scale: the same, and an image made again in place of a scaled one (img_own)
 
-// Lichii (dotfiles-25x.13): the live images with storage by its address, so the lookups by storage (a new texture's image of the same storage and shape, vka_tex_get; a GPU
+// Lichii: the live images with storage by its address, so the lookups by storage (a new texture's image of the same storage and shape, vka_tex_get; a GPU
 // image over it, gpu_image_over; the images under a done GPU write, vka_tex_prepare) find them without a pass over every live image (about 36,000 in Mario Kart World's race:
 // those passes and a sort per submission were ~250 ms/s of the replay thread). Images of the same storage keep their creation order. A range query scans the sorted array
 // back MEMIDX_SPAN from the range's start; images larger than that are also in g_wide, checked whole. Caller holds g_tmu
@@ -469,7 +469,7 @@ static uint32_t dense_floor(const nvn_texdesc *d, const nvn_texlayout *L, uint32
 // (bfloor: its finer levels are left out, sampled from the coarser one; a platform limit, logged), down to where it is no candidate any more, then dense from there
 static vka_img *img_create(const tex_t *t, const vka_fmt *f, uint32_t base) {
     uint32_t b = base; uint64_t need = 0; int wlast = 0;   // (the address space the last finer level asked for and did not get: once that much is free, a finer start is tried again, sparse_refresh)
-    // Lichii (dotfiles-25x.22): a sampled one's residency image starts at level 0 whatever is mapped now (only bound tiles take memory): a later mapping of a finer level binds
+    // Lichii: a sampled one's residency image starts at level 0 whatever is mapped now (only bound tiles take memory): a later mapping of a finer level binds
     // its tiles instead of making the image again (img_rebase), which loses what copies wrote into it
     if (base && sparse_sampled(t, f) && res_candidate(t, f, 0)) b = 0;
     for (; res_candidate(t, f, b); b++) {
@@ -518,7 +518,7 @@ static vka_img *img_create_(const tex_t *t, const vka_fmt *f, uint32_t base, int
     if ((ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) && !compressed(f)) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (d->flags & NVN_TEXTURE_FLAGS_IMAGE) && !f->srgb) u |= VK_IMAGE_USAGE_STORAGE_BIT;
-    // Lichii (dotfiles-25x.34): a render target at the render scale, as Lichii's texture cache picks them: GPU content (g_swant), dense, single-sampled, 2D or 2D array, not
+    // Lichii: a render target at the render scale, as Lichii's texture cache picks them: GPU content (g_swant), dense, single-sampled, 2D or 2D array, not
     // cube compatible, colour or depth attachable, uncompressed, not linear, taller than 288 texels (its rescale threshold: smaller ones hold lookup tables and the like), and
     // with room for its levels at the scaled size
     if (g_swant && vka_scale_on() && !res && !is3d && !is1d && !base && im->samples == 1 && !compressed(f) && (u & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
@@ -1002,7 +1002,7 @@ static void copy_bound(vka_img *im, VkCommandBuffer cb, const vka_span *s, uint3
 // band as zero texels): the staging is about what is mapped, never a whole level (Mario Kart World 1.8.0's 6144x6144 RGBA8 array levels, 144 MiB each, have about half of
 // their pages mapped at boot, and its 8192x8192 x68 arrays' levels a few MiB in all). 3D textures go by whole levels, as before. Each run is a point where the upload
 // batch may go to the queue (vka_up_point)
-// ASTC on a device without it, decoded on the GPU (dotfiles-25x.8: the host's decoder, Lichii's astc_decoder.comp and bc_encoder.comp, vk_nvn_direct_astc.cpp): level lv of
+// ASTC on a device without it, decoded on the GPU (the host's decoder, Lichii's astc_decoder.comp and bc_encoder.comp, vk_nvn_direct_astc.cpp): level lv of
 // layer ly (image level i) from the block-linear bytes [o, o + n) of buffer b (staging), as the game stored them. Always recorded into an upload batch (*ub, which it may send and
 // replace: vka_up_point), so every decode goes to one queue and the decoder's tile image and buffer need only barriers between uses. 0 = not recorded, or no batch left
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l);   // vka_dev.c
@@ -1045,7 +1045,7 @@ static void upload_astc_gpu(vka_img *im, const tex_t *t, VkCommandBuffer cb, uin
 // A sparse ASTC texture on a device without ASTC (vka_astc_transcode): each changed level and layer gathered whole from the page table (unmapped pages as zero texels),
 // deswizzled into ASTC blocks, transcoded and copied. Whole subresources, not bands: a band of ASTC block rows is not a band of BC3 block rows. Mario Kart World's
 // 8192x8192x68 ASTC arrays are dense images from level 2 here (no residency image: sparse_new), so a level is at most 2048x2048. Not for residency images
-// Lichii (dotfiles-25x.25, diagnostic): sparse ASTC textures' levels x layers with data uploaded, [0] opaque [1] with alpha; texture copies into them by source image: [0] BC1,
+// Lichii (diagnostic): sparse ASTC textures' levels x layers with data uploaded, [0] opaque [1] with alpha; texture copies into them by source image: [0] BC1,
 // [1] BC3 whose storage scans opaque now, [2] BC3 with alpha or unscanned (the VRAM line)
 static uint64_t g_arr_sub[2], g_arr_src[3];
 static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, uint64_t stamp, int all, int bind_only) {
@@ -1060,7 +1060,7 @@ static void upload_sparse_astc(vka_img *im, VkCommandBuffer cb, uint64_t gen, ui
                 if (!len || (!all && !nvn_sparse_since(im->vpool, mem + off, len, gen, stamp))) continue;
                 vka_span sp; if (!vka_scratch(len, 256, &sp)) { ub = VK_NULL_HANDLE; break; }
                 nvn_sparse_copy(im->vpool, sp.ptr, mem + off, len);
-                if (mem_any(sp.ptr, len)) g_arr_sub[!vka_astc_opaque(sp.ptr, len)]++;   // (Lichii, dotfiles-25x.25: the arrays' content, opaque or not; unmapped pages read as zero blocks, opaque)
+                if (mem_any(sp.ptr, len)) g_arr_sub[!vka_astc_opaque(sp.ptr, len)]++;   // (Lichii: the arrays' content, opaque or not; unmapped pages read as zero blocks, opaque)
                 astc_zero_blocks(sp.ptr, len);   // (unmapped pages: zero texels, not ASTC's error colour)
                 if (!astc_gpu_level(&ub, im, i, lv, ly, sp.buf, sp.off, len)) ub = VK_NULL_HANDLE;
             }
@@ -1376,7 +1376,7 @@ static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int m
     if (cb) vka_barrier(cb);
 }
 
-// ---------- BC1 for opaque ASTC (Lichii, dotfiles-25x.25) ----------
+// ---------- BC1 for opaque ASTC (Lichii) ----------
 // An ASTC texture decoded on the GPU whose storage holds data and only opaque blocks when its image is made gets a BC1 image instead of BC3: half the memory, as Lichii's
 // texture cache decides it (ASTC::IsOpaque over a storage of at most 64 MiB, all of it mapped). Copies between images of one ASTC format need one BC block size on both sides
 // (vkCmdCopyImage; a BC1 image beside a BC3 one was 'needs a draw' and skipped, 393d656f4e), so the block size is decided per copy group:
@@ -1684,9 +1684,9 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("texture serial %llu %ux%u format %#x: %llu bytes uploaded from guest memory", (unsigned long long)t->serial, im->w, im->h, d->format, (unsigned long long)bytes);
 }
 
-// VRAM budget (dotfiles-25x.8): when the process's device-local use passes BUDGET_HIGH % of the host's budget, compressed images no draw or copy took for BUDGET_IDLE ticks
+// VRAM budget: when the process's device-local use passes BUDGET_HIGH % of the host's budget, compressed images no draw or copy took for BUDGET_IDLE ticks
 // (a tick a submission: ~2 s) go, oldest first, until the use is down to BUDGET_LOW %. Only compressed ones: their content is always their texture's storage (no render
-// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Lichii (dotfiles-25x.21): also
+// target, no GPU write), so the next use makes the image again and uploads it (vka_tex_get), as mtl_tex_release lets go of a texture. Lichii: also
 // uncompressed ones the GPU never wrote (gpu_owned), whose content is their storage as well: on the Steam Deck the idle compressed ones were not enough to stay under the
 // budget. Not one held outside the recording
 // thread, waiting for a copy back, zero-shared, sparse or of a finalized pool, and only ones with an allocation of their own (4 MiB and up, vka_imgmem.c), whose memory
@@ -1694,7 +1694,7 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
 enum { BUDGET_HIGH = 90, BUDGET_LOW = 80, BUDGET_IDLE = 240 };
 static int budget_cmp(const void *a, const void *b) { uint64_t x = (*(vka_img *const *)a)->used, y = (*(vka_img *const *)b)->used; return x < y ? -1 : x > y; }
 static void blocks_compact(void);
-// Lichii (dotfiles-25x.25): the live images' memory by class, for the VRAM line (caller holds g_tmu): render targets (attachment use, GPU-written), other GPU-written
+// Lichii: the live images' memory by class, for the VRAM line (caller holds g_tmu): render targets (attachment use, GPU-written), other GPU-written
 // images, ASTC decoded to BC3, other compressed, uncompressed copies of their storage, sparse textures' dense images; of these, dedicated allocations, and images over the
 // same storage as an older live image (another shape or format of one texture's memory); residency images' bound tiles (vks_stats) and zero-shared allocations are counted apart
 static void img_classes(char *o, size_t n) {
@@ -1723,7 +1723,7 @@ void vka_tex_budget(void) {
     int have = vka_mem_budget(&usage, &budget);
     if (g_tick % 64 == 0) blocks_compact();
     static uint64_t vram_at; uint64_t vnow = now_ns();
-    if (vnow - vram_at >= 10000000000ull) { vram_at = vnow;   // (Lichii, dotfiles-25x.8: every 10 s, what the budget sees against the replay's own memory)
+    if (vnow - vram_at >= 10000000000ull) { vram_at = vnow;   // (Lichii: every 10 s, what the budget sees against the replay's own memory)
         char h[256], im[256]; void vka_heap_line(char *, size_t); vka_heap_line(h, sizeof h); vka_imem_stats(im, sizeof im);
         char cl[1024], sp[256];
         int ni; uint32_t ns; pthread_mutex_lock(&g_tmu); uint64_t img = vka_tex_mem_nolock(&ni); img_classes(cl, sizeof cl); pthread_mutex_unlock(&g_tmu); uint64_t scr = vka_scratch_bytes(&ns);
@@ -1755,7 +1755,7 @@ void vka_tex_budget(void) {
              budget / 1048576.0, n, freed / 1048576.0, (unsigned long long)evicted, evicted_bytes / 1048576.0);
 }
 
-// Lichii (dotfiles-25x.8): image blocks emptied by the textures the game let go of (a course load left 1.2 GiB free in 55 blocks of 64 MiB: ux-vram-1) stay allocated while
+// Lichii: image blocks emptied by the textures the game let go of (a course load left 1.2 GiB free in 55 blocks of 64 MiB) stay allocated while
 // any image remains in them. When their free space passes COMPACT_MB and a quarter of the blocks, idle compressed images (as the budget takes them) in the emptiest blocks
 // are let go of, so those blocks empty and go back to the driver; their textures are made again in other blocks at their next use
 enum { COMPACT_MB = 256 };
@@ -1922,7 +1922,7 @@ static uint32_t g_ntex_slots, g_nsamp_slots, g_nimg_slots;
 typedef struct { samp_par p; VkSampler s; } samp_ent; static samp_ent *g_samp; static int g_nsamp;
 static VkSampler *g_sres; static int g_nsres;   // the sampler of each registered ID, found once per registration (sampler_of searches every distinct sampler)
 static VkImageView g_null_view;
-// Lichii (dotfiles-25x.21): a texture ID registered in the pool table gets its image at its first use by a draw (id_view), not at the next submission: Mario Kart World
+// Lichii: a texture ID registered in the pool table gets its image at its first use by a draw (id_view), not at the next submission: Mario Kart World
 // registers ~33,000 textures before its title, 5.7 GiB of images, and on the Steam Deck (1 GiB VRAM + 8 GiB GTT) a command submission then ran out of memory. Until
 // its first use the ID's slot holds the null view. A draw or dispatch with a shader that reads the texture pool itself (any index: vka_draw.c any_pool) makes every
 // pending one first (vka_tex_lazy_make)
@@ -2108,7 +2108,7 @@ static int img_storage_upgrade(vka_img *im, VkCommandBuffer cb) {
     return 1;
 }
 
-// Lichii (dotfiles-25x.34): a scaled image made at its texture's own size again, as Lichii's texture cache scales an image down, for what the render scale cannot follow:
+// Lichii: a scaled image made at its texture's own size again, as Lichii's texture cache scales an image down, for what the render scale cannot follow:
 // texels the CPU sees or gives (buffer copies, uploads), shader images (stores and loads address texels: recompiled shaders scale only texture fetches), and a pass whose
 // other targets are not scaled. Its content is blitted into the new image (filtered for colour formats that filter), which is swapped in place as img_storage_upgrade does
 // (every serial and view that shares it follows); it is not scaled again. Caller holds g_tmu; no render pass open in cb (the replay's: the blit is in replay order)
@@ -2348,7 +2348,7 @@ int vka_tex_id_target(int id) {
     pthread_mutex_unlock(&g_tmu);
     return t;
 }
-// Lichii (dotfiles-25x.11): the NVN format texture ID id stands for (its view's), -1 = not registered (the recompiler reads it, nvn_recompile.c)
+// Lichii: the NVN format texture ID id stands for (its view's), -1 = not registered (the recompiler reads it, nvn_recompile.c)
 int vka_tex_id_format(int id) {
     pthread_mutex_lock(&g_tmu);
     int f = id > 0 && id < g_ntreg && g_treg[id].t.serial ? (g_treg[id].has_v && g_treg[id].v.set_format ? g_treg[id].v.format : g_treg[id].t.d.format) : -1;
@@ -2389,7 +2389,7 @@ VkSampler vka_samp_default(void) {
 // Re-uploads im if the CPU wrote its storage since its last upload, or a sparse one if its mappings or pages changed (vka_tex_prepare; caller holds g_tmu and nvn_pool_use)
 static void reup_written(vka_img *im, VkCommandBuffer cb) {
     if (img_pool_dead(im)) return;
-    // (GPU-written: binds only. Lichii, dotfiles-25x.22: a sampled one's residency image too once the GPU wrote it (copies into MKW's 68-layer arrays): its content is the
+    // (GPU-written: binds only. Lichii: a sampled one's residency image too once the GPU wrote it (copies into MKW's 68-layer arrays): its content is the
     // GPU's from then on, but the tiles the game maps later still need memory before the copies that fill them)
     if ((im->vbind || (im->rs && im->vtrack && im->gpu_owned)) && im->mem) { if (nvn_sparse_since(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size, im->vgen, im->stamp)) sparse_bind(im, cb, 0); return; }
     if (im->vtrack && !im->gpu_owned && im->mem) {
@@ -2490,7 +2490,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     static uint64_t seen, vseen; uint64_t now = nvn_dirty_now(), vnow = nvn_sparse_gen();
     if (now != seen || vnow != vseen) {
         seen = now; vseen = vnow;
-        // Lichii (dotfiles-25x.13): only the images over the pages written since the last check (nvn_dirty_take), and the sparse pools' ones, whose physical pages lie elsewhere;
+        // Lichii: only the images over the pages written since the last check (nvn_dirty_take), and the sparse pools' ones, whose physical pages lie elsewhere;
         // every live image when the write log was lost
         static nvn_dirty_range wr[4096]; int nwr = nvn_dirty_take(wr, 4096);
         if (nwr < 0) for (int i = 0; i < g_nlive; i++) reup_written(g_live[i], cb);

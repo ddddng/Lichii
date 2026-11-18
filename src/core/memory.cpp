@@ -936,7 +936,7 @@ struct Memory::Impl {
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
         if (Core::NvnHook::DirectMode()) {
             // NVN2 direct mode: the replay's write-tracked pools, by guest address (they have no
-            // device address: dotfiles-25x.5).
+            // device address).
             Core::NvnHook::OnDirectCpuWrite(v_address & 0xffffffffffffULL, size);
             return;
         }

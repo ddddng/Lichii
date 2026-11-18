@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// CPU write tracking of memory pools in direct mode (dotfiles-25x.5): upstream's nvn_dirty.h
+// CPU write tracking of memory pools in direct mode: upstream's nvn_dirty.h
 // interface (its nvn_dirty.c, MIT, is not built: its own fault handler and mprotect calls would
 // fight Lichii's fastmem protections) over Lichii's page types. Protecting pages arms them
 // (track_pages: rasterizer-cached pages by guest address, which stay readable in direct mode:

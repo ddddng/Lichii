@@ -20,15 +20,15 @@
 static VkCommandBuffer g_cb; static unsigned g_slot; static int g_prof, g_dyn_filter = 1, g_pass_keep = 1, g_vb_filter = 1;   // g_prof: DM_VK_PROF
 uint64_t vka_n_rp;   // render passes the draws opened (vka_exec.c replay statistics)
 static uint64_t g_draws, g_skipped, g_dispatches;
-uint64_t vka_skip_line[2048];   // dotfiles-o72.4 harness: skipped draws by the line that skipped them
-// Lichii (dotfiles-25x.17): the draws skipped since the last call, by the vka_draw.c line that skipped them (the replay thread writes, this reads: approximate)
+uint64_t vka_skip_line[2048];   // x86-64: skipped draws by the line that skipped them
+// Lichii: the draws skipped since the last call, by the vka_draw.c line that skipped them (the replay thread writes, this reads: approximate)
 void vka_skip_report(void) {
     static uint64_t last[2048]; char b[512]; size_t o = 0; uint64_t all = 0;
     for (int i = 0; i < 2048; i++) { uint64_t d = vka_skip_line[i] - last[i]; last[i] += d; all += d;
         if (d && o < sizeof b - 32) o += (size_t)snprintf(b + o, sizeof b - o, " line %d: %llu", i, (unsigned long long)d); }
     VLOG("draws skipped since the last report: %llu%s", (unsigned long long)all, o ? b : "");
 }
-// Render-target sizes (dotfiles-25x.10: whether a game's dynamic resolution shrinks its scene targets or viewports): passes at least 640 wide by render area, first viewport and whether they
+// Render-target sizes (whether a game's dynamic resolution shrinks its scene targets or viewports): passes at least 640 wide by render area, first viewport and whether they
 // have depth, since the last report (every 1800 presents, nvn_present.c)
 enum { NRTS = 64 };
 static struct { uint32_t w, h, vw, vh, depth; uint64_t n; } g_rts[NRTS];
@@ -75,11 +75,11 @@ void vka_dstate_reset(vka_dstate *d) {   // NVN's defaults (nvn_mtl.m state_rese
     d->poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
     d->ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
     d->st_vmask[0] = d->st_vmask[1] = d->st_wmask[0] = d->st_wmask[1] = 0xff; d->dr[1] = 1; d->b.samples = 1;
-    d->sample_mask = 0xffff; d->patch = 3; d->tess_inner[0] = d->tess_inner[1] = 1; for (int i = 0; i < 4; i++) d->tess_outer[i] = 1;   // (Lichii, dotfiles-25x.100)
+    d->sample_mask = 0xffff; d->patch = 3; d->tess_inner[0] = d->tess_inner[1] = 1; for (int i = 0; i < 4; i++) d->tess_outer[i] = 1;   // (Lichii)
     memset(d->vrs_pal, 5, sizeof d->vrs_pal);   // one invocation a pixel
 }
 static int cpu_read(uint64_t addr, void *out, size_t n);
-// Lichii (dotfiles-25x.100): a deferred bind (Bind*Deferred) as the memory at its source holds it now, applied as the bind it names (hle_nvn.c bind_handles' pool bases)
+// Lichii: a deferred bind (Bind*Deferred) as the memory at its source holds it now, applied as the bind it names (hle_nvn.c bind_handles' pool bases)
 static void bind_deferred(vka_dstate *d, const p_bind_defer *b) {
     if (b->stage < 0 || b->stage >= VKA_NSTAGE || b->n <= 0 || b->n > 32) return;
     uint64_t w[64]; const int buf = b->kind == DEFER_UBO || b->kind == DEFER_SSBO;
@@ -240,16 +240,16 @@ static struct {
     uint32_t cnl[8], dnl; VkExtent2D cext[8], dext;      // each attachment's layers and level size (clears in the pass must cover what they would outside it)
     int swrite;                                          // a draw of the pass wrote memory (storage buffers or images, raw global stores, a geometry shader's claim)
     int bar_pending;                                     // a game barrier came inside the pass and was taken there (vka_rp_game_barrier): the draws after it are checked (bar_hazard)
-    int scaled;                                          // Lichii (dotfiles-25x.34): its targets are at the render scale: viewports and scissors scaled
-    VkExtent2D own;                                      // Lichii (dotfiles-25x.40): the area in the targets' own texels (not scaled): the render area shaders read
-    int again;                                           // Lichii (dotfiles-25x.32): every target was drawn in the frames just before too (drawn_again): only such draws are skipped while their pipeline is made asynchronously
-    int vrs; uint64_t vrs_serial; view_t vrs_view; uint8_t vrs_has_view, vrs_rate[16];   // Lichii (dotfiles-25x.100): its shading-rate attachment's image and palette (vrs_key)
+    int scaled;                                          // Lichii: its targets are at the render scale: viewports and scissors scaled
+    VkExtent2D own;                                      // Lichii: the area in the targets' own texels (not scaled): the render area shaders read
+    int again;                                           // Lichii: every target was drawn in the frames just before too (drawn_again): only such draws are skipped while their pipeline is made asynchronously
+    int vrs; uint64_t vrs_serial; view_t vrs_view; uint8_t vrs_has_view, vrs_rate[16];   // Lichii: its shading-rate attachment's image and palette (vrs_key)
 } R;
-// Lichii (dotfiles-25x.34): the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
+// Lichii: the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
 // pixel stage's down factor; no image is scaled: vka_tex.c img_unscale), and the last pushed, which stays while every layout has the same push constant range (vka_dyn_invalidate forgets it)
 static struct { uint32_t tex[4], img[2]; float down, pad; } g_scale_push;
 static struct { typeof(g_scale_push) p; int valid; } g_scale_pushed;
-// Lichii (dotfiles-25x.40): the render area pushed last (nvn_direct.h NVN_DIRECT_RENDER_AREA_OFFSET), for draws whose shaders read it (VKA_F_RENDER_AREA)
+// Lichii: the render area pushed last (nvn_direct.h NVN_DIRECT_RENDER_AREA_OFFSET), for draws whose shaders read it (VKA_F_RENDER_AREA)
 static struct { float a[4]; int valid; } g_area_pushed;
 _Static_assert(sizeof g_scale_push == NVN_DIRECT_SCALE_PUSH_SIZE && offsetof(typeof(g_scale_push), img) == NVN_DIRECT_SCALE_IMAGES_OFFSET && offsetof(typeof(g_scale_push), down) == NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET, "RescalingLayout");
 // Clears waiting for the pass of their targets (vka_rp_clear), in order: the next draw over the same targets opens its pass with them (loadOp CLEAR, or vkCmdClearAttachments),
@@ -289,7 +289,7 @@ static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv
     *nl = has_v && v->set_layers && v->nlayers ? v->nlayers : all - (*l0 < all ? *l0 : 0);
     if (*l0 + *nl > all) *nl = *l0 < all ? all - *l0 : 0;
 }
-// Lichii (dotfiles-25x.34): a pass over scaled targets and targets at their own size (beside a small target, or one made at its own size again) draws them all at their own size
+// Lichii: a pass over scaled targets and targets at their own size (beside a small target, or one made at its own size again) draws them all at their own size
 static void rp_scale_targets(const p_set_rt *rt, int has_rt) {
     if (!has_rt) return;
     vka_img *ims[9]; int n = 0, scaled = 0;
@@ -299,19 +299,19 @@ static void rp_scale_targets(const p_set_rt *rt, int has_rt) {
     if (PC.n) pc_flush();   // (their rectangles are in their images' sizes)
     for (int i = 0; i < n; i++) if (ims[i]->scaled) vka_tex_unscale(ims[i], g_cb, "a pass with targets at their own size");
 }
-// Lichii (dotfiles-25x.40): an attachment's level size in its texture's own texels (lw, lh: the image's), into the smallest so far
+// Lichii: an attachment's level size in its texture's own texels (lw, lh: the image's), into the smallest so far
 static void own_min(const vka_img *im, uint32_t lv, uint32_t lw, uint32_t lh, uint32_t *ow, uint32_t *oh) {
     if (im->scaled) { lw = im->d.width >> lv ? im->d.width >> lv : 1; lh = im->d.height >> lv ? im->d.height >> lv : 1; }
     if (lw < *ow) *ow = lw; if (lh < *oh) *oh = lh;
 }
-// Lichii (dotfiles-25x.32): marks im drawn in this frame (the presents the replay filled so far); returns whether a pass drew into it in one of the 3 frames before too
+// Lichii: marks im drawn in this frame (the presents the replay filled so far); returns whether a pass drew into it in one of the 3 frames before too
 // (targets the game draws every frame, double or triple buffered)
 static int drawn_again(vka_img *im) {
     uint64_t vka_present_filled(void); const uint64_t f = vka_present_filled() + 1;
     if (im->drawn[0] != f) { im->drawn[1] = im->drawn[0]; im->drawn[0] = f; }
     return im->drawn[1] && im->drawn[1] + 3 >= f;
 }
-// ---------- Variable-rate shading (Lichii, dotfiles-25x.100) ----------
+// ---------- Variable-rate shading (Lichii) ----------
 // NVN's shading-rate image (BindShadingRateImage) holds a palette index per 16x16-pixel tile, and a viewport's palette (ShadingRateImagePalette) the rates, as
 // VK_NV_shading_rate_image's VkShadingRatePaletteEntryNV. A pass whose draws have an image bound gets a VK_KHR_fragment_shading_rate attachment made from them just
 // before it begins (vulkan_nvn_direct_shading_rate.comp): per tile the rate of its index in viewport 0's palette (the replay draws with one viewport). The pipelines
@@ -810,7 +810,7 @@ VkImageView placeholder(uint8_t dim, int storage) {
 
 // Where a draw's CPU time goes (DM_VK_PROF=1, logged with the replay statistics): the virtual counter at each phase boundary of vka_draw
 static uint64_t g_pt_last, g_pt[9], g_ps[6]; static int g_pt_ph;
-#if defined(__x86_64__)   // dotfiles-o72.4 harness: a nanosecond counter stands in for the generic timer
+#if defined(__x86_64__)   // x86-64: a nanosecond counter stands in for the generic timer
 static inline uint64_t cntvct(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 #else
 static inline uint64_t cntvct(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
@@ -957,7 +957,7 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     if (g_dwn) { g_pd_delta_w += g_dwn; g_pd_delta_all += g_w.n; return 2; }
     return 0;
 }
-// Lichii (dotfiles-25x.16): the pixel shader's set (VKA_SET_FS) of a draw, allocated from the submission slot's pools and written, or the one an earlier draw of the slot
+// Lichii: the pixel shader's set (VKA_SET_FS) of a draw, allocated from the submission slot's pools and written, or the one an earlier draw of the slot
 // wrote with the same descriptors (draws repeat a material's textures and constants). Its own set lets the fragment shader library depend on that shader only (vka_pso.c)
 enum { FSC = 8192, FSC_PROBE = 16 };
 static struct { uint64_t h; VkDescriptorSetLayout l; uint64_t *w; uint32_t n; VkDescriptorSet set; } g_fsc[FSC];
@@ -1228,7 +1228,7 @@ void vka_draw_prof(char *b, size_t n, double draws) {
     memset(g_ps, 0, sizeof g_ps);
     memset(g_pt, 0, sizeof g_pt);
 }
-typedef struct { VkCommandBuffer cb; VkRect2D r; } excl_arg;   // Lichii (dotfiles-25x.100): the exclusive scissor, through the encoder thread when it records
+typedef struct { VkCommandBuffer cb; VkRect2D r; } excl_arg;   // Lichii: the exclusive scissor, through the encoder thread when it records
 static void excl_call(const void *a) { const excl_arg *x = a; V.set_excl_scissor(x->cb, 0, 1, &x->r); }
 // The records of an indirect mesh draw of one dimension are {count, first} (DrawMeshTasksIndirect: derived from the NVN2 driver in OoT's sdk NSO, function at sdk+0x6814e0,
 // a 2-word DMA into the draw method that DrawMeshTasks writes count, first to); VK_EXT_mesh_shader reads {x, y, z}. Each record's count is copied on the GPU into {count, 1, 1}
@@ -1302,7 +1302,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!mesh) {
         topo = topology(prim, &expand);
         if (expand < 0) SKIP("primitive type %d not on Vulkan: the draw is skipped", prim);
-        if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {   // (Lichii, dotfiles-25x.100: the patch size is the pipeline's)
+        if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {   // (Lichii: the patch size is the pipeline's)
             if (!sh[4]) SKIP("patches drawn with no tessellation evaluation shader: skipped");
             if (!sh[3]) SKIP("patches drawn with tessellation evaluation shader %016llx and no control shader: NVN's default levels (outer %g %g %g %g, inner %g %g) need a control stage on Vulkan; skipped",
                              (unsigned long long)sh[4]->key, d->tess_outer[0], d->tess_outer[1], d->tess_outer[2], d->tess_outer[3], d->tess_inner[0], d->tess_inner[1]);
@@ -1353,7 +1353,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     k.topo = mesh ? 0 : (uint8_t)topo_class(topo);
     k.poly_mode = (uint8_t)(d->poly.mode == NVN_POLYGON_MODE_LINE && V.fill_lines ? VK_POLYGON_MODE_LINE : d->poly.mode == NVN_POLYGON_MODE_POINT && V.fill_lines ? VK_POLYGON_MODE_POINT : VK_POLYGON_MODE_FILL);
     k.depth_clamp = d->depth_clamp && V.depth_clamp; k.a2c = d->ms.a2c != 0;
-    // Lichii (dotfiles-25x.100): the sample mask, the patch size, conservative rasterization, the provoking vertex, viewport swizzles, the exclusive scissor, VRS
+    // Lichii: the sample mask, the patch size, conservative rasterization, the provoking vertex, viewport swizzles, the exclusive scissor, VRS
     k.sample_mask = (uint16_t)(d->sample_mask & ((1u << k.samples) - 1));
     if (!mesh && (sh[3] || sh[4])) k.patch = (uint8_t)d->patch;
     if (d->cons) {
@@ -1436,7 +1436,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     // Viewport and scissor. The translator writes clip space for Metal (y up, origin upper left): Metal's viewport, flipped for a lower-left window origin as on Metal, then given
     // a negative height, maps it as Metal does (android/SHADERS.md "Depth and Y")
     float vx = d->has_vp ? d->vp[0][0] : 0, vy = d->has_vp ? d->vp[0][1] : 0, vw = d->has_vp ? d->vp[0][2] : (float)R.area.extent.width, vh = d->has_vp ? d->vp[0][3] : (float)R.area.extent.height;
-    if (R.scaled && d->has_vp) { float f = (float)vka_scale_up / (float)(1u << vka_scale_shift); vx *= f; vy *= f; vw *= f; vh *= f; }   // (Lichii, dotfiles-25x.34: the render scale)
+    if (R.scaled && d->has_vp) { float f = (float)vka_scale_up / (float)(1u << vka_scale_shift); vx *= f; vy *= f; vw *= f; vh *= f; }   // (Lichii: the render scale)
     if (vka_origin_ll()) { vy += vh; vh = -vh; }
     if (vsw == 0x100) { vy += vh; vh = -vh; }   // (other swizzles are the pipeline's: k.vp_sw)
     float n0 = d->dr[0] < 0 ? 0 : d->dr[0] > 1 ? 1 : d->dr[0], n1 = d->dr[1] < 0 ? 0 : d->dr[1] > 1 ? 1 : d->dr[1];

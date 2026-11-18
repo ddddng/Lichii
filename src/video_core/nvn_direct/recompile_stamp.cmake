@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # cmake -DROOT=<src> -DLIST=<file of paths under ROOT, one a line> -DOUT=<header> -P recompile_stamp.cmake
-# The stamp of the recompiler's translations (nvn_recompile.c vk_recompiled.bin, dotfiles-25x.13):
+# The stamp of the recompiler's translations (nvn_recompile.c vk_recompiled.bin):
 # a hash of the sources whose change can change a translation's SPIR-V or descriptors. The header
 # is rewritten only when the stamp changes, so a build that touches none of them keeps the file.
 file(STRINGS "${LIST}" paths)

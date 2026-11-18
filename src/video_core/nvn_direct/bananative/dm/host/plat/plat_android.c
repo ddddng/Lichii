@@ -146,7 +146,7 @@ size_t plat_malloc_good_size(size_t n) { return n; }   // Scudo has no such quer
 #define SLOTS_MAGIC 0x4e58534c4f545321ull   // "NXSLOTS!"
 typedef struct { plat_slots_t s; uint64_t magic; } slots_block;
 static pthread_key_t g_slots_key; static pthread_once_t g_slots_once = PTHREAD_ONCE_INIT;
-#if defined(__x86_64__)   // dotfiles-o72.4 harness: a thread-local block stands in for Bionic's TCB slots
+#if defined(__x86_64__)   // x86-64: a thread-local block stands in for Bionic's TCB slots
 __thread plat_slots_t *plat_slots_x86;
 static __thread void *g_tcb_x86[4];
 static void **tcb(void) { return g_tcb_x86; }
@@ -361,7 +361,7 @@ void plat_on_signal(int sig, void (*fn)(void *), void *ctx) {
 }
 
 // ---- Signal contexts ----
-#if !defined(__x86_64__)   // dotfiles-o72.4 harness: aarch64 signal records only
+#if !defined(__x86_64__)   // x86-64: aarch64 signal records only
 // The kernel's records after the general registers in __reserved: fpsimd_context first, then esr_context for a fault
 static struct _aarch64_ctx *uc_record(ucontext_t *uc, uint32_t magic) {
     uint8_t *p = (uint8_t *)uc->uc_mcontext.__reserved, *end = p + sizeof uc->uc_mcontext.__reserved;

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// The emulator shutting down in direct mode (dotfiles-25x.18). Upstream's replay lives as long as
+// The emulator shutting down in direct mode. Upstream's replay lives as long as
 // its process (detached threads, the GPU until exit); in Lichii the emulation stops first and the
 // device goes away while the process goes on.
 // - nvn_direct_stop, before the guest's cores are suspended: a game thread inside a halted NVN

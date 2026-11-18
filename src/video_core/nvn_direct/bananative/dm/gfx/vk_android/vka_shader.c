@@ -79,7 +79,7 @@ static const char *refusal(const vka_shlib *L, const dmsh_vk_entry *e) {
     for (unsigned i = 0; i < e->bind_count; i++) if (b[i].kind == DMSH_VK_KIND_UNKNOWN) return "a binding the build could not place";
     return NULL;
 }
-// Lichii (dotfiles-25x.16): a pixel shader's set-0 resources in their own set (VKA_SET_FS), in every module made of it
+// Lichii: a pixel shader's set-0 resources in their own set (VKA_SET_FS), in every module made of it
 static void fs_set(const dmsh_vk_entry *e, uint32_t *w, size_t nb) { if (e->stage == DMSH_VK_STAGE_FS) vka_spv_set_remap(w, nb / 4, DMSH_VK_SET_DRAW, VKA_SET_FS); }
 static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
     size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);

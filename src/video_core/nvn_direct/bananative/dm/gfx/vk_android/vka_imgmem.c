@@ -152,7 +152,7 @@ void vka_imem_free(vka_imem *m) {
     memset(m, 0, sizeof *m);
 }
 
-// Lichii (dotfiles-25x.8): the blocks' free space (bytes) and the share of a block its images use (0-1; read without the lock: a heuristic's input)
+// Lichii: the blocks' free space (bytes) and the share of a block its images use (0-1; read without the lock: a heuristic's input)
 uint64_t vka_imem_block_free(uint64_t *block_bytes) { pthread_mutex_lock(&g_imu); uint64_t all = S.blocks * BLOCK, f = all - S.run_bytes; pthread_mutex_unlock(&g_imu); if (block_bytes) *block_bytes = all; return f; }
 double vka_imem_block_use(const void *blk) { const iblock *b = blk; return b ? (double)b->free.used / (double)(BLOCK / UNIT) : 1.0; }
 // For the stats line: the blocks, the bytes the images in them take, what rounding to units and the blocks' free space leave unused, the dedicated allocations

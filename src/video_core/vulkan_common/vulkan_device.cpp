@@ -817,7 +817,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 
     // Descriptors feature list
-    // NVN2 direct mode (dotfiles-25x): the replay's descriptor tables are update-after-bind and
+    // NVN2 direct mode: the replay's descriptor tables are update-after-bind and
     // partially bound arrays, and its pools use buffer device addresses; those stay enabled.
     nvn_direct = Core::NvnHook::DirectMode();
     const VkPhysicalDeviceDescriptorIndexingFeatures supported_descriptor_indexing =
@@ -986,7 +986,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 #endif
-    // NVN2 direct mode (dotfiles-25x.2): what the replay (nvn_direct/bananative/dm/gfx/vk_android)
+    // NVN2 direct mode: what the replay (nvn_direct/bananative/dm/gfx/vk_android)
     // needs beyond the emulator's device: dynamic rendering (it refuses to start without),
     // graphics pipeline libraries, host memory import for the guest's memory pools, and up to
     // 16 queues of the graphics family: one per NVN queue plus its own work on queue 0, which
@@ -1025,20 +1025,20 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
         }
         // Pools as udmabufs of guest memory where host-pointer imports of it are refused
-        // (amdgpu, dotfiles-25x.21: vka_mem.c vka_mem_import_choose)
+        // (amdgpu: vka_mem.c vka_mem_import_choose)
         if (supported_extensions.contains(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
             supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
             loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
         }
-        // Counter timestamps on the guest clock (dotfiles-25x.26: vka_exec.c gpu_offset)
+        // Counter timestamps on the guest clock (vka_exec.c gpu_offset)
         if (supported_extensions.contains(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
         } else if (supported_extensions.contains(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
             loaded_extensions.insert(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
         }
         // NVN state the replay maps onto extensions Lichii's renderer does not use
-        // (dotfiles-25x.100): shading-rate images as a fragment shading rate attachment, and
+        //: shading-rate images as a fragment shading rate attachment, and
         // exclusive scissors.
         if (supported_extensions.contains(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
             VkPhysicalDeviceFeatures2 shading_rate_query{

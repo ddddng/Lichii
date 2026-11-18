@@ -74,7 +74,7 @@ inline void Nx2NotifyHdrChange() {
 /**
  * What a Switch 2 game's present does besides showing its image, for both presenters: nx2:vi2's
  * PresentClientBuffer (the presents of the game's NVN driver) and NVN2 direct mode's
- * nvnQueuePresentTexture (core/nvn_hook.cpp, dotfiles-25x.7). The present count and times the
+ * nvnQueuePresentTexture (core/nvn_hook.cpp). The present count and times the
  * bench and the debug tools read, thread statistics, pacing to the vblank, the frame capture, the
  * speed limiter and perf stats.
  */

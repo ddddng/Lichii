@@ -96,11 +96,11 @@ uint64_t guest_ns(void);
 // timestamp where it is recorded (TOP_OF_PIPE for TIMESTAMP_TOP, else BOTTOM_OF_PIPE), and once the submission is done each report gets the completion time less the GPU time
 // from it to the submission's last report, so two reports of one submission bracket the GPU work between them (a game's dynamic resolution and frame pacing read that).
 // Without it every report of a submission reads the same time (the completion)
-// Lichii (dotfiles-25x.26, lab): DM_NVN_GPU_TS=gpu: each report reads its own GPU timestamp, on the guest clock: the device's ticks in ns plus an offset calibrated
+// Lichii: DM_NVN_GPU_TS=gpu: each report reads its own GPU timestamp, on the guest clock: the device's ticks in ns plus an offset calibrated
 // against CLOCK_MONOTONIC (VK_KHR/EXT_calibrated_timestamps, once a second; without it the smallest completion-time-less-GPU-time seen lately), never later than the
 // completion and never before an earlier report. Not the default: Mario Kart World puts its ~13 timestamp reports a frame in one submission, so with one time a
 // submission it reads a GPU time of 0 and keeps 1080p at a 1-vblank interval; with the GPU's own times (frame span p50 10.4, p90 14.3, p99 22.7 ms: GPU work plus the
-// GPU's waits for the replay's recording) it lowered its render resolution (1248x700 passes) and presented 16% of frames at 2 vblanks (nd26g-1: 22.1 ms against 17.1).
+// GPU's waits for the replay's recording) it lowered its render resolution (1248x700 passes) and presented 16% of frames at 2 vblanks (22.1 ms against 17.1).
 // The reports stay in 614.4 MHz ticks (nvn_timestamp.h): the game reads them through nvnDeviceGetTimestampInNanoseconds (~8 calls a frame), which turns them back into ns
 enum { SEGQ = 128 };   // queries per submission slot
 static VkQueryPool g_sqp; static int g_sq_n, g_sq_base, g_seg = -1;
@@ -476,7 +476,7 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
                                                 (unsigned long long)vka_fence_last(), (unsigned long long)vka_fence_queued(), r ? "yes" : "timeout", t0, ms_now(), ms_now() - t0);
         return r;
     }
-    return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence, dotfiles-25x.4)
+    return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence)
 }
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) {
     return vka_wait_done(fence, timeout_ns);
@@ -731,10 +731,10 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
     if (!im) return;
-    vka_tex_unscale(im, g_cb, to_tex ? "a buffer → texture copy" : "a texture → buffer copy");   // (Lichii, dotfiles-25x.34: the buffer's texels are the texture's size)
+    vka_tex_unscale(im, g_cb, to_tex ? "a buffer → texture copy" : "a texture → buffer copy");   // (Lichii: the buffer's texels are the texture's size)
     if (to_tex) vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = copy_aspect(im, to_tex ? "buffer → texture copy" : "texture → buffer copy"); if (!asp) return;
-    // Lichii (dotfiles-25x.25): an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
+    // Lichii: an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
     // size; counted, not yet decoded
     if (im->f.astc_bw && ++g_cp_astc_raw && (g_cp_astc_raw <= 8 || !(g_cp_astc_raw & (g_cp_astc_raw - 1)))) { VRED("%s of ASTC texture serial %llu %ux%u layers %u format %#x (image VkFormat %d) level %u region %dx%d: ASTC blocks copied as BC blocks (%llu so far)",
                                                                               to_tex ? "buffer → texture copy" : "texture → buffer copy", (unsigned long long)im->serial, im->d.width, im->d.height, im->layers, im->d.format, im->f.vk,
@@ -776,7 +776,7 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     g_stat_ops++;
     vka_barrier(g_cb);
 }
-// Lichii (dotfiles-25x.17): copies into a texture's levels its image leaves out (a sparse texture made dense from a coarser level, vka_tex.c dense_floor), and into the
+// Lichii: copies into a texture's levels its image leaves out (a sparse texture made dense from a coarser level, vka_tex.c dense_floor), and into the
 // levels it keeps, by destination, for the line every 1800 presents (lost updates of the 68-layer arrays?)
 static uint64_t g_cp_drop, g_cp_kept_sparse;
 void vka_copy_drop_stats(uint64_t *dropped, uint64_t *kept) { *dropped = g_cp_drop; *kept = g_cp_kept_sparse; }
@@ -792,7 +792,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
     vka_tex_own(d, g_cb);
-    if (s->f.astc_bw && d->f.astc_bw && !vka_tex_astc_copy(s, d, g_cb)) return;   // (Lichii, dotfiles-25x.25: one BC block size on both sides, BC1 for opaque ASTC)
+    if (s->f.astc_bw && d->f.astc_bw && !vka_tex_astc_copy(s, d, g_cb)) return;   // (Lichii: one BC block size on both sides, BC1 for opaque ASTC)
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     { unsigned dlt = dl; int ok = vka_img_lv(d, &dl); cp_note(d, dlt, !ok); if (!ok) return; }
@@ -803,7 +803,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = s->depth > 1, d3 = d->depth > 1, nz = c->sr.depth > 0 ? c->sr.depth : 1;
     VkImageSubresourceLayers ss = {sa, sl, s3 ? 0 : sz0 + (uint32_t)c->sr.zoffset, s3 ? 1 : (uint32_t)nz}, ds = {sa, dl, d3 ? 0 : dz0 + (uint32_t)c->dr.zoffset, d3 ? 1 : (uint32_t)nz};
     if (ss.baseArrayLayer + ss.layerCount > s->layers || ds.baseArrayLayer + ds.layerCount > d->layers) { VRED_ONCE("texture copy layers out of range"); return; }
-    // Lichii (dotfiles-25x.34): with an image at the render scale the regions are in each image's own texels, and sides that differ in size then are a blit (filtered for
+    // Lichii: with an image at the render scale the regions are in each image's own texels, and sides that differ in size then are a blit (filtered for
     // colour formats that filter; integer and depth formats blitted nearest). What neither a copy nor a blit takes (a resolve, mirroring, 3D, other formats, no blits of
     // the format) has both images made at their own size first
     const uint32_t mirror = NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT | NVN_COPY_FLAGS_MIRROR_Z_BIT;
@@ -895,7 +895,7 @@ static void rc_note(const p_render_cond *rc, int skip) {
         g_rc_frame0 = t; g_rc_n = g_rc_skip = g_rc_flip = 0;
     }
 }
-// Lichii (dotfiles-25x.17): a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
+// Lichii: a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
 // the other counters: 0) is written when the replay reaches the report, in the order the GPU would write it, and the completion thread then writes only the time beside it
 // (returns 1). Written at completion, it landed at a time set by the GPU's progress: Mario Kart World reports a timestamp onto a word its CPU sets to 1 and draws only while
 // the word differs from the next (SetRenderEnableConditional, render if not equal), so whether the completion of an earlier frame's report had overwritten the CPU's newer 1
@@ -920,7 +920,7 @@ static void ev_set(volatile uint32_t *val, int mode, uint32_t v) {
     if (i == g_nevv) { if (g_nevv == NEVV) { memmove(g_evv, g_evv + 1, (NEVV - 1) * sizeof *g_evv); i = NEVV - 1; } else g_nevv++; g_evv[i].val = val; g_evv[i].v = *val; }
     g_evv[i].v = mode == NVN_EVENT_SIGNAL_MODE_ADD ? g_evv[i].v + v : v;
 }
-// With the NVN queues as Vulkan queues (V.multi) an event's GPU signals are counted on timeline semaphores (dotfiles-25x.4): each signal walked is the next value of
+// With the NVN queues as Vulkan queues (V.multi) an event's GPU signals are counted on timeline semaphores: each signal walked is the next value of
 // the event's semaphore for its Vulkan queue, whatever 32-bit value it writes, and the values written since the last CPU write are kept with the queue and timeline
 // value that wrote them. A wait for "at least v" waits for the first of them that wrote v or more (that very signal, on its queue's semaphore), or, when none has yet,
 // for a gate (evgate) the first later signal that writes v or more signals: Mario Kart World's second queue waits for values 1, 2, 3 and 5 of one event before the first
@@ -937,7 +937,7 @@ enum { EVG = 16 };
 // is its next value (val; pending: the highest not signalled yet, a round of waits the next signal that meets them signals at once), and the first signal walked that writes
 // a value meeting it signals the gate there. A new round starts only once the gate's last signal has run (else another gate takes the wait): the next round's signal may
 // come from another queue, and must not run before the last one. Lichii: a gate holds the waits of one Vulkan queue (q).
-// Stopgap (dotfiles-25x.97): when the signal that meets a gate is walked on the gate's own Vulkan queue, its waits sit ahead of their signal in one queue, which the GPU
+// Stopgap: when the signal that meets a gate is walked on the gate's own Vulkan queue, its waits sit ahead of their signal in one queue, which the GPU
 // never gets past, so the host signals the gate there and its waits run before the signalling part instead of after it (that ordering is given up; the other queues'
 // gates wait for the part's GPU signal). It fires only where NVN queues share a Vulkan queue: the replay gives every live NVN queue one of its own while the family has
 // enough (vka_dev.c: up to NVN_DIRECT_MAX_QUEUES, the last the host's; NVIDIA's family has 16, so 15 live NVN queues), and moves one off a queue it shares with an NVN
@@ -977,7 +977,7 @@ static void psy_signal(VkSemaphore s, uint64_t v) {
     if (g_psy.ns < PWS) { g_psy.ss[g_psy.ns] = s; g_psy.sv[g_psy.ns++] = v; } else VRED_ONCE("more than %d event signals in one part", PWS);
 }
 // The last NEVTR queue-event steps in replay order (C: a CPU write, S: a GPU signal walked, W: a wait that ends the part, G: one on a gate, w: a wait met on its own queue), for a GPU hang's
-// report (dotfiles-25x.4): the stuck part's wait, the semaphores' values and the queue timelines then
+// report: the stuck part's wait, the semaphores' values and the queue timelines then
 enum { NEVTR = 128 };
 static struct { char k; int q; uint64_t serial, fence; const void *ev; uint32_t v; uint64_t t; } g_evtr[NEVTR]; static unsigned g_nevtr;
 static void evtr(char k, const evsem *e, uint32_t v, uint64_t t) {
@@ -1072,7 +1072,7 @@ static void evsem_wait(const p_wait_event *w) {   // a wait walked here: met on 
     if (!chunk()) VRED_ONCE("an event wait in a submission of more than %d parts: the whole part waits", NCHUNK);
     psy_wait(s, t);
 }
-// Lichii (dotfiles-25x.100): CommandBufferWaitSync. The sync's fence is read as the command runs; a submission on another Vulkan queue that has not completed is waited
+// Lichii: CommandBufferWaitSync. The sync's fence is read as the command runs; a submission on another Vulkan queue that has not completed is waited
 // for from here on: the part ends and the next one waits for that queue's timeline value (as vka_rp_sub_wait for QueueWaitSync). One queue, or other NVN queues sharing
 // this one: queue order already puts the fence's submission first
 static void wait_sync(uint64_t fence) {
@@ -1083,7 +1083,7 @@ static void wait_sync(uint64_t fence) {
     for (uint32_t i = 0; i < g_psy.nw; i++) if (g_psy.ws[i] == sm) { if (g_psy.wv[i] < v) g_psy.wv[i] = v; return; }
     if (g_psy.nw < PWS) { g_psy.ws[g_psy.nw] = sm; g_psy.wv[g_psy.nw++] = v; } else VRED_ONCE("more than %d waits in one part", PWS);
 }
-// Lichii (dotfiles-25x.100): debug groups and markers as VK_EXT_debug_utils labels (V.label_begin: a debugging tool or renderer debug). Groups are kept balanced in each
+// Lichii: debug groups and markers as VK_EXT_debug_utils labels (V.label_begin: a debugging tool or renderer debug). Groups are kept balanced in each
 // of the replay's command buffers: a pop with none open there is dropped, and the ones still open when it ends are closed (labels_close)
 static int g_label_depth;
 typedef struct { VkCommandBuffer cb; int what; char name[256]; } label_arg;
@@ -1150,7 +1150,7 @@ static void walk(walk_t *w) {
             else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); rc_note(rc, S.rc_skip); }
             break; }
         case OP_RESET_COUNTER: break;
-        case OP_ENABLE_COND: { const p_enable_cond *ec = a; int skip = ec->mode == 3;   // (Lichii, dotfiles-25x.100: as OP_RENDER_COND, for dispatches or copies)
+        case OP_ENABLE_COND: { const p_enable_cond *ec = a; int skip = ec->mode == 3;   // (Lichii: as OP_RENDER_COND, for dispatches or copies)
             if (ec->mode < 2) { uint64_t x = 0, y = 0; skip = rc_known(ec->addr, &x) && rc_known(ec->addr + 16, &y) && (ec->mode ? x == y : x != y); }
             if (ec->target) S.copy_skip = skip; else S.compute_skip = skip;
             break; }

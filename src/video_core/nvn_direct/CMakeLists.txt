@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# NVN2 direct renderer (lab, dotfiles-25x): Banana Native's NVN front end and Vulkan replay (MIT,
-# bananative/) as a C library, built the way the lab's x86-64 port builds them (__ANDROID__
+# NVN direct renderer: Banana Native's NVN front end and Vulkan replay (MIT, bananative/) as a
+# C library, built the way their x86-64 Linux port builds them (__ANDROID__
 # selects their Vulkan replay; the Android headers they include come from bananative/shim).
 # Linux x86-64, and Windows x86-64 with clang-cl (the code is GNU C: cl.exe does not take it), where
 # plat_windows.c and the headers in bananative/shim/win32 stand in for the POSIX calls.

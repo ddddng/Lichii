@@ -172,10 +172,10 @@ public:
     }
 };
 #else
-/// NVN2 direct mode (dotfiles-25x.8): NVML's figure for this process's video memory on the
+/// NVN2 direct mode: NVML's figure for this process's video memory on the
 /// device (NVIDIA only; 0 elsewhere or when NVML has no entry for it). VK_EXT_memory_budget's heap
 /// usage leaves out what the driver keeps for itself: Mario Kart World's race showed 8.8 GiB of
-/// heap usage while NVML had the process at 12.1 GiB (ux-vram-1), so a budget on the heap usage
+/// heap usage while NVML had the process at 12.1 GiB, so a budget on the heap usage
 /// never held the cap. Read at most every 250 ms (an NVML process query takes about a millisecond).
 class NvmlProcessMemory {
 public:
@@ -272,7 +272,7 @@ struct NvnDirectMemory {
     NvmlProcessMemory nvml;
 };
 
-/// NVN2 direct mode (dotfiles-25x.2): the replay runs on this device. Its NVN queues take the
+/// NVN2 direct mode: the replay runs on this device. Its NVN queues take the
 /// graphics family's queues from 1 on, its own work (uploads, sparse binds) queue 0 with Lichii; every
 /// submission of the replay holds the scheduler's submit lock. Returns whether the replay is up.
 bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
@@ -301,7 +301,7 @@ bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .astc_context = astc,
         .astc_opaque = astc != nullptr ? &NvnDirectAstc::IsOpaque : nullptr,
         // NVML's figure when there is one (it counts what the driver keeps for itself), else the
-        // heap usage (dotfiles-25x.8).
+        // heap usage.
         .memory_usage = [](void* context) -> uint64_t {
             auto* const memory = static_cast<NvnDirectMemory*>(context);
             const u64 nvml = memory->nvml.Get();
@@ -506,7 +506,7 @@ try
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
 #ifdef LICHII_NVN_DIRECT
-    // NVN2 direct mode (dotfiles-25x.18): the replay's threads leave the device (and the ASTC
+    // NVN2 direct mode: the replay's threads leave the device (and the ASTC
     // decode it calls back into) before both go away.
     if (device.IsNvnDirect()) {
         nvn_direct_park();

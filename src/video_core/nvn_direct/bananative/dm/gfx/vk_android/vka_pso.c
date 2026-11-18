@@ -84,7 +84,7 @@ int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
-// Lichii (dotfiles-25x.16): a graphics pipeline's layout has three sets: 0 the per-draw resources of the stages before the rasterizer (pushed when they fit), 1 the pools,
+// Lichii: a graphics pipeline's layout has three sets: 0 the per-draw resources of the stages before the rasterizer (pushed when they fit), 1 the pools,
 // VKA_SET_FS the pixel shader's own (an allocated set, vka_draw.c bind_sets; its module remapped there, vka_shader.c fs_set). The layouts are made with independent sets
 // (VK_EXT_graphics_pipeline_library), so the pre-rasterization library is made with {set 0, pools} and the fragment shader library with {pools, VKA_SET_FS}: each depends on
 // its own shaders only, not on the pair's union of bindings, and can be made ahead from the shader library alone. Compute keeps {set 0, pools}
@@ -119,8 +119,8 @@ static VkPipelineLayout pipe_layout(VkDescriptorSetLayout s0, VkDescriptorSetLay
     if (had) return (VkPipelineLayout)had;
     VkDescriptorSetLayout sets[3] = {s0, pk.s[1], s2}; uint32_t n = graphics ? 3 : pk.s[1] ? 2 : 1;
     if (!V.gpl) for (uint32_t i = 0; i < n; i++) if (!sets[i]) sets[i] = empty_set_layout();
-    // Lichii: one push-constant range in every layout, so that all of them stay compatible for push constants: the render scale's while it scales (dotfiles-25x.34),
-    // then the render area (dotfiles-25x.40)
+    // Lichii: one push-constant range in every layout, so that all of them stay compatible for push constants: the render scale's while it scales,
+    // then the render area
     VkPushConstantRange push = {VK_SHADER_STAGE_ALL, vka_scale_on() ? 0 : NVN_DIRECT_RENDER_AREA_OFFSET, (vka_scale_on() ? NVN_DIRECT_RENDER_AREA_OFFSET : 0) + NVN_DIRECT_RENDER_AREA_SIZE};
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .flags = graphics && V.gpl ? VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT : 0, .setLayoutCount = n, .pSetLayouts = sets,
                                      .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
@@ -263,9 +263,9 @@ static void *saver_main(void *a) {
 }
 // From the replay thread at each submission: a save is due DM_VK_PCACHE_SAVE_S seconds (Lichii: default 300) after the last one when pipelines were made since; it runs on the saver
 // thread. force (the end of the run, the shader library check): now, on the caller's thread.
-// Lichii (dotfiles-25x.13): a periodic save only when the frame path made pipelines since the last one. vkGetPipelineCacheData holds the cache while it copies it (~200 MB,
+// Lichii: a periodic save only when the frame path made pipelines since the last one. vkGetPipelineCacheData holds the cache while it copies it (~200 MB,
 // ~130 ms on the NVIDIA driver), and a pipeline or library the replay thread makes meanwhile waits for it: the background optimizer's pipelines, which land all through a
-// warm race, set off a save every 20 s and with it a hitch (nd13l-3: the replay stalled 98.68-98.78 s, exactly the copy). Their pipelines and the libraries made ahead
+// warm race, set off a save every 20 s and with it a hitch (the replay stalled 98.68-98.78 s, exactly the copy). Their pipelines and the libraries made ahead
 // reach the file with the next save the frame path's pipelines set off, or at the end of the run (vka_pso_park).
 // Lichii: every 300 s by default (DM_VK_PCACHE_SAVE_S, upstream 20). With new content all session long (Knockout Tour: 3,000 shaders in 30 min) the frame path makes
 // pipelines between any two saves, so the 20 s saves ran all session: 76 of 280 MB, 420-500 ms each on the saver thread, and the replay's pipelines and libraries waited
@@ -320,13 +320,13 @@ typedef struct {
     VkPipelineViewportStateCreateInfo vp; VkPipelineRasterizationStateCreateInfo rs; VkPipelineMultisampleStateCreateInfo ms; VkPipelineDepthStencilStateCreateInfo ds;
     VkPipelineColorBlendAttachmentState cb[8]; VkPipelineColorBlendStateCreateInfo bs; VkDynamicState dyn[24]; VkPipelineDynamicStateCreateInfo dy;
     VkFormat cf[8]; VkPipelineRenderingCreateInfo ri; VkGraphicsPipelineCreateInfo ci; int tess, mesh;   // mesh: a task / mesh pipeline (pstate_fill)
-    // Lichii (dotfiles-25x.100): the sample mask, conservative rasterization, the provoking vertex, viewport 0's swizzle, its exclusive scissor, the shading rate
+    // Lichii: the sample mask, conservative rasterization, the provoking vertex, viewport 0's swizzle, its exclusive scissor, the shading rate
     // attachment's combiner (vrs: such a pipeline is made whole, no libraries)
     VkSampleMask smask; VkPipelineRasterizationConservativeStateCreateInfoEXT cons; VkPipelineRasterizationProvokingVertexStateCreateInfoEXT prov;
     VkViewportSwizzleNV sw; VkPipelineViewportSwizzleStateCreateInfoNV vsw; VkPipelineViewportExclusiveScissorStateCreateInfoNV excl;
     VkPipelineFragmentShadingRateStateCreateInfoKHR fsr; int vrs;
     VkDescriptorSetLayout set0;   // the layout's set 0 (the library probe's independent-sets layout)
-    VkPipelineLayout pre_layout, fs_layout;   // Lichii (dotfiles-25x.16): what the pre-rasterization and fragment shader libraries are made with (vka_layout)
+    VkPipelineLayout pre_layout, fs_layout;   // Lichii: what the pre-rasterization and fragment shader libraries are made with (vka_layout)
 } pstate;
 
 // A VkFormat's class for colour outputs: 1 UINT, 2 SINT, 0 the rest (float, normalized, scaled)
@@ -386,7 +386,7 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
         .polygonMode = (VkPolygonMode)k->poly_mode, .lineWidth = 1.0f};
     P->ms = (VkPipelineMultisampleStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = (VkSampleCountFlagBits)(k->samples ? k->samples : 1), .alphaToCoverageEnable = k->a2c};
     P->ds = (VkPipelineDepthStencilStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .maxDepthBounds = 1.0f};
-    // Lichii (dotfiles-25x.100): each only when it differs from Vulkan's default, so the pipelines that do not use it stay as they were
+    // Lichii: each only when it differs from Vulkan's default, so the pipelines that do not use it stay as they were
     if (k->sample_mask != (1u << P->ms.rasterizationSamples) - 1) { P->smask = k->sample_mask; P->ms.pSampleMask = &P->smask; }
     const void *rs_next = NULL;
     if (k->cons) { float d = k->dilate / 4.0f; P->cons = (VkPipelineRasterizationConservativeStateCreateInfoEXT){VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT, rs_next, 0,
@@ -453,7 +453,7 @@ static int build_begin(const char *what, uint64_t vs, uint64_t fs) {
     return -1;
 }
 static void build_end(int i) { if (i >= 0) atomic_store(&g_build[i].tid, 0); }
-// Lichii (dotfiles-25x.18): the emulator shuts down and the device goes away after this. The prewarm and optimizer threads stop between pipelines (as for mtl_drain, but
+// Lichii: the emulator shuts down and the device goes away after this. The prewarm and optimizer threads stop between pipelines (as for mtl_drain, but
 // the game submits no more, so for good); the builds in progress are waited for (bounded), then the cache and the prewarm list are saved a last time, and the saver
 // thread never saves again. 1: no build was in progress at the end
 int vka_pso_park(uint64_t timeout_ns) {
@@ -531,7 +531,7 @@ static const char *const g_lib_name[NLIB] = {"vertex input", "pre-rasterization"
 enum { A_NOCACHE = 1, A_RETAIN = 2, A_NORI = 4, A_COMBINED = 8 };
 static unsigned g_pre_adapt; static int g_pre_probed, g_pre_refused; static _Atomic int g_gpl_off;
 static int gpl_on(void) { return V.gpl && !atomic_load(&g_gpl_off); }
-// Lichii (dotfiles-25x.16, gfx_make)
+// Lichii (gfx_make)
 #define LIB_BUSY ((void *)(uintptr_t)2)   // a library's map entry while a thread makes it (lib_make)
 static pthread_cond_t g_lib_cv = PTHREAD_COND_INITIALIZER;
 static _Thread_local int t_ahead;   // gpl_link makes only these libraries (1 pre-rasterization, 2 fragment shader) and links nothing (lib_ahead_main)
@@ -544,7 +544,7 @@ static _Atomic uint64_t g_lib_ahead_made, g_lib_slow;
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead) { *compiled = atomic_load(&g_lib_slow); *ahead = atomic_load(&g_lib_ahead_made); }
 static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPipelineCreateInfo *ci, VkGraphicsPipelineLibraryFlagsEXT part, int *refused) {
     uint64_t h = fnv(key, klen, 1469598103934665603ull);
-    // Lichii (dotfiles-25x.16): a library being made by another thread (LIB_BUSY: the libraries made ahead, lib_ahead_main) is waited for, not made twice; one that is
+    // Lichii: a library being made by another thread (LIB_BUSY: the libraries made ahead, lib_ahead_main) is waited for, not made twice; one that is
     // not there yet is made by this thread, so a frame-path miss takes it before the ahead threads reach it
     pthread_mutex_lock(&g_mu); void *hit = km_get(&g_lib[kind], key, h);
     if (t_ahead) {   // (only for the driver's caches: made outside the map and destroyed, unless the map has it)
@@ -678,7 +678,7 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
     for (uint32_t i = 0; i < npre; i++) { pk.mod[i] = pre[i].module; pk.stage[i] = pre[i].stage; pk.gl[i] = pre[i].pSpecializationInfo != NULL;
                                           pk.pin[i] = pre[i].pNext ? ((const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)pre[i].pNext)->requiredSubgroupSize : 0; }
     pk.layout = P->pre_layout; pk.depth_clamp = (uint8_t)P->rs.depthClampEnable; pk.poly_mode = (uint8_t)P->rs.polygonMode; pk.tess = (uint8_t)P->tess; pk.vin_static = (uint8_t)k->vin_static;
-    pk.patch = k->patch; pk.cons = k->cons; pk.dilate = k->dilate; pk.provoking_last = k->provoking_last; memcpy(pk.vp_sw, k->vp_sw, 4);   // (Lichii, dotfiles-25x.100)
+    pk.patch = k->patch; pk.cons = k->cons; pk.dilate = k->dilate; pk.provoking_last = k->provoking_last; memcpy(pk.vp_sw, k->vp_sw, 4);   // (Lichii)
     fskey fk; memset(&fk, 0, sizeof fk);
     if (fs) { fk.mod = fs->module; fk.afunc = fs->pSpecializationInfo ? P->afunc : 0; fk.pin = fs->pNext ? ((const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)fs->pNext)->requiredSubgroupSize : 0; }
     fk.layout = P->fs_layout; fk.samples = (uint8_t)P->ms.rasterizationSamples; fk.a2c = (uint8_t)P->ms.alphaToCoverageEnable; fk.vin_static = (uint8_t)k->vin_static; fk.sample_mask = k->sample_mask;
@@ -737,7 +737,7 @@ static opt_job *g_opt_head, **g_opt_tail = &g_opt_head; static pthread_mutex_t g
 static uint64_t g_opt_waiting;
 static void *opt_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-psopt");
-    setpriority(PRIO_PROCESS, 0, 10);   // Lichii (dotfiles-25x.16): under the game's threads and the asynchronous ones (the linked pipeline already draws)
+    setpriority(PRIO_PROCESS, 0, 10);   // Lichii: under the game's threads and the asynchronous ones (the linked pipeline already draws)
     for (;;) {
         pause_point();
         pthread_mutex_lock(&g_opt_mu);
@@ -1002,14 +1002,14 @@ static void busy_wait(gval *g) {
     while (g->busy) pthread_cond_wait(&g_busy_cv, &g_mu);
     atomic_fetch_add(&g_pw_wait_ns, now_ns() - t0);
 }
-// Lichii (dotfiles-25x.16, .32), with Lichii's asynchronous shader building setting (4 threads): a pipeline the frame path would have to compile is made on asynchronous threads
+// Lichii, with Lichii's asynchronous shader building setting (4 threads): a pipeline the frame path would have to compile is made on asynchronous threads
 // and its draws are skipped until it is there, so a frame never stops for a compile (a cold cache: 138 builds over 50 ms on the frame path in one boot and race, frames up
-// to 8.7 s, ux-cold-1; with it none, ux-cold-3). A skipped draw that renders something once is lost for good (ux-cold-3: the Grand Prix mode list's
+// to 8.7 s; with it none). A skipped draw that renders something once is lost for good (the Grand Prix mode list's
 // blurred backdrop, taken once when the menu opens, stayed black). What stays on the frame path is what costs no compile: the pipeline cache's pipeline
 // (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) and the link of graphics pipeline libraries all made before (t_lib_peek). A key another thread is making
 // (asynchronous, prewarm) is skipped too, not waited for. Each asynchronous build counts in Lichii's "building shaders" (vka_pipeline_notify).
 // A draw into targets that were not all drawn in the 3 frames before (vka_draw.c drawn_again: a pass the game may draw once) is never skipped: its pipeline is made on the
-// frame path, a queued build of it taken back, one in progress waited for (vka_gfx_pipeline's wait; ux-cold-3's backdrop)
+// frame path, a queued build of it taken back, one in progress waited for (vka_gfx_pipeline's wait; that backdrop)
 enum { MK_FRAME, MK_PREWARM, MK_ASYNC };
 static int async_threads(void) { return vka_async_pipelines() ? 4 : 0; }
 typedef struct async_job { struct async_job *next; gval *g; gkey_full fk; size_t len; vka_layout lay; uint64_t queued; } async_job;
