@@ -155,7 +155,7 @@ typedef struct nvn_direct_device {
     void* pipeline_context;
     /// Lichii's asynchronous shader building: a draw whose pipeline is not made yet is skipped
     /// until asynchronous threads have made it, instead of the frame waiting for its compile
-    /// (vka_pso.c async_threads; DM_VK_ASYNC_PSO=0/1 overrides it).
+    /// (vka_pso.c async_threads).
     int async_pipelines;
     /// Translates a program stage with Lichii's shader recompiler (dotfiles-25x.11): 1 = done,
     /// 0 = not (shader->error says why). NULL: no recompiler.
@@ -193,8 +193,8 @@ static inline uint32_t nvn_direct_scale_image_bit(uint32_t nvn_stage) {
 static inline uint32_t nvn_direct_scale_image_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 32 : 16; }
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.
-/// Called once, after the device exists. Without it the replay has no device: submissions run
-/// their CPU-side effects only and fences complete at submit (the null backend).
+/// Called once, after the device exists. When it fails the boot falls back to GPU emulation
+/// (Core::NvnHook::DirectFailed).
 int nvn_direct_adopt_device(const nvn_direct_device* device);
 
 /// Lichii's guest memory as the replay's memory pools need it (dotfiles-25x.5).

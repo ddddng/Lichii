@@ -110,7 +110,7 @@ typedef struct {
     VkDeviceSize placed_align, max_alloc;
     uint32_t guest_type, local_type, upload_type;   // guest RAM (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED, or the nearest), images, upload arenas
     VkSemaphore tl;                                 // the timeline: value n = submission n has completed
-    // NVN queues as Vulkan queues (dotfiles-25x.4/.14, DM_VK_MULTIQUEUE): qs[0] = q; with multi, each submission signals its queue's timeline qtl[i] and the completion thread
+    // NVN queues as Vulkan queues: qs[0] = q; with multi, each submission signals its queue's timeline qtl[i] and the completion thread
     // signals tl in fence order once the queue's value is reached (submissions on different queues complete in any order; tl stays in order for everything that waits on it)
     VkQueue qs[NVN_DIRECT_MAX_QUEUES]; VkSemaphore qtl[NVN_DIRECT_MAX_QUEUES]; uint64_t qseq[NVN_DIRECT_MAX_QUEUES]; int nq, multi;
     pthread_mutex_t qmu;                            // the queue is shared by the submit and present threads
@@ -163,13 +163,11 @@ void vka_heap_line(char *o, size_t n);               // vka_dev.c (Lichii): the 
 int vka_dev_ext(const char *name);                  // vka_dev.c (Lichii): the host's device has the extension enabled
 int vka_async_pipelines(void);                     // vka_dev.c: Lichii's asynchronous shader building setting (nvn_direct_device.async_pipelines)
 void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
-void vka_stall_stacks(void);                         // vka_dev.c: DM_VK_STALL_STACKS=1: every thread's stack to stderr (lab)
 void vka_stop(void);                                // vka_dev.c: as after a hang nothing more is submitted and every fence reads as done, silently; waits return at once
 int vka_stopping(void);
 void vka_worker_wake(void);                         // vka_worker.c: the game's waits for room in the worker's queue see the stop
 int vka_worker_idle(uint64_t timeout_ns);           // the worker has replayed every job queued (1), or timed out (0)
 int vka_complete_stop(uint64_t timeout_ns);         // vka_dev.c (Lichii): the completion thread has run what was submitted and left (1), or timed out (0)
-void vka_vram_trace_stop(void);                     // vka_dev.c (Lichii): the DM_VK_VRAM_TRACE thread has left
 void vka_bindless_init(void);                       // vka_tex.c: the bindless set and its layout (every pipeline layout holds it)
 void vka_pso_start(void);                           // vka_pso.c: the pipeline cache opened, the prewarm and the compute pipelines made ahead started
 int vka_pso_park(uint64_t timeout_ns);              // vka_pso.c: no pipeline built from now on, the last save made; 1 = no build was in progress at the end
@@ -308,8 +306,6 @@ typedef struct vka_img {
     // Large images (DM_VK_BIGIMG_MB, vka_tex.c "Large images"): draws that bound it for sampling, other textures found over its storage (the first serials)
     uint32_t nsamp, novl; uint64_t ovl[4];
     uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
-    // Lichii (dotfiles-25x.17): wseq the GPU write order of its last write (0: none); ali the serials of textures of another shape found over its storage (images of their own)
-    uint64_t wseq; uint64_t ali[8]; uint8_t nali;
     uint8_t scaled;          // Lichii (dotfiles-25x.34): made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
     uint64_t drawn[2];       // Lichii (dotfiles-25x.32): the last two frames (presents filled, plus 1) a pass drew into it, the newest first (vka_draw.c drawn_again)
 } vka_img;

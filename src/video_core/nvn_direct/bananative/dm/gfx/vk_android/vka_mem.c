@@ -686,7 +686,7 @@ static void import_free_after(uint64_t fence, VkBuffer buf, VkDeviceMemory mem, 
 // or through the pack, and the swap is a table edit; a segment's old import is freed once the GPU is past the last fence reserved (as unplace does). A pack lives while
 // a segment lies in it: a segment given back leaves its pages pinned in the pack (dead bytes) until the pack goes. A round (pack_maybe, after an import) packs the
 // single imports of at most PACK_SEG_MAX together with the segments of loose packs (under half of udmabuf_max, or under half live), so packs grow and the dead get
-// dropped; it runs once PACK_SOLO single imports are waiting or PACK_DEAD more bytes died since the last round. DM_VK_PACK=0: every import stays its own
+// dropped; it runs once PACK_SOLO single imports are waiting or PACK_DEAD more bytes died since the last round
 typedef struct pack { VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; VkDeviceSize size, live; int members; } pack_t;
 enum { PACK_SOLO = 64 };
 static const VkDeviceSize PACK_DEAD = 64ull << 20;
@@ -768,7 +768,7 @@ static int pack_make(const int *idx, int n, uint32_t cnt, VkDeviceSize size) {
 }
 // After an import (caller holds g_pl): a round of packing when enough single imports wait or enough bytes in packs are dead
 static void pack_maybe(void) {
-    if (!V.udmabuf || !VKA_ENV("DM_VK_PACK", 1)) return;
+    if (!V.udmabuf) return;
     pthread_mutex_lock(&g_packmu);
     int nsolo = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack && g_sg[i].hi - g_sg[i].lo <= pack_seg_max()) nsolo++;
     int go = nsolo >= PACK_SOLO || g_pack_dead >= g_pack_dead_round + PACK_DEAD;
@@ -794,7 +794,7 @@ static void pack_maybe(void) {
     pthread_mutex_lock(&g_packmu); uint64_t rounds = ++g_pack_rounds; int np = g_npack; VkDeviceSize dead = g_pack_dead_round = g_pack_dead; pthread_mutex_unlock(&g_packmu);
     int nimp = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack) nimp++;
     if (rounds <= 8 || !(rounds & 63))
-        VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports (DM_VK_PACK)",
+        VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports",
              (unsigned long long)rounds, packed, nsolo, made, bytes / 1048576.0, (mono_ns() - t0) / 1e6, np, dead / 1048576.0, nimp);
 }
 #endif

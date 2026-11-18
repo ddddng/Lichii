@@ -30,7 +30,7 @@ int vka_rc_park(uint64_t timeout_ns); // nvn_recompile.c
 static _Atomic int g_parked;
 
 // The shutdown should reach nvn_direct_park within seconds of the stop: if it does not, a line
-// (and with DM_VK_STALL_STACKS=1 every thread's stack) says where it waits.
+// says so.
 static void* watchdog_main(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "vk-shutdown");
@@ -39,8 +39,7 @@ static void* watchdog_main(void* arg) {
         struct timespec ts = {0, 100000000};
         nanosleep(&ts, NULL);
     }
-    VRED("shutdown: the device not released 5 s after the stop (Lichii's shutdown waits elsewhere; DM_VK_STALL_STACKS=1 logs every thread's stack)");
-    vka_stall_stacks();
+    VRED("shutdown: the device not released 5 s after the stop (Lichii's shutdown waits elsewhere)");
     return NULL;
 }
 
@@ -58,7 +57,6 @@ void nvn_direct_park(void) {
     nvn_direct_stop();
     atomic_store(&g_parked, 1);
     if (!vka_ok()) return;
-    vka_vram_trace_stop();
     // Bounded: a thread stuck in the driver must not keep the emulator from shutting down. The
     // device's own wait for idle follows (RendererVulkan's destructor).
     const uint64_t bound = 3000000000ull;
@@ -75,7 +73,6 @@ void nvn_direct_park(void) {
     VRED("parked for the shutdown in %.0f ms: the replay worker %s, pipeline builds %s, speculative translations %s, the completion thread %s; the device is still in use: the process exits", ms,
          worker ? "is idle" : "is still replaying", builds ? "stopped" : "still running", translations ? "stopped" : "still running",
          !(worker && builds && translations) ? "was not stopped" : "is still running");
-    vka_stall_stacks();
     // Not abort or exit: the replay's own fatal exit (dm_host_shutdown's abort) has been seen to hang
     // the process, and exit handlers and destructors would destroy the device under those threads.
     _exit(1);

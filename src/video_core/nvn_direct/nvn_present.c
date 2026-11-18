@@ -52,9 +52,7 @@ void mtl_create_ns(uint64_t* lib_ns, uint64_t* pso_ns); // vka_pso.c
 void vka_fsc_stats(uint64_t* hit, uint64_t* miss); // vka_draw.c
 void vka_skip_report(void); // vka_draw.c
 void vka_rt_size_report(void); // vka_draw.c
-void vka_tex_stale_stats(uint64_t* reads); // vka_tex.c
 void vka_copy_drop_stats(uint64_t* dropped, uint64_t* kept); // vka_exec.c
-void vka_drawflip_frame(double period_s); // vka_draw.c
 // Pipeline creation on the frame path (dotfiles-25x.16: the replay thread's compiles, links and
 // cache lookups, vka_pso.c g_create_ns) between two presents, when it is over a 60 Hz frame: the
 // stalls a cold pipeline cache costs, frame by frame (the first 300), and every 1800 presents a sum.
@@ -86,14 +84,13 @@ static void frame_path_creation(uint64_t tk) {
         }
         vka_skip_report();
         vka_rt_size_report();
-        { uint64_t stale, dr, kp; vka_tex_stale_stats(&stale); vka_copy_drop_stats(&dr, &kp); VLOG("stale alias reads so far: %llu; copies into left-out levels dropped %llu, into kept levels of such textures %llu", (unsigned long long)stale, (unsigned long long)dr, (unsigned long long)kp); }
+        { uint64_t dr, kp; vka_copy_drop_stats(&dr, &kp); VLOG("copies into left-out levels dropped so far %llu, into kept levels of such textures %llu", (unsigned long long)dr, (unsigned long long)kp); }
     }
 }
-uint64_t vka_present_filled(void) { return g_filled; }   // (the replay thread, which fills them: DM_VK_TS_LOG's frame number)
+uint64_t vka_present_filled(void) { return g_filled; }   // (the replay thread, which fills them)
 void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int crop[4]) {
     vka_perf_frame(period_s);
     frame_path_creation(tk);
-    vka_drawflip_frame(period_s);
     pthread_mutex_lock(&g_mu);
     pres_t* p = &g_pres[tk % NPRES];
     p->ticket = tk;
