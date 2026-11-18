@@ -3514,8 +3514,13 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
         const auto& targets = texture_cache.GetRenderTargets();
         if (targets.depth_buffer_id) {
             const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
-            if (depth.size.width == oot_motion.extent.width &&
-                depth.size.height == oot_motion.extent.height && !depth.IsRescaled()) {
+            const bool padded_scene_depth =
+                depth.size.width == oot_motion.image_extent.width &&
+                depth.format == VideoCore::Surface::PixelFormat::D32_FLOAT &&
+                gpu_memory == oot_motion.camera_channel;
+            if (depth.size.height == oot_motion.extent.height &&
+                (depth.size.width == oot_motion.extent.width || padded_scene_depth) &&
+                !depth.IsRescaled()) {
                 // AMD's phase count for the last FSR frame's scale.
                 const u32 index = static_cast<u32>(render_trace_frame % oot_jitter_phases) + 1;
                 const auto driver = device.GetDriverID();
