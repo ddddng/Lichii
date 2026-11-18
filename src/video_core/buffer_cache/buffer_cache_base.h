@@ -911,6 +911,16 @@ private:
     std::array<TouchMemo, NUM_VERTEX_BUFFERS> vertex_touches{};
     std::array<std::array<TouchMemo, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES> uniform_touches{};
     void TouchBufferOnce(TouchMemo& memo, Buffer& buffer, BufferId buffer_id) noexcept;
+    /// FindBuffer's recent results by caching page.
+    struct FindMemo {
+        u64 page{~u64{0}};
+        u64 deletions{}; ///< buffer_deletions then
+        DAddr begin{};
+        DAddr end{};
+        BufferId buffer_id{};
+        bool sparse_compatible{};
+    };
+    std::array<FindMemo, 256> find_memos{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
     u64 buffer_deletions = 0;
     /// EDEN_NX2_BUFFER_TRACE: buffers created (with the buffers they joined) and collected, logged

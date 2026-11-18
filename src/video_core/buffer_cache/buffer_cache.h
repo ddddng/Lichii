@@ -3644,24 +3644,42 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
     if (device_addr == 0 || page >= page_table.size()) {
         return NULL_BUFFER_ID;
     }
+    // A recent result for the page, found without touching the buffer (draws look up ~20 ranges
+    // each). Only a deletion takes a buffer off the page table: a bigger one joining it deletes it.
+    const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
+    FindMemo& memo = find_memos[page % find_memos.size()];
+    const bool memo_hit = !should_sync && memo.page == page &&
+                          memo.deletions == buffer_deletions && device_addr >= memo.begin &&
+                          device_addr + size <= memo.end &&
+                          (memo.sparse_compatible || !sparse_compatible);
+    if (memo_hit && !Nx2Perf::Verify()) {
+        return memo.buffer_id;
+    }
     const BufferId buffer_id = page_table[page];
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
         if (buffer.IsInBounds(device_addr, size)) {
-            const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
             if (should_sync) {
                 SynchronizeBufferWrites(buffer);
             }
-            bool usable = true;
+            bool sparse = true;
             if constexpr (requires { buffer.IsSparseCompatible(); }) {
-                if (sparse_compatible && !buffer.IsSparseCompatible()) {
-                    usable = false;
-                }
+                sparse = buffer.IsSparseCompatible();
             }
-            if (usable) {
+            if (!sparse_compatible || sparse) {
+                if (memo_hit && memo.buffer_id != buffer_id) {
+                    LOG_ERROR(HW_GPU, "Nx2Perf find buffer: {:#x}+{:#x} remembered in {}, found in {}",
+                              device_addr, size, memo.buffer_id.index, buffer_id.index);
+                }
+                memo = {page, buffer_deletions, buffer.CpuAddr(),
+                        buffer.CpuAddr() + buffer.SizeBytes(), buffer_id, sparse};
                 return buffer_id;
             }
         }
+    }
+    if (memo_hit) {
+        LOG_ERROR(HW_GPU, "Nx2Perf find buffer: {:#x}+{:#x} remembered in {}, not in the page table",
+                  device_addr, size, memo.buffer_id.index);
     }
     return CreateBuffer(device_addr, size, sparse_compatible, caller);
 }
