@@ -212,6 +212,25 @@ TEST_CASE("Nextendo BCAT installs, keeps and replaces a title's cache", "[core][
                           fs::directory_iterator{}) == 1);
 }
 
+TEST_CASE("Nextendo BCAT reinstalls over a hash marker it can't read", "[core][bcat]") {
+    const TempDir temp;
+    const auto target = temp.Target();
+    REQUIRE(Update(Splatoon2, target, Serve(Ok(Schedule))) == Outcome::Installed);
+    const auto hash = ReadText(target / HashFileName);
+
+    fs::remove(target / HashFileName);
+    fs::create_directory(target / HashFileName);
+    REQUIRE(Update(Splatoon2, target, Serve(Ok(Schedule))) == Outcome::Installed);
+    REQUIRE(ReadText(target / HashFileName) == hash);
+
+    {
+        std::ofstream out{target / HashFileName, std::ios::app};
+        out << "x";
+    }
+    REQUIRE(Update(Splatoon2, target, Serve(Ok(Schedule))) == Outcome::Installed);
+    REQUIRE(Update(Splatoon2, target, Serve(Ok(Schedule))) == Outcome::Unchanged);
+}
+
 TEST_CASE("Nextendo BCAT installs Violet's event for Scarlet", "[core][bcat]") {
     const TempDir temp;
     std::vector<u64> asked;
