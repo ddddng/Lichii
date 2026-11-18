@@ -55,11 +55,15 @@ std::vector<u64> ListGameListApplications(Core::System& system) {
 }
 
 FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& system,
-                                                              u64 application_id) {
+                                                              u64 application_id,
+                                                              bool include_icon) {
     const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
                                    system.GetContentProvider()};
     auto metadata = pm.GetControlMetadata();
-    if (metadata.first != nullptr && metadata.second != nullptr) {
+    if (!include_icon) {
+        metadata.second.reset();
+    }
+    if (metadata.first != nullptr && (!include_icon || metadata.second != nullptr)) {
         return metadata;
     }
 
@@ -79,7 +83,7 @@ FileSys::PatchManager::Metadata GetApplicationControlMetadata(Core::System& syst
             metadata.first = std::move(nacp);
         }
     }
-    if (metadata.second == nullptr) {
+    if (include_icon && metadata.second == nullptr) {
         auto icon = provider->ReadApplicationIcon(application_id);
         if (!icon.empty() ||
             (loader->ReadIcon(icon) == Loader::ResultStatus::Success && !icon.empty())) {

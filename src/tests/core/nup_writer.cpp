@@ -225,6 +225,11 @@ TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's me
     edit.title_name = "After";
     REQUIRE(FileSys::Nup::EditNupMetadata(archive, edit) == FileSys::Nup::EditResult::Success);
     CHECK(Service::NS::OpenGameListApplication(system, path, TitleId));
+    const auto title_only = Service::NS::GetApplicationControlMetadata(system, TitleId, false);
+    REQUIRE(title_only.first != nullptr);
+    CHECK(title_only.first->GetApplicationName() == "After");
+    CHECK(title_only.second == nullptr);
+    CHECK(artwork_requests.empty());
     const auto metadata = Service::NS::GetApplicationControlMetadata(system, TitleId);
     REQUIRE(metadata.first != nullptr);
     CHECK(metadata.first->GetApplicationName() == "After");

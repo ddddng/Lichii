@@ -3,6 +3,11 @@
 
 #include "qt_common/util/game.h"
 
+#include <algorithm>
+#include <list>
+#include <mutex>
+#include <span>
+
 #include <fmt/format.h>
 
 #include "common/fs/fs.h"
@@ -36,6 +41,25 @@
 #endif
 
 namespace QtCommon::Game {
+
+namespace {
+
+struct HomeMenuArtworkEntry {
+    std::filesystem::path path;
+    std::filesystem::file_time_type modified;
+    std::uintmax_t size;
+    std::vector<u8> jpeg;
+};
+
+std::mutex home_artwork_mutex;
+std::list<HomeMenuArtworkEntry> home_artwork_cache;
+
+void InvalidateHomeMenuArtwork(const std::filesystem::path& path) {
+    std::scoped_lock lock{home_artwork_mutex};
+    home_artwork_cache.remove_if([&](const auto& entry) { return entry.path == path; });
+}
+
+} // namespace
 
 bool CreateShortcutLink(const std::filesystem::path& shortcut_path, const std::string& comment,
                         const std::filesystem::path& icon_path,
@@ -380,6 +404,10 @@ void RemoveCacheStorage(u64 program_id) {
 
 // Metadata //
 void ResetMetadata(bool show_message) {
+    {
+        std::scoped_lock lock{home_artwork_mutex};
+        home_artwork_cache.clear();
+    }
     const QString title = tr("Reset Metadata Cache");
 
     if (!Common::FS::Exists(Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) /
@@ -704,8 +732,7 @@ std::vector<u8> ReadCustomArtwork(u64 program_id) {
     return std::vector<u8>(bytes.begin(), bytes.end());
 }
 
-std::vector<u8> ReadHomeMenuArtwork(u64 program_id) {
-    const auto artwork = ReadCustomArtwork(program_id);
+static std::vector<u8> EncodeHomeMenuArtwork(std::span<const u8> artwork) {
     if (artwork.empty()) {
         return {};
     }
@@ -738,6 +765,39 @@ std::vector<u8> ReadHomeMenuArtwork(u64 program_id) {
     return {jpeg.begin(), jpeg.end()};
 }
 
+std::vector<u8> ReadHomeMenuArtwork(u64 program_id) {
+    if (program_id == 0) {
+        return {};
+    }
+    const auto path = CustomArtworkPath(program_id);
+    std::scoped_lock lock{home_artwork_mutex};
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return {};
+    }
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+        return {};
+    }
+
+    const auto found = std::ranges::find(home_artwork_cache, path, &HomeMenuArtworkEntry::path);
+    if (found != home_artwork_cache.end()) {
+        if (found->size == size && found->modified == modified) {
+            home_artwork_cache.splice(home_artwork_cache.begin(), home_artwork_cache, found);
+            return found->jpeg;
+        }
+        home_artwork_cache.erase(found);
+    }
+
+    constexpr std::size_t MaxEntries = 256;
+    if (home_artwork_cache.size() == MaxEntries) {
+        home_artwork_cache.pop_back();
+    }
+    auto jpeg = EncodeHomeMenuArtwork(ReadCustomArtwork(program_id));
+    return home_artwork_cache.emplace_front(path, modified, size, std::move(jpeg)).jpeg;
+}
+
 bool SaveCustomArtwork(u64 program_id, const QImage& image) {
     if (program_id == 0 || image.isNull()) {
         return false;
@@ -758,6 +818,7 @@ bool SaveCustomArtwork(u64 program_id, const QImage& image) {
         LOG_ERROR(Frontend, "Cannot write custom artwork for {:016X}", program_id);
         return false;
     }
+    InvalidateHomeMenuArtwork(path);
     return true;
 }
 
@@ -770,7 +831,12 @@ static bool RemoveCustomFile(const std::filesystem::path& path) {
 }
 
 bool RemoveCustomArtwork(u64 program_id) {
-    return RemoveCustomFile(CustomArtworkPath(program_id));
+    const auto path = CustomArtworkPath(program_id);
+    if (!RemoveCustomFile(path)) {
+        return false;
+    }
+    InvalidateHomeMenuArtwork(path);
+    return true;
 }
 
 std::filesystem::path CustomTitlePath(u64 program_id) {
