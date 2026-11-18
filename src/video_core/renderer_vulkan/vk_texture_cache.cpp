@@ -2312,11 +2312,6 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
         report(UsesNvidiaDlss() ? "NVIDIA DLSS" : "FSR 3.1", "all inputs present");
         return true;
     }
-    report("the stand-in", !use_history                  ? "no history"
-                           : fsr3_unsupported             ? "FSR 3.1 unsupported or failed"
-                           : !WantsTemporalUpscaleDepth() ? "stand-in forced"
-                           : !depth                       ? "no depth"
-                                                          : "FSR 3.1 declined");
     const VkFormat format =
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, dst.format).format;
     // The framebuffer's area is the output's size on the host (scaled with resolution scaling).
@@ -2494,6 +2489,11 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
                                           dst_region, sharpness);
     }
     temporal_history.current = write_index;
+    report("the stand-in", !use_history                  ? "no history"
+                           : fsr3_unsupported             ? "FSR 3.1 unsupported or failed"
+                           : !WantsTemporalUpscaleDepth() ? "stand-in forced"
+                           : !depth                       ? "no depth"
+                                                          : "FSR 3.1 declined");
     return true;
 }
 

@@ -1618,8 +1618,9 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
     // Without this evaluation's jitter or usable motion vectors (a rejected pass clears them), the
     // region is still scaled, without history, rather than leaving the network's output.
     const bool use_history = jitter && motion && width <= motion->Width() &&
-                             height <= motion->Height() &&
-                             (!depth || (width <= depth->Width() && height <= depth->Height()));
+                             height <= motion->Height();
+    // A depth too small for the region is left out; history still runs (on the stand-in).
+    const bool depth_fits = depth && width <= depth->Width() && height <= depth->Height();
     Fermi2D::Surface motion_surface{};
     if (use_history) {
         motion_surface = surface(*motion);
@@ -1637,8 +1638,8 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
             jitter ? jitter->offset : std::array{0.0f, 0.0f}, motion_scale, use_history,
             std::array{width, height});
     };
-    bool done = upscale(use_history && depth ? &*depth : nullptr);
-    if (!done && use_history && depth) {
+    bool done = upscale(use_history && depth_fits ? &*depth : nullptr);
+    if (!done && use_history && depth_fits) {
         // The depth can still be refused after it was prepared; the stand-in runs without it.
         done = upscale(nullptr);
     }
