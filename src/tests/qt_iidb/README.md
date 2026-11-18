@@ -19,3 +19,6 @@ test the exact-ID artwork writer against a temporary profile:
 cmake --build build --target iidb_artwork_tests
 ctest --test-dir build -R '^iidb_artwork$' --output-on-failure --no-tests=error
 ```
+
+For a multi-config generator, add `--config Release` to the build command and `-C Release` to
+the CTest command. Use the same configuration in both.

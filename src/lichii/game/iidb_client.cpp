@@ -119,7 +119,13 @@ QDateTime ParseHttpDate(QByteArray header, const QDateTime& now) {
         return QDateTime::fromString(QString::fromLatin1(date), Qt::RFC2822Date);
     };
     const auto fields = header.simplified().split(' ');
+    constexpr std::array<QByteArrayView, 7> weekdays{"Monday", "Tuesday",  "Wednesday", "Thursday",
+                                                     "Friday", "Saturday", "Sunday"};
     if (fields.size() == 4 && fields.at(0).endsWith(',') && fields.at(3) == "GMT") {
+        if (std::ranges::find(weekdays, QByteArrayView(fields.at(0)).chopped(1)) ==
+            weekdays.end()) {
+            return {};
+        }
         const auto date = fields.at(1).split('-');
         if (date.size() != 3 || date.at(2).size() != 2) {
             return {};
@@ -139,6 +145,10 @@ QDateTime ParseHttpDate(QByteArray header, const QDateTime& now) {
         return result > limit ? format(year - 100) : result;
     }
     if (fields.size() == 5 && fields.at(0).size() == 3 && fields.at(1).size() == 3) {
+        if (std::ranges::none_of(weekdays,
+                                 [&](auto day) { return day.first(3) == fields.at(0); })) {
+            return {};
+        }
         return parse(fields.at(2) + ' ' + fields.at(1) + ' ' + fields.at(4) + ' ' + fields.at(3) +
                      " +0000");
     }
@@ -198,8 +208,13 @@ bool RateLimits::Blocked(bool image, Clock::time_point now) const {
 }
 
 void RateLimits::Observe(bool image, const QByteArray& retry_after) {
+    const auto utc_now = QDateTime::currentDateTimeUtc();
+    Observe(image, retry_after, utc_now, Clock::now());
+}
+
+void RateLimits::Observe(bool image, const QByteArray& retry_after, const QDateTime& utc_now,
+                         Clock::time_point now) {
     using namespace std::chrono;
-    const auto now = Clock::now();
     const auto header = retry_after.trimmed();
     auto delay = seconds{5};
     if (!header.isEmpty() &&
@@ -212,7 +227,6 @@ void RateLimits::Observe(bool image, const QByteArray& retry_after) {
         }
         delay = seconds{value};
     } else {
-        const auto utc_now = QDateTime::currentDateTimeUtc();
         const auto date = ParseHttpDate(header, utc_now);
         if (date.isValid()) {
             delay = seconds{std::max<qint64>(0, utc_now.secsTo(date) + 1)};
