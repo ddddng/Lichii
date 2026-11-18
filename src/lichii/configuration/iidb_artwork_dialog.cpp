@@ -89,7 +89,8 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     gallery->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     gallery->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browsing->addWidget(gallery, 1);
-    thumbnail_status = new QLabel(tr("Thumbnails are temporarily unavailable."), this);
+    thumbnail_status =
+        new QLabel(tr("Some thumbnails could not load because iiDB asked Lichii to wait."), this);
     thumbnail_status->setObjectName(u"iidbThumbnailStatus"_s);
     thumbnail_status->setWordWrap(true);
     auto thumbnail_notice_policy = thumbnail_status->sizePolicy();
@@ -384,25 +385,30 @@ void ArtworkDialog::LoadPage() {
 }
 
 void ArtworkDialog::LoadVisibleThumbnail() {
-    if (!isVisible() || result() == QDialog::Accepted || thumbnail_loading || preview_loading) {
+    if (!isVisible() || result() == QDialog::Accepted) {
+        return;
+    }
+    UpdateThumbnailNotice();
+    if (thumbnail_loading || preview_loading) {
         return;
     }
     const auto viewport = gallery->viewport()->rect();
     for (int row = 0; row < gallery->count(); ++row) {
         auto& entry = assets.at(static_cast<size_t>(row));
-        if (entry.thumbnail_checked || entry.asset.thumbnail.isEmpty() ||
+        if (entry.thumbnail != Thumbnail::Pending || entry.asset.thumbnail.isEmpty() ||
             !viewport.intersects(gallery->visualItemRect(gallery->item(row)))) {
             continue;
         }
         thumbnail_loading = true;
         client.Download(entry.asset.thumbnail, true, [this, row](QByteArray bytes, Error error) {
             thumbnail_loading = false;
-            assets.at(static_cast<size_t>(row)).thumbnail_checked = true;
+            auto& thumbnail = assets.at(static_cast<size_t>(row)).thumbnail;
             if (error == Error::RateLimited) {
-                thumbnail_status->show();
+                thumbnail = Thumbnail::Limited;
+                UpdateThumbnailNotice();
                 return;
             }
-            thumbnail_status->hide();
+            thumbnail = Thumbnail::Attempted;
             if (error == Error::None) {
                 const auto image = ArtworkImage::Decode(bytes, ThumbnailSize);
                 if (!image.isNull()) {
@@ -412,6 +418,17 @@ void ArtworkDialog::LoadVisibleThumbnail() {
             LoadVisibleThumbnail();
         });
         return;
+    }
+}
+
+void ArtworkDialog::UpdateThumbnailNotice() {
+    const auto viewport = gallery->viewport()->rect();
+    for (int row = 0; row < gallery->count(); ++row) {
+        if (assets.at(static_cast<size_t>(row)).thumbnail == Thumbnail::Limited &&
+            viewport.intersects(gallery->visualItemRect(gallery->item(row)))) {
+            thumbnail_status->show();
+            return;
+        }
     }
     thumbnail_status->hide();
 }
