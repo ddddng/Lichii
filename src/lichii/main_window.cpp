@@ -1602,6 +1602,11 @@ void MainWindow::InitializeHotkeys() {
     });
     connect_shortcut(QStringLiteral("Change Adapting Filter"), &MainWindow::OnToggleAdaptingFilter);
     connect_shortcut(QStringLiteral("Change Docked Mode"), &MainWindow::OnToggleDockedMode);
+    connect_shortcut(QStringLiteral("HOME Button"), [this] {
+        if (emulation_running) {
+            QtCommon::system->GetAppletManager().PressHomeButton();
+        }
+    });
     connect_shortcut(QStringLiteral("Change GPU Mode"), &MainWindow::OnToggleGpuAccuracy);
     connect_shortcut(QStringLiteral("Audio Mute/Unmute"), &MainWindow::OnMute);
     connect_shortcut(QStringLiteral("Audio Volume Down"), &MainWindow::OnDecreaseVolume);
