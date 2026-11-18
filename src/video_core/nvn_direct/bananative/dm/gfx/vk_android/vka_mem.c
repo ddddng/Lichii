@@ -403,11 +403,11 @@ static void prefault(uintptr_t lo, uintptr_t hi) {
 // Where a placement's time goes (logged every 256 placements): buffer and allocation, the protections read, the copy, the maps, the prefault, the protections put back
 static uint64_t g_ph[6], g_ph_n;
 static __thread uint64_t t_place_bytes, t_pend_ns;
-// Lichii (dotfiles-25x.21): how pools are imported, chosen once at device creation. A host-pointer import of shared memfd memory, as Lichii's guest memory is, works on
+// Lichii: how pools are imported, chosen once at device creation. A host-pointer import of shared memfd memory, as Lichii's guest memory is, works on
 // NVIDIA's driver. amdgpu refuses it: libdrm asks the kernel for userptr of anonymous memory only (AMDGPU_GEM_USERPTR_ANONONLY), and RADV reports the kernel's -EPERM as
 // VK_ERROR_INVALID_EXTERNAL_HANDLE (measured on the Steam Deck: anonymous memory imports, a MAP_SHARED or MAP_PRIVATE memfd mapping or shared anonymous memory does not).
 // There the pools are udmabufs of the memfd's own pages imported with VK_EXT_external_memory_dma_buf: still the guest's pages, coherent both ways (measured there).
-// The probe imports a page of a shared memfd mapping: on RADV a refused import leaves later ones working (measured); NVIDIA's would not (dotfiles-25x.1), but it imports it
+// The probe imports a page of a shared memfd mapping: on RADV a refused import leaves later ones working (measured); NVIDIA's would not, but it imports it
 #if !defined(_WIN32)
 static struct udmabuf_create_list *g_ul; static uint32_t g_ulcap, g_ul_max = 1024;   // g_ul_max: udmabuf's list_limit
 #endif
@@ -482,7 +482,7 @@ static int udmabuf_of(uintptr_t lo, VkDeviceSize n) { uint32_t cnt = 0; return u
 // Lichii: [lo, hi) (guest addresses; no segment overlaps it; caller holds g_pl) as guest memory imported with VK_EXT_external_memory_host or, where the driver refuses
 // that (V.udmabuf), as a udmabuf of the same pages with VK_EXT_external_memory_dma_buf. A host-pointer import is made of a view of its own (nvn_direct_map_view: the same
 // pages mapped once more, read-write), never of the fastmem arena: the arena's pages may be write-protected by Lichii's tracking or not mapped, and on NVIDIA's driver one
-// refused import makes every later one fail (dotfiles-25x.1). The pages stay the guest's: CPU writes through the arena and GPU writes through the import meet in the same
+// refused import makes every later one fail. The pages stay the guest's: CPU writes through the arena and GPU writes through the import meet in the same
 // memory, nothing is copied or swapped. An import pins its pages: it is given back before the guest unmaps them (vka_mem_release)
 static uint64_t g_imp_n, g_imp_unmapped;
 static void pack_maybe(void);   // (Packs below)
@@ -676,9 +676,9 @@ static void import_free_after(uint64_t fence, VkBuffer buf, VkDeviceMemory mem, 
     vka_after(fence, import_free_run, f);
 }
 
-// ---------- Packs (Lichii, dotfiles-25x.27) ----------
+// ---------- Packs (Lichii) ----------
 // amdgpu: every import is a BO in RADV's global BO list (its own allocations are VM_ALWAYS_VALID and are not), and that list goes with every vkQueueSubmit, where the
-// kernel locks, validates and fences each BO. Measured on the Steam Deck (RADV 26.2.6, .pi/o72-replay/spike-import/deck_bo_submit_test.c): a submission takes 0.02 ms
+// kernel locks, validates and fences each BO. Measured on the Steam Deck (RADV 26.2.6, a submit-time test with N imported BOs): a submission takes 0.02 ms
 // with no imports, 1.9 ms with 1,000 and 17 ms with 5,000, all of it kernel time; Mario Kart World's race holds ~4,800 pool imports (most of 16-500 KiB), and the replay,
 // its uploads and Lichii's presenter paid that on every submission (~80 % of the replay thread's time, 6 fps).
 // So small imports are packed: one udmabuf lists the memfd runs of many segments one after the other (at most udmabuf_max bytes and list_limit runs), is imported once,
@@ -686,7 +686,7 @@ static void import_free_after(uint64_t fence, VkBuffer buf, VkDeviceMemory mem, 
 // or through the pack, and the swap is a table edit; a segment's old import is freed once the GPU is past the last fence reserved (as unplace does). A pack lives while
 // a segment lies in it: a segment given back leaves its pages pinned in the pack (dead bytes) until the pack goes. A round (pack_maybe, after an import) packs the
 // single imports of at most PACK_SEG_MAX together with the segments of loose packs (under half of udmabuf_max, or under half live), so packs grow and the dead get
-// dropped; it runs once PACK_SOLO single imports are waiting or PACK_DEAD more bytes died since the last round. DM_VK_PACK=0: every import stays its own
+// dropped; it runs once PACK_SOLO single imports are waiting or PACK_DEAD more bytes died since the last round
 typedef struct pack { VkDeviceMemory mem; VkBuffer buf; VkDeviceAddress bda; VkDeviceSize size, live; int members; } pack_t;
 enum { PACK_SOLO = 64 };
 static const VkDeviceSize PACK_DEAD = 64ull << 20;
@@ -768,7 +768,7 @@ static int pack_make(const int *idx, int n, uint32_t cnt, VkDeviceSize size) {
 }
 // After an import (caller holds g_pl): a round of packing when enough single imports wait or enough bytes in packs are dead
 static void pack_maybe(void) {
-    if (!V.udmabuf || !VKA_ENV("DM_VK_PACK", 1)) return;
+    if (!V.udmabuf) return;
     pthread_mutex_lock(&g_packmu);
     int nsolo = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack && g_sg[i].hi - g_sg[i].lo <= pack_seg_max()) nsolo++;
     int go = nsolo >= PACK_SOLO || g_pack_dead >= g_pack_dead_round + PACK_DEAD;
@@ -794,14 +794,14 @@ static void pack_maybe(void) {
     pthread_mutex_lock(&g_packmu); uint64_t rounds = ++g_pack_rounds; int np = g_npack; VkDeviceSize dead = g_pack_dead_round = g_pack_dead; pthread_mutex_unlock(&g_packmu);
     int nimp = 0; for (int i = 0; i < g_nsg; i++) if (g_sg[i].mem && g_sg[i].import && !g_sg[i].pack) nimp++;
     if (rounds <= 8 || !(rounds & 63))
-        VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports (DM_VK_PACK)",
+        VLOG("pool memory: packing round %llu: %d imports (%d single) into %d udmabufs of %.1f MiB in all, %.1f ms; now %d packs (%.1f MiB of them dead) and %d single imports",
              (unsigned long long)rounds, packed, nsolo, made, bytes / 1048576.0, (mono_ns() - t0) / 1e6, np, dead / 1048576.0, nimp);
 }
 #endif
 static void unplace(const seg_t *sp) {
     seg_t s = *sp; size_t n = s.hi - s.lo;
     uint64_t fence = vka_fence_last();
-    // Lichii (dotfiles-25x.4): an import keeps the guest's pages where they are (its view is a mapping of its own), so it is freed once the GPU is past the fence, without
+    // Lichii: an import keeps the guest's pages where they are (its view is a mapping of its own), so it is freed once the GPU is past the fence, without
     // the caller waiting: with the NVN queues as Vulkan queues the last fence may be a queue's submission that waits for an event the game signals only after it gave the
     // pool back (Mario Kart World at a course's load: a stall until the host let the wait through)
     if (s.pack) {   // Lichii: a packed import (Packs above): it leaves its pack, which goes with its last segment
@@ -951,7 +951,7 @@ int vka_mem_release(uintptr_t lo, uintptr_t hi) {
     return 0;
 }
 // Lichii: the guest unmaps memory (Core::Memory::UnmapRegion): imports over it are given back before its pages can be reused (a hole punched under a live import leaves
-// the GPU with the old pages: dotfiles-25x.1). Then the replay's readers of guest storage (nvn_pool_use: texture uploads, which check that pages are mapped and then read
+// the GPU with the old pages). Then the replay's readers of guest storage (nvn_pool_use: texture uploads, which check that pages are mapped and then read
 // them in place) are kept out until the pages are gone (nvn_direct_guest_unmap_done)
 void nvn_pool_unmap(int on);   // hle_nvn.c
 void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); nvn_pool_unmap(1); }
@@ -1051,7 +1051,7 @@ void mtl_pool_alias(const void *va, uint64_t n, const void *phys) {
     pthread_mutex_lock(&g_pl); pthread_rwlock_wrlock(&g_rw);
     alias_cut(lo, hi);
     int ok = 1;
-    // One alias a physical segment the range lies in: a physical pool placed in pieces (cover) takes one alias a piece (Lichii: 64 MiB udmabufs, dotfiles-25x.21)
+    // One alias a physical segment the range lies in: a physical pool placed in pieces (cover) takes one alias a piece (Lichii: 64 MiB udmabufs)
     for (uintptr_t p = pk, e = pk + n, v = lo; phys && p < e;) {
         int k = sg_find(p);
         if (k < 0 || !g_sg[k].mem || p >= g_sg[k].hi) { ok = 0; break; }

@@ -10,15 +10,7 @@
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
 // ways unchanged.
 
-#if !defined(_WIN32)
-#include <signal.h>
-#include <execinfo.h>
-#include <sys/mman.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#endif
-#include <stdatomic.h>
+#include <sys/mman.h>   // (Windows: bananative/shim/win32)
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,44 +212,6 @@ static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, const ui
 }
 static const dispatch_entry g_empty = {"(empty)", d_empty, 0};
 
-#if defined(_WIN32)
-// Windows: Lichii's own handler reports a crash with the faulting thread's stack (the Host crash line and eden_crash.dmp)
-static void crash_stack_install(void) {}
-#else
-// Lab (DM_VK_CRASH_STACK=1, dotfiles-25x.16): a crash outside the JIT writes the faulting thread's stack to stderr (addresses as eden-cli(+offset), for
-// llvm-symbolizer). The handler before it (dynarmic's, when it was there first) runs first and decides: a fastmem fault it handles returns as before
-static struct sigaction g_crash_old;
-static void crash_stack(int sig, siginfo_t* si, void* uc) {
-    if ((g_crash_old.sa_flags & SA_SIGINFO) && g_crash_old.sa_sigaction) {
-        g_crash_old.sa_sigaction(sig, si, uc);
-        struct sigaction now;
-        sigaction(sig, NULL, &now);
-        if (now.sa_handler != SIG_DFL) return;   // (handled: dynarmic resets the action only for a fault it does not handle)
-    }
-    char h[160], name[17] = {0};
-    prctl(PR_GET_NAME, name);
-    extern _Thread_local char vka_crash_note[96];   // (what the thread was doing, when it says: vka_pso.c)
-    int k = snprintf(h, sizeof h, "[dm] [RED] crash: signal %d at %p, thread %ld %s %s\n", sig, si->si_addr, (long)syscall(SYS_gettid), name, vka_crash_note);
-    write(2, h, (size_t)k);
-    void* b[64];
-    backtrace_symbols_fd(b, backtrace(b, 64), 2);
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-static void crash_stack_install(void) {
-    const char* e = getenv("DM_VK_CRASH_STACK");
-    if (!e || atoi(e) != 1) return;
-    void* warm[2];
-    backtrace(warm, 2);   // (libgcc loaded outside the handler)
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = crash_stack;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &g_crash_old);
-}
-#endif
-
 // The game's NVN (nvn_direct_init): the front end and the replay choose NVN2's behaviour by
 // dm_sdk_ounce and NVN1's API version by dm_sdk_major (upstream's loader.c reads both from the sdk).
 static int g_switch2, g_sdk_major;
@@ -266,7 +220,6 @@ int dm_sdk_major(void) { return g_sdk_major; }
 
 void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory,
                      int switch2, int sdk_major) {
-    crash_stack_install();
     g_arena = (uintptr_t)arena;
     g_guest_size = guest_size;
     g_memory = *memory;
@@ -306,20 +259,8 @@ int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
         return mtl_tex_gpu_owned(((const tex_t*)host_ptr(x[0]))->serial) && !mtl_wait_acq(mtl_last_fence(), 0);
     return 0;
 }
-// Lab (DM_VK_TS_LOG=1, dotfiles-25x.26): the calls of each name, for the counter timestamp log (vka_exec.c)
-static _Atomic uint64_t g_calls[NVN_NFUNC];
-static int calls_on(void) {
-    static int on = -1;
-    if (on < 0) { const char* e = getenv("DM_VK_TS_LOG"); on = e && atoi(e) > 0; }
-    return on;
-}
-uint64_t nvn_direct_calls(const char* name) {
-    for (int i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], name)) return atomic_load(&g_calls[i]);
-    return 0;
-}
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
-    if (calls_on()) atomic_fetch_add_explicit(&g_calls[slot], 1, memory_order_relaxed);
     return g_slot[slot].d->d(g_slot[slot].fn, x, v, (const uint64_t*)host_ptr(sp), v0);
 }
 

@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Lichii: NVN2's DLSS evaluation (OP_DLSS, hle_nvn.c "s4-dlss") on a host without NVIDIA's network: a spatial upscale. The input colour's subrectangle is drawn
+// Lichii: NVN2's DLSS evaluation (OP_DLSS, hle_nvn.c "DLSS, dirty tile maps and cooperative-vector matrices") on a host without NVIDIA's network: a spatial upscale. The input colour's subrectangle is drawn
 // into the output's with bilinear filtering, each output pixel sampled where the input's jitter put it: input texel k sampled the scene at k + 0.5 - jitter (the
 // sign temporal_upscale.frag measured on Fire Emblem Fortune's Weave's DLSS jitter), so the output pixel at input position p reads the input at p + jitter, clamped
 // to the subrectangle's texel centres. Without a colour attachment, a draw pipeline or push descriptors: a blit of the subrectangles, without the jitter

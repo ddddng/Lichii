@@ -4117,7 +4117,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     }
 #ifdef LICHII_NVN_DIRECT
     if (device.IsNvnDirect()) {
-        // NVN2 direct mode (dotfiles-25x.7): the replay's image of the frame the address names
+        // NVN2 direct mode: the replay's image of the frame the address names
         // (core/nvn_hook.cpp PresentDirect), once the GPU finished it. Nothing else presents.
         nvn_direct_frame frame{};
         if ((framebuffer_addr & NVN_DIRECT_FRAME_TAG) == 0 ||

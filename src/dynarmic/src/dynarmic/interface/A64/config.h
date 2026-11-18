@@ -89,11 +89,10 @@ enum class InstructionCacheOperation {
 /// What UserConfig::block_entry_hook asks for a block's start address.
 enum class BlockEntryHook : std::uint8_t {
     None,
-    /// Raise InstructionCacheOperationRaised(BlockEntryHook, pc), then run the guest code there
-    Call,
-    /// Raise it, then branch to X16 without reading any guest code: the address is a synthetic
-    /// one the callback stands behind (it sets X16 to where execution goes on). X16 (IP0) is
-    /// free to clobber on a call to a function by the AArch64 procedure call standard.
+    /// Raise InstructionCacheOperationRaised(BlockEntryHook, pc), then branch to X16 without
+    /// reading any guest code: the address is a synthetic one the callback stands behind (it sets
+    /// X16 to where execution goes on). X16 (IP0) is free to clobber on a call to a function by
+    /// the AArch64 procedure call standard.
     Thunk,
 };
 

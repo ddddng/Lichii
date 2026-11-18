@@ -331,7 +331,7 @@ public:
         return graphics_family;
     }
 
-    /// NVN2 direct mode (dotfiles-25x): the device enables what the replay needs.
+    /// NVN2 direct mode: the device enables what the replay needs.
     bool IsNvnDirect() const {
         return nvn_direct;
     }

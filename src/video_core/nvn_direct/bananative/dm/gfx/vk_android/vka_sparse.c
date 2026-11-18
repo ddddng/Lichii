@@ -55,9 +55,9 @@ static int grow(void **p, uint32_t *cap, uint32_t n, size_t sz) {
     uint32_t c = *cap ? *cap * 2 : 256; void *q = realloc(*p, (size_t)c * sz); if (!q) return 0; *p = q; *cap = c; return 1;
 }
 
-// Lichii: on by default on NVIDIA's driver only (DM_VK_SPARSE_RES=0/1 overrides). An early run on Lichii's device (dotfiles-25x.5, nd-pic-0, before most of the replay's
+// Lichii: on by default on NVIDIA's driver only (DM_VK_SPARSE_RES=0/1 overrides). An early run on Lichii's device (nd-pic-0, before most of the replay's
 // fixes) lost the device within the first menus after the driver's "can't alloc VA space for mapping" (Xid 31); with them off, MKW's sparse arrays were dense images from a
-// coarser level, which left out the levels the game samples up close (dotfiles-25x.22). Other drivers keep the dense images until measured there
+// coarser level, which left out the levels the game samples up close. Other drivers keep the dense images until measured there
 int vks_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("DM_VK_SPARSE_RES"); on = V.sparse_res && (e && *e ? atoi(e) != 0 : V.driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY); }

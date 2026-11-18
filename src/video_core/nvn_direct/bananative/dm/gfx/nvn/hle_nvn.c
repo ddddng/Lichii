@@ -895,7 +895,7 @@ NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-// Lichii (dotfiles-25x.4): the queue's own last submission, not the last of every queue: with the NVN queues as Vulkan queues another queue's submission may wait for an
+// Lichii: the queue's own last submission, not the last of every queue: with the NVN queues as Vulkan queues another queue's submission may wait for an
 // event this queue only signals after the game's wait for this sync (Mario Kart World hung waiting for its second queue's submission, which waited for the first's signal)
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = ((const queue_t *)q)->last_fence; }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
@@ -1093,7 +1093,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     hostseg_release((uintptr_t)NVN_CMDMEM_ADDR(pl->mem + off), (uintptr_t)NVN_CMDMEM_ADDR(pl->mem + off) + n);
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
-    // dotfiles-o72.4 harness: records go to a shadow of the game's command memory (NVN_CMDMEM_ADDR), since the harness restores the pool bytes the real driver wrote
+    // NVN_CMDMEM_ADDR is the identity here; a trace replay harness defines it so records go to a shadow of the game's command memory, since it restores the pool bytes the real driver wrote
     // there; the shadow spreads the game's addresses (x4) because these records outgrow the NVN2 driver's commands (BindTexture: 24 bytes against 16-20) and the game
     // places each recording right behind the driver's last one
     nvn_direct_host_written((const uint8_t *)NVN_CMDMEM_ADDR(pl->mem + off), n);   // Lichii: the records are written in place: never write-tracked (nvn_tracking.c)
@@ -1135,7 +1135,7 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
 // An empty recording (nothing between Begin and End) takes no command memory and is a shared END, as the NVN2 driver's empty recordings take none: Mario Kart World
 // records one per frame and puts the next recording, through the next AddCommandMemory, at the same address (by the driver's count). Its END at the start of that
 // memory was overwritten and its handle then named the next list: a list that waits on an event ran twice, the first time ahead of the signals it waits for
-// (dotfiles-25x.14 harness, queue event waits). The empty handle is only ever called or submitted, never written
+// (queue event waits). The empty handle is only ever called or submitted, never written
 static const uint64_t g_empty_list[2] = {OP_END | (uint64_t)8 << 32, 0};
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
@@ -1195,7 +1195,7 @@ static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind |
 #if defined(__ANDROID__)
 // NVN2 mesh draw: count task workgroups (or mesh workgroups when the program has no task shader) from first, with the bound program's task and mesh shaders. A draw like the
 // others (it opens and joins render passes the same way); the Vulkan replay draws it with vkCmdDrawMeshTasksEXT (vka_draw.c). The signature is the game's calls' (switch2mac
-// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). The indirect, 3D and multi-draw variants are at the end of the file (s3-tex)
+// hle_nvn.c, MIT: x1 = 0, x2 = workgroups in Mario Kart World). The indirect, 3D and multi-draw variants are near the end of the file ("Mesh draws, texture clears ...")
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){NVN_PRIM_MESH, first, count, 1, 0, 0}); }
 // Depth bounds test (Mario Kart World sets it ~1,300 times a frame): the Vulkan replay applies it as dynamic state (vka_draw.c); the Mac host keeps it empty (g_nops)
 NVN(nvnCommandBufferSetDepthBounds, void, NVNcommandBuffer *c, uint32_t en, float lo, float hi) { *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){(en & 0xff) != 0, lo, hi}; }
@@ -1988,8 +1988,8 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
 // NVN2 (Switch 2) creates programs from a builder: SetDefaults, SetDevice, SetShaders(count, NVNshaderData[]) and then nvnProgramInitializeFromBuilder (Donkey Kong Bananza). The stages are
 // 16-byte {data, control} pairs as in NVN, so initializing from the builder is nvnProgramInitialize + nvnProgramSetShaders. The builder only keeps the caller's array, which the game keeps
 // until it initializes the program (its stack frame), as other NVN builders keep their pointers. Lichii: the array as the game wrote it (its addresses), which GetShaders returns;
-// InitializeFromBuilder turns them into host pointers. sample_shading, dbg, link / nlink: SetSampleShading, SetDebugDataHashes, SetSubroutineLinkage (s1-state section);
-// rt_*: the ray-tracing setters (s5-rt section)
+// InitializeFromBuilder turns them into host pointers. sample_shading, dbg, link / nlink: SetSampleShading, SetDebugDataHashes, SetSubroutineLinkage ("Object state and queries");
+// rt_*: the ray-tracing setters ("Device command buffers, ... ray-tracing builder state")
 typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n, sample_shading, nlink; const void *dbg, *link; int32_t rt_nmod, rt_max_trace, rt_max_callable; uint32_t rt_flags; uint64_t rt_mod; } prog_builder_t;
 NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); ((prog_builder_t *)b)->rt_max_trace = ((prog_builder_t *)b)->rt_max_callable = 2; }
 NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev = d; }
@@ -2382,9 +2382,9 @@ int nvn_host_signal_sync(void *nvnsync) {
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush
 
-// ---------- s1-state: object state and queries ----------
+// ---------- Object state and queries ----------
 // Getters return what the matching setter stored, or the driver's default, and the queries answer as NVN2's driver does (Mario Kart World's and Ocarina of Time's sdk, read
-// statically: lab script .cache/lab/25x/lanes2/s1). Where the driver keeps state the host has no use for (debug labels, checkpoints, GL interop), it answers as the driver does without them.
+// statically). Where the driver keeps state the host has no use for (debug labels, checkpoints, GL interop), it answers as the driver does without them.
 
 // Device
 NVN_NOPROTO(nvnDeviceBuilderGetFlags, int, const NVNdeviceBuilder *b) { return (int)((const dev_builder_t *)b)->flags; }
@@ -2566,7 +2566,7 @@ NVN_NOPROTO(nvnProgramBuilderGetSubroutineLinkageCount, int, const void *b) { re
 // and the host makes no ray tracing programs
 NVN_NOPROTO(nvnProgramGetScratchBytesPerWarp, int, const NVNprogram *p) { (void)p; return 0; }
 
-// ---------- s5-rt: device command buffers, device message buffers, ray-tracing builder state ----------
+// ---------- Device command buffers, device message buffers, ray-tracing builder state ----------
 #include <stdarg.h>
 // None of these calls is in nvn.h or Banana Native's prototypes. Signatures, object layouts and defaults are derived from the NVN2 driver in
 // Ocarina of Time's sdk NSO (function offsets in that NSO below); the objects keep the driver's layout so a game reading one finds what it wrote.
@@ -2711,7 +2711,7 @@ NVN_NOPROTO(nvnQueueBuilderSetRayTracingMemorySize, void, NVNqueueBuilder *b, in
 NVN_NOPROTO(nvnQueueBuilderGetRayTracingMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { *n = ((const queue_builder_t *)b)->sz[QB_RT]; return ((const queue_builder_t *)b)->set[QB_RT]; }
 NVN_NOPROTO(nvnQueueGetTotalRayTracingMemoryUsed, uint64_t, const NVNqueue *q) { (void)q; return 0; }
 
-// ---------- s4-dlss: NVN2's DLSS, dirty tile maps and cooperative-vector matrices ----------
+// ---------- DLSS, dirty tile maps and cooperative-vector matrices ----------
 // Lichii. nvn.h has no prototypes for these: the signatures, the object layouts and every rule below were read from the NVN2 driver in Ocarina of Time's sdk NSO
 // (OoT's driver has all of them; Mario Kart World's lacks the dirty tile map parameters and the cooperative vectors), at the sdk offsets named. The objects are
 // kept in the game's memory in the driver's layout, so their getters read back what the setters stored.
@@ -3168,7 +3168,7 @@ NVN_NOPROTO(nvnCommandBufferConvertCooperativeVectorMatrix, void, NVNcommandBuff
     r->src = src; r->dst = dst; r->sd = *(const coopvec_desc *)src_desc; r->dd = *(const coopvec_desc *)dst_desc; r->rows = rows; r->cols = cols;
 }
 
-// ---------- s3-tex: mesh draws, texture clears / resolves / readback, descriptor table writes, views ----------
+// ---------- Mesh draws, texture clears / resolves / readback, descriptor table writes, views ----------
 // Signatures and meanings of the NVN2-only calls are derived from the NVN2 driver in OoT's sdk NSO (functions at sdk+0x..., nvn_protos.h)
 #if defined(__ANDROID__)
 // The other mesh draws, recorded as DrawMeshTasks is (nvn_obj.h NVN_PRIM_MESH / NVN_PRIM_MESH_3D) and drawn with vkCmdDrawMeshTasks*EXT (vka_draw.c). An indirect draw's
@@ -3250,7 +3250,7 @@ NVN(nvnSamplerPoolWriteDescriptorTableData, void, const NVNsamplerPool *sp, int 
     }
 }
 
-// ---------- s2-cmd: command-buffer state commands (Lichii, dotfiles-25x.100) ----------
+// ---------- Command-buffer state (Lichii) ----------
 // The calls nvn_protos.h has no prototype for take the signatures of the NVN2 driver in Ocarina of Time's sdk (the registers each reads, the methods it writes).
 // The replay applies what Vulkan can express (vka_draw.c, vka_exec.c, vka_pso.c); what it cannot is logged once where it is used
 

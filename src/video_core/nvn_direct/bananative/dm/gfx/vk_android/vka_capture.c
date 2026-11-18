@@ -224,13 +224,6 @@ void vcap_iface(const prog_t *p, uint64_t out[6]) {
         plat_sha256_final(md, &c); memcpy(&out[st], md, 8); out[st] |= 1;
     }
 }
-void vcap_shlib_path(char *out, size_t n) {
-    const char *e = getenv("DM_VK_SHLIB"), *l = vka_shader_lib_path();
-    if (l && *l) snprintf(out, n, "%s", l);   // the one loaded: an older library of the same ABI while the update runs
-    else if (e && *e) snprintf(out, n, "%s", e);
-    else { const char *dir = dm_module_dir(); snprintf(out, n, "%s/shaders/" DMSH_VK_DIR_PREFIX "%s/" DMSH_VK_LIB_FILE, dir && *dir ? dir : ".", DMSH_VK_CHAIN); }
-}
-
 // ---------- The capture ----------
 static int g_cap_frame = -1;            // -1: not parsed yet, 0: off (or not chosen yet with @seconds)
 static double g_cap_at_s;               // @seconds: the frame is chosen at the first present after that time
@@ -491,13 +484,12 @@ static void cap_registries(uint32_t submit) {
 // ---------- The frame ----------
 extern char **environ;
 static void cap_head(void) {
-    cap_buf h = {0}; char line[2048], lib[1024];
+    cap_buf h = {0}; char line[2048];
 #define KV(...) do { int n_ = snprintf(line, sizeof line, __VA_ARGS__); cap_buf_put(&h, line, (size_t)MIN(n_, (int)sizeof line - 1)); } while (0)
     const char *commit = getenv("DM_BUILD_COMMIT"), *tmp = getenv("DM_TEMP"), *pc = getenv("DM_VK_PCACHE");
-    vcap_shlib_path(lib, sizeof lib);
     KV("format\t%u\n", CAP_VERSION); KV("backend\tvulkan\n"); KV("iface\t%d\n", VCAP_IFACE); KV("chain\t%s\n", DMSH_CHAIN); KV("vk_chain\t%s\n", DMSH_VK_CHAIN);
     KV("commit\t%s\n", commit && *commit ? commit : "unknown"); KV("title\t%s\n", DM_GAME_ID); KV("build\t%s\n", dm_main_build());
-    KV("frame\t%d\n", g_cap_frame); KV("frames\t1\n"); KV("mtl_frame\t%llu\n", (unsigned long long)vka_frame()); KV("vk_shlib\t%s\n", lib);
+    KV("frame\t%d\n", g_cap_frame); KV("frames\t1\n"); KV("mtl_frame\t%llu\n", (unsigned long long)vka_frame());
     if (pc && *pc) KV("vk_pcache\t%s\n", pc); else if (tmp && *tmp) KV("vk_pcache\t%s/vk_pipelines.bin\n", tmp);
     KV("device\t%s\n", V.props.deviceName);
     for (char **e = environ; e && *e; e++) if (!strncmp(*e, "DM_", 3) && strncmp(*e, "DM_NVN_CAPTURE=", 15)) KV("env\t%s\n", *e);

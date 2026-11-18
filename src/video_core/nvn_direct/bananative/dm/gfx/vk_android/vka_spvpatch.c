@@ -229,7 +229,7 @@ fail:
 // atomic is put under that condition (its block split around it); the other runs see an atomic's result as the memory's value (a compare-exchange its comparator, so a
 // compare-exchange loop ends). What the shader emits is left alone: every run emits as before. Returns the count of memory writes (0: nothing to do, *out NULL), -1 with err
 // on failure; with out and a count above 0, the rewritten module (malloc'd, *out_nw words).
-// Lichii (dotfiles-25x.37): the claim buffer is declared as the module's SPIR-V version allows, a Uniform BufferBlock up to 1.2 (the library's), a StorageBuffer Block from
+// Lichii: the claim buffer is declared as the module's SPIR-V version allows, a Uniform BufferBlock up to 1.2 (the library's), a StorageBuffer Block from
 // 1.3 (Lichii's recompiler emits 1.6, where BufferBlock does not exist), and from 1.4 the claim and guard variables join the entry point's interface. RADV crashed in
 // spirv_to_nir on the BufferBlock claim of Donkey Kong Bananza's 5d537f7630ec3671 at its first load into the game
 enum { OpUndef = 1, OpExecutionMode = 16, OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypeForwardPointer = 39,
@@ -496,7 +496,7 @@ fail:
 #undef FAIL
 }
 
-// Lichii (dotfiles-25x.16): a pixel shader's per-draw resources moved from set 0 to a set of their own (vka.h VKA_SET_FS), so a fragment shader library depends on its own
+// Lichii: a pixel shader's per-draw resources moved from set 0 to a set of their own (vka.h VKA_SET_FS), so a fragment shader library depends on its own
 // shader only (vka_pso.c layout_slow). The OpDecorate DescriptorSet operands are rewritten in place; the module's other words, its bindings among them, stay as they are
 int vka_spv_set_remap(uint32_t *w, size_t nw, uint32_t from, uint32_t to) {
     enum { DecDescriptorSet = 34 };

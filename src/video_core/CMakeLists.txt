@@ -151,8 +151,6 @@ add_library(video_core STATIC
     nx2_list_indirect_stats.h
     nx2_owed_words.h
     nx2_profile.h
-    nvn_header_count.h
-    nvn_hle_marker.h
     nx2_stutter_trace.cpp
     nx2_stutter_trace.h
     nx2_perf.h

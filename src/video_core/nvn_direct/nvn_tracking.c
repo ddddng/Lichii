@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// CPU write tracking of memory pools in direct mode (dotfiles-25x.5): upstream's nvn_dirty.h
+// CPU write tracking of memory pools in direct mode: upstream's nvn_dirty.h
 // interface (its nvn_dirty.c, MIT, is not built: its own fault handler and mprotect calls would
 // fight Lichii's fastmem protections) over Lichii's page types. Protecting pages arms them
 // (track_pages: rasterizer-cached pages by guest address, which stay readable in direct mode:
@@ -63,15 +63,9 @@ static span_t* find(uintptr_t a, size_t len) {
     return s;
 }
 
-// EDEN_NX2_NVN_TRACK=0: nothing tracked (a texture is uploaded once, at its first use).
-static int track_on(void) {
-    static int on = -1;
-    if (on < 0) { const char* e = getenv("EDEN_NX2_NVN_TRACK"); on = !e || atoi(e) != 0; }
-    return on;
-}
 void nvn_dirty_add_range(const void* mem, size_t size) {
     const uintptr_t lo = (uintptr_t)mem, hi = lo + size;
-    if (!size || nvn_direct_guest_of(lo) == lo || !track_on()) return; // not guest memory (a host segment)
+    if (!size || nvn_direct_guest_of(lo) == lo) return; // not guest memory (a host segment)
     span_t* s = calloc(1, sizeof *s);
     const size_t pages = (size + PAGE_SIZE - 1 + (lo & (PAGE_SIZE - 1))) >> PAGE_SHIFT;
     if (s) { s->gen = calloc(pages, sizeof *s->gen); s->armed = calloc(pages, 1); s->host = calloc(pages, 1); }

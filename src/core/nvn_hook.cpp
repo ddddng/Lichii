@@ -5,8 +5,6 @@
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -35,15 +33,12 @@
 #include "core/memory.h"
 #include "core/nvn_direct_choice.h"
 #include "core/nvn_hook.h"
-#include "core/nvn_trace.h"
 #include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_native_image_lookup.h"
 #include "core/hle/service/nx2_present.h"
 #include "video_core/framebuffer_config.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
-#include "video_core/nvn_header_count.h"
-#include "video_core/nvn_hle_marker.h"
 #ifdef LICHII_NVN_DIRECT
 #include "video_core/nvn_direct/nvn_direct.h"
 #endif
@@ -54,31 +49,20 @@ namespace {
 using Dynarmic::A64::BlockEntryHook;
 
 constexpr u32 MaxSlots = 4096;
-/// Synthetic address the proc-address lookups return to (their caller's LR is kept per thread).
-constexpr u32 LookupReturnSlot = 0;
-/// Synthetic address command-buffer calls return to under EDEN_NX2_NVN_EMITTED.
-constexpr u32 EmittedReturnSlot = 1;
 /// What the game gets for nvnDeviceGetProcAddress (not exported: games get it from
 /// nvnBootstrapLoader): a lookup like nvnBootstrapLoader's.
-constexpr u32 LookupSlot = 2;
-/// Synthetic address calls whose return the trace wants (nvn_trace.h) return to.
-constexpr u32 TraceReturnSlot = 3;
-/// Synthetic address nvnDeviceGetInteger returns to when its answers are captured.
-constexpr u32 DeviceIntegerReturnSlot = 4;
-constexpr u32 FirstNameSlot = 5;
-constexpr u32 GuestThreadSlots = 4096;
+constexpr u32 LookupSlot = 0;
+constexpr u32 FirstNameSlot = 1;
 
 struct Slot {
-    u64 driver{};
-    bool command_buffer{};
-    /// Direct mode: the front end's slot (-1: no implementation, the stub answers 0) and whether
-    /// the call leaves the JIT first (it may block: HaltedCallSvc).
+    /// The front end's slot (-1: no implementation, the stub answers 0) and whether the call
+    /// leaves the JIT first (it may block: HaltedCallSvc).
     s32 front = -1;
     bool halts{};
 };
 
-/// Direct mode: the calls that may block. They run from the kernel (RunHaltedCall), not inside
-/// the JIT's callback: a kernel wait or signal there would switch fibers under a live Jit::Run.
+/// The calls that may block. They run from the kernel (RunHaltedCall), not inside the JIT's
+/// callback: a kernel wait or signal there would switch fibers under a live Jit::Run.
 constexpr std::array HaltingCalls{
     std::string_view{"nvnQueueSubmitCommands"}, std::string_view{"nvnQueuePresentTexture"},
     std::string_view{"nvnQueueFinish"},         std::string_view{"nvnSyncWait"},
@@ -87,130 +71,34 @@ constexpr std::array HaltingCalls{
     std::string_view{"nvnTextureReadTexelsStrided"},
 };
 
-struct DeviceIntegerFrame {
-    u64 lr;
-    u32 item;
-    u64 out;
-};
-
-/// One host thread's counters. Only that thread increments them, but OnPresent sums them from
-/// another: relaxed atomics.
-struct Counters {
-    std::array<std::atomic<u64>, MaxSlots> calls{};
-    std::vector<std::atomic<u64>> emitted_headers; ///< by key, EDEN_NX2_NVN_EMITTED only
-    std::atomic<u64> decoded_calls{};
-    std::atomic<u64> emitted_words{};
-    std::atomic<u64> skipped_calls{}; ///< the write pointer moved to another chunk
-    // EDEN_NX2_NVN_HLE=BindTexture
-    std::atomic<u64> hle_calls{};     ///< written as a marker
-    std::atomic<u64> hle_fallbacks{}; ///< left to the driver: compute/task stage, unlearned, no room
-    /// EDEN_NX2_NVN_HLE_VERIFY: driver output compared with the marker's
-    std::atomic<u64> verify_checked{};
-    std::atomic<u64> verify_mismatches{};
-};
-
-struct LookupFrame {
-    std::string name;
-    u64 lr;
-};
-
-/// The words the driver's nvnCommandBufferBindTexture writes for a graphics stage, at most.
-using BindTextureWords = u32[5];
-
-struct TraceFrame {
-    u64 lr;
-    u64 seq;
-    u32 slot;
-    u64 output; ///< the guest address of the output the trace records at the return
-};
-
-struct CommandFrame {
-    u64 lr;
-    u64 command_buffer;
-    u64 write_pointer;
-    bool decode;               ///< EDEN_NX2_NVN_EMITTED, top level
-    u32 learn_stage = ~0u;     ///< BindTexture: take macro 0xe1c's argument for this stage
-    u32 expected_count{};      ///< BindTexture verify: the words the marker stands for
-    BindTextureWords expected{};
-};
-
-constexpr u32 MaxStages = 16;
-constexpr u32 ComputeStage = 5;
-constexpr u32 TaskStage = 8; ///< the driver's other special case besides compute
-
 struct State {
-    ~State() {
-        for (Counters* thread_counters : counters) {
-            delete thread_counters;
-        }
-        if (out != nullptr) {
-            std::fclose(out);
-        }
-        if (driver_file != nullptr) {
-            std::fclose(driver_file);
-        }
-    }
-
-    u64 boot{}; ///< which boot of the process this state is (LocalCounters)
-    bool direct{}; ///< DirectMode()
     u64 program_id{}; ///< DirectProgramId()
-    bool emitted{};
-    bool hle_bind_texture{};
-    bool hle_verify{};
-    u32 bind_texture_slot = ~0u;
-    /// Macro 0xe1c's argument per stage, as the driver wrote it (0 until seen; bit 31 set)
-    std::array<std::atomic<u32>, MaxStages> bind_texture_argument{};
-    std::optional<u64> private0_value;
-    u64 every = 300;
-    std::FILE* out{};
-    /// EDEN_NX2_NVN_DRIVER_FILE: the NVN driver's entry points and device integers, written in
-    /// pass-through and read in direct mode.
-    std::string driver_file_path;
-    std::FILE* driver_file{};
     std::map<u64, std::string> modules; ///< by base
-    u32 device_integer_slot = ~0u;
-    std::unordered_map<u32, s32> device_integers; ///< captured (pass-through) or read (direct)
-    std::array<std::vector<DeviceIntegerFrame>, GuestThreadSlots> device_integer_frames;
-    // Direct mode
-    bool direct_ready{};                     ///< nvn_direct_init ran
-    std::vector<std::pair<u64, std::string>> driver_entries; ///< hooked to prove none runs
-    std::atomic<u64> driver_entry_calls{};
+    bool direct_ready{}; ///< nvn_direct_init ran
     std::atomic<u64> halted_calls{};
-    std::optional<Service::Nx2PresentBookkeeping> present; ///< direct mode's presents
-    u64 presents{};                                         ///< direct mode's presents so far
+    std::optional<Service::Nx2PresentBookkeeping> present;
+    u64 presents{};
 
     Kernel::KProcess* process{};
     /// Lichii's guest memory (its memfd and backing views, for the replay's pool imports)
     Common::HostMemory* host_memory{};
     u64 synthetic_base{};
-    /// nvnBootstrapLoader, every module's export: LM3 (Switch 1) exports it from a subsdk
-    /// (nnSdkEn) and from nnSdk (dotfiles-1gi).
+    /// nvnBootstrapLoader, every module's export: Luigi's Mansion 3 (Switch 1) exports it from a
+    /// subsdk (nnSdkEn) and from nnSdk.
     std::vector<u64> bootstrap_entries;
     int sdk_major{-1}; ///< NintendoSDK major of the game's sdk (-1 unknown)
-    u64 lookup_driver{};   ///< nvnDeviceGetProcAddress, as nvnBootstrapLoader returned it
     u64 private0_address{};
     u64 private0_size{};
 
     std::array<Slot, MaxSlots> slots{};
-    std::array<std::atomic<u64>, MaxSlots> stub_calls{}; ///< direct mode
+    std::array<std::atomic<u64>, MaxSlots> stub_calls{};
     std::atomic<u32> slot_count{FirstNameSlot};
 
-    std::mutex mutex; ///< slots' creation, lookups, the counters' list, the output
+    std::mutex mutex; ///< slots' creation, lookups
     std::unordered_map<std::string, u32> slot_by_name;
-    std::unordered_map<u32, std::vector<LookupFrame>> lookups; ///< by guest thread
-    std::vector<Counters*> counters;
-    /// EDEN_NX2_NVN_EMITTED: open command-buffer calls by guest thread (id modulo the size)
-    std::array<std::vector<CommandFrame>, GuestThreadSlots> command_frames;
-    /// EDEN_NX2_NVN_TRACE: calls whose return the trace wants, by guest thread
-    std::array<std::vector<TraceFrame>, GuestThreadSlots> trace_frames;
 };
 
-bool EnvIsOne(const char* name) {
-    const char* value = std::getenv(name);
-    return value != nullptr && std::strcmp(value, "1") == 0;
-}
-
-/// EDEN_NX2_NVN_DIRECT=0/1: the lab's override of the nvn_direct_renderer setting.
+/// EDEN_NX2_NVN_DIRECT=0/1 overrides the nvn_direct_renderer setting for a launch.
 std::optional<bool> DirectOverride() {
     const char* const value = std::getenv("EDEN_NX2_NVN_DIRECT");
     if (value == nullptr || (std::strcmp(value, "0") != 0 && std::strcmp(value, "1") != 0)) {
@@ -224,58 +112,16 @@ bool DirectAsked() {
     return DirectOverride().value_or(Settings::values.nvn_direct_renderer.GetValue());
 }
 
-/// The boot's state, from Install to Uninstall (none while the hook is off for the boot).
+/// The boot's state, from Install to Uninstall (none unless the boot runs the direct renderer).
 std::unique_ptr<State> g_state;
-u64 g_boots{};
 /// A boot of this process ran the direct renderer: its replay starts once per process.
 bool g_direct_ran{};
 /// The direct renderer failed to start on the device in this process (DirectFailed).
 bool g_replay_failed{};
 RendererChoice g_choice{RendererChoice::SettingOff};
 
-std::unique_ptr<State> Create() {
-    auto state = std::make_unique<State>();
-    state->boot = ++g_boots;
-    if (const char* path = std::getenv("EDEN_NX2_NVN_OUT")) {
-        state->out = std::fopen(path, "w");
-    }
-    if (const char* every = std::getenv("EDEN_NX2_NVN_EVERY")) {
-        state->every = std::max<u64>(std::strtoull(every, nullptr, 10), 1);
-    }
-    state->emitted = std::getenv("EDEN_NX2_NVN_EMITTED") != nullptr;
-    VideoCommon::NvnHeaderCount::g_enabled = state->emitted;
-    if (const char* hle = std::getenv("EDEN_NX2_NVN_HLE")) {
-        state->hle_bind_texture = std::strstr(hle, "BindTexture") != nullptr;
-    }
-    state->hle_verify = std::getenv("EDEN_NX2_NVN_HLE_VERIFY") != nullptr;
-    if (const char* path = std::getenv("EDEN_NX2_NVN_DRIVER_FILE")) {
-        state->driver_file_path = path;
-    }
-    // Verify keeps the driver's words: no marker reaches the front.
-    VideoCommon::NvnHleMarker::g_enabled = state->hle_bind_texture && !state->hle_verify;
-    if (const char* value = std::getenv("EDEN_NX2_NVN_PRIVATE0")) {
-        state->private0_value = std::strtoull(value, nullptr, 0);
-    }
-    return state;
-}
-
 State* Get() {
     return g_state.get();
-}
-
-Counters& LocalCounters(State& state) {
-    static thread_local Counters* counters = nullptr;
-    static thread_local u64 counters_boot = 0;
-    if (counters == nullptr || counters_boot != state.boot) {
-        counters = new Counters;
-        counters_boot = state.boot;
-        if (state.emitted) {
-            counters->emitted_headers = std::vector<std::atomic<u64>>(1u << 16);
-        }
-        std::scoped_lock lock{state.mutex};
-        state.counters.push_back(counters);
-    }
-    return *counters;
 }
 
 u64 SyntheticAddress(const State& state, u32 slot) {
@@ -286,11 +132,6 @@ bool IsBootstrap(const State& state, u64 address) {
     return std::ranges::find(state.bootstrap_entries, address) != state.bootstrap_entries.end();
 }
 
-bool IsDriverEntry(const State& state, u64 address) {
-    return std::ranges::binary_search(state.driver_entries, std::pair{address, std::string{}},
-                                      [](const auto& a, const auto& b) { return a.first < b.first; });
-}
-
 BlockEntryHook HookOf(u64 pc) {
     const State* const state_pointer = Get();
     if (state_pointer == nullptr) {
@@ -298,11 +139,8 @@ BlockEntryHook HookOf(u64 pc) {
     }
     const State& state = *state_pointer;
     if (IsBootstrap(state, pc)) {
-        // Direct mode: nvnBootstrapLoader is answered here and the driver's never runs.
-        return state.direct ? BlockEntryHook::Thunk : BlockEntryHook::Call;
-    }
-    if (state.direct && IsDriverEntry(state, pc)) {
-        return BlockEntryHook::Call;
+        // nvnBootstrapLoader is answered here and the driver's never runs.
+        return BlockEntryHook::Thunk;
     }
     if (pc >= state.synthetic_base && (pc & 3) == 0 && state.synthetic_base != 0 &&
         (pc - state.synthetic_base) / 4 < state.slot_count.load(std::memory_order_acquire)) {
@@ -311,78 +149,25 @@ BlockEntryHook HookOf(u64 pc) {
     return BlockEntryHook::None;
 }
 
-/// The slot of `name`, made on first sight (under state.mutex).
-u32 SlotOf(State& state, const std::string& name, u64 driver) {
-    if (const auto it = state.slot_by_name.find(name); it != state.slot_by_name.end()) {
-        if (state.slots[it->second].driver != driver) {
-            LOG_WARNING(Core, "NVN hook: {} resolved to {:#x}, earlier {:#x}", name, driver,
-                        state.slots[it->second].driver);
-        }
-        return it->second;
-    }
-    const u32 slot = state.slot_count.load(std::memory_order_relaxed);
-    if (slot == MaxSlots) {
-        return MaxSlots;
-    }
-    state.slots[slot] = {.driver = driver,
-                         .command_buffer = name.starts_with("nvnCommandBuffer")};
-    state.slot_by_name.emplace(name, slot);
-    if (name == "nvnCommandBufferBindTexture") {
-        state.bind_texture_slot = slot;
-    }
-    if (name == "nvnDeviceGetInteger") {
-        state.device_integer_slot = slot;
-    }
-    state.slot_count.store(slot + 1, std::memory_order_release);
-    if (state.driver_file != nullptr && driver != 0) {
-        // The entry as module + offset: the driver's addresses in a later run of the same game.
-        const auto module = state.modules.upper_bound(driver);
-        if (module != state.modules.begin()) {
-            const auto& [base, module_name] = *std::prev(module);
-            fmt::print(state.driver_file, "e {} {} {:#x}\n", name, module_name, driver - base);
-            std::fflush(state.driver_file);
-        }
-    }
-    NvnTrace::OnName(slot, name.c_str());
-    if (state.out != nullptr) {
-        fmt::print(state.out, "n {} {:#x} {:#x} {}\n", slot, driver, SyntheticAddress(state, slot),
-                   name);
-        std::fflush(state.out);
-    }
-    return slot;
-}
-
-void WritePrivate0(const State& state, Core::Memory::Memory& memory) {
-    if (!state.private0_value || state.private0_address == 0) {
+/// The game's inline NVN encoding stays off: its commands come through the proc table (the driver
+/// sets nvnPrivate0 to 1 only once its lookup ran, which it never does now; written at each lookup).
+void ClearPrivate0(const State& state, Core::Memory::Memory& memory) {
+    if (state.private0_address == 0) {
         return;
     }
-    const u64 value = *state.private0_value;
     switch (state.private0_size) {
     case 1:
-        memory.Write8(state.private0_address, static_cast<u8>(value));
+        memory.Write8(state.private0_address, 0);
         break;
     case 2:
-        memory.Write16(state.private0_address, static_cast<u16>(value));
+        memory.Write16(state.private0_address, 0);
         break;
     case 8:
-        memory.Write64(state.private0_address, value);
+        memory.Write64(state.private0_address, 0);
         break;
     default:
-        memory.Write32(state.private0_address, static_cast<u32>(value));
+        memory.Write32(state.private0_address, 0);
         break;
-    }
-}
-
-u64 ReadPrivate0(const State& state, Core::Memory::Memory& memory) {
-    switch (state.private0_size) {
-    case 1:
-        return memory.Read8(state.private0_address);
-    case 2:
-        return memory.Read16(state.private0_address);
-    case 8:
-        return memory.Read64(state.private0_address);
-    default:
-        return memory.Read32(state.private0_address);
     }
 }
 
@@ -435,118 +220,6 @@ bool ReadGuest(Core::Memory::Memory& memory, u64 address, void* out, size_t size
         size -= chunk;
     }
     return true;
-}
-
-/// The method headers a top-level command-buffer call wrote between `begin` and `end`.
-void DecodeEmitted(Counters& counters, Core::Memory::Memory& memory, u64 begin, u64 end) {
-    if (begin == 0 || end < begin || end - begin > 0x10000) {
-        counters.skipped_calls.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    counters.decoded_calls.fetch_add(1, std::memory_order_relaxed);
-    const size_t count = static_cast<size_t>((end - begin) / 4);
-    counters.emitted_words.fetch_add(count, std::memory_order_relaxed);
-    if (count == 0) {
-        return;
-    }
-    static thread_local std::vector<u32> words;
-    words.resize(count);
-    if (!ReadGuest(memory, begin, words.data(), count * 4)) {
-        return;
-    }
-    for (size_t i = 0; i < count;) {
-        const u32 header = words[i];
-        const u32 mode = header >> 29;
-        u32 data;
-        if (mode == 1 || mode == 3 || mode == 5) {
-            data = (header >> 16) & 0x1fff;
-        } else if (mode == 4) {
-            data = 0;
-        } else {
-            break;
-        }
-        // The header's method field is in words; subchannel bits 13-15.
-        const u32 key = (((header >> 13) & 7) << 13) | (header & 0x1fff);
-        counters.emitted_headers[key].fetch_add(1, std::memory_order_relaxed);
-        VideoCommon::NvnHeaderCount::NoteWritten(
-            memory.GetPointerSilent(Common::ProcessAddress{begin + i * 4}), header);
-        i += 1 + data;
-    }
-}
-
-/// nvnCommandBufferBindTexture(cmdbuf x0, stage w1, slot w2, handle x3). Returns whether the
-/// call was done here (a marker written, see nvn_hle_marker.h); otherwise the driver runs it,
-/// with `frame` (when set up) checked at its return.
-bool HleBindTexture(State& state, Counters& counters, Dynarmic::A64::Jit& jit,
-                    Core::Memory::Memory& memory, CommandFrame& frame, bool& want_return) {
-    const u64 command_buffer = jit.GetRegister(0);
-    const u32 stage = static_cast<u32>(jit.GetRegister(1));
-    const u32 slot = static_cast<u32>(jit.GetRegister(2));
-    const u32 handle = static_cast<u32>(jit.GetRegister(3));
-    if (stage == ComputeStage || stage == TaskStage || stage >= MaxStages || slot > 0xff) {
-        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-    const u32 learned = state.bind_texture_argument[stage].load(std::memory_order_relaxed);
-    if (learned == 0) {
-        frame.learn_stage = stage;
-        want_return = true;
-        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-    namespace Marker = VideoCommon::NvnHleMarker;
-    // pipe_nop: the driver's IMMD 0x68b, written when cmdbuf+0x13 bit 3 is set (sdk BindTexture)
-    const bool pipe_nop = (memory.Read8(command_buffer + 0x13) & 8) != 0;
-    const u32 word0 = Marker::BindTextureWord0(slot, stage, pipe_nop, learned);
-    if (state.hle_verify) {
-        // What the front would replay from this very marker, against the driver's words.
-        frame.expected_count = Marker::ExpandBindTexture(word0, handle, frame.expected);
-        want_return = true;
-        return false;
-    }
-    const u64 write_pointer = memory.Read64(command_buffer);
-    const u64 end = memory.Read64(command_buffer + 8);
-    if (write_pointer == 0 || write_pointer + 12 > end) {
-        // the driver asks the game for more memory
-        counters.hle_fallbacks.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-    const std::array<u32, 3> words{Marker::Header(Marker::BindTexture, 2), word0, handle};
-    memory.WriteBlock(write_pointer, words.data(), sizeof(words));
-    memory.Write64(command_buffer, write_pointer + sizeof(words));
-    counters.hle_calls.fetch_add(1, std::memory_order_relaxed);
-    return true;
-}
-
-/// At a BindTexture's return: learn the stage's macro argument, or compare with the marker.
-void CheckBindTexture(State& state, Counters& counters, Core::Memory::Memory& memory,
-                      const CommandFrame& frame) {
-    const u64 end = memory.Read64(frame.command_buffer);
-    if (frame.write_pointer == 0 || end <= frame.write_pointer ||
-        end - frame.write_pointer > 5 * 4) {
-        return; // another chunk (the driver asked for memory first): not comparable
-    }
-    u32 written[5]{};
-    const u32 count = static_cast<u32>((end - frame.write_pointer) / 4);
-    ReadGuest(memory, frame.write_pointer, written, count * 4);
-    if (frame.learn_stage != ~0u) {
-        if ((written[0] & 0xe000ffffu) == 0x80000e1cu) {
-            state.bind_texture_argument[frame.learn_stage].store(
-                0x80000000u | ((written[0] >> 16) & 0x1fff), std::memory_order_relaxed);
-        }
-        return;
-    }
-    counters.verify_checked.fetch_add(1, std::memory_order_relaxed);
-    if (count != frame.expected_count ||
-        !std::equal(written, written + count, frame.expected)) {
-        if (counters.verify_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
-            LOG_ERROR(Core, "NVN HLE verify: BindTexture wrote {} words {:08x} {:08x} {:08x} {:08x} "
-                            "{:08x}, the marker stands for {} words {:08x} {:08x} {:08x} {:08x} {:08x}",
-                      count, written[0], written[1], written[2], written[3], written[4],
-                      frame.expected_count, frame.expected[0], frame.expected[1],
-                      frame.expected[2], frame.expected[3], frame.expected[4]);
-        }
-    }
 }
 
 #ifdef LICHII_NVN_DIRECT
@@ -622,15 +295,14 @@ u32 ReadNvn2Constants(Kernel::KProcess& process, u64 base) {
 }
 #endif
 
-/// Direct mode, at Install: a slot per name the front end knows (upstream's names.txt), the
-/// driver's entry points from a pass-through run's capture, hooked only to count, and its
-/// device integers (the driver code's constants, then the capture's answers).
+/// At Install: a slot per name the front end knows (upstream's names.txt) and, for NVN2, the
+/// device integers that are constants in the driver's code.
 void InstallDirect(State& state) {
 #ifdef LICHII_NVN_DIRECT
     for (int front = 0; front < nvn_direct_name_count(); ++front) {
         const std::string name = nvn_direct_name(front);
         const u32 slot = state.slot_count.load(std::memory_order_relaxed);
-        state.slots[slot] = {.command_buffer = name.starts_with("nvnCommandBuffer"), .front = front,
+        state.slots[slot] = {.front = front,
                              .halts = std::ranges::find(HaltingCalls, name) != HaltingCalls.end()};
         if (state.slots[slot].halts && nvn_direct_float_args(front)) {
             LOG_CRITICAL(Core, "NVN direct: {} takes floats, which a halted call loses", name);
@@ -638,9 +310,6 @@ void InstallDirect(State& state) {
         state.slot_by_name.emplace(name, slot);
         state.slot_count.store(slot + 1, std::memory_order_release);
     }
-    // The game's inline NVN encoding stays off: its commands come through the table (nvnPrivate0
-    // is 1 only once the driver's lookup ran, which it never does now; written at each lookup).
-    state.private0_value = state.private0_value.value_or(0);
     // NVN2 is compiled into the module that exports nvnBootstrapLoader.
     u32 constants = 0;
     if (state.process->IsSwitch2()) {
@@ -656,38 +325,10 @@ void InstallDirect(State& state) {
                               "driver: the device answers the newest versions known");
         }
     }
-    std::FILE* file = state.driver_file_path.empty()
-                          ? nullptr
-                          : std::fopen(state.driver_file_path.c_str(), "r");
-    if (file == nullptr) {
-        LOG_WARNING(Core, "NVN direct: no driver capture (EDEN_NX2_NVN_DRIVER_FILE): driver entries "
-                          "are not watched, device integers are the front end's own");
-    } else {
-        char line[512];
-        while (std::fgets(line, sizeof line, file) != nullptr) {
-            char name[256], module[64];
-            unsigned long long offset{};
-            unsigned item{};
-            int value{};
-            if (std::sscanf(line, "e %255s %63s %llx", name, module, &offset) == 3) {
-                for (const auto& [base, module_name] : state.modules) {
-                    if (module_name == module) {
-                        state.driver_entries.emplace_back(base + offset, name);
-                    }
-                }
-            } else if (std::sscanf(line, "i %u %d", &item, &value) == 2) {
-                state.device_integers[item] = value;
-                nvn_direct_set_device_integer(item, value);
-            }
-        }
-        std::fclose(file);
-        std::ranges::sort(state.driver_entries);
-    }
     LOG_INFO(Core,
-             "NVN direct: the game's NVN driver is replaced: {} names in the front end, {} driver "
-             "entries watched, {} device integers from the driver, {} from its code",
-             state.slot_count.load() - FirstNameSlot, state.driver_entries.size(),
-             state.device_integers.size(), constants);
+             "NVN direct: the game's NVN driver is replaced: {} names in the front end, {} device "
+             "integers from its code",
+             state.slot_count.load() - FirstNameSlot, constants);
 #endif
 }
 
@@ -704,14 +345,14 @@ u32 DirectSlotOf(State& state, const std::string& name) {
     if (slot == MaxSlots) {
         return MaxSlots;
     }
-    state.slots[slot] = {.command_buffer = name.starts_with("nvnCommandBuffer")};
+    state.slots[slot] = {};
     state.slot_by_name.emplace(name, slot);
     state.slot_count.store(slot + 1, std::memory_order_release);
     LOG_WARNING(Core, "NVN direct: the game asks for {}, which the front end lacks: a stub", name);
     return slot;
 }
 
-/// nvn_direct_memory.map_view (dotfiles-25x.5): the pages behind guest [address, address + size)
+/// nvn_direct_memory.map_view: the pages behind guest [address, address + size)
 /// mapped once more at a range of their own, for the replay to import: each run of pages that lie
 /// one after the other in the backing memory is one mapping of it (HostMemory::MapBackingView);
 /// pages the guest has not mapped are zero pages of the view.
@@ -757,7 +398,7 @@ void UnmapPoolView(void* context, void* view, u64 size) {
 /// nvn_direct_memory.track_pages: arms or disarms the write tracking of pool pages by guest
 /// address: rasterizer-cached pages, which stay readable in direct mode (Core::Memory); a write
 /// to one reaches OnDirectCpuWrite. The pools stay out of the SMMU: with them mapped there MKW
-/// stalls (dotfiles-25x.5).
+/// stalls.
 void TrackPages(void* context, u64 address, u64 size, int armed) {
     static_cast<State*>(context)->process->GetMemory().RasterizerMarkRegionCached(address, size,
                                                                                   armed != 0);
@@ -818,16 +459,6 @@ thread_local u64 t_halted_lr = 0;
 /// Direct mode's block entries. Returns whether the JIT halts for the call (HaltedCallSvc).
 bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory) {
     const u64 lr = jit.GetRegister(30);
-    if (IsDriverEntry(state, pc)) {
-        const u64 calls = state.driver_entry_calls.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (calls <= 8) {
-            const auto it = std::ranges::lower_bound(state.driver_entries,
-                                                     std::pair{pc, std::string{}});
-            LOG_CRITICAL(Core, "NVN direct: the game's NVN driver ran: {} at {:#x} (from {:#x})",
-                         it != state.driver_entries.end() ? it->second : "?", pc, lr);
-        }
-        return false;
-    }
     const bool bootstrap = IsBootstrap(state, pc);
     const u32 slot = bootstrap ? MaxSlots : static_cast<u32>((pc - state.synthetic_base) / 4);
     if (bootstrap || slot == LookupSlot) {
@@ -859,11 +490,10 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
         }
         const u32 found = DirectSlotOf(state, name);
         jit.SetRegister(0, found == MaxSlots ? 0 : SyntheticAddress(state, found));
-        WritePrivate0(state, memory);
+        ClearPrivate0(state, memory);
         jit.SetRegister(16, lr);
         return false;
     }
-    LocalCounters(state).calls[slot].fetch_add(1, std::memory_order_relaxed);
     const Slot& target = state.slots[slot];
     jit.SetRegister(16, lr);
     if (target.front < 0 || !nvn_direct_implemented(target.front)) {
@@ -896,18 +526,13 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
 
 } // namespace
 
-bool Enabled() {
-    return Get() != nullptr;
-}
-
 bool DirectMode() {
-    const State* const state = Get();
-    return state != nullptr && state->direct;
+    return Get() != nullptr;
 }
 
 u64 DirectProgramId() {
     const State* const state = Get();
-    return state != nullptr && state->direct ? state->program_id : 0;
+    return state != nullptr ? state->program_id : 0;
 }
 
 void StopDirect() {
@@ -991,11 +616,10 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     constexpr bool built = false;
 #endif
     g_state.reset();
-    const bool hook = EnvIsOne("EDEN_NX2_NVN_HOOK");
     const bool asked = DirectAsked();
     // The hook's block entries are A64 only (ArmDynarmic64): a 32-bit game gets no state.
     std::unique_ptr<State> state_owner =
-        (hook || (built && asked)) && process.Is64Bit() ? Create() : nullptr;
+        built && asked && process.Is64Bit() ? std::make_unique<State>() : nullptr;
     if (state_owner != nullptr) {
         ScanModules(system, process, *state_owner);
     }
@@ -1014,18 +638,12 @@ void Install(Core::System& system, Kernel::KProcess& process) {
                  IsDirect(g_choice) ? "NVN direct renderer" : "GPU emulation",
                  Describe(g_choice));
     }
-    if (state_owner == nullptr || (!hook && !IsDirect(g_choice))) {
+    if (state_owner == nullptr || !IsDirect(g_choice)) {
         return;
     }
     State& state = *state_owner;
-    state.direct = IsDirect(g_choice);
-    g_direct_ran |= state.direct;
-    if (state.direct) {
-        InstallDirect(state);
-    } else if (!state.driver_file_path.empty()) {
-        state.driver_file = std::fopen(state.driver_file_path.c_str(), "w");
-    }
-    NvnTrace::Install(process);
+    g_direct_ran = true;
+    InstallDirect(state);
     LOG_INFO(Core,
              "NVN hook: {} nvnBootstrapLoader exports (SDK {}), nvnPrivate0 {:#x} ({} bytes), "
              "synthetic addresses from {:#x}",
@@ -1062,167 +680,42 @@ bool DirectNeedsFreshProcess() {
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc) {
     // Asked for when the process's JIT is made, before Install decides: HookOf answers nothing
     // while the boot has no state.
-    return EnvIsOne("EDEN_NX2_NVN_HOOK") || DirectAsked() ? &HookOf : nullptr;
+    return DirectAsked() ? &HookOf : nullptr;
 }
 
 bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
-                  Kernel::KProcess* process, u32 thread_id) {
+                  Kernel::KProcess* process) {
     State& state = *Get();
     if (process != state.process) {
         return false;
     }
 #ifdef LICHII_NVN_DIRECT
-    if (state.direct) {
-        return DirectEntry(state, pc, jit, memory);
-    }
-#endif
-    const u32 slot = IsBootstrap(state, pc)
-                         ? MaxSlots
-                         : static_cast<u32>((pc - state.synthetic_base) / 4);
-    if (slot == LookupSlot) {
-        LocalCounters(state).calls[LookupSlot].fetch_add(1, std::memory_order_relaxed);
-    }
-    if (slot == MaxSlots || slot == LookupSlot) {
-        // nvnBootstrapLoader(name) or nvnDeviceGetProcAddress(device, name): return through
-        // LookupReturnSlot, which swaps the driver's address for the name's synthetic one.
-        const u64 name_address = jit.GetRegister(slot == LookupSlot ? 1 : 0);
-        std::scoped_lock lock{state.mutex};
-        state.lookups[thread_id].push_back(
-            {.name = memory.ReadCString(name_address, 128), .lr = jit.GetRegister(30)});
-        jit.SetRegister(30, SyntheticAddress(state, LookupReturnSlot));
-        if (slot == LookupSlot) {
-            jit.SetRegister(16, state.lookup_driver);
-        }
-        return false;
-    }
-    if (slot == LookupReturnSlot) {
-        std::scoped_lock lock{state.mutex};
-        auto& frames = state.lookups[thread_id];
-        if (frames.empty()) {
-            LOG_CRITICAL(Core, "NVN hook: lookup return without a lookup on thread {}", thread_id);
-            return false;
-        }
-        const LookupFrame frame = std::move(frames.back());
-        frames.pop_back();
-        const u64 driver = jit.GetRegister(0);
-        // A loader export that forwards to another hooked one returns its synthetic address.
-        const bool synthetic =
-            driver >= state.synthetic_base &&
-            (driver - state.synthetic_base) / 4 < state.slot_count.load(std::memory_order_relaxed);
-        if (!synthetic && frame.name == "nvnDeviceGetProcAddress" && driver != 0) {
-            if (state.lookup_driver != 0 && state.lookup_driver != driver) {
-                LOG_WARNING(Core, "NVN hook: a second nvnDeviceGetProcAddress {:#x}", driver);
-            }
-            if (state.lookup_driver == 0 && state.out != nullptr) {
-                fmt::print(state.out, "n {} {:#x} {:#x} {}\n", LookupSlot, driver,
-                           SyntheticAddress(state, LookupSlot), frame.name);
-            }
-            state.lookup_driver = driver;
-            jit.SetRegister(0, SyntheticAddress(state, LookupSlot));
-        } else if (!synthetic && driver != 0 && !IsBootstrap(state, driver)) {
-            const u32 name_slot = SlotOf(state, frame.name, driver);
-            if (name_slot != MaxSlots) {
-                jit.SetRegister(0, SyntheticAddress(state, name_slot));
-            }
-        }
-        WritePrivate0(state, memory);
-        jit.SetRegister(16, frame.lr);
-        return false;
-    }
-    if (slot == TraceReturnSlot) {
-        auto& frames = state.trace_frames[thread_id % GuestThreadSlots];
-        if (frames.empty()) {
-            LOG_CRITICAL(Core, "NVN hook: trace return without a call on thread {}", thread_id);
-            return false;
-        }
-        const TraceFrame frame = frames.back();
-        frames.pop_back();
-        NvnTrace::OnReturn(frame.seq, frame.slot, frame.output, jit, memory);
-        jit.SetRegister(16, frame.lr);
-        return false;
-    }
-    if (slot == DeviceIntegerReturnSlot) {
-        auto& frames = state.device_integer_frames[thread_id % GuestThreadSlots];
-        if (frames.empty()) {
-            LOG_CRITICAL(Core, "NVN hook: GetInteger return without a call on thread {}", thread_id);
-            return false;
-        }
-        const DeviceIntegerFrame frame = frames.back();
-        frames.pop_back();
-        const s32 value = static_cast<s32>(memory.Read32(frame.out));
-        std::scoped_lock lock{state.mutex};
-        if (state.device_integers.emplace(frame.item, value).second) {
-            fmt::print(state.driver_file, "i {} {}\n", frame.item, value);
-            std::fflush(state.driver_file);
-        }
-        jit.SetRegister(16, frame.lr);
-        return false;
-    }
-    if (slot == EmittedReturnSlot) {
-        auto& frames = state.command_frames[thread_id % GuestThreadSlots];
-        if (frames.empty()) {
-            LOG_CRITICAL(Core, "NVN hook: command return without a call on thread {}", thread_id);
-            return false;
-        }
-        const CommandFrame frame = frames.back();
-        frames.pop_back();
-        Counters& counters = LocalCounters(state);
-        if (frame.decode && frames.empty()) {
-            DecodeEmitted(counters, memory, frame.write_pointer, memory.Read64(frame.command_buffer));
-        }
-        if (frame.learn_stage != ~0u || frame.expected_count != 0) {
-            CheckBindTexture(state, counters, memory, frame);
-        }
-        jit.SetRegister(16, frame.lr);
-        return false;
-    }
-    Counters& counters = LocalCounters(state);
-    counters.calls[slot].fetch_add(1, std::memory_order_relaxed);
-    const Slot& target = state.slots[slot];
-    CommandFrame frame{.lr = jit.GetRegister(30), .decode = state.emitted && target.command_buffer};
-    bool want_return = frame.decode;
-    if (slot == state.bind_texture_slot && state.hle_bind_texture &&
-        HleBindTexture(state, counters, jit, memory, frame, want_return)) {
-        jit.SetRegister(16, frame.lr); // done: back to the caller
-        return false;
-    }
-    if (slot == state.device_integer_slot && state.driver_file != nullptr) {
-        // nvnDeviceGetInteger(device, item, int* out): the answer at the return (pass-through
-        // runs only; the trace misses these calls then).
-        state.device_integer_frames[thread_id % GuestThreadSlots].push_back(
-            {.lr = jit.GetRegister(30),
-             .item = static_cast<u32>(jit.GetRegister(1)),
-             .out = jit.GetRegister(2)});
-        jit.SetRegister(30, SyntheticAddress(state, DeviceIntegerReturnSlot));
-        jit.SetRegister(16, target.driver);
-        return false;
-    }
-    if (u64 seq = 0; NvnTrace::OnCall(slot, jit, memory, thread_id, seq)) {
-        // The trace's return frame stands alone: a trace run sets neither EDEN_NX2_NVN_EMITTED
-        // nor EDEN_NX2_NVN_HLE.
-        const u32 output = NvnTrace::OutputArgument(slot);
-        state.trace_frames[thread_id % GuestThreadSlots].push_back(
-            {.lr = jit.GetRegister(30),
-             .seq = seq,
-             .slot = slot,
-             .output = output != ~0u ? jit.GetRegister(output) : 0});
-        jit.SetRegister(30, SyntheticAddress(state, TraceReturnSlot));
-        jit.SetRegister(16, target.driver);
-        return false;
-    }
-    if (want_return) {
-        frame.command_buffer = jit.GetRegister(0);
-        frame.write_pointer = memory.Read64(frame.command_buffer);
-        state.command_frames[thread_id % GuestThreadSlots].push_back(frame);
-        jit.SetRegister(30, SyntheticAddress(state, EmittedReturnSlot));
-    }
-    jit.SetRegister(16, target.driver);
+    return DirectEntry(state, pc, jit, memory);
+#else
     return false;
+#endif
 }
 
 #ifdef LICHII_NVN_DIRECT
 namespace {
-/// Direct mode's present (nvnQueuePresentTexture, dotfiles-25x.7): the replay's image goes to
+/// Every 600 presents: the halted calls and the stub census (names called without an
+/// implementation).
+void LogStubCensus(State& state, u64 present) {
+    if (present % 600 != 0) {
+        return;
+    }
+    std::string census;
+    std::scoped_lock lock{state.mutex};
+    for (const auto& [name, slot] : state.slot_by_name) {
+        if (const u64 calls = state.stub_calls[slot].load(std::memory_order_relaxed); calls) {
+            census += fmt::format(" {}={}", name, calls);
+        }
+    }
+    LOG_INFO(Core, "NVN direct: present {}: halted calls {}, stubs called:{}", present,
+             state.halted_calls.load(), census.empty() ? " none" : census);
+}
+
+/// Direct mode's present (nvnQueuePresentTexture): the replay's image goes to
 /// Lichii's presenter as a layer whose address names the frame (AccelerateDisplay finds it), and
 /// the present's bookkeeping is nx2:vi2's (Service::Nx2PresentBookkeeping): counts, capture,
 /// speed limiter, perf stats, pacing to the vblank, and as nx2:vi2's Composite the display
@@ -1281,7 +774,7 @@ void PresentDirect(Core::System& system, State& state) {
     }
     present.Finish(own);
     present.PaceToVblank((frame.interval << 16) | 60, system.ApplicationProcess(), own, nullptr);
-    OnPresent(number);
+    LogStubCensus(state, number);
 }
 } // namespace
 #endif
@@ -1328,7 +821,7 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     state.halted_calls.fetch_add(1, std::memory_order_relaxed);
     const Slot& target = state.slots[slot];
     // A wait for the replay's GPU (SyncWait, QueueFinish) sleeps in the guest kernel until it
-    // would not wait (dotfiles-25x.4): a host wait here held the guest core, so the game's other
+    // would not wait: a host wait here held the guest core, so the game's other
     // threads there stopped (one of them may be the one whose submission the GPU waits for).
     const bool sync_wait = std::string_view{nvn_direct_name(target.front)} == "nvnSyncWait";
     bool waited = false;
@@ -1366,86 +859,6 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     (void)system;
     (void)args;
 #endif
-}
-
-void OnPresent(u64 present) {
-    NvnTrace::OnPresent(present);
-    State* const state_pointer = Get();
-    if (state_pointer != nullptr && state_pointer->direct && present % 600 == 0) {
-        // Direct mode: the stub census (names called without an implementation) and proof the
-        // driver did not run.
-        State& state = *state_pointer;
-        std::string census;
-        std::scoped_lock lock{state.mutex};
-        for (const auto& [name, slot] : state.slot_by_name) {
-            if (const u64 calls = state.stub_calls[slot].load(std::memory_order_relaxed); calls) {
-                census += fmt::format(" {}={}", name, calls);
-            }
-        }
-        LOG_INFO(Core,
-                 "NVN direct: present {}: driver entries run {}, halted calls {}, stubs called:{}",
-                 present, state.driver_entry_calls.load(), state.halted_calls.load(),
-                 census.empty() ? " none" : census);
-    }
-    if (state_pointer == nullptr || state_pointer->out == nullptr ||
-        present % state_pointer->every != 0) {
-        return;
-    }
-    State& state = *state_pointer;
-    std::string text = fmt::format(
-        "t {} {}\n", present,
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    std::scoped_lock lock{state.mutex};
-    const u32 slots = state.slot_count.load(std::memory_order_acquire);
-    for (u32 slot = LookupSlot; slot < slots; ++slot) {
-        u64 calls = 0;
-        for (const Counters* counters : state.counters) {
-            calls += counters->calls[slot].load(std::memory_order_relaxed);
-        }
-        if (calls != 0) {
-            text += fmt::format("c {} {} {}\n", present, slot, calls);
-        }
-    }
-    if (state.emitted) {
-        u64 decoded = 0, words = 0, skipped = 0;
-        for (const Counters* counters : state.counters) {
-            decoded += counters->decoded_calls.load(std::memory_order_relaxed);
-            words += counters->emitted_words.load(std::memory_order_relaxed);
-            skipped += counters->skipped_calls.load(std::memory_order_relaxed);
-        }
-        text += fmt::format("ew {} {} {} {}\n", present, decoded, words, skipped);
-        for (u32 key = 0; key < (1u << 16); ++key) {
-            u64 headers = 0;
-            for (const Counters* counters : state.counters) {
-                headers += counters->emitted_headers[key].load(std::memory_order_relaxed);
-            }
-            if (headers != 0) {
-                text += fmt::format("e {} {:#x} {}\n", present, key, headers);
-            }
-            if (const u64 front = VideoCommon::NvnHeaderCount::g_headers[key]; front != 0) {
-                text += fmt::format("f {} {:#x} {} {}\n", present, key, front,
-                                    VideoCommon::NvnHeaderCount::g_table_headers[key]);
-            }
-        }
-    }
-    if (state.hle_bind_texture) {
-        u64 hle = 0, fallbacks = 0, checked = 0, mismatches = 0;
-        for (const Counters* counters : state.counters) {
-            hle += counters->hle_calls.load(std::memory_order_relaxed);
-            fallbacks += counters->hle_fallbacks.load(std::memory_order_relaxed);
-            checked += counters->verify_checked.load(std::memory_order_relaxed);
-            mismatches += counters->verify_mismatches.load(std::memory_order_relaxed);
-        }
-        text += fmt::format("h {} {} {} {} {}\n", present, hle, fallbacks, checked, mismatches);
-    }
-    if (state.private0_address != 0 && state.process != nullptr) {
-        text += fmt::format("p0 {} {}\n", present,
-                            ReadPrivate0(state, state.process->GetMemory()));
-    }
-    std::fwrite(text.data(), 1, text.size(), state.out);
-    std::fflush(state.out);
 }
 
 } // namespace Core::NvnHook

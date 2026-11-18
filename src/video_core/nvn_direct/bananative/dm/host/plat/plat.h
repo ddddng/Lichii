@@ -24,7 +24,7 @@
 #define PLAT_WINDOWS 1
 #define PLAT_MAC 0
 #define PLAT_IOS 0
-#elif defined(__ANDROID__)   // dotfiles-o72.4: also the x86-64 Linux harness (__ANDROID__ defined there, no Bionic)
+#elif defined(__ANDROID__)   // also the x86-64 Linux port (__ANDROID__ defined there, no Bionic)
 #include <ucontext.h>
 #define PLAT_APPLE 0
 #define PLAT_ANDROID 1
@@ -119,7 +119,7 @@ extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 typedef struct { void *slot18, *slottls, *slottlr, *slotgate; } plat_slots_t;   // = PLAT_SLOT_* order (the key page entries are offsets into it)
 plat_slots_t *plat_slots_own(void);   // this thread's block, made on first use and freed when the thread exits
 #if defined(__x86_64__)
-extern __thread plat_slots_t *plat_slots_x86;   // dotfiles-o72.4 harness: no Bionic TLS slot
+extern __thread plat_slots_t *plat_slots_x86;   // x86-64: no Bionic TLS slot
 static inline plat_slots_t *plat_slots_peek(void) { return plat_slots_x86; }
 #else
 static inline plat_slots_t *plat_slots_peek(void) { void **tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp)); return (plat_slots_t *)tp[2]; }
@@ -189,7 +189,7 @@ PLAT_FN void plat_on_signal(int sig, void (*fn)(void *), void *ctx);       // fn
 #define PLAT_UC_FPSR(uc) ((uc)->uc_mcontext->__ns.__fpsr)
 #define PLAT_UC_FPCR(uc) ((uc)->uc_mcontext->__ns.__fpcr)
 #define PLAT_UC_ESR(uc) ((uc)->uc_mcontext->__es.__esr)
-#elif defined(__x86_64__)   // dotfiles-o72.4 harness: the aarch64 register names have no x86 meaning (only the PC is read: the faulting address comes from si_addr)
+#elif defined(__x86_64__)   // x86-64: the aarch64 register names have no x86 meaning (only the PC is read: the faulting address comes from si_addr)
 #define PLAT_UC_X(uc, i) ((uint64_t)0)
 #define PLAT_UC_FP(uc) ((uint64_t)(uc)->uc_mcontext.gregs[REG_RBP])
 #define PLAT_UC_LR(uc) ((uint64_t)0)

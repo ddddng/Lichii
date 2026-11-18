@@ -181,13 +181,6 @@ int nxhost_vk_selftest(ANativeWindow *w, int frames) {
         last = tk;
     }
     mtl_present_flush(); mtl_finish();
-    // DM_VK_SHLIB=<a game's dmsh_vk.lib>: every shader of it through this device's compiler (any game's library: the chain must match, the game is not checked)
-    const char *gl = getenv("DM_VK_SHLIB");
-    if (gl && *gl) {
-        static vka_shlib G; char e2[256];
-        if (!vka_shlib_open(&G, gl, DMSH_CHAIN, DMSH_VK_CHAIN, NULL, NULL, e2, sizeof e2)) { VRED("selftest: shader library %s refused: %s", gl, e2); bad++; }
-        else { char game[17]; vka_shlib_str(G.h->game, game); VLOG("selftest: shader library %s (game %s)", gl, game); bad += vka_shlib_check_all(&G) != 0; }
-    }
     char pl[200]; mtl_pso_line(pl, sizeof pl);
     VLOG("selftest: %d frames presented to %s; %s; %s", frames, mtl_has_window() ? "the window" : "no window (dropped)", pl, bad ? "FAILED" : "passed");
     mtl_prog_release(&gp); mtl_prog_release(&cp);

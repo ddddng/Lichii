@@ -37,7 +37,6 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
-#include "core/nvn_hook.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/device_memory.h"
 #include "video_core/rasterizer_interface.h"
@@ -2101,7 +2100,7 @@ private:
         if (Common::DkbFrameTrace::Enabled()) {
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
-        const u64 present = m_present.Count(ctx.GetThread());
+        m_present.Count(ctx.GetThread());
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -2169,7 +2168,6 @@ private:
         m_present.PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess(), m_presents,
                                m_vsync.get());
         const auto paced = std::chrono::steady_clock::now();
-        Core::NvnHook::OnPresent(present);
         if (const u32 recorder = w[18] & 0xf; recorder != 0) {
             m_recorded_ticks[recorder - 1] = system.CoreTiming().GetClockTicks();
         }

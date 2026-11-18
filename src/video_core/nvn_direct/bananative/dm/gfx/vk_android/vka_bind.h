@@ -54,11 +54,11 @@ typedef struct {
 // Reads guest memory for handles kept in uniform buffers (TEX_UBO, SAMP_UBO, SBUF_UBO): 1 = read, 0 = not readable (the value reads as 0)
 typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);
 
-// Lichii (dotfiles-25x.11): a recompiled NVN2 compute shader's c[0], in the shader's own layout (nvn_recompile.c vka_rc_cs_c0): a VKA_R_DRV of bank
+// Lichii: a recompiled NVN2 compute shader's c[0], in the shader's own layout (nvn_recompile.c vka_rc_cs_c0): a VKA_R_DRV of bank
 // VKA_BANK_NVN2_CS_C0, which the walk's caller fills from the shader
 #define VKA_KIND_NVN2_CS_C0 64
 #define VKA_BANK_NVN2_CS_C0 0x100
-// Lichii (dotfiles-25x.11): a recompiled shader's loop guard word (nvn_recompile.c): a VKA_R_LOOP_GUARD the walk's caller binds from the shader
+// Lichii: a recompiled shader's loop guard word (nvn_recompile.c): a VKA_R_LOOP_GUARD the walk's caller binds from the shader
 #define VKA_KIND_LOOP_GUARD 65
 
 #define VKA_WALK_REFUSE (-1)
