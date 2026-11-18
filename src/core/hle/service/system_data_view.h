@@ -19,6 +19,7 @@ enum class SystemDataAsset {
     FontKorean,
     FontChineseTraditional,
     FontChineseSimple,
+    TimeZoneBinary,
 };
 
 class SystemDataView final {
@@ -28,12 +29,26 @@ public:
     explicit SystemDataView(Records immutable_romfs) : records{std::move(immutable_romfs)} {}
 
     [[nodiscard]] std::shared_ptr<const FileSys::VfsFile> OpenFile(
-        SystemDataAsset asset, std::string_view name) const {
+        SystemDataAsset asset, std::string_view path) const {
         const auto record = records.find(asset);
-        if (record == records.end() || !record->second) {
+        if (record == records.end() || path.find_first_of("\\:") != std::string_view::npos ||
+            path.find('\0') != std::string_view::npos) {
             return nullptr;
         }
-        return record->second->GetFile(name);
+        auto directory = record->second;
+        while (directory) {
+            const auto slash = path.find('/');
+            const auto name = path.substr(0, slash);
+            if (name.empty() || name.back() == '.' || name.back() == ' ') {
+                return nullptr;
+            }
+            if (slash == std::string_view::npos) {
+                return directory->GetFile(name);
+            }
+            directory = directory->GetSubdirectory(name);
+            path.remove_prefix(slash + 1);
+        }
+        return nullptr;
     }
 
 private:
