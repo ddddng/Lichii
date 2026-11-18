@@ -40,6 +40,8 @@
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ns/platform_service_manager.h"
 #include "core/hle/service/server_manager.h"
+#include "core/hle/service/set/settings.h"
+#include "core/hle/service/set/settings_server.h"
 #include "core/hle/service/set/system_settings_server.h"
 #include "core/hle/service/system_data_view.h"
 #include "core/loader/deconstructed_rom_directory.h"
@@ -221,6 +223,153 @@ std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesyst
 }
 
 } // namespace
+
+TEST_CASE("Native HOME SET uses a scratch profile without changing shared settings",
+          "[core][native_home_settings]") {
+    using namespace Service;
+    using namespace Service::PSC::Time;
+    using namespace Service::Set;
+
+    SysmixTests::Context context;
+    auto& system = context.system;
+    auto& kernel = system.Kernel();
+    const auto& nand = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir);
+    const auto previous_language = Settings::values.language_index.GetValue();
+    const auto previous_region = Settings::values.region_index.GetValue();
+    const auto previous_name = Settings::values.device_name.GetValue();
+    SCOPE_EXIT {
+        Settings::values.language_index.SetValue(previous_language);
+        Settings::values.region_index.SetValue(previous_region);
+        Settings::values.device_name.SetValue(previous_name);
+    };
+    Settings::values.language_index.SetValue(Settings::Language::EnglishAmerican);
+    Settings::values.region_index.SetValue(Settings::Region::Usa);
+    Settings::values.device_name.SetValue("Shared host");
+
+    Kernel::KThread client{kernel};
+    Kernel::KAutoObject::Create(&client);
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &client, &*context.process).IsSuccess());
+    SCOPE_EXIT {
+        context.process->UnregisterThread(kernel, &client);
+        context.process->Close(kernel);
+        kernel.UnregisterKernelObject(&client);
+    };
+    std::optional<std::jthread> server_thread;
+    Service::ServerManager server{system};
+    server_thread.emplace(
+        kernel.RunOnHostCoreProcess("scratch-settings-test", [&] { server.LoopProcess(); }));
+    const auto manager = std::make_shared<Service::SessionRequestManager>(kernel, server);
+    constexpr u32 NicknameSize = 0x80;
+    const auto dispatch = [&](ServiceFrameworkBase& service, u32 command, u64 input = 0,
+                              bool nickname_buffer = false) {
+        std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> words{};
+        IPC::CommandHeader header{};
+        header.type.Assign(IPC::CommandType::Request);
+        header.num_buf_b_descriptors.Assign(nickname_buffer ? 1 : 0);
+        header.data_size.Assign(nickname_buffer ? 13 : 10);
+        std::memcpy(words.data(), &header, sizeof(header));
+        if (nickname_buffer) {
+            IPC::BufferDescriptorABW buffer{};
+            buffer.size_bits_0_31 = NicknameSize;
+            buffer.address_bits_0_31 = SysmixTests::Context::Base;
+            std::memcpy(words.data() + 2, &buffer, sizeof(buffer));
+        }
+        const auto start = nickname_buffer ? 8 : 4;
+        words[start] = 0x49434653;
+        words[start + 2] = command;
+        words[start + 4] = static_cast<u32>(input);
+        words[start + 5] = static_cast<u32>(input >> 32);
+
+        HLERequestContext request{kernel, context.Memory(), nullptr, &client};
+        request.SetSessionRequestManager(manager);
+        REQUIRE(request.PopulateFromIncomingCommandBuffer(words.data()).IsSuccess());
+        service.InvokeRequest(request);
+        REQUIRE(request.CommandBuffer()[4] == 0x4f434653);
+        REQUIRE(request.CommandBuffer()[6] == ResultSuccess.raw);
+        return u64{request.CommandBuffer()[8]} | (u64{request.CommandBuffer()[9]} << 32);
+    };
+
+    const auto legacy_clock = Common::UUID::MakeRandomWithSeed(1);
+    const auto scratch_clock = Common::UUID::MakeRandomWithSeed(2);
+    const LocationName legacy_zone{"America/Los_Angeles"};
+    const LocationName scratch_zone{"Europe/Amsterdam"};
+    {
+        const auto legacy = CreateSettingsServers(system, {});
+        REQUIRE(legacy.system->SetExternalSteadyClockSourceId(legacy_clock).IsSuccess());
+        REQUIRE(legacy.system->SetDeviceTimeZoneLocationName(legacy_zone).IsSuccess());
+    }
+    const auto malformed_record = nand / "system/save/8000000000000053/settings.dat";
+    {
+        std::ofstream file{malformed_record, std::ios::binary};
+        REQUIRE(file.is_open());
+        file << "Keep this shared record unchanged";
+    }
+    const auto before = SnapshotProfile(nand);
+    const auto view = std::make_shared<const SystemDataView>(SystemDataView::Records{});
+    {
+        const auto scratch = CreateSettingsServers(system, view);
+        LocationName zone{};
+        REQUIRE(scratch.system->GetDeviceTimeZoneLocationName(&zone).IsSuccess());
+        CHECK(zone == LocationName{"UTC"});
+
+        REQUIRE(scratch.system->SetExternalSteadyClockSourceId(scratch_clock).IsSuccess());
+        REQUIRE(scratch.system->SetDeviceTimeZoneLocationName(scratch_zone).IsSuccess());
+        const SteadyClockTimePoint update{123, scratch_clock};
+        REQUIRE(scratch.system->SetDeviceTimeZoneLocationUpdatedTime(update).IsSuccess());
+        const SystemClockContext clock_context{456, update};
+        REQUIRE(scratch.system->SetUserSystemClockContext(clock_context).IsSuccess());
+        REQUIRE(scratch.system->SetNetworkSystemClockContext(clock_context).IsSuccess());
+
+        Common::UUID clock{};
+        REQUIRE(scratch.system->GetExternalSteadyClockSourceId(&clock).IsSuccess());
+        CHECK(clock == scratch_clock);
+        REQUIRE(scratch.system->GetDeviceTimeZoneLocationName(&zone).IsSuccess());
+        CHECK(zone == scratch_zone);
+        SteadyClockTimePoint updated_at{};
+        REQUIRE(scratch.system->GetDeviceTimeZoneLocationUpdatedTime(&updated_at).IsSuccess());
+        CHECK(updated_at == update);
+        SystemClockContext read_context{};
+        REQUIRE(scratch.system->GetUserSystemClockContext(&read_context).IsSuccess());
+        CHECK(read_context == clock_context);
+        REQUIRE(scratch.system->GetNetworkSystemClockContext(&read_context).IsSuccess());
+        CHECK(read_context == clock_context);
+
+        dispatch(*scratch.system, 0, static_cast<u64>(LanguageCode::FR));
+        dispatch(*scratch.system, 57, static_cast<u32>(SystemRegionCode::Europe));
+        CHECK(dispatch(*scratch.user, 0) == static_cast<u64>(LanguageCode::FR));
+        CHECK(static_cast<u32>(dispatch(*scratch.user, 4)) ==
+              static_cast<u32>(SystemRegionCode::Europe));
+        const std::array<u8, NicknameSize> name{'H', 'O', 'M', 'E'};
+        REQUIRE(scratch.system->SetDeviceNickName(name).IsSuccess());
+        std::array<u8, NicknameSize> read_name{};
+        REQUIRE(scratch.system->GetDeviceNickName(&read_name).IsSuccess());
+        CHECK(read_name == name);
+        dispatch(*scratch.user, 11, 0, true);
+        CHECK(std::equal(name.begin(), name.end(), context.backing));
+        CHECK(SnapshotProfile(nand) == before);
+    }
+    CHECK(SnapshotProfile(nand) == before);
+    CHECK(Settings::values.language_index.GetValue() == Settings::Language::EnglishAmerican);
+    CHECK(Settings::values.region_index.GetValue() == Settings::Region::Usa);
+    CHECK(Settings::values.device_name.GetValue() == "Shared host");
+
+    const auto second_scratch = CreateSettingsServers(system, view);
+    CHECK(dispatch(*second_scratch.user, 0) == static_cast<u64>(LanguageCode::EN_US));
+    LocationName zone{};
+    REQUIRE(second_scratch.system->GetDeviceTimeZoneLocationName(&zone).IsSuccess());
+    CHECK(zone == LocationName{"UTC"});
+
+    const auto legacy = CreateSettingsServers(system, {});
+    REQUIRE(legacy.system->GetDeviceTimeZoneLocationName(&zone).IsSuccess());
+    CHECK(zone == legacy_zone);
+    Common::UUID clock{};
+    REQUIRE(legacy.system->GetExternalSteadyClockSourceId(&clock).IsSuccess());
+    CHECK(clock == legacy_clock);
+    CHECK(dispatch(*legacy.user, 0) == static_cast<u64>(LanguageCode::EN_US));
+    dispatch(*legacy.system, 0, static_cast<u64>(LanguageCode::FR));
+    CHECK(Settings::values.language_index.GetValue() == Settings::Language::French);
+    CHECK(SnapshotProfile(nand) != before);
+}
 
 TEST_CASE("System data is selected before NS loads fonts and SET serves firmware version",
           "[core][native_home_system_data]") {
