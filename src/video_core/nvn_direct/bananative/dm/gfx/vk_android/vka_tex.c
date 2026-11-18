@@ -775,6 +775,7 @@ uint64_t vka_frame(void);
 // The GPU's view of the same bytes: copied out of the pool's buffer in this submission, compared with what the CPU reads once it is done
 typedef struct { vka_span s; const uint8_t *mem; uint64_t serial; } gv_t;
 static void gview_report(void *arg) {
+    if (vka_stopping()) return;
     gv_t *g = arg; char a[40], b[40]; for (int j = 0; j < 16; j++) { snprintf(a + 2 * j, 3, "%02x", g->s.ptr[j]); snprintf(b + 2 * j, 3, "%02x", g->mem[j]); }
     char sd[400]; void vka_mem_describe(uint64_t, char *, size_t); vka_mem_describe((uint64_t)(uintptr_t)g->mem, sd, sizeof sd);
     char mp_[200] = ""; { FILE *f = fopen("/proc/self/maps", "re"); char ln[512]; uintptr_t ad = (uintptr_t)g->mem;

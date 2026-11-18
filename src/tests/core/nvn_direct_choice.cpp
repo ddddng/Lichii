@@ -18,6 +18,7 @@ constexpr RendererInputs Runnable{
     .vulkan = true,
     .is_64bit = true,
     .has_nvn = true,
+    .fastmem = true,
     .direct_ran_before = false,
     .replay_failed = false,
 };
@@ -48,6 +49,10 @@ TEST_CASE("A game the direct renderer cannot run falls back", "[nvn_direct_choic
     REQUIRE(with([](RendererInputs& in) { in.vulkan = false; }) == RendererChoice::NotVulkan);
     REQUIRE(with([](RendererInputs& in) { in.is_64bit = false; }) == RendererChoice::Not64Bit);
     REQUIRE(with([](RendererInputs& in) { in.has_nvn = false; }) == RendererChoice::NoNvn);
+    REQUIRE(with([](RendererInputs& in) {
+                in.override_ = true;
+                in.fastmem = false;
+            }) == RendererChoice::NoFastmem);
     REQUIRE(with([](RendererInputs& in) { in.direct_ran_before = true; }) ==
             RendererChoice::EarlierBoot);
     // A start that failed on the device stays the reason for the later boots of the process.

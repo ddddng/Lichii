@@ -556,7 +556,11 @@ struct System::Impl {
                  Common::g_cpu_caps.max_frequency, Common::g_cpu_caps.invariant_tsc);
 #endif
 
+        Core::NvnHook::TraceStartup("before guest kernel");
         const auto kernel_result = InitializeKernel(system);
+        Core::NvnHook::TraceStartup(kernel_result == SystemResultStatus::Success
+                                       ? "guest kernel ready"
+                                       : "guest kernel failed");
         if (kernel_result != SystemResultStatus::Success) {
             return kernel_result;
         }
@@ -689,9 +693,9 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
+        Core::NvnHook::StopDirect();
         if (gpu_core)
             gpu_core->NotifyShutdown();
-        Core::NvnHook::StopDirect();
 
         stop_event.request_stop();
         core_timing.SyncPause(false);
@@ -751,6 +755,7 @@ struct System::Impl {
         if (Settings::CurrentProgramIsSwitch2()) {
             device_memory.reset();
             guest_memory_released = true;
+            Core::NvnHook::TraceStartup("guest backing released");
         }
 
         LOG_DEBUG(Core, "Shutdown OK");

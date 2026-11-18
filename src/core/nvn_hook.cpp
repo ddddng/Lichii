@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "common/memory_detect.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/device_memory.h"
@@ -74,7 +75,9 @@ constexpr std::array HaltingCalls{
 struct State {
     u64 program_id{}; ///< DirectProgramId()
     std::map<u64, std::string> modules; ///< by base
+    bool replay_started{};
     bool direct_ready{}; ///< nvn_direct_init ran
+    bool first_image{};
     std::atomic<u64> halted_calls{};
     std::optional<Service::Nx2PresentBookkeeping> present;
     u64 presents{};
@@ -537,9 +540,42 @@ u64 DirectProgramId() {
 
 void StopDirect() {
 #ifdef LICHII_NVN_DIRECT
-    if (DirectMode()) {
+    if (const auto* state = Get(); state && state->replay_started) {
         nvn_direct_stop();
     }
+#endif
+}
+
+void TraceStartup(std::string_view phase) {
+#ifdef LICHII_NVN_DIRECT
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_STARTUP_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled || !DirectAsked()) {
+        return;
+    }
+    const auto memory = Common::GetProcessMemoryUsage();
+    const auto physical = Common::GetAvailablePhysicalMemory();
+    constexpr auto mib = [](u64 bytes) { return bytes >> 20; };
+    const auto commit_room = memory.system_commit_limit != 0
+                                 ? fmt::to_string(mib(memory.system_commit_limit -
+                                                      std::min(memory.system_commit,
+                                                               memory.system_commit_limit)))
+                                 : "unavailable";
+#ifdef _WIN32
+    constexpr auto process_counter = "private commit";
+#else
+    constexpr auto process_counter = "data size";
+#endif
+    LOG_INFO(Core,
+             "NVN startup memory ({}): process {} {} MiB, working set {} MiB, "
+             "system commit headroom {} MiB, available physical RAM {} MiB",
+             phase, process_counter, memory.commit ? fmt::to_string(mib(memory.commit)) : "unavailable",
+             memory.working_set ? fmt::to_string(mib(memory.working_set)) : "unavailable",
+             commit_room, physical ? fmt::to_string(mib(physical)) : "unavailable");
+#else
+    (void)phase;
 #endif
 }
 
@@ -630,19 +666,18 @@ void Install(Core::System& system, Kernel::KProcess& process) {
         .vulkan = Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan,
         .is_64bit = process.Is64Bit(),
         .has_nvn = state_owner != nullptr && !state_owner->bootstrap_entries.empty(),
+        .fastmem = process.GetPageTable().GetImpl().fastmem_arena != nullptr,
         .direct_ran_before = g_direct_ran,
         .replay_failed = g_replay_failed,
     });
-    if (built || IsFallback(g_choice)) {
-        LOG_INFO(Core, "Renderer: {} ({})",
-                 IsDirect(g_choice) ? "NVN direct renderer" : "GPU emulation",
-                 Describe(g_choice));
-    }
     if (state_owner == nullptr || !IsDirect(g_choice)) {
+        if (built || IsFallback(g_choice)) {
+            LOG_INFO(Core, "Renderer: GPU emulation ({})", Describe(g_choice));
+        }
         return;
     }
+    LOG_INFO(Core, "Renderer request: NVN direct renderer ({})", Describe(g_choice));
     State& state = *state_owner;
-    g_direct_ran = true;
     InstallDirect(state);
     LOG_INFO(Core,
              "NVN hook: {} nvnBootstrapLoader exports (SDK {}), nvnPrivate0 {:#x} ({} bytes), "
@@ -652,10 +687,18 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     g_state = std::move(state_owner);
 }
 
+void DirectStarted() {
+    Get()->replay_started = true;
+    g_direct_ran = true;
+    LOG_INFO(Core, "Renderer: NVN direct renderer ({})", Describe(g_choice));
+    TraceStartup("replay started");
+}
+
 void DirectFailed() {
     g_replay_failed = true;
     g_choice = RendererChoice::ReplayFailed;
     LOG_WARNING(Core, "Renderer: GPU emulation ({})", Describe(g_choice));
+    TraceStartup("replay refused");
     // The game has not run yet: without a state its NVN driver runs, on GPU emulation.
     g_state.reset();
 }
@@ -729,12 +772,17 @@ void PresentDirect(Core::System& system, State& state) {
     const u64 own = ++state.presents;
     const u64 number = present.Count(Kernel::GetCurrentThread(system.Kernel()));
     nvn_direct_frame frame{};
-    const bool shown = nvn_direct_present_take(&frame) != 0;
+    const bool acquired = nvn_direct_present_take(&frame) != 0;
     if (own <= 4 || own % 600 == 0) {
         LOG_INFO(Core, "NVN direct: present #{} ({}x{} VkFormat {}, {})", own, frame.width,
-                 frame.height, static_cast<int>(frame.format), shown ? "shown" : "nothing to show");
+                 frame.height, static_cast<int>(frame.format),
+                 acquired ? "image acquired" : "no image");
     }
-    if (shown) {
+    if (acquired) {
+        if (!std::exchange(state.first_image, true)) {
+            LOG_INFO(Core, "NVN direct: first replay image acquired at guest present #{}", own);
+            TraceStartup("first replay image");
+        }
         // The game's present waits for the previous frame's composite (as many images as the
         // window has are in flight between the replay and Lichii's presenter).
         system.GPU().WaitForComposite();

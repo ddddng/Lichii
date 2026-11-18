@@ -201,6 +201,7 @@ int nvn_direct_present_take(nvn_direct_frame* out) {
 }
 
 int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* out) {
+    if (vka_stopping() || vka_hung()) return 0;
     pthread_mutex_lock(&g_held_mu);
     // A frame dropped already (Lichii composited it late): the newest one held instead.
     const held_t* h = &g_held[id % NHELD];
@@ -209,13 +210,13 @@ int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* out) {
     if (ok) *out = h->frame;
     pthread_mutex_unlock(&g_held_mu);
     if (!ok) return 0;
-    // Drawn on the replay's queues: Lichii samples it once the GPU is past its fence (bounded:
-    // a frame whose GPU work waits on the CPU is shown as far as it got).
+    // Drawn on the replay's queues: Lichii samples it once the GPU is past its fence.
     if (out->fence && !vka_wait_done(out->fence, 1000000000ull)) {
         static _Atomic int n;
-        if (atomic_fetch_add(&n, 1) < 8) VRED("present: frame %llu's fence %llu not reached in 1 s: shown as it is", (unsigned long long)out->id, (unsigned long long)out->fence);
+        if (atomic_fetch_add(&n, 1) < 8) VRED("present: frame %llu's fence %llu not reached in 1 s: dropped", (unsigned long long)out->id, (unsigned long long)out->fence);
+        return 0;
     }
-    return 1;
+    return !vka_stopping() && !vka_hung();
 }
 
 // The teardown (vka_dev.c vka_destroy): the frames still held, their views and references
