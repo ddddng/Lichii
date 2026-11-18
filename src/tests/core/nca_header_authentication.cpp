@@ -33,7 +33,10 @@ constexpr NcaHeader Header = [] {
 
 NcaCryptoConfiguration MakeCryptoConfiguration() {
     NcaCryptoConfiguration config{};
-    config.generate_key = [](void* dst, size_t size, const void*, size_t, s32 key_type) {
+    config.generate_key = [](void* dst, size_t size, const void*, size_t source_size,
+                             s32 key_type) {
+        REQUIRE(size == NcaCryptoConfiguration::Aes128KeySize);
+        REQUIRE(source_size == NcaCryptoConfiguration::Aes128KeySize);
         std::memset(dst, 0, size);
         if (key_type == static_cast<s32>(KeyType::NcaHeaderKey1)) {
             std::memcpy(dst, HeaderKey.data(), size);
