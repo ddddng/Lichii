@@ -1341,19 +1341,19 @@ void ManualContentProvider::ClearAllEntries() {
     application_files.clear();
 }
 
-void ManualContentProvider::AddApplicationFile(u64 program_id, VirtualFile file) {
-    application_files.insert_or_assign(program_id, std::move(file));
+void ManualContentProvider::AddApplicationFile(u64 program_id, GameListApplication application) {
+    application_files.try_emplace(program_id, std::move(application));
 }
 
-VirtualFile ManualContentProvider::GetApplicationFile(u64 program_id) const {
+std::optional<GameListApplication> ManualContentProvider::GetApplicationFile(u64 program_id) const {
     const auto it = application_files.find(program_id);
-    return it != application_files.end() ? it->second : nullptr;
+    return it != application_files.end() ? std::optional{it->second} : std::nullopt;
 }
 
 std::vector<u64> ManualContentProvider::ListApplicationFiles() const {
     std::vector<u64> program_ids;
     program_ids.reserve(application_files.size());
-    for (const auto& [program_id, file] : application_files) {
+    for (const auto& [program_id, application] : application_files) {
         program_ids.push_back(program_id);
     }
     return program_ids;

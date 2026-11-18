@@ -29,9 +29,9 @@ Result CreateGuestApplication(SharedPointer<IApplicationAccessor>* out_applicati
     // A Switch 2 program needs the guest counter frequency and memory layout it boots with, and
     // those were set for the HOME Menu before it started. A game the menu lists from the game list
     // with no program NCA (NUP, NX) only boots from its file. Both boot in a session of their own.
-    const bool own_session = nca_raw != nullptr
-                                 ? IsSwitch2Application(system, program_id)
-                                 : NS::GetGameListApplicationFile(system, program_id) != nullptr;
+    const bool own_session =
+        IsSwitch2Application(system, program_id) ||
+        (nca_raw == nullptr && NS::GetGameListApplication(system, program_id).has_value());
     if (own_session) {
         if (system.LaunchInNewSession(program_id)) {
             LOG_INFO(Service_AM, "{:016X}: booting it in a new session", program_id);

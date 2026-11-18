@@ -52,6 +52,11 @@ struct ContentProviderEntry {
     std::string DebugInfo() const;
 };
 
+struct GameListApplication {
+    VirtualFile file;
+    std::string path;
+};
+
 struct ExternalUpdateEntry {
     u64 title_id;
     u32 version;
@@ -271,8 +276,8 @@ public:
 
     /// The game file the frontend's game list shows for an application. The HOME Menu lists these
     /// next to installed applications, which covers games with no program NCA (NUP, NX).
-    void AddApplicationFile(u64 program_id, VirtualFile file);
-    VirtualFile GetApplicationFile(u64 program_id) const;
+    void AddApplicationFile(u64 program_id, GameListApplication application);
+    std::optional<GameListApplication> GetApplicationFile(u64 program_id) const;
     std::vector<u64> ListApplicationFiles() const;
 
     void Refresh() override;
@@ -291,7 +296,7 @@ public:
 private:
     std::map<std::tuple<TitleType, ContentRecordType, u64>, VirtualFile> entries;
     std::vector<ExternalUpdateEntry> multi_version_entries;
-    std::map<u64, VirtualFile> application_files;
+    std::map<u64, GameListApplication> application_files;
 };
 
 class ExternalContentProvider : public ContentProvider {

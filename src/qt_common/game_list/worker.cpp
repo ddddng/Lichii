@@ -572,16 +572,15 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                 RecordEvent([=](GameListModel* model) {
                     model->AddEntry(pending->Release(), parent_dir);
                 });
-                provider->AddApplicationFile(id, file);
+                provider->AddApplicationFile(id, {file, physical_name});
             };
 
             if (res2 == Loader::ResultStatus::Success && program_ids.size() > 1 &&
                 (file_type == Loader::FileType::XCI || file_type == Loader::FileType::XCZ ||
                  file_type == Loader::FileType::NSP || file_type == Loader::FileType::NSZ)) {
                 for (const auto id : program_ids) {
-                    // dravee suggested this, only viable way to
-                    // not show sub-games in qlaunch for now.
-                    if ((id & 0xFFF) != 0) {
+                    if ((id & 0xFFF) != 0 &&
+                        std::ranges::find(program_ids, id & ~0xFFFULL) != program_ids.end()) {
                         continue;
                     }
                     loader = Loader::GetLoader(system, file, id);

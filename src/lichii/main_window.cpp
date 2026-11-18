@@ -173,6 +173,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applet_web_browser_types.h"
+#include "core/hle/service/ns/game_list_applications.h"
 #include "core/hle/service/bcat/backend/nextendo.h"
 
 #include "core/file_sys/card_image.h"
@@ -624,8 +625,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (Settings::values.use_dev_keys.GetValue()) {
         Core::Crypto::KeyManager::Instance().ReloadKeys();
     }
-    game_list->PopulateAsync(UISettings::values.game_dirs);
-
     if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
         UISettings::values.show_whats_new.GetValue()) {
         QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
@@ -744,6 +743,18 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     nextendo_session_timer.start(std::chrono::minutes{2});
     KeepNextendoSessionAlive();
 
+    const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
+                             launch->launch_qlaunch;
+    if (launch_home) {
+        connect(
+            game_list, &GameList::PopulatingCompleted, this,
+            [this] {
+                LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
+            },
+            Qt::SingleShotConnection);
+    }
+    game_list->PopulateAsync(UISettings::values.game_dirs);
+
     if (launch) {
         const auto& lp = *launch;
 
@@ -756,15 +767,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             BootGame(QString::fromStdString(lp.filepath), ApplicationAppletParameters());
         } else if (lp.launch_setup) {
             LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::Starter), std::nullopt);
-        } else if (lp.launch_qlaunch) {
-            // The HOME Menu lists the game list's games, and booting stops the scan.
-            connect(
-                game_list, &GameList::PopulatingCompleted, this,
-                [this] {
-                    LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
-                },
-                Qt::SingleShotConnection);
-        } else if (lp.launch_hlaunch) {
+        } else if (!launch_home && lp.launch_hlaunch) {
             std::filesystem::path const sd_dir =
                 Common::FS::GetEdenPathString(Common::FS::EdenPath::SDMCDir);
             auto const hbl_path = (sd_dir / "atmosphere" / "hbl.nsp").string();
@@ -3976,26 +3979,34 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
                     program_id);
         return;
     }
-    auto* const model = game_list->GetModel();
-    const auto matches =
-        model->match(model->index(0, 0), GameListItemPath::ProgramIdRole,
-                     QVariant::fromValue(qulonglong{program_id}), 1,
-                     Qt::MatchExactly | Qt::MatchRecursive);
     QString filename;
-    if (!matches.isEmpty()) {
-        filename = matches.front().data(GameListItemPath::FullPathRole).toString();
-    } else if (const auto nca = QtCommon::system->GetContentProviderUnion().GetEntryRaw(
-                   program_id, FileSys::ContentRecordType::Program)) {
-        filename = QString::fromStdString(nca->GetFullPath());
+    if (const auto application = Service::NS::GetGameListApplication(*QtCommon::system, program_id)) {
+        filename = QString::fromStdString(application->path);
+    } else {
+        auto* const model = game_list->GetModel();
+        const auto matches =
+            model->match(model->index(0, 0), GameListItemPath::ProgramIdRole,
+                         QVariant::fromValue(qulonglong{program_id}), 1,
+                         Qt::MatchExactly | Qt::MatchRecursive);
+        if (!matches.isEmpty()) {
+            filename = matches.front().data(GameListItemPath::FullPathRole).toString();
+        }
+    }
+    if (filename.isEmpty()) {
+        const auto nca = QtCommon::system->GetContentProviderUnion().GetEntryRaw(
+            program_id, FileSys::ContentRecordType::Program);
+        if (nca != nullptr) {
+            filename = QString::fromStdString(nca->GetFullPath());
+        }
     }
 
-    LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
-             filename.toStdString());
-
-    ShutdownGame();
     if (filename.isEmpty()) {
+        LOG_WARNING(Frontend, "No launch path for HOME Menu application {:016X}", program_id);
         return;
     }
+    LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
+             filename.toStdString());
+    ShutdownGame();
 
     auto params = ApplicationAppletParameters();
     params.program_id = program_id;
