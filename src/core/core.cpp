@@ -223,9 +223,10 @@ std::optional<u64> FindSwitch2Program(const FileSys::VirtualFile& file, u64 prog
 }
 
 struct System::Impl {
-    explicit Impl(System& system)
+    explicit Impl(System& system, Service::Account::ProfileStorage profile_storage)
         : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
-          reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {}
+          reporter{system}, applet_manager{system}, frontend_applets{system},
+          profile_manager{std::make_shared<Service::Account::ProfileManager>(profile_storage)} {}
 
     u64 program_id;
 
@@ -439,6 +440,11 @@ struct System::Impl {
     SystemResultStatus SetupForApplicationProcess(
         System& system, Frontend::EmuWindow& emu_window,
         std::shared_ptr<const Service::SystemDataView> isolated_system_data = {}) {
+        if (profile_manager->IsScratch() != (isolated_system_data != nullptr)) {
+            LOG_ERROR(Core, "Isolated system data and a scratch profile must be selected together");
+            return SystemResultStatus::ErrorSystemFiles;
+        }
+
         std::shared_ptr<Service::Glue::Time::TimeZoneBinary> isolated_time_zone;
         u64 isolated_process_id{};
         if (isolated_system_data) {
@@ -484,6 +490,10 @@ struct System::Impl {
     }
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
+        if (profile_manager->IsScratch()) {
+            return SystemResultStatus::ErrorSystemFiles;
+        }
+
         VideoCommon::StutterTrace::BootMarker("boot_start");
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
@@ -770,7 +780,7 @@ struct System::Impl {
     Service::APM::Controller apm_controller{core_timing};
     /// Service State
     Service::Glue::ARPManager arp_manager;
-    Service::Account::ProfileManager profile_manager;
+    std::shared_ptr<Service::Account::ProfileManager> profile_manager;
     /// Network instance
     Network::NetworkInstance network_instance;
     Core::SpeedLimiter speed_limiter;
@@ -834,7 +844,10 @@ struct System::Impl {
     }
 };
 
-System::System() : impl{std::make_unique<Impl>(*this)} {}
+System::System() : System{Service::Account::ProfileStorage::Shared} {}
+
+System::System(Service::Account::ProfileStorage profile_storage)
+    : impl{std::make_unique<Impl>(*this, profile_storage)} {}
 
 System::~System() = default;
 
@@ -1169,11 +1182,15 @@ const Service::APM::Controller& System::GetAPMController() const {
 }
 
 Service::Account::ProfileManager& System::GetProfileManager() {
-    return impl->profile_manager;
+    return *impl->profile_manager;
 }
 
 const Service::Account::ProfileManager& System::GetProfileManager() const {
-    return impl->profile_manager;
+    return *impl->profile_manager;
+}
+
+std::shared_ptr<Service::Account::ProfileManager> System::GetScratchProfileManager() const {
+    return impl->profile_manager->IsScratch() ? impl->profile_manager : nullptr;
 }
 
 void System::SetExitLocked(bool locked) {
