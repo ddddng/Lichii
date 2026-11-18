@@ -1492,6 +1492,18 @@ void KeplerCompute::RememberDlssMotionVectors() {
     if (!depth || depth->Address() == 0 || !same_grid(*depth) || !depth->IsBlockLinear()) {
         return;
     }
+    // The lookup below asserts on tuples it does not know, so only depth formats reach it.
+    using TF = Texture::TextureFormat;
+    switch (depth->format) {
+    case TF::Z32:
+    case TF::Z24S8:
+    case TF::G24R8:
+    case TF::S8Z24:
+    case TF::G8R24:
+        break;
+    default:
+        return;
+    }
     // The same mapping the texture cache applies to this TIC, so both accept the same depths.
     const auto depth_format = VideoCommon::PixelFormatFromTextureInfo(
         depth->format, depth->r_type, depth->g_type, depth->b_type, depth->a_type,
