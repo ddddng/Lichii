@@ -181,7 +181,7 @@ static uint64_t g_ngfx, g_ncs, g_nfail, g_ncs_over, g_create_ns, g_frame_made;  
 static uint64_t g_probe_hit, g_probe_miss, g_probe_miss_ns;          // GPL: the cache-only try before a link (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
 static _Atomic uint64_t g_save_ns_total, g_hy_draws, g_pw_wait_ns;
 static VkPipelineCreateFlags pipe_stats_flag(void); static void pipe_stats(VkPipeline p, const char *what, uint64_t k0, uint64_t k1);
-static void pw_load(void); static void pw_start(void); static int pw_save(void); static void cs_ahead_start(void); static void lib_ahead_start(void);
+static void pw_load(void); static void pw_start(void); static int pw_save(void); static void lib_ahead_start(void);
 static void *saver_main(void *a);
 static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;   // one save at a time (the saver thread, a forced save)
 static int g_pc_parked;   // Lichii: vka_pso_park made the last save (under g_save_mu): no more, the device goes away after it
@@ -220,7 +220,6 @@ static void pc_open_once(void) {
     pthread_t th;
     if (!pthread_create(&th, NULL, saver_main, NULL)) { pthread_detach(th); g_sv_up = 1; }
     pw_start();
-    cs_ahead_start();
     lib_ahead_start();
 }
 static void pc_open(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, pc_open_once); }
@@ -315,7 +314,7 @@ static kmap g_gfx = {.klen = sizeof(gkey_full)};
 static pthread_cond_t g_busy_cv = PTHREAD_COND_INITIALIZER;
 // The create info of a graphics pipeline, built in place (its members point at one another): the whole pipeline and each stage library take their parts from it
 typedef struct {
-    VkPipelineShaderStageCreateInfo ss[5]; uint32_t ns; VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg[5];
+    VkPipelineShaderStageCreateInfo ss[5]; uint32_t ns;
     VkBool32 gl_true; uint32_t afunc; VkSpecializationMapEntry me, ae; VkSpecializationInfo spec, aspec;
     VkVertexInputBindingDescription vb[33]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescription vd[33];
     VkPipelineVertexInputDivisorStateCreateInfo vds; VkPipelineVertexInputStateCreateInfo vi; VkPipelineInputAssemblyStateCreateInfo ia; VkPipelineTessellationStateCreateInfo ts;
@@ -369,9 +368,6 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
         uint32_t n = P->ns++;
         P->ss[n] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = (VkShaderStageFlagBits)stage_bit(s->e->stage), .module = mod, .pName = "main",
                                                     .pSpecializationInfo = gl ? &P->spec : fs && P->afunc && (s->e->flags & DMSH_VK_F_ALPHA_TEST) ? &P->aspec : NULL};
-        uint32_t pin = (s->e->flags & DMSH_VK_F_SUBGROUP) ? vka_shader_sg_pin(s->e->stage) : 0;   // subgroup shaders of a stage whose size the device varies: pinned to the library's (vka_shader_sg_pin)
-        if (pin) { P->rsg[n] = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
-                   P->ss[n].pNext = &P->rsg[n]; }
     }
     uint32_t nvb = 0, nva = 0, nvd = 0;
     if (k->vin_static) {
@@ -590,16 +586,15 @@ static _Thread_local int t_lib_peek;            // lib_make answers from the map
 static _Thread_local const char *t_how = "";    // appended to the build lines of this thread (" (asynchronous)")
 static _Atomic uint64_t g_async_made, g_async_ns, g_async_skips;   // made asynchronously, their time, the draws skipped meanwhile
 static _Atomic uint64_t g_async_claimed;   // pipelines the frame path took back from the asynchronous threads or waited for (async_claim)
-// Lichii (dotfiles-25x.13): libraries the ahead threads made (and let go of, DM_VK_LIB_AHEAD_KEEP=0), and the ones other threads compiled (over 20 ms: not a cache hit)
+// Lichii: libraries the ahead threads made (and let go of), and the ones other threads compiled (over 20 ms: not a cache hit)
 static _Atomic uint64_t g_lib_ahead_made, g_lib_slow;
-static int lib_ahead_keep(void) { static int v = -1; if (v < 0) v = VKA_ENV("DM_VK_LIB_AHEAD_KEEP", 0) != 0; return v; }
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead) { *compiled = atomic_load(&g_lib_slow); *ahead = atomic_load(&g_lib_ahead_made); }
 static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPipelineCreateInfo *ci, VkGraphicsPipelineLibraryFlagsEXT part, int *refused) {
     uint64_t h = fnv(key, klen, 1469598103934665603ull);
     // Lichii (dotfiles-25x.16): a library being made by another thread (LIB_BUSY: the libraries made ahead, lib_ahead_main) is waited for, not made twice; one that is
     // not there yet is made by this thread, so a frame-path miss takes it before the ahead threads reach it
     pthread_mutex_lock(&g_mu); void *hit = km_get(&g_lib[kind], key, h);
-    if (t_ahead && !lib_ahead_keep()) {   // (only for the driver's caches: made outside the map and destroyed, unless the map has it)
+    if (t_ahead) {   // (only for the driver's caches: made outside the map and destroyed, unless the map has it)
         pthread_mutex_unlock(&g_mu);
         if (hit) return VK_NULL_HANDLE;
         int shp = kind == L_PRE || kind == L_PREFS;   // (the same create info as below: the frame path's later make must hit the caches)
@@ -1228,12 +1223,10 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     pthread_mutex_unlock(&g_mu);
     pc_open();
     uint64_t t0 = now_ns();
-    uint32_t pin = (cs->e->flags & DMSH_VK_F_SUBGROUP) ? vka_shader_sg_pin(DMSH_VK_STAGE_CS) : 0;
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
     int spill = 0;   // shared memory in the spill buffer (vka_draw.c spill_dispatch): dispatched in parts with a base workgroup
     for (unsigned i = 0; i < cs->e->bind_count; i++) if (cs->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) spill = 1;
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0, .layout = lay->layout,
-        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's
@@ -1257,52 +1250,16 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
 }
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; return cs_obtain(cs, lay, 0, &made); }
 
-// Lichii (dotfiles-25x.16): every compute program of the game's shader library made into its pipeline ahead, from the device's start on, on DM_VK_CS_AHEAD background
-// threads (default 4, nice 10; 0 = off). Its pipeline depends on the program alone (its layout is the program's), so the library's key list is the whole list; the frame
-// path compiled them on a miss (38 over 50 ms, 8.3 s in a cold boot and race: ux-cold-1). A dispatch is not skipped as a draw is (what it writes may be read as
-// indirect arguments): one whose pipeline a thread here is making waits for it (busy_wait), one not reached yet is compiled on the frame path as before
-static uint64_t *g_ca_keys; static unsigned g_ca_n; static _Atomic uint32_t g_ca_next, g_ca_done, g_ca_made; static int g_ca_threads; static uint64_t g_ca_t0; static _Atomic uint64_t g_ca_cpu_ns;
-static void *cs_ahead_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-csahead");
-    setpriority(PRIO_PROCESS, 0, 10);
-    for (;;) {
-        pause_point();
-        uint32_t i = atomic_fetch_add(&g_ca_next, 1);
-        if (i >= g_ca_n) break;
-        vka_pipeline_notify(0);
-        vka_shader *sh[VKA_NSTAGE] = {0}; vka_layout lay; int made = 0;
-        if ((sh[5] = vka_shader_by_key(g_ca_keys[i], 1)) && vka_layout_of(sh, 1, &lay)) cs_obtain(sh[5], &lay, 1, &made);
-        if (made) atomic_fetch_add(&g_ca_made, 1);
-        vka_pipeline_notify(1);
-        setpriority(PRIO_PROCESS, 0, 10);   // back under the game's threads if a waiting frame path raised it (busy_wait)
-    }
-    { struct timespec c; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c); atomic_fetch_add(&g_ca_cpu_ns, (uint64_t)c.tv_sec * 1000000000ull + (uint64_t)c.tv_nsec); }
-    if (atomic_fetch_add(&g_ca_done, 1) + 1 == (uint32_t)g_ca_threads)
-        VLOG("compute pipelines made ahead: %u of the library's %u compute programs made (the rest there already or refused) in %.1f s on %d threads, %.1f s of CPU",
-             (unsigned)atomic_load(&g_ca_made), g_ca_n, (now_ns() - g_ca_t0) / 1e9, g_ca_threads, atomic_load(&g_ca_cpu_ns) / 1e9);
-    return NULL;
-}
-static void cs_ahead_start(void) {
-    int nt = VKA_ENV("DM_VK_CS_AHEAD", 4);
-    if (nt <= 0 || !(g_ca_n = vka_shlib_stage_keys(DMSH_VK_STAGE_CS, &g_ca_keys))) return;
-    if (nt > 4) nt = 4;
-    g_ca_t0 = now_ns();
-    for (int i = 0; i < nt; i++) { pthread_t th; if (!pthread_create(&th, NULL, cs_ahead_main, NULL)) { pthread_detach(th); g_ca_threads++; } }
-    VLOG("compute pipelines: the library's %u compute programs made ahead on %d background threads (DM_VK_CS_AHEAD=0 off)", g_ca_n, g_ca_threads);
-}
-
-// Lichii (dotfiles-25x.16), lab, OFF by default (DM_VK_LIB_AHEAD=<threads>, nice 10): the graphics pipeline libraries of the game's shader library made ahead from the
-// device's start, so the frame path only links them. Not usable as it is: keeping all of them alive took the process to 28 GiB resident (11,800 libraries, ux-ahead-boot-6;
-// 5.3 GiB at 3,000) and a thread crashed in the NVIDIA compiler (null read, 595.112.07) at 40-85 s in every cold boot with 4 or 12 threads, though the library it was
-// making alone builds fine (ux-ahead-only-4). Open: build them only to fill the pipeline and driver caches (destroyed after), keep those of the prewarm list. With the pixel shader's resources in a set of their own (layout_slow) a stage library depends on its
-// shader and a few state bits only:
+// Lichii: graphics pipeline libraries of the kept translations (nvn_recompile.c, the shaders this title showed in earlier runs) made ahead from the device's start on
+// two background threads (nice 10), each only to fill the pipeline and driver caches and destroyed: a vertex / pixel shader pair the frame path has not met then
+// compiles neither stage, the libraries it makes hit the pipeline cache and only the fast link is new. With the pixel shader's resources in a set of their own
+// (layout_slow) a stage library depends on its shader and a few state bits only:
 // - pre-rasterization (the vertex shader; tessellation and geometry pipelines and mesh pipelines are made whole): the GL depth constant (gl_depth), depth clamp, polygon
 //   mode, the vertex inputs retyped for integer formats (vin_u / vin_s), the device's vertex input dynamic state;
 // - fragment shader: the module variant (DMSH_VK_MOD_*, outputs retyped for integer targets), the alpha test function, samples, alpha to coverage.
-// First every library the earlier runs' pipelines used (the prewarm list's records, their own state), then every vertex and pixel shader of the library in its most common
-// state (Mario Kart World's 914 recorded pipelines: GL depth on, no clamp, fill, 1 sample, no alpha to coverage, no alpha test, the base module; the vertex inputs retyped in
-// a fifth of them, which only the records cover). A library a draw needs first is made by its frame path, or waited for when a thread here is making it (lib_make)
-typedef struct { uint64_t key; uint8_t part; int32_t rec; } ahead_item;   // part 1 pre-rasterization (key: a vertex shader), 2 fragment shader; rec: the prewarm record's offset, -1 default
+// Each is made in its most common state (GL depth on, no clamp, fill, 1 sample, no alpha to coverage, no alpha test, the base module). The prewarm list's pipelines
+// are made whole by prewarm. A library a draw needs first is made by its frame path
+typedef struct { uint64_t key; uint8_t part; } ahead_item;   // part 1 pre-rasterization (key: a vertex shader), 2 fragment shader
 static ahead_item *g_la; static uint32_t g_la_n; static _Atomic uint32_t g_la_next, g_la_done; static int g_la_threads; static uint64_t g_la_t0; static _Atomic uint64_t g_la_cpu_ns;
 _Thread_local char vka_crash_note[96];   // (nvn_dispatch.c crash_stack)
 static void lib_default_key(vka_gkey *k) { k->samples = 1; k->gl_depth = 1; k->topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; k->vin_static = !V.vin_dyn; }
@@ -1319,16 +1276,13 @@ static void lib_ahead_make(vka_shader *s, int part, const vka_gkey *k, int scrat
 }
 static void lib_ahead_one(const ahead_item *it) {
     snprintf(vka_crash_note, sizeof vka_crash_note, "making ahead: %s library of %016llx", it->part == 1 ? "pre-rasterization" : "fragment shader", (unsigned long long)it->key);
-    vka_gkey k; memset(&k, 0, sizeof k);
-    if (it->rec >= 0) { pwrec r; memcpy(&r, g_pw_load + it->rec, sizeof r); if (!pw_rec_ok(&r, g_pw_load + it->rec + sizeof r)) return;
-                        memcpy(&k, g_pw_load + it->rec + sizeof r, r.klen < sizeof k ? r.klen : sizeof k); if (k.vin_static != (uint32_t)!V.vin_dyn) return; }
-    else lib_default_key(&k);
+    vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
     lib_ahead_make(vka_shader_by_key(it->key, k.gl_depth), it->part, &k, 0);
 }
 // A speculative translation's stage library in the most common state, for the caches only (nvn_recompile.c spec_main): part 1 a vertex shader, 2 a pixel shader;
-// s is a vka_shader_scratch one (not with DM_VK_LIB_AHEAD_KEEP=1: the library map would keep its module's handle)
+// s is a vka_shader_scratch one
 void vka_lib_ahead_shader(vka_shader *s, int part) {
-    if (!gpl_on() || lib_ahead_keep()) return;
+    if (!gpl_on()) return;
     vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
     snprintf(vka_crash_note, sizeof vka_crash_note, "made speculatively: %s library of %016llx", part == 1 ? "pre-rasterization" : "fragment shader", s ? (unsigned long long)s->key : 0ull);
     vka_pipeline_notify(0);
@@ -1357,35 +1311,21 @@ static void *lib_ahead_main(void *a) {
     }
     return NULL;
 }
-// Lichii (dotfiles-25x.13): with the recompiler (vka_rc_mode 1) ON by default (2 threads): the shaders are the kept translations (nvn_recompile.c, the ~1,300 this game
-// has shown in earlier runs, not the 11,800 of the library), made from the file (vka_rc_by_key), and each library is made only to fill the driver's caches and destroyed
-// (DM_VK_LIB_AHEAD_KEEP=1 keeps them in the map): a vertex / pixel shader pair the frame path has not met then compiles neither stage, the libraries it makes hit the
-// pipeline cache and only the fast link is new. The prewarm list's pipelines are made whole by prewarm, so their records are not taken here
 static void lib_ahead_start(void) {
-    int rc = vka_rc_mode() == 1, nt = VKA_ENV("DM_VK_LIB_AHEAD", rc ? 2 : 0);
-    if (nt <= 0 || !gpl_on()) return;
-    if (nt > 24) nt = 24;
+    const int nt = 2;
+    if (!gpl_on()) return;
     uint64_t *vs = NULL, *fs = NULL;
-    unsigned nvs = rc ? vka_rc_stage_keys(0, &vs) : vka_shlib_stage_keys(DMSH_VK_STAGE_VS, &vs), nfs = rc ? vka_rc_stage_keys(1, &fs) : vka_shlib_stage_keys(DMSH_VK_STAGE_FS, &fs), nrec = 0;
-    g_la = malloc(((size_t)2 * g_pw_load_n + nvs + nfs + 1) * sizeof *g_la);
+    unsigned nvs = vka_rc_stage_keys(0, &vs), nfs = vka_rc_stage_keys(1, &fs);
+    g_la = malloc(((size_t)nvs + nfs + 1) * sizeof *g_la);
     if (!g_la) { free(vs); free(fs); return; }
-    for (size_t o = 0; !rc && g_pw_load && o + sizeof(pwrec) <= g_pw_load_len;) {   // the earlier runs' pipelines first, in their order
-        pwrec r; memcpy(&r, g_pw_load + o, sizeof r);
-        if (r.kind == 0 && !r.key[2] && !r.key[3] && !r.key[4]) {   // (a vertex and a pixel shader: the pipelines whose parts are libraries here)
-            if (r.key[0]) g_la[g_la_n++] = (ahead_item){r.key[0], 1, (int32_t)o};
-            if (r.key[1]) g_la[g_la_n++] = (ahead_item){r.key[1], 2, (int32_t)o};
-            nrec++;
-        }
-        o += pw_size(&r);
-    }
-    for (unsigned i = 0; i < nvs || i < nfs; i++) {   // then every vertex and pixel shader, in their most common state
-        if (i < nvs) g_la[g_la_n++] = (ahead_item){vs[i], 1, -1};
-        if (i < nfs) g_la[g_la_n++] = (ahead_item){fs[i], 2, -1};
+    for (unsigned i = 0; i < nvs || i < nfs; i++) {
+        if (i < nvs) g_la[g_la_n++] = (ahead_item){vs[i], 1};
+        if (i < nfs) g_la[g_la_n++] = (ahead_item){fs[i], 2};
     }
     free(vs); free(fs);
     g_la_t0 = now_ns();
     for (int i = 0; i < nt; i++) { pthread_t th; if (!pthread_create(&th, NULL, lib_ahead_main, NULL)) { pthread_detach(th); g_la_threads++; } }
-    VLOG("graphics pipeline libraries: made ahead on %d background threads (DM_VK_LIB_AHEAD=0 off): %u from %u earlier runs' pipelines, then %u vertex and %u pixel shaders of the %s%s",
-         g_la_threads, g_la_n - nvs - nfs, nrec, nvs, nfs, rc ? "kept translations" : "library", lib_ahead_keep() ? "" : " (destroyed once made: the driver's caches keep them)");
+    VLOG("graphics pipeline libraries: made ahead on %d background threads: %u vertex and %u pixel shaders of the kept translations (destroyed once made: the driver's caches keep them)",
+         g_la_threads, nvs, nfs);
 }
 #endif

@@ -64,14 +64,13 @@ int nvn_direct_adopt_device(const nvn_direct_device *d) {
     { char e[16]; const int lab = vka_env_str("DM_VK_ASYNC_PSO", e, sizeof e);
       VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (%s)", (lab ? atoi(e) != 0 : g_adopt.async_pipelines) ? "on" : "off",
            lab ? "DM_VK_ASYNC_PSO" : "asynchronous shader building setting"); }
-    if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (only Lichii's recompiler reads the scale: library shaders draw at the texture's size)
-        if (vka_rc_mode() == 1) { vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift; }
-        VLOG("render scale %u/%u%s", g_adopt.scale_up, 1u << g_adopt.scale_shift, vka_scale_on() ? "" : ": off, the shader library cannot follow it (EDEN_NX2_NVN_RECOMPILE)");
+    if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (Lichii's recompiler reads the scale)
+        vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift;
+        VLOG("render scale %u/%u", g_adopt.scale_up, 1u << g_adopt.scale_shift);
     }
     char h[256]; uint64_t u = 0, b = 0;
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();
-    if (ok) vka_shlib_check_pending();   // (the library may have loaded inside the init: vka_pso_start)
     if (ok && g_adopt.memory_usage && VKA_ENV("DM_VK_VRAM_TRACE", 0)) g_vram_up = !pthread_create(&g_vram_th, NULL, vram_trace_main, NULL);
     if (ok && g_adopt.memory_usage) { vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); (void)b; VLOG("VRAM after the replay started: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     return ok;

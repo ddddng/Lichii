@@ -1482,7 +1482,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         // mesh stage bit. Task and mesh come from the same program (a program's task shader feeds its own mesh shader)
         const prog_t *mp = d->bst[7];
         { vka_shader *m = NULL; unsigned b2 = 0; if (d->bst[1] && d->bst[1] != mp && resolve(d->bst[1], 7, &m, &b2) && (m || (b2 & 1u << 7))) mp = d->bst[1]; }
-        if (!resolve(mp, 6, &sh[6], &bad) || !resolve(mp, 7, &sh[7], &bad) || !resolve(d->bst[1], 1, &sh[1], &bad)) SKIP("mesh draw skipped: no shader library");
+        if (!resolve(mp, 6, &sh[6], &bad) || !resolve(mp, 7, &sh[7], &bad) || !resolve(d->bst[1], 1, &sh[1], &bad)) SKIP("mesh draw skipped: a program without shaders");
         if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }   // a refused or missing shader (logged when it was made)
         if (!sh[7]) SKIP("mesh draw with no mesh shader bound: skipped");
         if (d->bst[6] && d->bst[6] != mp) VRED_ONCE("mesh draw: a program bound at the task stage bit apart from the mesh program; drawn with the mesh program's own task shader, if any");
@@ -1498,7 +1498,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (dw->ind && (!vk.vkCmdDrawMeshTasksIndirectEXT || !vk.vkCmdDrawMeshTasksIndirectCountEXT)) SKIP("indirect mesh draw on a device without vkCmdDrawMeshTasksIndirect(Count)EXT: skipped");
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
     } else {
-        for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
+        for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: a program without shaders");
         if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }   // a refused or missing shader (logged when it was made)
         if (!sh[0]) SKIP("draw with no vertex shader bound: skipped");
         if (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM)) SKIP("pixel shader %016llx reads per-primitive mesh outputs and is drawn with a vertex shader: skipped", (unsigned long long)sh[1]->key);
@@ -1775,7 +1775,6 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         vk.vkCmdDrawIndexed(g_cb, nout, inst, 0, di ? di->base_vertex : 0, binst);
     } else if (dw) {
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
-                   if (vka_rc_mode() != 1) VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's (library shaders; recompiled ones read the draw's: vk_nvn_direct_shaders.cpp)");
                    VkBuffer cb_; VkDeviceSize co_;
                    if (mdi_gpu && vka_addr(ind, (uint64_t)(dw->mdi_max - 1) * (uint32_t)dw->mdi_stride + 16, NULL, NULL, NULL) && vka_addr(mdi, 4, &cb_, &co_, NULL) && !(co_ & 3) && dw->mdi_stride >= 16 && !(dw->mdi_stride & 3))
                        vk.vkCmdDrawIndirectCount(g_cb, b, o, cb_, co_, (uint32_t)dw->mdi_max, (uint32_t)dw->mdi_stride);
@@ -1822,7 +1821,7 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
     d->b.dispatch[0] = (uint32_t)dp->x; d->b.dispatch[1] = (uint32_t)dp->y; d->b.dispatch[2] = (uint32_t)dp->z; d->b.nvn2 = (uint32_t)vka_nvn2();
     vka_rc_draw(d);   // Lichii: the state shaders recompiled at this dispatch read (nvn_recompile.c)
-    if (!resolve(d->cprog, 5, &sh[5], &bad)) SKIP("dispatch skipped: no shader library");
+    if (!resolve(d->cprog, 5, &sh[5], &bad)) SKIP("dispatch skipped: a program without shaders");
     if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!sh[5]) SKIP("dispatch with no compute shader bound: skipped");
     vka_layout lay; if (!vka_layout_of(sh, 1, &lay)) SKIP("dispatch skipped: no pipeline layout");

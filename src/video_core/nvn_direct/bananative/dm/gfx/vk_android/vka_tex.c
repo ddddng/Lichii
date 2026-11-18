@@ -436,10 +436,10 @@ static uint32_t sparse_base(const void *pool, const uint8_t *mem, const nvn_texd
     if (vmin) *vmin = r < n ? r : n - 1;
     return b;
 }
-// Lichii (dotfiles-25x.22): where the views of im start, from sparse_base's vmin. A residency image's unbound tiles are non-resident, so with Lichii's recompiler, which keeps
-// TEX's level-of-detail clamp (SPIR-V MinLod) and residency predicate (OpImageSparse*), the views take every level, as NVN's do: the game's own clamp keeps its samples on
-// the mapped tiles, and up close it samples its finest levels. The library's shaders (EDEN_NX2_NVN_RECOMPILE=0 / 2) and dense images keep views from the wholly mapped levels
-static uint32_t view_vmin(const vka_img *im, uint32_t vmin) { return im->rs && vka_rc_mode() == 1 ? 0 : vmin; }
+// Lichii: where the views of im start, from sparse_base's vmin. A residency image's unbound tiles are non-resident, so with Lichii's recompiler, which keeps TEX's
+// level-of-detail clamp (SPIR-V MinLod) and residency predicate (OpImageSparse*), the views take every level, as NVN's do: the game's own clamp keeps its samples on
+// the mapped tiles, and up close it samples its finest levels. Dense images keep views from the wholly mapped levels
+static uint32_t view_vmin(const vka_img *im, uint32_t vmin) { return im->rs ? 0 : vmin; }
 // A sparse residency image (vka_sparse.c) instead of a dense one: a sampled sparse pool texture, 2D or 2D array, single-sampled, with NVN tiled levels from base on, whose dense
 // image from base would take DM_VK_SPARSE_RES_MB (default 32) or more; or a GPU-written one (sparse_gpu) from level 0. Smaller ones stay dense (the tiles' bookkeeping and binds cost more than they save)
 static int res_candidate(const tex_t *t, const vka_fmt *f, uint32_t base) {

@@ -383,8 +383,7 @@ VkSampler vka_samp_id(int id);                      // sampler ID id; VK_NULL_HA
 VkSampler vka_samp_default(void);                   // the sampler an unbound sampler slot reads with (nearest, clamp to edge)
 
 // ---------- Shaders (vka_shader.c) ----------
-// The game's Vulkan shader library, <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (DM_VK_SHLIB overrides the path), loaded at the first program the replay resolves.
-// A shader is one library entry with its module made; it lives as long as the process
+// A shader is one library entry with its module made (Lichii: each a one-entry library its recompiler made, nvn_recompile.c); it lives as long as the process
 #include "vka_shlib.h"
 #include "vka_bind.h"
 typedef struct vka_shader {
@@ -407,14 +406,11 @@ typedef struct vka_shader {
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; uint8_t depth; } vka_progsh;
 int vka_progsh_current(const vka_progsh *ps);   // 1 = ps's shaders fit the depth mode now
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
-int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
+int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no program
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
-const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
-unsigned vka_shlib_stage_keys(int stage, uint64_t **keys);   // Lichii: the game library's shader keys of a DMSH_VK_STAGE_* (malloc'd), their count
-vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused. gl_depth: the depth mode a recompiled one is for
+vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the recompiled shader of key in depth mode gl_depth (vka_rc_by_key); NULL = not translated or refused
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
-uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_SET_FS 2   // Lichii (dotfiles-25x.16): a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
@@ -423,12 +419,8 @@ VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t sm
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
 #define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask);   // the base module with those float inputs as uvec4 / ivec4 (vka_spv_vin_retype), made once per masks   // the module of that variant (DMSH_VK_MOD_*), made on first use; VK_NULL_HANDLE = the entry has none   // the shader of key in library L (the game's, or the selftest's own); NULL = not there or refused
-int vka_shlib_check_all(const vka_shlib *L);   // every module and compute pipeline of L made (DM_VK_SHLIB_CHECK=1): the failures
-void vka_shlib_check_pending(void);             // Lichii: DM_VK_SHLIB_CHECK's check of the game's library, once it has loaded; never under g_mu or inside the replay's init
-// Lichii's recompiler (nvn_recompile.c, dotfiles-25x.11): EDEN_NX2_NVN_RECOMPILE's mode (1 recompiler, the default; 0 library; 2 library compared with it); control sections kept at
-// nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN stage, -1 without a kept control section); a shader by key;
-// mode 2's comparison; a recompiled compute shader's c[0]
-int vka_rc_mode(void);
+// Lichii's recompiler (nvn_recompile.c): control sections kept at nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN
+// stage, -1 without a kept control section); a shader by key; a recompiled compute shader's c[0]
 void vka_rc_keep(const prog_t *p);
 typedef struct vka_dstate vka_dstate;
 void vka_rc_draw(const vka_dstate *d);
@@ -442,7 +434,6 @@ vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader 
 void vka_shader_scratch_free(vka_shader *s);
 void vka_lib_ahead_shader(vka_shader *s, int part);   // a stage library (1 pre-rasterization, 2 fragment shader) in the most common state, for the caches only
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead);   // graphics pipeline libraries compiled outside the ahead threads (over 20 ms), made ahead
-void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
 void vka_rc_cs_c0(const vka_shader *sh, const vka_bstate *s, uint8_t *d);
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)
 

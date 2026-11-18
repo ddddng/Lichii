@@ -34,8 +34,6 @@ int vcap_digest(const tex_t *t, uint8_t md[32], uint64_t *bytes, uint32_t *w, ui
 int vcap_png(const char *path, const uint8_t *px, uint32_t w, uint32_t h, VkFormat f, int flip);
 // Per NVN stage of a program, a hash of the binding records of the library entry it resolves to (0 = none): a replay whose library gives another refuses the capture
 void vcap_iface(const prog_t *p, uint64_t out[6]);
-// The shader library the replay loads (vka_shader.c lib_load's path)
-void vcap_shlib_path(char *out, size_t n);
 
 // Accessors of the replay's own tables (vka_tex.c, vka_mem.c) and hle_nvn.c's side tables
 int vka_cap_treg(int id, tex_t *t, view_t *v, uint8_t *has_v, uint8_t *img, int *n);
