@@ -114,6 +114,41 @@ Error HttpError(int status, bool image) {
     }
 }
 
+QDateTime ParseHttpDate(QByteArray header, const QDateTime& now) {
+    const auto parse = [](const QByteArray& date) {
+        return QDateTime::fromString(QString::fromLatin1(date), Qt::RFC2822Date);
+    };
+    const auto fields = header.simplified().split(' ');
+    if (fields.size() == 4 && fields.at(0).endsWith(',') && fields.at(3) == "GMT") {
+        const auto date = fields.at(1).split('-');
+        if (date.size() != 3 || date.at(2).size() != 2) {
+            return {};
+        }
+        bool valid = false;
+        const int short_year = date.at(2).toInt(&valid);
+        if (!valid || short_year < 0) {
+            return {};
+        }
+        const auto limit = now.addYears(50);
+        const int year = limit.date().year() - (limit.date().year() - short_year) % 100;
+        const auto format = [&](int full_year) {
+            return parse(date.at(0) + ' ' + date.at(1) + ' ' + QByteArray::number(full_year) + ' ' +
+                         fields.at(2) + " +0000");
+        };
+        const auto result = format(year);
+        return result > limit ? format(year - 100) : result;
+    }
+    if (fields.size() == 5 && fields.at(0).size() == 3 && fields.at(1).size() == 3) {
+        return parse(fields.at(2) + ' ' + fields.at(1) + ' ' + fields.at(4) + ' ' + fields.at(3) +
+                     " +0000");
+    }
+    if (header.endsWith(" GMT")) {
+        header.chop(4);
+        header.append(" +0000");
+    }
+    return parse(header);
+}
+
 } // namespace
 
 bool IsValidKey(const QByteArray& key) {
@@ -158,37 +193,33 @@ QString ErrorText(Error error) {
     Q_UNREACHABLE();
 }
 
-bool RateLimits::Blocked(bool image) const {
-    return std::chrono::steady_clock::now() < retry_until[image];
+bool RateLimits::Blocked(bool image, Clock::time_point now) const {
+    return now < retry_until[image];
 }
 
 void RateLimits::Observe(bool image, const QByteArray& retry_after) {
     using namespace std::chrono;
-    const auto now = steady_clock::now();
-    auto header = retry_after.trimmed();
+    const auto now = Clock::now();
+    const auto header = retry_after.trimmed();
     auto delay = seconds{5};
     if (!header.isEmpty() &&
         std::ranges::all_of(header, [](char c) { return c >= '0' && c <= '9'; })) {
         bool valid = false;
         const auto value = header.toLongLong(&valid);
-        if (!valid ||
-            value >= duration_cast<seconds>(steady_clock::time_point::max() - now).count()) {
-            retry_until[image] = steady_clock::time_point::max();
+        if (!valid || value >= duration_cast<seconds>(Clock::time_point::max() - now).count()) {
+            retry_until[image] = Clock::time_point::max();
             return;
         }
         delay = seconds{value};
     } else {
-        if (header.endsWith(" GMT")) {
-            header.chop(4);
-            header.append(" +0000");
-        }
-        const auto date = QDateTime::fromString(QString::fromLatin1(header), Qt::RFC2822Date);
+        const auto utc_now = QDateTime::currentDateTimeUtc();
+        const auto date = ParseHttpDate(header, utc_now);
         if (date.isValid()) {
-            delay = seconds{std::max<qint64>(0, QDateTime::currentDateTimeUtc().secsTo(date) + 1)};
+            delay = seconds{std::max<qint64>(0, utc_now.secsTo(date) + 1)};
         }
     }
-    if (delay >= duration_cast<seconds>(steady_clock::time_point::max() - now)) {
-        retry_until[image] = steady_clock::time_point::max();
+    if (delay >= duration_cast<seconds>(Clock::time_point::max() - now)) {
+        retry_until[image] = Clock::time_point::max();
         return;
     }
     retry_until[image] = std::max(retry_until[image], now + delay);

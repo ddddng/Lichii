@@ -411,6 +411,7 @@ void ArtworkDialog::LoadVisibleThumbnail() {
         });
         return;
     }
+    thumbnail_status->hide();
 }
 
 void ArtworkDialog::ClearPreview() {

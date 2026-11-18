@@ -69,11 +69,13 @@ QString ErrorText(Error error);
 
 class RateLimits {
 public:
-    bool Blocked(bool image) const;
+    using Clock = std::chrono::steady_clock;
+
+    bool Blocked(bool image, Clock::time_point now = Clock::now()) const;
     void Observe(bool image, const QByteArray& retry_after);
 
 private:
-    std::array<std::chrono::steady_clock::time_point, 2> retry_until{};
+    std::array<Clock::time_point, 2> retry_until{};
 };
 
 class Client final : public QObject {

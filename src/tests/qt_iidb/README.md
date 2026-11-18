@@ -9,13 +9,13 @@ To build just the picker tests from the repository root:
 ```sh
 cmake -S src/tests/qt_iidb -B build-iidb -G Ninja -DCMAKE_PREFIX_PATH=/path/to/Qt
 cmake --build build-iidb
-ctest --test-dir build-iidb --output-on-failure
+(cd build-iidb && ctest --output-on-failure)
 ```
 
-The production build with `LICHII_TESTS=ON` also runs the exact-ID file test against Lichii's
-artwork writer, using a temporary profile:
+Configure the production build with both `BUILD_TESTING=ON` and `LICHII_TESTS=ON` to also
+test the exact-ID artwork writer against a temporary profile:
 
 ```sh
 cmake --build build --target iidb_artwork_tests
-ctest --test-dir build -R '^iidb_artwork$' --output-on-failure
+ctest --test-dir build -R '^iidb_artwork$' --output-on-failure --no-tests=error
 ```
