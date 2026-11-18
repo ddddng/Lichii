@@ -7,6 +7,7 @@
 
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,10 +53,7 @@ struct ContentProviderEntry {
     std::string DebugInfo() const;
 };
 
-struct GameListApplication {
-    VirtualFile file;
-    std::string path;
-};
+using GameListApplicationPaths = std::map<u64, std::string>;
 
 struct ExternalUpdateEntry {
     u64 title_id;
@@ -274,10 +272,9 @@ public:
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
 
-    /// The game file the frontend's game list shows for an application. The HOME Menu lists these
-    /// next to installed applications, which covers games with no program NCA (NUP, NX).
-    void AddApplicationFile(u64 program_id, GameListApplication application);
-    std::optional<GameListApplication> GetApplicationFile(u64 program_id) const;
+    /// Publish the paths from the last completed game-list scan, independently of NCA entries.
+    void ReplaceApplicationPaths(GameListApplicationPaths paths);
+    std::optional<std::string> GetApplicationPath(u64 program_id) const;
     std::vector<u64> ListApplicationFiles() const;
 
     void Refresh() override;
@@ -296,7 +293,7 @@ public:
 private:
     std::map<std::tuple<TitleType, ContentRecordType, u64>, VirtualFile> entries;
     std::vector<ExternalUpdateEntry> multi_version_entries;
-    std::map<u64, GameListApplication> application_files;
+    GameListApplicationPaths application_paths;
 };
 
 class ExternalContentProvider : public ContentProvider {

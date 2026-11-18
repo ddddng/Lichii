@@ -3980,8 +3980,13 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
         return;
     }
     QString filename;
-    if (const auto application = Service::NS::GetGameListApplication(*QtCommon::system, program_id)) {
-        filename = QString::fromStdString(application->path);
+    if (const auto path = Service::NS::GetGameListApplicationPath(*QtCommon::system, program_id)) {
+        if (!Service::NS::OpenGameListApplication(*QtCommon::system, *path, program_id)) {
+            LOG_WARNING(Frontend, "No matching program for HOME Menu application {:016X} in {}",
+                        program_id, *path);
+            return;
+        }
+        filename = QString::fromStdString(*path);
     } else {
         auto* const model = game_list->GetModel();
         const auto matches =

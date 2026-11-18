@@ -527,7 +527,7 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
             std::vector<u64> program_ids;
             loader->ReadProgramIds(program_ids);
 
-            const auto addEntry = [this, physical_name, file,
+            const auto addEntry = [this, physical_name,
                                    parent_dir](std::unique_ptr<Loader::AppLoader>& app_loader,
                                                const u64 id) {
                 std::vector<u8> icon;
@@ -572,7 +572,9 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                 RecordEvent([=](GameListModel* model) {
                     model->AddEntry(pending->Release(), parent_dir);
                 });
-                provider->AddApplicationFile(id, {file, physical_name});
+                if (id != 0) {
+                    application_paths.try_emplace(id, physical_name);
+                }
             };
 
             if (res2 == Loader::ResultStatus::Success && program_ids.size() > 1 &&
@@ -675,7 +677,14 @@ void GameListWorker::run() {
              std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::steady_clock::now() - started).count(),
              watch_list.size(), stop_requested.load());
-    RecordEvent([this](GameListModel* model) { model->DonePopulating(watch_list); });
+    if (!stop_requested) {
+        RecordEvent([this, paths = std::move(application_paths)](GameListModel* model) mutable {
+            if (!stop_requested) {
+                provider->ReplaceApplicationPaths(std::move(paths));
+                model->DonePopulating(watch_list);
+            }
+        });
+    }
 
     // Loose dump folders are sized once the list is shown: walking their RomFS during discovery
     // made the list slow to appear. A reload stops this through stop_requested.
