@@ -16,7 +16,7 @@ namespace Vulkan {
 
 class Device;
 
-/// NVN2 direct mode (dotfiles-25x.11): the replay's shaders through Lichii's recompiler instead of
+/// NVN2 direct mode: the replay's shaders through Lichii's recompiler instead of
 /// the offline library. A program stage's Ampere code is lowered to Maxwell code and translated as
 /// the Maxwell path does it (GenericEnvironment::LowerNativeCode, PipelineCache), one stage at a
 /// time: its SPIR-V numbers its descriptors from the replay's first binding of the stage, and its

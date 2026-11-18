@@ -1,14 +1,10 @@
 // From Banana Native (github.com/hugorosario/BananaNative, Android port of github.com/seedds/nxnative by seedds), MIT: see LICENSE in src/video_core/nvn_direct/bananative.
-// The Vulkan shader library reader (vka_shlib.h). Every offset in the file is checked once at open, so lookups afterwards index the tables without further checks
+// The Vulkan shader library reader (vka_shlib.h). Every offset in the image is checked once (vka_shlib_check), so lookups afterwards index the tables without further checks
 #include "vka_shlib.h"
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 // zstd's decompressor (dm/third_party/zstd/zstddeclib.c, linked beside this file): the two calls used
 size_t ZSTD_decompress(void *dst, size_t dst_cap, const void *src, size_t src_size);
@@ -60,24 +56,6 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
         if (m->size & 3 || m->size < 20 || (m->codec == DMSH_VK_CODEC_RAW && m->stored != m->size)) return fail(err, errn, "module %u: %u bytes of SPIR-V, %u stored", i, m->size, m->stored);
     }
     return 1;
-}
-
-int vka_shlib_open(vka_shlib *L, const char *path, const char *chain, const char *vk_chain, const char *game, const char *abi, char *err, size_t errn) {
-    memset(L, 0, sizeof *L);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return fail(err, errn, "cannot open %s", path);
-    struct stat st;
-    if (fstat(fd, &st) || st.st_size < (off_t)sizeof(dmsh_vk_header)) { close(fd); return fail(err, errn, "%s: no header", path); }
-    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    close(fd);
-    if (p == MAP_FAILED) return fail(err, errn, "%s: mmap failed", path);
-    if (!vka_shlib_check(L, p, (size_t)st.st_size, chain, vk_chain, game, abi, err, errn)) { munmap(p, (size_t)st.st_size); return 0; }
-    L->mapped = 1;
-    return 1;
-}
-void vka_shlib_close(vka_shlib *L) {
-    if (L->mapped && L->base) munmap((void *)L->base, L->size);
-    memset(L, 0, sizeof *L);
 }
 
 uint64_t vka_shlib_key(const uint8_t md[8]) { uint64_t k = 0; for (int i = 0; i < 8; i++) k = k << 8 | md[i]; return k; }

@@ -255,7 +255,7 @@ bool Swapchain::Create(
 
     // Submitted work may still wait on the old acquire/present semaphores; destroying them under
     // it loses the device on MoltenVK (window moved to a display with a different scale).
-    // NVN2 direct mode (dotfiles-25x.4): the device-wide wait under the submit lock could wait
+    // NVN2 direct mode: the device-wide wait under the submit lock could wait
     // forever, as a replay queue may wait for an event a later submission signals, which the lock
     // keeps out; the semaphores are only used by Lichii's own submissions and presents (the
     // graphics and present queues; the replay's other queues are left alone).

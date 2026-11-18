@@ -100,9 +100,7 @@ ComputeProgram MakeProgram(const Device& device, u32 buffer_binding, u32 image_b
         {
             .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .pNext = nullptr,
-            .flags = std::getenv("DM_VK_PIPE_STATS") != nullptr && device.IsKhrPipelineExecutablePropertiesEnabled()
-                         ? VkPipelineCreateFlags{VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR}
-                         : VkPipelineCreateFlags{0},
+            .flags = 0,
             .stage{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = nullptr,
@@ -117,21 +115,6 @@ ComputeProgram MakeProgram(const Device& device, u32 buffer_binding, u32 image_b
             .basePipelineIndex = 0,
         },
         device.StaticPipelineCache());
-    // Lab (DM_VK_PIPE_STATS=1, dotfiles-25x.8): the driver's statistics of the decode / encode
-    // pipeline (local memory per thread sizes a pool NVML counts outside the memory heaps).
-    if (std::getenv("DM_VK_PIPE_STATS") != nullptr && device.IsKhrPipelineExecutablePropertiesEnabled()) {
-        const auto& logical = device.GetLogical();
-        const auto executables = logical.GetPipelineExecutablePropertiesKHR(*program.pipeline);
-        for (u32 index = 0; index < executables.size(); ++index) {
-            std::string text;
-            for (const auto& statistic :
-                 logical.GetPipelineExecutableStatisticsKHR(*program.pipeline, index)) {
-                text += fmt::format(" {}={}", statistic.name, statistic.value.u64);
-            }
-            LOG_INFO(Render_Vulkan, "NVN2 direct mode: ASTC/BC pipeline ({} bytes of SPIR-V) statistics:{}",
-                     code.size_bytes(), text);
-        }
-    }
     return program;
 }
 

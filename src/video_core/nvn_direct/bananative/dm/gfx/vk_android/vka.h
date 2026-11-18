@@ -51,7 +51,6 @@
     X(vkCmdDrawMeshTasksIndirectEXT) X(vkCmdDrawMeshTasksIndirectCountEXT) \
     X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdSetDepthBounds) \
     X(vkGetMemoryHostPointerPropertiesEXT) X(vkGetMemoryFdPropertiesKHR)   /* Lichii: pools imported from guest memory (vka_mem.c) */ \
-    X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV)   /* Lichii: GPU hang checkpoints (vka_draw.c vka_checkpoint) */ \
     X(vkDestroyCommandPool)   /* Lichii: a frame capture copy's pool, once the GPU finished it late (vka_capture.c vcap_late_reap) */
 #define VKA_DECL(f) PFN_##f f;
 typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS(VKA_DECL) VKA_INSTANCE_FNS(VKA_DECL) VKA_DEVICE_FNS(VKA_DECL) } vka_fns;
@@ -90,7 +89,7 @@ typedef struct {
     // Lichii: memory pools are guest memory imported with VK_EXT_external_memory_host (vka_mem.c import_seg), not placed maps; host_import_types: the memory types an
     // import may take (vkGetMemoryHostPointerPropertiesEXT of a guest page), placed_align then the import alignment (minImportedHostPointerAlignment)
     int host_import; uint32_t host_import_types;
-    // Lichii: udmabuf: the driver refuses host-pointer imports of Lichii's shared memfd memory (amdgpu, dotfiles-25x.21), so the pools are udmabufs of the memfd's pages
+    // Lichii: udmabuf: the driver refuses host-pointer imports of Lichii's shared memfd memory (amdgpu), so the pools are udmabufs of the memfd's pages
     // (udmabuf_fd: /dev/udmabuf) imported with VK_EXT_external_memory_dma_buf, at most udmabuf_max bytes each (udmabuf's size_limit_mb) (vka_mem.c vka_mem_import_choose)
     int udmabuf, udmabuf_fd; VkDeviceSize udmabuf_max;
     void *perf_hint;                                // vkQueueSetPerfHintQCOM (VK_QCOM_queue_perf_hint), NULL without it: vka_gpu_floor
@@ -111,13 +110,13 @@ typedef struct {
     VkDeviceSize placed_align, max_alloc;
     uint32_t guest_type, local_type, upload_type;   // guest RAM (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED, or the nearest), images, upload arenas
     VkSemaphore tl;                                 // the timeline: value n = submission n has completed
-    // NVN queues as Vulkan queues (dotfiles-25x.4/.14, DM_VK_MULTIQUEUE): qs[0] = q; with multi, each submission signals its queue's timeline qtl[i] and the completion thread
+    // NVN queues as Vulkan queues: qs[0] = q; with multi, each submission signals its queue's timeline qtl[i] and the completion thread
     // signals tl in fence order once the queue's value is reached (submissions on different queues complete in any order; tl stays in order for everything that waits on it)
     VkQueue qs[NVN_DIRECT_MAX_QUEUES]; VkSemaphore qtl[NVN_DIRECT_MAX_QUEUES]; uint64_t qseq[NVN_DIRECT_MAX_QUEUES]; int nq, multi;
     pthread_mutex_t qmu;                            // the queue is shared by the submit and present threads
     int sparse_res;                                 // sparse residency images can be made (vka_sparse.c): binding on the queue, 2D residency, standard block shape, strict non-resident reads
     uint64_t tl_queued;                             // the highest timeline value a vkQueueSubmit so far signals (under qmu): what a later submission on the queue may wait for
-    // Lichii (dotfiles-25x.100), each 0 without the device extension Lichii enabled: conservative rasterization (cons_max: maxExtraPrimitiveOverestimationSize), the last
+    // Lichii, each 0 without the device extension Lichii enabled: conservative rasterization (cons_max: maxExtraPrimitiveOverestimationSize), the last
     // vertex as the provoking one, NV viewport swizzles, NV exclusive scissors, a fragment shading rate attachment (VRS) of 16x16-pixel texels, debug utils labels
     int cons, provoking_last, vp_swizzle, excl_scissor, vrs; float cons_max;
     PFN_vkCmdSetExclusiveScissorNV set_excl_scissor;
@@ -158,19 +157,17 @@ void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int cr
 uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_hang_ns(void);                         // how long a fence may make no progress before it is a hang (DM_VK_HANG_S, default 6 s)
 int vka_hung(void);
-// Lichii: the emulator shuts down (dotfiles-25x.18, nvn_direct_stop / nvn_direct_park in nvn_shutdown.c)
+// Lichii: the emulator shuts down (nvn_direct_stop / nvn_direct_park in nvn_shutdown.c)
 void vka_up_decoded(void);                          // vka_dev.c (Lichii): an ASTC decode went into the open upload batch
 void vka_heap_line(char *o, size_t n);               // vka_dev.c (Lichii): the driver's use and budget per heap, MiB
 int vka_dev_ext(const char *name);                  // vka_dev.c (Lichii): the host's device has the extension enabled
 int vka_async_pipelines(void);                     // vka_dev.c: Lichii's asynchronous shader building setting (nvn_direct_device.async_pipelines)
-void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders" (dotfiles-25x.16)
-void vka_stall_stacks(void);                         // vka_dev.c: DM_VK_STALL_STACKS=1: every thread's stack to stderr (lab)
+void vka_pipeline_notify(int built);                // vka_dev.c: a pipeline made off the frame path starts (0) or is done (1): the host's "building shaders"
 void vka_stop(void);                                // vka_dev.c: as after a hang nothing more is submitted and every fence reads as done, silently; waits return at once
 int vka_stopping(void);
 void vka_worker_wake(void);                         // vka_worker.c: the game's waits for room in the worker's queue see the stop
 int vka_worker_idle(uint64_t timeout_ns);           // the worker has replayed every job queued (1), or timed out (0)
 int vka_complete_stop(uint64_t timeout_ns);         // vka_dev.c (Lichii): the completion thread has run what was submitted and left (1), or timed out (0)
-void vka_vram_trace_stop(void);                     // vka_dev.c (Lichii): the DM_VK_VRAM_TRACE thread has left
 void vka_bindless_init(void);                       // vka_tex.c: the bindless set and its layout (every pipeline layout holds it)
 void vka_pso_start(void);                           // vka_pso.c: the pipeline cache opened, the prewarm and the compute pipelines made ahead started
 int vka_pso_park(uint64_t timeout_ns);              // vka_pso.c: no pipeline built from now on, the last save made; 1 = no build was in progress at the end
@@ -250,9 +247,9 @@ typedef struct {
 int vka_fmt_of(int nvn_format, vka_fmt *f);         // 0 = no Vulkan format (logged once per format)
 // ASTC blocks (w x h x depth texels, bw x bh blocks, rows of blocks packed) transcoded to BC3 (rows of 4x4 blocks packed, 16 bytes each) on the CPU, for a device without
 // ASTC: BC3 keeps an ASTC 4x4 texture's size (RGBA8 took 10.5 GiB of images for Mario Kart World's race and ran out of device memory). A weak hook the host may supply
-// (the x86 lab harness does); without it ASTC textures have no image there. 0 = done
-// A texture filled from storage, level lv layer ly deswizzled into lin (pitch bytes a row, n bytes): a weak hook the host may supply to replace those bytes (the x86
-// trace harness stands in for GPU-made state a trace does not hold: dotfiles-25x.14, Mario Kart World's boot-time colour-grading LUTs)
+// (a trace replay harness does); without it ASTC textures have no image there. 0 = done
+// A texture filled from storage, level lv layer ly deswizzled into lin (pitch bytes a row, n bytes): a weak hook the host may supply to replace those bytes (a trace replay
+// harness stands in for GPU-made state a trace does not hold: Mario Kart World's boot-time colour-grading LUTs)
 void vka_upload_hook(const tex_t *t, uint32_t lv, uint32_t ly, uint8_t *lin, size_t pitch, size_t n) __attribute__((weak));
 int vka_upload_claim(const tex_t *t) __attribute__((weak));   // 1 = the host fills this texture (vka_upload_hook): uploaded from storage even where it would start cleared
 int vka_astc_transcode(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t depth, uint32_t bw, uint32_t bh, uint8_t *bc3) __attribute__((weak));
@@ -309,17 +306,15 @@ typedef struct vka_img {
     // Large images (DM_VK_BIGIMG_MB, vka_tex.c "Large images"): draws that bound it for sampling, other textures found over its storage (the first serials)
     uint32_t nsamp, novl; uint64_t ovl[4];
     uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
-    // Lichii (dotfiles-25x.17): wseq the GPU write order of its last write (0: none); ali the serials of textures of another shape found over its storage (images of their own)
-    uint64_t wseq; uint64_t ali[8]; uint8_t nali;
-    uint8_t scaled;          // Lichii (dotfiles-25x.34): made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
-    uint64_t drawn[2];       // Lichii (dotfiles-25x.32): the last two frames (presents filled, plus 1) a pass drew into it, the newest first (vka_draw.c drawn_again)
+    uint8_t scaled;          // Lichii: made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
+    uint64_t drawn[2];       // Lichii: the last two frames (presents filled, plus 1) a pass drew into it, the newest first (vka_draw.c drawn_again)
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
 // The layers a render target view of level lv can name: a 3D texture's slices at that level (drawn into through 2D / 2D-array views, VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT), else the array layers
 static inline uint32_t vka_img_slices(const vka_img *im, uint32_t lv) { return im->d.target == NVN_TEXTURE_TARGET_3D ? (im->depth >> lv ? im->depth >> lv : 1) : im->layers; }
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's image, made (and filled from guest memory, or cleared) on first use in cb; NULL = no image
-// Lichii (dotfiles-25x.34): the render scale, Lichii's resolution setting (nvn_direct_device scale_up / scale_shift): render targets (GPU content, 2D, attachable,
+// Lichii: the render scale, Lichii's resolution setting (nvn_direct_device scale_up / scale_shift): render targets (GPU content, 2D, attachable,
 // see vka_tex.c img_create_) are made scale_up / 2^scale_shift times their size; passes over them, their viewports, scissors, clears and copies follow, and recompiled
 // shaders read the size through Lichii's RescalingPass (push constants, vka_draw.c). 1, 0: no scale, nothing of it runs
 extern uint32_t vka_scale_up, vka_scale_shift;
@@ -383,8 +378,7 @@ VkSampler vka_samp_id(int id);                      // sampler ID id; VK_NULL_HA
 VkSampler vka_samp_default(void);                   // the sampler an unbound sampler slot reads with (nearest, clamp to edge)
 
 // ---------- Shaders (vka_shader.c) ----------
-// The game's Vulkan shader library, <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (DM_VK_SHLIB overrides the path), loaded at the first program the replay resolves.
-// A shader is one library entry with its module made; it lives as long as the process
+// A shader is one library entry with its module made (Lichii: each a one-entry library its recompiler made, nvn_recompile.c); it lives as long as the process
 #include "vka_shlib.h"
 #include "vka_bind.h"
 typedef struct vka_shader {
@@ -397,9 +391,9 @@ typedef struct vka_shader {
     int bad;                            // refused: no module, an unknown binding, an NV-only capability (logged once with its key)
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
-    const uint8_t *nvn2_control;        // Lichii (dotfiles-25x.11): a recompiled shader's NVN2 control section (nvn_recompile.c), NULL for the library's
+    const uint8_t *nvn2_control;        // Lichii: a recompiled shader's NVN2 control section (nvn_recompile.c), NULL for the library's
     vka_span loop_guard;                // Lichii: a recompiled shader's loop guard word (static memory; none when it has no loops)
-    uint16_t scale_tex_binding;         // Lichii (dotfiles-25x.34): a recompiled shader's first texture binding and that texture's bit in the render scale's push constants
+    uint16_t scale_tex_binding;         // Lichii: a recompiled shader's first texture binding and that texture's bit in the render scale's push constants
     uint8_t scale_tex_bit, scale_tex_bits;   // (nvn_direct.h nvn_direct_scale_texture_bit; scale_tex_bits 0: no textures)
 } vka_shader;
 // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped). Lichii: depth, recompiled shaders' depth mode
@@ -407,28 +401,21 @@ typedef struct vka_shader {
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; uint8_t depth; } vka_progsh;
 int vka_progsh_current(const vka_progsh *ps);   // 1 = ps's shaders fit the depth mode now
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
-int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
+int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no program
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
-const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
-unsigned vka_shlib_stage_keys(int stage, uint64_t **keys);   // Lichii: the game library's shader keys of a DMSH_VK_STAGE_* (malloc'd), their count
-vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused. gl_depth: the depth mode a recompiled one is for
+vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the recompiled shader of key in depth mode gl_depth (vka_rc_by_key); NULL = not translated or refused
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
-uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
-#define VKA_SET_FS 2   // Lichii (dotfiles-25x.16): a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
+#define VKA_SET_FS 2   // Lichii: a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
-#define VKA_F_RENDER_AREA 16384   // Lichii (dotfiles-25x.40): an entry flag of recompiled shaders past the library's DMSH_VK_F_*: reads the draw's render area (vka_draw.c, nvn_direct.h NVN_DIRECT_RENDER_AREA_OFFSET)
+#define VKA_F_RENDER_AREA 16384   // Lichii: an entry flag of recompiled shaders past the library's DMSH_VK_F_*: reads the draw's render area (vka_draw.c, nvn_direct.h NVN_DIRECT_RENDER_AREA_OFFSET)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
 #define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask);   // the base module with those float inputs as uvec4 / ivec4 (vka_spv_vin_retype), made once per masks   // the module of that variant (DMSH_VK_MOD_*), made on first use; VK_NULL_HANDLE = the entry has none   // the shader of key in library L (the game's, or the selftest's own); NULL = not there or refused
-int vka_shlib_check_all(const vka_shlib *L);   // every module and compute pipeline of L made (DM_VK_SHLIB_CHECK=1): the failures
-void vka_shlib_check_pending(void);             // Lichii: DM_VK_SHLIB_CHECK's check of the game's library, once it has loaded; never under g_mu or inside the replay's init
-// Lichii's recompiler (nvn_recompile.c, dotfiles-25x.11): EDEN_NX2_NVN_RECOMPILE's mode (1 recompiler, the default; 0 library; 2 library compared with it); control sections kept at
-// nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN stage, -1 without a kept control section); a shader by key;
-// mode 2's comparison; a recompiled compute shader's c[0]
-int vka_rc_mode(void);
+// Lichii's recompiler (nvn_recompile.c): control sections kept at nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN
+// stage, -1 without a kept control section); a shader by key; a recompiled compute shader's c[0]
 void vka_rc_keep(const prog_t *p);
 typedef struct vka_dstate vka_dstate;
 void vka_rc_draw(const vka_dstate *d);
@@ -442,7 +429,6 @@ vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader 
 void vka_shader_scratch_free(vka_shader *s);
 void vka_lib_ahead_shader(vka_shader *s, int part);   // a stage library (1 pre-rasterization, 2 fragment shader) in the most common state, for the caches only
 void vka_lib_counts(uint64_t *compiled, uint64_t *ahead);   // graphics pipeline libraries compiled outside the ahead threads (over 20 ms), made ahead
-void vka_rc_compare(const prog_t *p, unsigned i, uint64_t key, const vka_shader *lib);
 void vka_rc_cs_c0(const vka_shader *sh, const vka_bstate *s, uint8_t *d);
 int vka_static(VkDeviceSize n, VkDeviceSize align, vka_span *out);   // host-visible memory for the process's life (c1 bytes, the support and zero buffers)
 
@@ -452,7 +438,7 @@ typedef struct {   // what a graphics pipeline is made from beyond its shaders a
     uint8_t ncolor, samples, topo, poly_mode, depth_clamp, a2c, logic_en, logic_op, gl_depth, fs_variant, alpha_func, gs_fx;   // fs_variant: DMSH_VK_MOD_*; alpha_func: NVN_ALPHA_FUNC_* or 0; gs_fx: 1 = the geometry module with the claim (vka_shader_gs_module)
     uint32_t vin_u, vin_s;            // float vertex inputs fed UINT / SINT formats: retyped in the vertex module (vka_spvpatch.c), by location
     struct { uint8_t en, src, dst, op, srca, dsta, opa, mask; } att[8];
-    // Lichii (dotfiles-25x.100): the sample mask (of the key's samples), the patch's control points (0: no tessellation), conservative rasterization (cons: on, dilate:
+    // Lichii: the sample mask (of the key's samples), the patch's control points (0: no tessellation), conservative rasterization (cons: on, dilate:
     // quarter pixels), the last vertex provoking, VK_NV_viewport_swizzle's swizzles of viewport 0 (0: none), the exclusive scissor's dynamic state, a shading rate attachment
     uint16_t sample_mask; uint8_t patch, cons, dilate, provoking_last, excl, vrs; uint8_t vp_sw[4];
     uint32_t vin_static;              // no vertex input dynamic state: the attributes and bindings below are part of the pipeline
@@ -461,7 +447,7 @@ typedef struct {   // what a graphics pipeline is made from beyond its shaders a
 } vka_gkey;
 typedef struct {
     VkPipelineLayout layout; VkDescriptorSetLayout set0; int push; uint32_t ndesc;
-    // Lichii (dotfiles-25x.16), graphics: the pixel shader's own set (VKA_SET_FS, allocated), and the independent-sets layouts its stage libraries are made with
+    // Lichii, graphics: the pixel shader's own set (VKA_SET_FS, allocated), and the independent-sets layouts its stage libraries are made with
     VkDescriptorSetLayout set_fs; uint32_t ndesc_fs; VkPipelineLayout pre_layout, fs_layout;
 } vka_layout;
 int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out);   // the set-0 layout of these stages' records with the pools' set 1
@@ -482,7 +468,7 @@ typedef struct vka_dstate {   // (named: nvn_recompile.c declares it ahead)
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; uint8_t vp_sw[16][4]; p_depth_bounds dbounds;
     float blend_color[4], alpha_ref;
     p_prim_restart restart; int rast_discard, tf_on;
-    // Lichii (dotfiles-25x.100): the command-buffer state of hle_nvn.c's s2-cmd section
+    // Lichii: the command-buffer state of hle_nvn.c's "Command-buffer state" section
     int patch; float tess_inner[2], tess_outer[4]; uint32_t sample_mask;
     int cons, cons_mode, subpixel_bias[2], provoking; float dilate;
     int excl_on, excl_n; int32_t excl[16][4];
@@ -523,9 +509,8 @@ void vka_enc_start(VkCommandBuffer cb);     // after vkBeginCommandBuffer on the
 void vka_enc_stop(void);                    // before vkEndCommandBuffer / a submit / a pool use: every deferred call made, none deferred from now on
 void vka_enc_sync(void);                    // every deferred call made (a direct call that must land in order follows)
 int vka_enc_on(void);
-int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n);
-void vka_checkpoint_report(void);
-void vka_checkpoint_op(int op);   // a checkpoint before a command that is not a draw (vka_draw.c)   // GPU hang: the last checkpoint each queue passed, and the draw or dispatch it marks (vka_draw.c)   // fn on the encoder thread in order (1), or 0: encoder off
+int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n);   // fn on the encoder thread in order (1), or 0: encoder off
+
 void vka_enc_switch(VkCommandBuffer cb);    // recording goes on in cb (queued reset / begin)
 void vka_enc_stats(char *b, size_t n, double frames);   // the replay statistics' line (empty when unused)
 int vka_nan_split(vka_img *const *ims, int n);

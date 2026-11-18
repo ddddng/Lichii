@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Presents in direct mode (dotfiles-25x.7): what upstream's vka_present.c did (left out there),
+// Presents in direct mode: what upstream's vka_present.c did (left out there),
 // handing the presented image to Lichii's presenter instead of a swapchain of the replay's own.
 // The game's present takes a ticket (vka_present_reserve, on the game's thread, from mtl_present);
 // the replay worker fills it once every submission before it was handed to the queue
@@ -30,7 +30,7 @@ typedef struct {
 } pres_t;
 static pres_t g_pres[NPRES];
 static uint64_t g_reserved, g_filled;
-// The presenting queue's last submission, by ticket (dotfiles-25x.4): the present waits for it
+// The presenting queue's last submission, by ticket: the present waits for it
 // and every fence before it. The last submission of any queue may be another queue's that waits for an event the game
 // signals only in its next frame (Mario Kart World's second queue): the next acquire then waited
 // for it, and the composite up to 1 s.
@@ -52,10 +52,8 @@ void mtl_create_ns(uint64_t* lib_ns, uint64_t* pso_ns); // vka_pso.c
 void vka_fsc_stats(uint64_t* hit, uint64_t* miss); // vka_draw.c
 void vka_skip_report(void); // vka_draw.c
 void vka_rt_size_report(void); // vka_draw.c
-void vka_tex_stale_stats(uint64_t* reads); // vka_tex.c
 void vka_copy_drop_stats(uint64_t* dropped, uint64_t* kept); // vka_exec.c
-void vka_drawflip_frame(double period_s); // vka_draw.c
-// Pipeline creation on the frame path (dotfiles-25x.16: the replay thread's compiles, links and
+// Pipeline creation on the frame path (the replay thread's compiles, links and
 // cache lookups, vka_pso.c g_create_ns) between two presents, when it is over a 60 Hz frame: the
 // stalls a cold pipeline cache costs, frame by frame (the first 300), and every 1800 presents a sum.
 static void frame_path_creation(uint64_t tk) {
@@ -76,7 +74,7 @@ static void frame_path_creation(uint64_t tk) {
         vka_fsc_stats(&hit, &miss);
         VLOG("presents up to %llu: %llu frames with over 16.7 ms of frame-path pipeline creation (%llu over 50 ms), %.1f s in them; pixel shader sets %llu reused, %llu written",
              (unsigned long long)tk, (unsigned long long)over16, (unsigned long long)over50, over_ns / 1e9, (unsigned long long)hit, (unsigned long long)miss);
-        {   // (dotfiles-25x.13) what the frame-path creation above is made of: shaders new to DM_TEMP, libraries compiled rather than read from the caches
+        {   // what the frame-path creation above is made of: shaders new to DM_TEMP, libraries compiled rather than read from the caches
             unsigned made, kept;
             uint64_t slow, ahead;
             vka_rc_counts(&made, &kept);
@@ -86,14 +84,13 @@ static void frame_path_creation(uint64_t tk) {
         }
         vka_skip_report();
         vka_rt_size_report();
-        { uint64_t stale, dr, kp; vka_tex_stale_stats(&stale); vka_copy_drop_stats(&dr, &kp); VLOG("stale alias reads so far: %llu; copies into left-out levels dropped %llu, into kept levels of such textures %llu", (unsigned long long)stale, (unsigned long long)dr, (unsigned long long)kp); }
+        { uint64_t dr, kp; vka_copy_drop_stats(&dr, &kp); VLOG("copies into left-out levels dropped so far %llu, into kept levels of such textures %llu", (unsigned long long)dr, (unsigned long long)kp); }
     }
 }
-uint64_t vka_present_filled(void) { return g_filled; }   // (the replay thread, which fills them: DM_VK_TS_LOG's frame number)
+uint64_t vka_present_filled(void) { return g_filled; }   // (the replay thread, which fills them)
 void vka_present_fill(uint64_t tk, const tex_t* t, double period_s, const int crop[4]) {
     vka_perf_frame(period_s);
     frame_path_creation(tk);
-    vka_drawflip_frame(period_s);
     pthread_mutex_lock(&g_mu);
     pres_t* p = &g_pres[tk % NPRES];
     p->ticket = tk;

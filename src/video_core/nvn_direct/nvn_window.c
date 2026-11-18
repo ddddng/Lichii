@@ -103,7 +103,7 @@ NVN(nvnWindowGetCrop, void, const NVNwindow* w, NVNrectangle* r) {
 }
 // The images go round in order; an acquire's sync is reached when the window's last present is:
 // its queue's last submission and every fence before it (mtl_wait_acq), as on the console, where
-// the image is free once the frame after it is on screen (dotfiles-25x.4). The last submission of
+// the image is free once the frame after it is on screen. The last submission of
 // any queue, as upstream's default mtl_acquire_fence, may be another queue's that waits for an
 // event the game signals only after this acquire's wait (Mario Kart World's second queue: a GPU
 // hang). Only the presenting queue's own fence was too early: the game then rewrote data the

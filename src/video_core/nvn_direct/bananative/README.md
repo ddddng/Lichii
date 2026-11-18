@@ -7,10 +7,14 @@ Origin: Banana Native (https://github.com/hugorosario/BananaNative, by hugorosar
 Android port of nxnative (https://github.com/seedds/nxnative, by seedds). MIT, see
 `LICENSE`; every imported file carries a line naming its origin.
 
-Imported from upstream d154da1 (Banana Native v0.1.1) plus the lab's x86-64 Linux port and
-its Mario Kart World fixes (lab branch nvn-direct-lab, 1877f5d: x86-64 port, ASTC through a
-host transcode hook, NVN2 calls MKW makes, the empty-recording fix, NVN queues as Vulkan
-queues, pass diagnostics, texture hooks). Paths below `dm/` are upstream's.
+Imported from upstream d154da1 (Banana Native v0.1.1) plus an x86-64 Linux port and its
+Mario Kart World fixes (ASTC through a host transcode hook, NVN2 calls MKW makes, the
+empty-recording fix, NVN queues as Vulkan queues, texture hooks). Lichii's changes to these
+files are marked `Lichii` in their comments. Paths below `dm/` are upstream's.
+
+Upstream's offline shader library is not loaded: every shader comes from Lichii's recompiler
+(`nvn_recompile.c`), wrapped as a one-entry library image in memory. Upstream's `DM_*`
+diagnostic variables are kept as upstream ships them; they cost nothing when unset.
 
 Not imported: `nvn_dirty.c` (Lichii's write tracking replaces it), `vka_replay.c`,
 `vka_driver.c`, `vka_present.c`, `vka_framegen.c` and `lsfg/` (frame generation, GPL),

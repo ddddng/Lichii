@@ -9,13 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <dirent.h>
-#if !defined(_WIN32)   // Lichii: the stall stacks below are Linux's
-#include <execinfo.h>
-#include <signal.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
 #include <unistd.h>
 
 vka_fns vk;
@@ -25,34 +18,9 @@ vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 // Lichii: the device handed over (nvn_direct_adopt_device), and the lock every submission to its queues holds (Lichii's Scheduler::submit_mutex: Lichii submits to the
 // last of these queues too); V.qmu without one
 static nvn_direct_device g_adopt; static int g_adopted;
-// Lichii (lab DM_VK_SLOWSUB_MS, vka_worker.c): waits for the queue lock, staging blocks made and freed and their time, waits for upload batches; cumulative
-static _Atomic uint64_t g_qlock_ns, g_sblk_new_n, g_sblk_new_ns, g_sblk_free_ns;
-static uint64_t g_uwait_ns, g_uslot_ns;   // (g_uslot_ns: the part of the waits for a batch slot to come free)
-void vka_up_work_stats(uint64_t *qlock_ns, uint64_t *sblk_n, uint64_t *sblk_ns, uint64_t *sblk_free_ns, uint64_t *up_wait_ns) {
-    *qlock_ns = atomic_load(&g_qlock_ns); *sblk_n = atomic_load(&g_sblk_new_n); *sblk_ns = atomic_load(&g_sblk_new_ns); *sblk_free_ns = atomic_load(&g_sblk_free_ns); *up_wait_ns = g_uwait_ns; }
-uint64_t vka_up_batches(void);
-void vka_qlock(void) { uint64_t t0 = now_ns(); if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); atomic_fetch_add_explicit(&g_qlock_ns, now_ns() - t0, memory_order_relaxed); }
+static uint64_t g_uwait_ns;   // waits for upload batches; cumulative
+void vka_qlock(void) { if (g_adopt.queue_lock) g_adopt.queue_lock(g_adopt.queue_context); else pthread_mutex_lock(&V.qmu); }
 void vka_qunlock(void) { if (g_adopt.queue_unlock) g_adopt.queue_unlock(g_adopt.queue_context); else pthread_mutex_unlock(&V.qmu); }
-// Lab (DM_VK_VRAM_TRACE=1, dotfiles-25x.8): the host's use (NVML) beside the driver's heaps and the replay's imports and images, every second
-uint64_t vka_mem_placed_nolock(void); uint64_t vka_tex_mem_nolock(int *n);
-static pthread_t g_vram_th; static int g_vram_up, g_vram_stop; static pthread_mutex_t g_vram_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_vram_cv = PTHREAD_COND_INITIALIZER;   // Lichii: vka_vram_trace_stop
-static void *vram_trace_main(void *a) {
-    (void)a; pthread_setname_np(pthread_self(), "vk-vramtrace");
-    pthread_mutex_lock(&g_vram_mu);
-    while (!g_vram_stop) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1; pthread_cond_timedwait(&g_vram_cv, &g_vram_mu, &ts);
-        if (g_vram_stop) break;
-        pthread_mutex_unlock(&g_vram_mu);
-        char h[256]; vka_heap_line(h, sizeof h); uint64_t u = g_adopt.memory_usage(g_adopt.memory_context); int ni;
-        VLOG("VRAM trace: host use %.0f MiB; driver %s; placed/imported pools %.0f MiB, images %.0f MiB", u / 1048576.0, h, vka_mem_placed_nolock() / 1048576.0, vka_tex_mem_nolock(&ni) / 1048576.0);
-        pthread_mutex_lock(&g_vram_mu); }
-    pthread_mutex_unlock(&g_vram_mu);
-    return NULL;
-}
-void vka_vram_trace_stop(void) {
-    if (!g_vram_up) return;
-    pthread_mutex_lock(&g_vram_mu); g_vram_stop = 1; pthread_cond_broadcast(&g_vram_cv); pthread_mutex_unlock(&g_vram_mu);
-    pthread_join(g_vram_th, NULL); g_vram_up = 0;
-}
 int vka_async_pipelines(void) { return g_adopt.async_pipelines; }
 uint32_t vka_scale_up = 1, vka_scale_shift;
 int nvn_direct_adopt_device(const nvn_direct_device *d) {
@@ -61,18 +29,14 @@ int nvn_direct_adopt_device(const nvn_direct_device *d) {
     if (d->extension_count) memcpy(ext, d->extensions, d->extension_count * sizeof *ext);
     pthread_mutex_lock(&g_init_mu); if (!g_adopted && !g_state) { g_adopt = *d; g_adopt.extensions = ext; ext = NULL; g_adopted = 1; } pthread_mutex_unlock(&g_init_mu);
     free(ext);
-    { char e[16]; const int lab = vka_env_str("DM_VK_ASYNC_PSO", e, sizeof e);
-      VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (%s)", (lab ? atoi(e) != 0 : g_adopt.async_pipelines) ? "on" : "off",
-           lab ? "DM_VK_ASYNC_PSO" : "asynchronous shader building setting"); }
-    if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (only Lichii's recompiler reads the scale: library shaders draw at the texture's size)
-        if (vka_rc_mode() == 1) { vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift; }
-        VLOG("render scale %u/%u%s", g_adopt.scale_up, 1u << g_adopt.scale_shift, vka_scale_on() ? "" : ": off, the shader library cannot follow it (EDEN_NX2_NVN_RECOMPILE)");
+    VLOG("asynchronous pipelines (draws skipped until their pipeline is made): %s (asynchronous shader building setting)", g_adopt.async_pipelines ? "on" : "off");
+    if (g_adopt.scale_up && (g_adopt.scale_up != 1 || g_adopt.scale_shift)) {   // (Lichii's recompiler reads the scale)
+        vka_scale_up = g_adopt.scale_up; vka_scale_shift = g_adopt.scale_shift;
+        VLOG("render scale %u/%u", g_adopt.scale_up, 1u << g_adopt.scale_shift);
     }
     char h[256]; uint64_t u = 0, b = 0;
     if (g_adopt.memory_usage) { V.pd = d->physical; vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); VLOG("VRAM before the replay starts: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     int ok = vka_init();
-    if (ok) vka_shlib_check_pending();   // (the library may have loaded inside the init: vka_pso_start)
-    if (ok && g_adopt.memory_usage && VKA_ENV("DM_VK_VRAM_TRACE", 0)) g_vram_up = !pthread_create(&g_vram_th, NULL, vram_trace_main, NULL);
     if (ok && g_adopt.memory_usage) { vka_heap_line(h, sizeof h); u = g_adopt.memory_usage(g_adopt.memory_context); (void)b; VLOG("VRAM after the replay started: host use %.0f MiB; driver %s", u / 1048576.0, h); }
     return ok;
 }
@@ -186,9 +150,8 @@ static int init_once(void) {
     V.bda = f12.bufferDeviceAddress; V.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound && f12.runtimeDescriptorArray;
     V.placed = placed && fmp.memoryMapPlaced; V.placed_range = placed && fmp.memoryMapRangePlaced; V.unmap_reserve = placed && fmp.memoryUnmapReserve;
     float prio = 1.f;
-    // One Vulkan queue per NVN queue (DM_VK_MULTIQUEUE=0: one queue, every NVN queue in its FIFO as before). Lichii: every queue of the family Lichii made, up to
-    // NVN_DIRECT_MAX_QUEUES (four until 2026-11-17, enough for Mario Kart World's three NVN queues; Ocarina of Time keeps six)
-    V.nq = VKA_ENV("DM_VK_MULTIQUEUE", 1) ? (int)(fam_queues < NVN_DIRECT_MAX_QUEUES ? fam_queues : NVN_DIRECT_MAX_QUEUES) : 1; if (V.nq < 1) V.nq = 1;
+    // One Vulkan queue per NVN queue. Lichii: every queue of the family Lichii made, up to NVN_DIRECT_MAX_QUEUES (Ocarina of Time keeps six NVN queues)
+    V.nq = (int)(fam_queues < NVN_DIRECT_MAX_QUEUES ? fam_queues : NVN_DIRECT_MAX_QUEUES); if (V.nq < 1) V.nq = 1;
     float prios[4] = {1.f, 1.f, 1.f, 1.f}; (void)prio;
     (void)prios; (void)dext; (void)ndext;
     V.dev = g_adopt.device;   // Lichii's device (see above)
@@ -198,7 +161,7 @@ static int init_once(void) {
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
-    {   // Lichii (dotfiles-25x.100): the state of hle_nvn.c's s2-cmd section that needs an extension, where Lichii's device enabled it (vulkan_device.cpp)
+    {   // Lichii: the state of hle_nvn.c's "Command-buffer state" section that needs an extension, where Lichii's device enabled it (vulkan_device.cpp)
         VkPhysicalDeviceProvokingVertexFeaturesEXT fpv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
         VkPhysicalDeviceExclusiveScissorFeaturesNV fex = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXCLUSIVE_SCISSOR_FEATURES_NV, .pNext = &fpv};
         VkPhysicalDeviceFragmentShadingRateFeaturesKHR ffsr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR, .pNext = &fex};
@@ -291,9 +254,6 @@ static int init_once(void) {
     if (V.guest_type == UINT32_MAX) V.guest_type = vka_mem_type(~0u, HV | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
     if (V.guest_type == UINT32_MAX) V.guest_type = vka_mem_type(~0u, HV, 0);
     V.upload_type = V.guest_type;
-    // DM_VK_GUEST_LOCAL=1: pools in device-local host-visible memory (a desktop GPU's resizable BAR: uncached for the CPU) instead of cached system memory, to measure
-    // what the GPU's reads over the bus cost (the pools are placed maps either way; staging stays in the type above)
-    if (VKA_ENV("DM_VK_GUEST_LOCAL", 0)) { uint32_t t = vka_mem_type(~0u, HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); if (t != UINT32_MAX) V.guest_type = t; else VRED("DM_VK_GUEST_LOCAL=1: no device-local host-visible memory type"); }
     V.local_type = vka_mem_type(~0u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
 
     VkSemaphoreTypeCreateInfo st = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
@@ -313,7 +273,7 @@ static int init_once(void) {
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
     if (!V.placed && !V.host_import) VRED("no VK_EXT_map_memory_placed or VK_EXT_external_memory_host: the GPU sees no memory pool");
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
-    vka_pso_start();   // Lichii (dotfiles-25x.16): the pipeline cache, the prewarm and the compute pipelines made ahead from the start, not from the first pipeline
+    vka_pso_start();   // Lichii: the pipeline cache, the prewarm and the compute pipelines made ahead from the start, not from the first pipeline
     return 1;
 }
 int vka_init(void) {
@@ -423,7 +383,7 @@ void vka_fence_cpu(uint64_t fence, void *ops, int n, void (*run)(void *, int)) {
 }
 uint64_t vka_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE); }
 // Waits until fence and every fence before it are done (in fence order: what frees memory or reuses a slot needs). vka_wait_fence: until fence itself is, which with several
-// queues may be before an earlier fence of another queue (a sync the game fenced on one queue: dotfiles-25x.4)
+// queues may be before an earlier fence of another queue (a sync the game fenced on one queue)
 static int wait_fence(uint64_t fence, uint64_t timeout_ns, int own) {
     if (vka_done() >= fence || vka_stopping()) return 1;   // (Lichii: vka_stop)
     if (!timeout_ns) { if (!own) return 0; pthread_mutex_lock(&g_fmu); int d = g_fdone[fence % FQ_RING] == fence; pthread_mutex_unlock(&g_fmu); return d; }
@@ -454,7 +414,7 @@ uint64_t vka_hang_ns(void) {
     double s = VKA_ENVF("DM_VK_HANG_S", 6.0); if (!(s > 0.5)) s = 6.0;
     return (uint64_t)(s * 1e9);
 }
-// Lichii: the emulator shuts down (dotfiles-25x.18): as after a hang nothing more is submitted and every fence reads as done (the completion thread runs the effects of those
+// Lichii: the emulator shuts down: as after a hang nothing more is submitted and every fence reads as done (the completion thread runs the effects of those
 // submitted), without the hang's report or exit; waits for fences return at once, also those the replay worker has not submitted yet, so the game's threads leave their
 // halted calls and the emulator's cores stop
 static _Atomic int g_stopping;
@@ -471,7 +431,6 @@ static void hang_declare(uint64_t want, uint64_t at, double s, const char *what)
     VRED("GPU hang: %s; fence %llu not reached in %.1f s (the timeline at %llu, %llu handed to the queue, %llu reserved): nothing more is submitted, every fence reads as done",
          what, (unsigned long long)want, s, (unsigned long long)at, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_fence_last());
     vka_exec_hang_report(at + 1);
-    vka_checkpoint_report();
     if (!VKA_ENV("DM_VK_HANG_EXIT", 1)) { VRED("GPU hang: DM_VK_HANG_EXIT=0, the game runs on without the GPU"); return; }
     VRED("GPU hang: the host exits (DM_VK_HANG_EXIT=0 runs on without the GPU)");
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
@@ -484,7 +443,7 @@ static void post_run_one(uint64_t f) {
     if (p->run) p->run(p->ops, p->n); else free(p->ops);
     pthread_mutex_lock(&g_fmu); p->fence = 0; pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
 }
-// With the NVN queues as Vulkan queues each fence completes when its own queue's timeline reaches it (dotfiles-25x.4), and g_done follows the fences done in a row. In fence
+// With the NVN queues as Vulkan queues each fence completes when its own queue's timeline reaches it, and g_done follows the fences done in a row. In fence
 // order, a submission that waits for an event a later submission of another queue signals held back every fence after it: Mario Kart World waited for one of its queues'
 // syncs (an acquire, a queue's FenceSync) before submitting the signal another queue's earlier submission waited for, and the GPU hang detection ended the run.
 // Returns the fences that completed in this pass (*pending: the first one not done yet, 0 = none)
@@ -515,31 +474,6 @@ static void multi_wait(void) {   // until any NVN queue's timeline moves (or 0.5
     VkResult r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
     if (r && r != VK_TIMEOUT) { char w[64]; snprintf(w, sizeof w, "vkWaitSemaphores %d (the device is lost)", r); hang_declare(vka_done() + 1, vka_done(), 0, w); }
 }
-// DM_VK_STALL_STACKS=1 (lab, dotfiles-25x.15): at a GPU stall every thread of the process writes its stack to stderr (frame addresses: addr2line against the binary),
-// where ptrace is not permitted
-#if !defined(_WIN32)
-static void stall_stack_sig(int sig) {
-    (void)sig; void *b[48]; int n = backtrace(b, 48); char name[17] = {0}; prctl(PR_GET_NAME, name);
-    char h[96]; int k = snprintf(h, sizeof h, "[dm] [RED] vk: stall stack: thread %ld %s\n", (long)syscall(SYS_gettid), name); write(2, h, (size_t)k);
-    backtrace_symbols_fd(b, n, 2);
-}
-#endif
-void vka_stall_stacks(void);
-static void stall_stacks(void) { vka_stall_stacks(); }
-void vka_stall_stacks(void) {   // (Lichii: also the shutdown watchdog, nvn_shutdown.c)
-    if (!VKA_ENV("DM_VK_STALL_STACKS", 0)) return;
-#if defined(_WIN32)   // Lichii: no signal reaches another thread there
-    VRED("DM_VK_STALL_STACKS: not on Windows (a debugger, or Lichii's crash dump, has every thread's stack)");
-#else
-    void *warm[2]; backtrace(warm, 2);   // (libgcc loaded outside the handler)
-    struct sigaction sa = {0}; sa.sa_handler = stall_stack_sig; sigaction(SIGRTMIN + 7, &sa, NULL);
-    DIR *d = opendir("/proc/self/task"); if (!d) return;
-    long self = (long)syscall(SYS_gettid); struct dirent *e;
-    while ((e = readdir(d))) { long tid = atol(e->d_name); if (tid <= 0 || tid == self) continue;
-        syscall(SYS_tgkill, (long)getpid(), tid, SIGRTMIN + 7); struct timespec ts = {0, 30000000}; nanosleep(&ts, NULL); }
-    closedir(d);
-#endif
-}
 static void *completion_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
@@ -564,7 +498,7 @@ static void *completion_main(void *arg) {
                 if (!stall_t0 || stall_at != pending) { stall_t0 = t; stall_at = pending; stall_logged = 0; }
                 double st = (t - stall_t0) / 1e9;
                 if (st >= 2 && !stall_logged) { stall_logged = 1; VRED("GPU: fence %llu not reached after %.1f s (fences done in a row up to %llu, %llu handed to the queue)", (unsigned long long)pending, st, (unsigned long long)v, (unsigned long long)vka_fence_queued());
-                    stall_stacks(); void vka_exec_stall(void); vka_exec_stall(); }   // vka_exec.c: event waits nothing walked so far meets
+                    void vka_exec_stall(void); vka_exec_stall(); }   // vka_exec.c: event waits nothing walked so far meets
                 if (t - stall_t0 >= vka_hang_ns()) hang_declare(pending, v, st, "no progress");
                 else multi_wait();
             }
@@ -629,13 +563,7 @@ static uint64_t up_done(void) {   // the upload timeline's value (every batch co
     uint64_t v = 0; if (g_utl) vk.vkGetSemaphoreCounterValue(V.dev, g_utl, &v); return v;
 }
 static int sblk_idle(const sblk *b, uint64_t done, uint64_t udone) { return b->fence <= (b->up ? udone : done); }
-static sblk *sblk_new_(VkDeviceSize n);
 static sblk *sblk_new(VkDeviceSize n) {
-    uint64_t t0 = now_ns(); sblk *b = sblk_new_(n);
-    atomic_fetch_add_explicit(&g_sblk_new_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_sblk_new_n, 1, memory_order_relaxed);
-    return b;
-}
-static sblk *sblk_new_(VkDeviceSize n) {
     sblk *b = calloc(1, sizeof *b); b->size = n;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                                                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};   // (Lichii: indirect mesh draws' converted records, vka_draw.c mesh_records)
@@ -664,7 +592,7 @@ void vka_mem_grew(uint64_t bytes) {
 // Kept, every block stayed for the process's life: Mario Kart World 1.8.0's boot uploads (levels of up to 144 MiB, each in a block of its size) left 1.4 GB of scratch
 // before its first frame, and the phone's low-memory killer stopped it
 static void sblk_trim(uint64_t done, uint64_t udone) {
-    VkDeviceSize idle = 0; uint64_t t0 = now_ns();
+    VkDeviceSize idle = 0;
     for (sblk **pp = &g_busy; *pp;) {
         sblk *b = *pp;
         int id = sblk_idle(b, done, udone);
@@ -673,7 +601,6 @@ static void sblk_trim(uint64_t done, uint64_t udone) {
             atomic_fetch_sub(&g_scratch_bytes, b->size); atomic_fetch_sub(&g_scratch_n, 1); free(b);
         } else { if (id) idle += b->size; pp = &b->next; }
     }
-    atomic_fetch_add_explicit(&g_sblk_free_ns, now_ns() - t0, memory_order_relaxed);
 }
 int vka_scratch(VkDeviceSize n, VkDeviceSize align, vka_span *out) {
     if (!align) align = 16;
@@ -713,9 +640,9 @@ void vka_scratch_retire(uint64_t fence) { retire(0, fence); }
 // When the batches in flight hold more than DM_VK_UPLOAD_INFLIGHT_MB (live, default 256) of staging, the replay thread waits for the oldest. Only a new image is safe here:
 // nothing recorded earlier in the submission reads it (a re-upload of a live image stays in the submission, in order with the draws before it). DM_VK_UPLOAD_BATCH=0 (live)
 // records first contents into the submission, as before
-// Lichii (dotfiles-25x.13): 128 batch slots (upstream 16). With a batch per DM_VK_ASTC_PER_BATCH decodes, Mario Kart World's race start made 52 batches in one
+// Lichii: 128 batch slots (upstream 16). With a batch per 256 ASTC decodes, Mario Kart World's race start made 52 batches in one
 // submission (836 images, 196 MB): the replay thread waited 234 ms for slots to come free, the GPU's decodes then ran one after another behind it instead of beside
-// the recording (nd29u-1). The staging they hold stays capped by DM_VK_UPLOAD_INFLIGHT_MB (vka_up_throttle)
+// the recording. The staging they hold stays capped by DM_VK_UPLOAD_INFLIGHT_MB (vka_up_throttle)
 enum { NUP = 128 };
 static struct { VkCommandBuffer cb; uint64_t val; } g_ub[NUP];
 static VkCommandPool g_upool; static uint64_t g_uval; static int g_ui = -1; static unsigned g_unext;   // g_ui: the open batch's slot (-1: none); replay thread only
@@ -745,7 +672,7 @@ VkCommandBuffer vka_up_begin(void) {
         }
         if (vka_hung()) return VK_NULL_HANDLE;
         unsigned k = g_unext % NUP;   // (the backpressure below keeps them mostly done)
-        { uint64_t t0 = now_ns(); int ok = !g_ub[k].val || up_wait(g_ub[k].val); g_uslot_ns += now_ns() - t0; if (!ok) return VK_NULL_HANDLE; }   // (its batch still runs: the caller records into the submission)
+        if (g_ub[k].val && !up_wait(g_ub[k].val)) return VK_NULL_HANDLE;   // (its batch still runs: the caller records into the submission)
         g_unext++;
         vk.vkResetCommandBuffer(g_ub[k].cb, 0);
         VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -758,22 +685,22 @@ VkCommandBuffer vka_up_begin(void) {
 void vka_up_end(void) { vka_scr_up = 0; }
 static int is_batch(VkCommandBuffer cb) { for (int i = 0; i < NUP; i++) if (cb && g_ub[i].cb == cb) return 1; return 0; }
 int vka_up_is(VkCommandBuffer cb) { return is_batch(cb); }
-// ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc, dotfiles-25x.8)
-int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL && VKA_ENV("DM_VK_ASTC_GPU", 1); }   // (DM_VK_ASTC_GPU=0: none, lab A/B)
+// ASTC on a device without it, decoded on the GPU by the host (Lichii: nvn_direct_device.astc_to_bc)
+int vka_astc_gpu_on(void) { return g_adopt.astc_to_bc != NULL; }
 int vka_astc_gpu(VkCommandBuffer cb, const nvn_direct_astc_level *l) { return g_adopt.astc_to_bc && g_adopt.astc_to_bc(g_adopt.astc_context, cb, l); }
 static void astc_gpu_flush(VkCommandBuffer cb) { if (g_adopt.astc_flush) g_adopt.astc_flush(g_adopt.astc_context, cb); }   // (the decodes it batches, before the batch ends)
-int vka_astc_opaque(const void *blocks, size_t n) { return g_adopt.astc_opaque && g_adopt.astc_opaque(blocks, n); }   // Lichii (dotfiles-25x.25): BC1 for opaque ASTC (vka_tex.c astc_bc1)
-// Lichii's shader recompiler (nvn_direct_device.shader_translate, dotfiles-25x.11): a program stage translated, its result given back with vka_shader_translated_free
+int vka_astc_opaque(const void *blocks, size_t n) { return g_adopt.astc_opaque && g_adopt.astc_opaque(blocks, n); }   // Lichii: BC1 for opaque ASTC (vka_tex.c astc_bc1)
+// Lichii's shader recompiler (nvn_direct_device.shader_translate): a program stage translated, its result given back with vka_shader_translated_free
 int vka_shader_translate(const nvn_direct_shader_source *s, nvn_direct_shader *o) {
     if (g_adopt.shader_translate) return g_adopt.shader_translate(g_adopt.shader_context, s, o);
     memset(o, 0, sizeof *o); snprintf(o->error, sizeof o->error, "no shader recompiler"); return 0;
 }
 void vka_shader_translated_free(nvn_direct_shader *o) { if (g_adopt.shader_free) g_adopt.shader_free(g_adopt.shader_context, o); }
-void vka_pipeline_notify(int built) {   // (Lichii: nvn_direct_device.pipeline_building / pipeline_built, dotfiles-25x.16)
+void vka_pipeline_notify(int built) {   // (Lichii: nvn_direct_device.pipeline_building / pipeline_built)
     void (*fn)(void *) = built ? g_adopt.pipeline_built : g_adopt.pipeline_building;
     if (fn) fn(g_adopt.pipeline_context);
 }
-// Lichii (dotfiles-25x.8): the driver's own use and budget per heap (VK_EXT_memory_budget), MiB, for the VRAM line
+// Lichii: the driver's own use and budget per heap (VK_EXT_memory_budget), MiB, for the VRAM line
 void vka_heap_line(char *o, size_t n) {
     static PFN_vkGetPhysicalDeviceMemoryProperties2 get; if (!get && g_adopt.get_instance_proc_addr) get = (PFN_vkGetPhysicalDeviceMemoryProperties2)g_adopt.get_instance_proc_addr(g_adopt.instance, "vkGetPhysicalDeviceMemoryProperties2");
     if (!n) return; o[0] = 0; if (!get) return;
@@ -795,9 +722,9 @@ VkCommandBuffer vka_up_cur(VkCommandBuffer cb) {   // the open batch when cb was
     if (g_ui >= 0) return g_ub[g_ui].cb;
     VkCommandBuffer n = vka_up_begin(); return n ? n : up_fallback();
 }
-// Lichii (dotfiles-25x.8): an upload batch also goes to the queue after DM_VK_ASTC_PER_BATCH ASTC decodes (default 256; 0 = by staging bytes only). With batches of
+// Lichii: an upload batch also goes to the queue after 256 ASTC decodes. With batches of
 // thousands of small decodes (Mario Kart World's boot: a decode, an encode and a copy per mip level, most of them tiny) the NVIDIA driver kept ~2.9 GiB of video memory
-// outside every memory heap (NVML counts it, VK_EXT_memory_budget does not), and it stayed: 32 or 256 decodes a batch keep it near 0 at the same boot time (ux-gP*);
+// outside every memory heap (NVML counts it, VK_EXT_memory_budget does not), and it stayed: 32 or 256 decodes a batch keep it near 0 at the same boot time;
 // a submission per level does too but boots half as fast. Lichii's own texture cache runs the same shaders in small submissions and kept ~0.3 GiB
 static unsigned g_up_decodes;   // ASTC decodes recorded into the open upload batch (vka_up_decoded)
 void vka_up_decoded(void) { g_up_decodes++; }
@@ -805,8 +732,7 @@ VkCommandBuffer vka_up_point(VkCommandBuffer cb) {
     if (g_ui < 0 || cb != g_ub[g_ui].cb) return cb;
     pthread_mutex_lock(&g_smu); VkDeviceSize n = g_ubytes; pthread_mutex_unlock(&g_smu);
     double mb = VKA_ENVF("DM_VK_UPLOAD_BATCH_MB", 64.0);
-    int per = VKA_ENV("DM_VK_ASTC_PER_BATCH", 256);
-    if ((double)n < mb * 1048576.0 && !(per > 0 && g_up_decodes >= (unsigned)per)) return cb;
+    if ((double)n < mb * 1048576.0 && g_up_decodes < 256) return cb;
     vka_up_flush();
     VkCommandBuffer nb = vka_up_begin(); return nb ? nb : up_fallback();
 }
@@ -851,7 +777,6 @@ void vka_up_throttle(void) {
     }
 }
 uint64_t vka_up_batches(void) { return g_n_ubatch; }
-uint64_t vka_up_slot_waits(void) { return g_uslot_ns; }
 void vka_up_stats(uint64_t *batches, uint64_t *waits, double *wait_ms) { if (batches) *batches = g_n_ubatch; if (waits) *waits = g_n_uwait; if (wait_ms) *wait_ms = g_uwait_ns / 1e6; }
 #endif
 

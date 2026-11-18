@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// NVN direct renderer (dotfiles-25x): with the nvn_direct_renderer setting (or
+// NVN direct renderer: with the nvn_direct_renderer setting (or
 // EDEN_NX2_NVN_DIRECT=1) a game's NVN calls run in Banana Native's NVN front end (bananative/dm/gfx/nvn/hle_nvn.c: objects and command
 // records in the game's own memory) and its NVN -> Vulkan replay (bananative/dm/gfx/vk_android),
 // not in the game's NVN driver and Lichii's Maxwell GPU path. This is the C interface between
@@ -26,7 +26,7 @@ extern "C" {
 /// 16): one per NVN queue the game keeps alive, plus the replay's own work.
 #define NVN_DIRECT_MAX_QUEUES 16
 
-/// One level of one layer of an ASTC texture on a device without ASTC (dotfiles-25x.8): its
+/// One level of one layer of an ASTC texture on a device without ASTC: its
 /// block-linear ASTC blocks as the game stored them, decoded and re-compressed to BC on the GPU
 /// into image's level and layer (VK_IMAGE_LAYOUT_GENERAL, a BC1 or BC3 format).
 typedef struct nvn_direct_astc_level {
@@ -43,7 +43,7 @@ typedef struct nvn_direct_astc_level {
     int bc3; ///< BC3 (with alpha), else BC1
 } nvn_direct_astc_level;
 
-/// One NVN program stage for Lichii's shader recompiler (dotfiles-25x.11): its code and control
+/// One NVN program stage for Lichii's shader recompiler: its code and control
 /// section, and the reads of the draw's state translation makes (constant buffer words, the
 /// texture formats of handles, guest memory).
 typedef struct nvn_direct_shader_source {
@@ -138,7 +138,7 @@ typedef struct nvn_direct_device {
     void (*astc_flush)(void* context, VkCommandBuffer cmdbuf);
     void* astc_context;
     /// Whether ASTC blocks decode without alpha (Lichii's ASTC::IsOpaque): the image of such a
-    /// texture may be BC1 instead of BC3, half the memory (dotfiles-25x.25). NULL: always BC3.
+    /// texture may be BC1 instead of BC3, half the memory. NULL: always BC3.
     int (*astc_opaque)(const void* blocks, size_t size);
     /// The process's device-local memory use and the budget it should stay within (Lichii's
     /// Device::GetDeviceMemoryUsage / GetDeviceMemoryBudget, EDEN_NX2_VRAM_LIMIT_MIB included):
@@ -155,15 +155,15 @@ typedef struct nvn_direct_device {
     void* pipeline_context;
     /// Lichii's asynchronous shader building: a draw whose pipeline is not made yet is skipped
     /// until asynchronous threads have made it, instead of the frame waiting for its compile
-    /// (vka_pso.c async_threads; DM_VK_ASYNC_PSO=0/1 overrides it).
+    /// (vka_pso.c async_threads).
     int async_pipelines;
-    /// Translates a program stage with Lichii's shader recompiler (dotfiles-25x.11): 1 = done,
+    /// Translates a program stage with Lichii's shader recompiler: 1 = done,
     /// 0 = not (shader->error says why). NULL: no recompiler.
     int (*shader_translate)(void* context, const nvn_direct_shader_source* source, nvn_direct_shader* shader);
     void (*shader_free)(void* context, nvn_direct_shader* shader);
     void* shader_context;
     /// Lichii's resolution setting (Settings::ResolutionScalingInfo): render targets are made
-    /// scale_up / 2^scale_shift times their size (dotfiles-25x.34). 1 and 0: no scale.
+    /// scale_up / 2^scale_shift times their size. 1 and 0: no scale.
     uint32_t scale_up, scale_shift;
     /// Whether the replay labels its command buffers with the game's debug groups and markers
     /// (VK_EXT_debug_utils), as Lichii labels its own: a debugging tool attached, or renderer debug.
@@ -193,11 +193,11 @@ static inline uint32_t nvn_direct_scale_image_bit(uint32_t nvn_stage) {
 static inline uint32_t nvn_direct_scale_image_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 32 : 16; }
 
 /// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.
-/// Called once, after the device exists. Without it the replay has no device: submissions run
-/// their CPU-side effects only and fences complete at submit (the null backend).
+/// Called once, after the device exists. When it fails the boot falls back to GPU emulation
+/// (Core::NvnHook::DirectFailed).
 int nvn_direct_adopt_device(const nvn_direct_device* device);
 
-/// Lichii's guest memory as the replay's memory pools need it (dotfiles-25x.5).
+/// Lichii's guest memory as the replay's memory pools need it.
 typedef struct nvn_direct_memory {
     /// Maps the pages behind guest [address, address + size) (page aligned) once more, at a host
     /// range of their own: read-write and never protected, so Vulkan imports them while the
@@ -255,7 +255,7 @@ int nvn_direct_float_args(int slot);
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr,
                          uint64_t* v0);
 
-/// A presented image as Lichii's presenter shows it (dotfiles-25x.7). The image stays in
+/// A presented image as Lichii's presenter shows it. The image stays in
 /// VK_IMAGE_LAYOUT_GENERAL; it is drawn on the replay's queues and finished at fence.
 typedef struct nvn_direct_frame {
     uint64_t id;
@@ -282,13 +282,13 @@ int nvn_direct_present_take(nvn_direct_frame* frame);
 /// already), once the GPU finished drawing it (waits, bounded). 0: no frame was ever taken.
 int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
 
-/// Whether an implemented slot's call would wait for the replay's GPU now (dotfiles-25x.4):
+/// Whether an implemented slot's call would wait for the replay's GPU now:
 /// nvnSyncWait on a fenced sync the GPU has not reached, nvnQueueFinish on a queue whose last
 /// submission it has not. Lichii then sleeps the guest thread in the guest kernel until it would
 /// not, so the core runs the game's other threads meanwhile.
 int nvn_direct_call_blocks(int slot, const uint64_t x[8]);
 
-/// The emulator shuts down (dotfiles-25x.18), before the guest's cores are suspended: nothing
+/// The emulator shuts down, before the guest's cores are suspended: nothing
 /// more is replayed or submitted, every fence reads as done, and the game's threads waiting on the
 /// host inside an NVN call (a fence, the replay worker's queue, a present) return. For the rest of
 /// the process.

@@ -17,7 +17,7 @@ namespace Vulkan {
 class Device;
 class MemoryAllocator;
 
-/// NVN2 direct mode (dotfiles-25x.8): the replay's ASTC textures on a device without ASTC,
+/// NVN2 direct mode: the replay's ASTC textures on a device without ASTC,
 /// decoded by Lichii's astc_decoder.comp and re-compressed by its bc_encoder.comp, the same
 /// shaders and push constants as ASTCDecoderPass::AssembleInto and BcEncoderPass::Encode.
 /// Recorded straight into the replay's command buffer, not through a Scheduler: Lichii's
@@ -30,7 +30,7 @@ class MemoryAllocator;
 /// needs barriers against the tile before it.
 ///
 /// A level that fits one SmallTile x SmallTile tile (most mip levels and array layers) is decoded
-/// into a slot of its own instead (dotfiles-25x.13): up to SmallSlots of them are decoded back to
+/// into a slot of its own instead: up to SmallSlots of them are decoded back to
 /// back, then encoded and copied, with three barriers for the lot, at Flush (the replay's upload
 /// batch end) or when the slots run out. One tile at a time, with a decode, an encode and a copy
 /// each behind a barrier, Mario Kart World's race start (about 12,800 levels) kept the GPU in

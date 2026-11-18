@@ -66,7 +66,7 @@ static void fwake(_Atomic uint32_t *a) { syscall(SYS_futex, (uint32_t *)a, FUTEX
 #endif
 // Waits (low power) until *a may have changed from old: the exclusive monitor on its cache line wakes WFE when another core writes it (the event stream bounds the wait)
 static inline uint64_t wait_change(_Atomic uint64_t *a, uint64_t old) {
-#if defined(__x86_64__)   // dotfiles-o72.4 harness: a pause instead of WFE
+#if defined(__x86_64__)   // x86-64: a pause instead of WFE
     uint64_t v = atomic_load_explicit(a, memory_order_acquire);
     if (v == old) __builtin_ia32_pause();
 #else

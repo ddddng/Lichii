@@ -25,7 +25,7 @@ static int g_chunk_draws = -1, g_nx; static uint64_t g_chunk_d0;   // chunk(): d
 static VkCommandPool g_pool;
 static VkCommandBuffer g_cb;   // the submission being recorded (NULL without a device)
 VkCommandBuffer vka_rp_cb(void) { return g_cb; }
-typedef struct { int kind; uint32_t mode, v, type; uint64_t addr; } pop;   // kind 1 event, 2 counter report, 3 frame span, 4 the submission's frame (DM_VK_TS_LOG)
+typedef struct { int kind; uint32_t mode, v, type; uint64_t addr; } pop;   // kind 1 event, 2 counter report, 3 frame span
 static pop *g_post; static int g_npost, g_postcap;
 static uint64_t g_frame, g_stat_ops, g_stat_draws, g_stat_skipped;
 static int g_origin_ll = 1, g_queue_origin_ll = 1, g_depth_zero;
@@ -34,7 +34,6 @@ _Atomic int vka_synclog_n;   // DM_VK_SYNCLOG: lines left (mtl_wait)
 static double ms_now(void) { return (now_ns() % 1000000000000ull) / 1e6; }
 #define RC_PEND 64
 static uint64_t g_rc_ts[RC_PEND]; static int g_nrc_ts;   // timestamp reports replayed in this submission (their counter field reads 0 once written)
-static void rct_flush(void);
 
 int vka_origin_ll(void) { return __atomic_load_n(&g_origin_ll, __ATOMIC_RELAXED); }
 int vka_queue_origin_ll(void) { return g_queue_origin_ll; }
@@ -97,11 +96,11 @@ uint64_t guest_ns(void);
 // timestamp where it is recorded (TOP_OF_PIPE for TIMESTAMP_TOP, else BOTTOM_OF_PIPE), and once the submission is done each report gets the completion time less the GPU time
 // from it to the submission's last report, so two reports of one submission bracket the GPU work between them (a game's dynamic resolution and frame pacing read that).
 // Without it every report of a submission reads the same time (the completion)
-// Lichii (dotfiles-25x.26, lab): DM_NVN_GPU_TS=gpu: each report reads its own GPU timestamp, on the guest clock: the device's ticks in ns plus an offset calibrated
+// Lichii: DM_NVN_GPU_TS=gpu: each report reads its own GPU timestamp, on the guest clock: the device's ticks in ns plus an offset calibrated
 // against CLOCK_MONOTONIC (VK_KHR/EXT_calibrated_timestamps, once a second; without it the smallest completion-time-less-GPU-time seen lately), never later than the
 // completion and never before an earlier report. Not the default: Mario Kart World puts its ~13 timestamp reports a frame in one submission, so with one time a
 // submission it reads a GPU time of 0 and keeps 1080p at a 1-vblank interval; with the GPU's own times (frame span p50 10.4, p90 14.3, p99 22.7 ms: GPU work plus the
-// GPU's waits for the replay's recording) it lowered its render resolution (1248x700 passes) and presented 16% of frames at 2 vblanks (nd26g-1: 22.1 ms against 17.1).
+// GPU's waits for the replay's recording) it lowered its render resolution (1248x700 passes) and presented 16% of frames at 2 vblanks (22.1 ms against 17.1).
 // The reports stay in 614.4 MHz ticks (nvn_timestamp.h): the game reads them through nvnDeviceGetTimestampInNanoseconds (~8 calls a frame), which turns them back into ns
 enum { SEGQ = 128 };   // queries per submission slot
 static VkQueryPool g_sqp; static int g_sq_n, g_sq_base, g_seg = -1;
@@ -111,8 +110,6 @@ static int seg_ts(void) {
                      VLOG("counter timestamps: %s (DM_NVN_GPU_TS=gpu / segment / submission)", g_seg == 2 ? "each report's GPU time on the guest clock" : g_seg ? "GPU time of their place in the submission" : "one time for the whole submission"); }
     return g_seg;
 }
-// Lab: DM_VK_TS_LOG=1, a line per frame: its timestamp reports' span as written and as the GPU timed it, and every 600 frames the calls that read them
-static int ts_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_LOG"); v = e && atoi(e) > 0; } return v; }
 extern uint64_t g_t0_ns;   // nvn_direct_host.c: guest_ns() = CLOCK_MONOTONIC - g_t0_ns
 static int64_t gpu_offset(uint64_t g, uint64_t tmax) {   // (completion thread) guest ns of GPU tick 0
     static PFN_vkGetCalibratedTimestampsKHR cal; static int state; static int64_t off; static uint64_t at; static int have;
@@ -142,7 +139,6 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
     }
     int64_t off = g_seg == 2 && nq ? gpu_offset(g, tmax) : 0;
     static uint64_t last_ts;   // (gpu) the latest report written: reports stay in submission order
-    static uint64_t lf = ~0ull, f_n, f_wmin, f_wmax, f_gmin, f_gmax; uint64_t frame = ~0ull;   // DM_VK_TS_LOG: the frame being summed
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) for (int i = 0; i < n; i++) if (ops[i].kind == 2 && ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP) {
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
     for (int i = 0, q = 0; i < n; i++) {
@@ -152,32 +148,17 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             if (atomic_load(&g_fstart_f[k]) == f) { uint64_t t0 = atomic_load(&g_fstart[k]), t1 = now_ns(); if (t1 > t0) vka_floor_span(f, t1 - t0); }
             continue;
         }
-        if (ops[i].kind == 4) {   // (DM_VK_TS_LOG) the submission's frame: the frame before it is summed up
-            frame = ops[i].addr;
-            if (frame != lf && lf != ~0ull && f_n) VLOG("ts frame %llu: %llu reports, written span %.3f ms, GPU span %.3f ms, last at %.3f s", (unsigned long long)lf, (unsigned long long)f_n,
-                                                         (f_wmax - f_wmin) / 1e6, f_gmax > f_gmin ? (f_gmax - f_gmin) / 1e6 : 0.0, f_wmax / 1e9);
-            if (frame != lf) { lf = frame; f_n = 0; }
-            if (frame % 600 == 0 && !f_n) { uint64_t nvn_direct_calls(const char *); VLOG("ts calls so far: GetTimestampInNanoseconds %llu, GetCurrentTimestampInNanoseconds %llu, ReportCounter %llu, CommandBufferWaitSync %llu, QueueWaitSync %llu",
-                (unsigned long long)nvn_direct_calls("nvnDeviceGetTimestampInNanoseconds"), (unsigned long long)nvn_direct_calls("nvnDeviceGetCurrentTimestampInNanoseconds"),
-                (unsigned long long)nvn_direct_calls("nvnCommandBufferReportCounter"), (unsigned long long)nvn_direct_calls("nvnCommandBufferWaitSync"), (unsigned long long)nvn_direct_calls("nvnQueueWaitSync")); }
-            continue;
-        }
         if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last (gpu: its own GPU time)
             uint64_t gns = (uint64_t)((double)gq[q] * g_sq_ns), back = (uint64_t)((double)(tmax - gq[q]) * g_sq_ns), ns; q++;
             if (g_seg == 2) { int64_t x = (int64_t)gns + off; ns = x < 0 ? 0 : (uint64_t)x; if (ns > g) ns = g; if (ns < last_ts) ns = last_ts; last_ts = ns; }
             else ns = g > back ? g - back : 0;
-            if (frame != ~0ull && (ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP || ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
-                uint64_t w = g_seg ? ns : g;
-                if (!f_n || w < f_wmin) f_wmin = w; if (!f_n || w > f_wmax) f_wmax = w; if (!f_n || gns < f_gmin) f_gmin = gns; if (!f_n || gns > f_gmax) f_gmax = gns; f_n++;
-            }
-            if (!g_seg) goto plain;   // (DM_VK_TS_LOG with one time a submission: the query only for the log)
             uint64_t tk = nvn_timestamp_from_ns(ns), tt = ops[i].type;
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
             if (ops[i].mode) { memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8); continue; }   // (Lichii: its counter written at replay, rc_counter)
             memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
-        else plain: {
+        else {
             if (g > last_ts) last_ts = g;
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
@@ -266,7 +247,6 @@ void vka_exec_hang_report(uint64_t fence) {
              (unsigned long long)g_hrec[i].skipped, g_hrec[i].t_ns / 1e6); }
 }
 
-uint64_t vka_o72_ns[8];   // dotfiles-o72.4 harness: time in tex_prepare, tex_writeback, upload flush, vkQueueSubmit, sub_begin
 // The part's queue event waits and signals (the NVN queues as Vulkan queues, V.multi): timeline values of the events' semaphores, taken by the part's vkQueueSubmit
 enum { PWS = 16 };
 typedef struct { uint32_t nw, ns; VkSemaphore ws[PWS], ss[PWS]; uint64_t wv[PWS], sv[PWS]; } part_sync;
@@ -324,12 +304,9 @@ static unsigned slot_take(void) {
     return k;
 }
 void vka_rp_sub_begin(void) {
-    uint64_t t_o72b = now_ns();
     vka_perf_thread(0); vka_ctl_sub();
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
-    rct_flush();
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
-    if (ts_log()) { uint64_t vka_present_filled(void); post((pop){4, 0, 0, 0, vka_present_filled()}); }   // (the frame: presents filled before this submission, nvn_present.c)
     if (!vka_init()) return;
     vka_tex_budget();
     memset(&g_psy, 0, sizeof g_psy); g_qi = queue_of(S.serial); if (g_qn >= 0 && g_qshared >> g_qi & 1) g_qi = queue_move(g_qn);
@@ -355,7 +332,7 @@ void vka_rp_sub_begin(void) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ;
-        if ((seg_ts() || ts_log()) && !g_sqp) {
+        if (seg_ts() && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
             if (qf.create(V.dev, &ci, NULL, &g_sqp)) { g_sqp = VK_NULL_HANDLE; g_seg = 0; VRED("segment timestamps: no query pool: one time for the whole submission"); }
             g_sq_get = qf.get; g_sq_ns = g_ts_ns;
@@ -365,13 +342,12 @@ void vka_rp_sub_begin(void) {
     vka_gp_sub_begin(g_cb, g_frame);
     vka_enc_start(g_cb);
     vka_barrier(g_cb);   // the host's writes to guest memory before this submission (made available by the submit), and earlier submissions' writes
-    { uint64_t t_o72 = now_ns(); vka_tex_prepare(g_cb); vka_o72_ns[0] += now_ns() - t_o72; }
+    vka_tex_prepare(g_cb);
     vka_barrier(g_cb);   // the re-uploads of CPU-written textures before the submission's draws read them
     vka_draw_sub_begin(g_cb, k);
     { void vka_pso_pause(int on); vka_pso_pause(0); }   // the game submits: resumed (mtl_drain paused the pipeline threads)
     g_chunk_draws = VKA_ENV("DM_VK_CHUNK", 600);   // live: from the next submission
     g_nx = 0; g_chunk_d0 = g_stat_draws;
-    vka_o72_ns[4] += now_ns() - t_o72b;
 }
 
 // Lichii: nvnQueueWaitSync on a fence of another NVN queue. That submission was replayed before this one (the worker's FIFO); on another Vulkan queue, this submission's
@@ -423,7 +399,7 @@ static int chunk(void) {   // 1 = the part was ended and submitted
     part_arg pe = {g_cb, ts ? k * QPS + 2 * (part - 1) + 1 : UINT32_MAX, g_qi, g_psy}, pb = {next, ts ? k * QPS + 2 * part : UINT32_MAX, g_qi, {0}};
     memset(&g_psy, 0, sizeof g_psy);
     if (ts) g_slot_parts[k] = part + 1;
-    { uint64_t t_o72 = now_ns(); vka_up_flush(); vka_up_throttle(); vka_o72_ns[2] += now_ns() - t_o72; }   // the upload batch goes first: the part may use what it made (vka_dev.c "Upload batches")
+    vka_up_flush(); vka_up_throttle();   // the upload batch goes first: the part may use what it made (vka_dev.c "Upload batches")
     // With the encoder the part's end, its submit and the next part's reset and begin are made on its thread, in order with the calls before: the replay thread goes on
     if (vka_enc_call(part_submit, &pe, sizeof pe)) { vka_enc_call(part_begin, &pb, sizeof pb); vka_enc_switch(next); }
     else { part_submit(&pe); part_begin(&pb); }
@@ -455,7 +431,7 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     if (!g_cb) { vka_fence_cpu(fence, ops, n, post_run); return fence; }
     vka_rp_end();
     labels_close();
-    { uint64_t t_o72 = now_ns(); vka_tex_writeback(g_cb); vka_o72_ns[1] += now_ns() - t_o72; }   // linear textures the GPU wrote, back into their storage for the CPU
+    vka_tex_writeback(g_cb);   // linear textures the GPU wrote, back into their storage for the CPU
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
     vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     vka_enc_stop();   // every call made: the command buffer is complete
@@ -467,8 +443,9 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     g_hrec[fence % NHREC] = (typeof(g_hrec[0])){fence, g_frame, S.serial, g_stat_draws - g_sub_draws0, g_stat_ops - g_sub_ops0, g_stat_skipped - g_sub_skip0, now_ns() - g_sub_t0};
     vka_tex_gw_commit(fence);
     vka_floor_commit(tail);
-    { uint64_t t_o72 = now_ns(); vka_up_flush(); vka_up_throttle(); vka_o72_ns[2] += now_ns() - t_o72; }   // before the submission that may use what it made
-    { uint64_t t_o72 = now_ns(); if (!r) r = submit_part(g_qi, g_cb, fence, &g_psy); memset(&g_psy, 0, sizeof g_psy); vka_o72_ns[3] += now_ns() - t_o72; }
+    vka_up_flush(); vka_up_throttle();   // before the submission that may use what it made
+    if (!r) r = submit_part(g_qi, g_cb, fence, &g_psy);
+    memset(&g_psy, 0, sizeof g_psy);
     g_slot[(g_slot_i - 1) % NSLOT].fence = fence;
     if (vka_nan_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
@@ -499,22 +476,10 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
                                                 (unsigned long long)vka_fence_last(), (unsigned long long)vka_fence_queued(), r ? "yes" : "timeout", t0, ms_now(), ms_now() - t0);
         return r;
     }
-    static int slow_ms = -1; if (slow_ms < 0) { const char *e = getenv("DM_VK_SLOWSUB_MS"); slow_ms = e ? atoi(e) : 0; }   // (lab: vka_worker.c)
-    if (slow_ms > 0 && timeout_ns && vka_done() < fence) {
-        uint64_t t0 = now_ns(), q0 = vka_fence_queued(), l0 = vka_fence_last(); int r = vka_wait_fence(fence, timeout_ns); uint64_t w = now_ns() - t0;
-        if (w > (uint64_t)slow_ms * 1000000ull) VLOG("slow game wait: %.1f ms for fence %llu (at its start: last reserved %llu, queued %llu; at its end: queued %llu, %s)", w / 1e6,
-                                                    (unsigned long long)fence, (unsigned long long)l0, (unsigned long long)q0, (unsigned long long)vka_fence_queued(), r ? "done" : "timed out");
-        return r;
-    }
-    return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence, dotfiles-25x.4)
+    return vka_wait_fence(fence, timeout_ns);   // (a queue's sync: its own fence)
 }
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) {
-    static int slow_ms = -1; if (slow_ms < 0) { const char *e = getenv("DM_VK_SLOWSUB_MS"); slow_ms = e ? atoi(e) : 0; }   // (lab: vka_worker.c)
-    uint64_t t0 = slow_ms > 0 ? now_ns() : 0, q0 = slow_ms > 0 ? vka_fence_queued() : 0;
-    int r = vka_wait_done(fence, timeout_ns);
-    if (slow_ms > 0 && now_ns() - t0 > (uint64_t)slow_ms * 1000000ull) VLOG("slow game acquire wait: %.1f ms for fence %llu and every one before it (queued %llu at its start, %llu at its end, done %llu)",
-                                                                          (now_ns() - t0) / 1e6, (unsigned long long)fence, (unsigned long long)q0, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_done());
-    return r;
+    return vka_wait_done(fence, timeout_ns);
 }   // (the presenting queue's last, and every fence before it: nvn_window.c)
 void mtl_finish(void) { vka_wait_done(vka_fence_last(), UINT64_MAX); }
 void mtl_present_flush(void);
@@ -766,10 +731,10 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     if (!c->tex) return;
     vka_img *im = vka_tex_get(c->tex, g_cb);
     if (!im) return;
-    vka_tex_unscale(im, g_cb, to_tex ? "a buffer → texture copy" : "a texture → buffer copy");   // (Lichii, dotfiles-25x.34: the buffer's texels are the texture's size)
+    vka_tex_unscale(im, g_cb, to_tex ? "a buffer → texture copy" : "a texture → buffer copy");   // (Lichii: the buffer's texels are the texture's size)
     if (to_tex) vka_tex_own(im, g_cb);
     VkImageAspectFlags asp = copy_aspect(im, to_tex ? "buffer → texture copy" : "texture → buffer copy"); if (!asp) return;
-    // Lichii (dotfiles-25x.25): an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
+    // Lichii: an ASTC texture's image is BC1 / BC3 on a device without ASTC, so a copy of ASTC blocks from or into a buffer moves bytes of another block
     // size; counted, not yet decoded
     if (im->f.astc_bw && ++g_cp_astc_raw && (g_cp_astc_raw <= 8 || !(g_cp_astc_raw & (g_cp_astc_raw - 1)))) { VRED("%s of ASTC texture serial %llu %ux%u layers %u format %#x (image VkFormat %d) level %u region %dx%d: ASTC blocks copied as BC blocks (%llu so far)",
                                                                               to_tex ? "buffer → texture copy" : "texture → buffer copy", (unsigned long long)im->serial, im->d.width, im->d.height, im->layers, im->d.format, im->f.vk,
@@ -811,7 +776,7 @@ static void copy_bt(const p_copy_b2t *c, int to_tex) {
     g_stat_ops++;
     vka_barrier(g_cb);
 }
-// Lichii (dotfiles-25x.17): copies into a texture's levels its image leaves out (a sparse texture made dense from a coarser level, vka_tex.c dense_floor), and into the
+// Lichii: copies into a texture's levels its image leaves out (a sparse texture made dense from a coarser level, vka_tex.c dense_floor), and into the
 // levels it keeps, by destination, for the line every 1800 presents (lost updates of the 68-layer arrays?)
 static uint64_t g_cp_drop, g_cp_kept_sparse;
 void vka_copy_drop_stats(uint64_t *dropped, uint64_t *kept) { *dropped = g_cp_drop; *kept = g_cp_kept_sparse; }
@@ -827,7 +792,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     vka_img *s = vka_tex_get(c->src, g_cb), *d = vka_tex_get(c->dst, g_cb);
     if (!s || !d) return;
     vka_tex_own(d, g_cb);
-    if (s->f.astc_bw && d->f.astc_bw && !vka_tex_astc_copy(s, d, g_cb)) return;   // (Lichii, dotfiles-25x.25: one BC block size on both sides, BC1 for opaque ASTC)
+    if (s->f.astc_bw && d->f.astc_bw && !vka_tex_astc_copy(s, d, g_cb)) return;   // (Lichii: one BC block size on both sides, BC1 for opaque ASTC)
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     { unsigned dlt = dl; int ok = vka_img_lv(d, &dl); cp_note(d, dlt, !ok); if (!ok) return; }
@@ -838,7 +803,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = s->depth > 1, d3 = d->depth > 1, nz = c->sr.depth > 0 ? c->sr.depth : 1;
     VkImageSubresourceLayers ss = {sa, sl, s3 ? 0 : sz0 + (uint32_t)c->sr.zoffset, s3 ? 1 : (uint32_t)nz}, ds = {sa, dl, d3 ? 0 : dz0 + (uint32_t)c->dr.zoffset, d3 ? 1 : (uint32_t)nz};
     if (ss.baseArrayLayer + ss.layerCount > s->layers || ds.baseArrayLayer + ds.layerCount > d->layers) { VRED_ONCE("texture copy layers out of range"); return; }
-    // Lichii (dotfiles-25x.34): with an image at the render scale the regions are in each image's own texels, and sides that differ in size then are a blit (filtered for
+    // Lichii: with an image at the render scale the regions are in each image's own texels, and sides that differ in size then are a blit (filtered for
     // colour formats that filter; integer and depth formats blitted nearest). What neither a copy nor a blit takes (a resolve, mirroring, 3D, other formats, no blits of
     // the format) has both images made at their own size first
     const uint32_t mirror = NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT | NVN_COPY_FLAGS_MIRROR_Z_BIT;
@@ -915,36 +880,14 @@ static int rc_known(uint64_t a, uint64_t *v) {   // a counter at a: 0 for a time
     memcpy(v, (const void *)(uintptr_t)a, 8); return 1;
 }
 
-// Lichii (dotfiles-25x.17): the counter reports replayed so far, by address (the replay thread only): the type and the frame of the last report there, so a render
-// condition is decided by what the GPU would hold at that point in the replay, not by what the completion thread happens to have written into memory by then
-enum { RPT = 8192 };
-static struct { uint64_t addr; uint32_t type; uint64_t frame; } g_rpt[RPT];
-static void rpt_note(uint64_t a, uint32_t t) {
-    unsigned h = (unsigned)((a >> 3) * 0x9E3779B1u) & (RPT - 1), victim = h;
-    for (unsigned i = 0; i < 8; i++) { unsigned k = (h + i) & (RPT - 1);
-        if (g_rpt[k].addr == a || !g_rpt[k].addr) { victim = k; break; }
-        if (g_rpt[k].frame < g_rpt[victim].frame) victim = k; }
-    g_rpt[victim].addr = a; g_rpt[victim].type = t; g_rpt[victim].frame = g_frame;
-}
-static int rpt_find(uint64_t a, uint32_t *t, uint64_t *frame) {
-    unsigned h = (unsigned)((a >> 3) * 0x9E3779B1u) & (RPT - 1);
-    for (unsigned i = 0; i < 8; i++) { unsigned k = (h + i) & (RPT - 1); if (g_rpt[k].addr == a) { *t = g_rpt[k].type; *frame = g_rpt[k].frame; return 1; } if (!g_rpt[k].addr) return 0; }
-    return 0;
-}
-// DM_VK_RC_LOG=n (lab; DM_VK_RC_LOG_AFTER=<s> from that many seconds on): the first n render conditions decided, with what each side held; every 10 s the conditions decided, skipped and changed since the last decision
+// Every 10 s: the render conditions decided, skipped and changed since the last decision at the same address
 static struct { uint64_t addr; int skip; } g_rcl[1024];
 static uint64_t g_rc_n, g_rc_skip, g_rc_flip, g_rc_frame0;
-static void rc_note(const p_render_cond *rc, uint64_t x, uint64_t y, int known, int skip) {
-    static int lines = -1; if (lines < 0) lines = VKA_ENV("DM_VK_RC_LOG", 0);
+static void rc_note(const p_render_cond *rc, int skip) {
     g_rc_n++; g_rc_skip += skip;
     unsigned k = (unsigned)((rc->addr >> 3) * 0x9E3779B1u) & 1023;
     if (g_rcl[k].addr == rc->addr && g_rcl[k].skip != skip) g_rc_flip++;
     g_rcl[k].addr = rc->addr; g_rcl[k].skip = skip;
-    static uint64_t after = 1; if (after == 1) after = (uint64_t)VKA_ENV("DM_VK_RC_LOG_AFTER", 0) * 1000000000ull;
-    if (lines > 0 && guest_ns() >= after) { lines--; uint32_t tx = 99, ty = 99; uint64_t fx = 0, fy = 0; int hx = rpt_find(rc->addr, &tx, &fx), hy = rpt_find(rc->addr + 16, &ty, &fy);
-        VLOG("render cond: frame %llu queue %llu mode %u at %#llx: x %llu (last report %s type %u frame %llu), y %llu (last report %s type %u frame %llu), known %d: %s",
-             (unsigned long long)g_frame, (unsigned long long)S.serial, rc->mode, (unsigned long long)nvn_direct_guest_of(rc->addr), (unsigned long long)x, hx ? "yes" : "no", tx, (unsigned long long)fx,
-             (unsigned long long)y, hy ? "yes" : "no", ty, (unsigned long long)fy, known, skip ? "skip" : "draw"); }
     uint64_t t = now_ns();
     if (t >= g_rc_frame0 + 10000000000ull) {
         if (g_rc_frame0) VLOG("render conditions in the last 10 s: %llu decided, %llu skipped, %llu changed since the last decision at the same address",
@@ -952,42 +895,14 @@ static void rc_note(const p_render_cond *rc, uint64_t x, uint64_t y, int known, 
         g_rc_frame0 = t; g_rc_n = g_rc_skip = g_rc_flip = 0;
     }
 }
-// Lab (dotfiles-25x.17): DM_VK_RC_TRACE_FROM=<present> (+ DM_VK_RC_TRACE_N presents, default 4): every render condition and every report onto a condition's words in
-// that window, by present and queue, with the draws each condition covered (the vertex / fragment programs and the render target of its first draw)
-static struct { int on; uint64_t from, n; uint64_t addr[512]; struct { int open, skip, draws, ncol; uint64_t addr, vs, fs; const void *col, *dep; } c; } g_rct = {-1};
-uint64_t vka_present_filled(void);
-static int rct_on(void) {
-    if (g_rct.on < 0) { g_rct.from = (uint64_t)VKA_ENV("DM_VK_RC_TRACE_FROM", 0); g_rct.n = (uint64_t)VKA_ENV("DM_VK_RC_TRACE_N", 4); g_rct.on = g_rct.from > 0; }
-    if (!g_rct.on) return 0;
-    uint64_t p = vka_present_filled(); return p >= g_rct.from && p < g_rct.from + g_rct.n;
-}
-static int rct_cond_addr(uint64_t a, int add) {
-    unsigned k = (unsigned)((a >> 4) * 0x9E3779B1u) & 511;
-    for (unsigned i = 0; i < 16; i++) { unsigned j = (k + i) & 511; if (g_rct.addr[j] == a) return 1; if (!g_rct.addr[j]) { if (add) g_rct.addr[j] = a; return add; } }
-    return 0;
-}
-static void rct_flush(void) {
-    if (!g_rct.c.open) return;
-    g_rct.c.open = 0;
-    VLOG("rct p %llu q %llu   covered %#llx: %d draws %s, vs %llu fs %llu, rt %d colour %p depth %p", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial,
-         (unsigned long long)nvn_direct_guest_of(g_rct.c.addr), g_rct.c.draws, g_rct.c.skip ? "skipped" : "drawn", (unsigned long long)g_rct.c.vs, (unsigned long long)g_rct.c.fs, g_rct.c.ncol, g_rct.c.col, g_rct.c.dep);
-}
-static void rct_draw(void) {
-    if (!g_rct.c.open) return;
-    if (!g_rct.c.draws++) {
-        g_rct.c.vs = S.d.bst[0] ? S.d.bst[0]->serial : 0; g_rct.c.fs = S.d.bst[1] ? S.d.bst[1]->serial : 0;
-        g_rct.c.ncol = S.has_rt ? S.rt.n : -1; g_rct.c.col = S.has_rt && S.rt.n ? (const void *)S.rt.color[0] : NULL; g_rct.c.dep = S.has_rt ? (const void *)S.rt.depth : NULL;
-    }
-}
-// Lichii (dotfiles-25x.17): a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
+// Lichii: a report's counter word whose value does not depend on the GPU (a timestamp's under the profile's render conditions: 0; samples passed: 1;
 // the other counters: 0) is written when the replay reaches the report, in the order the GPU would write it, and the completion thread then writes only the time beside it
 // (returns 1). Written at completion, it landed at a time set by the GPU's progress: Mario Kart World reports a timestamp onto a word its CPU sets to 1 and draws only while
 // the word differs from the next (SetRenderEnableConditional, render if not equal), so whether the completion of an earlier frame's report had overwritten the CPU's newer 1
-// when the replay reached the condition decided whether those draws ran: background objects came and went from frame to frame. DM_VK_RC_REPLAY_WRITE=0: at completion
+// when the replay reached the condition decided whether those draws ran: background objects came and went from frame to frame
 static int rc_counter(uint64_t a, uint32_t t) {
-    static int on = -1; if (on < 0) on = VKA_ENV("DM_VK_RC_REPLAY_WRITE", 1) != 0;
     const int ts = t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
-    if (!on || (ts && !DM_GAME_RENDER_COND)) return 0;   // (a timestamp's counter is the time otherwise: known at completion only)
+    if (ts && !DM_GAME_RENDER_COND) return 0;   // (a timestamp's counter is the time otherwise: known at completion only)
     uint64_t v = t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0;
     memcpy(nvn_direct_writable(a), &v, 8);
     return 1;
@@ -995,18 +910,9 @@ static int rc_counter(uint64_t a, uint32_t t) {
 static void seg_write(const void *a) { struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, w.st, g_sqp, w.q); }
 // ---------- Queues that wait for each other's events ----------
 // NVN queues run side by side and may wait for each other mid-list (CommandBufferWaitEvent): Mario Kart World submits its second graphics queue first, and the two
-// hand five stages a frame back and forth through events (dotfiles-25x.14 census). The replay runs every queue's submissions in one FIFO on one Vulkan queue, so a list
-// whose wait is not met by what has been replayed so far (the signals walked, the CPU's signals in order: vka_rp_event) is parked there: the rest of it, and that queue's
-// later lists, wait; a signal walked later resumes it right there, after a barrier (the waiting queue reads what the signaler wrote), with its own queue state, and the
-// signaling list goes on where it was. Off, the waits are empty and the waiting queue runs all its stages first, on the previous frame's data.
-// Open: a parked submission's fence is its own Vulkan submission's, which may complete before its parked rest has run; a wait no signal meets within PARK_SUBS
-// submissions is let through ([RED]). Off by default (DM_VK_QUEUE_INTERLEAVE=1 on): in the dotfiles-25x.14 harness the first window frame's second queue held
-// and the first queue then held at its second wait without having replayed the signals and first wait the trace shows ahead of it (the front end's recorded
-// list lacks them), so both queues held until PARK_SUBS let them through, by then over reused command memory (crash). Not resolved
-enum { WDEPTH = 17, NPARK = 8, NEVV = 256, PARK_SUBS = 64 };
-typedef struct { const uint8_t *p[WDEPTH]; int n, skip; } walk_t;   // the next record of each list being walked (p[n-1]: the innermost); skip: the next wait passes (it was found met)
-typedef struct { uint64_t serial, since; int origin, busy; walk_t w; const uint8_t **h; int nh, ih, cap; } park_t;   // a queue held at a wait, and its lists after it (h[ih..nh))
-static park_t *g_park[NPARK]; static int g_npark;
+// hand five stages a frame back and forth through events. Event values are kept in replay order (the signals walked, the CPU's signals in order: vka_rp_event).
+enum { WDEPTH = 17, NEVV = 256 };
+typedef struct { const uint8_t *p[WDEPTH]; int n; } walk_t;   // the next record of each list being walked (p[n-1]: the innermost)
 static struct { volatile uint32_t *val; uint32_t v; } g_evv[NEVV]; static int g_nevv;   // event values in replay order (signals walked, CPU signals)
 static uint32_t ev_get(volatile uint32_t *val) { for (int i = 0; i < g_nevv; i++) if (g_evv[i].val == val) return g_evv[i].v; return *val; }
 static void ev_set(volatile uint32_t *val, int mode, uint32_t v) {
@@ -1014,9 +920,7 @@ static void ev_set(volatile uint32_t *val, int mode, uint32_t v) {
     if (i == g_nevv) { if (g_nevv == NEVV) { memmove(g_evv, g_evv + 1, (NEVV - 1) * sizeof *g_evv); i = NEVV - 1; } else g_nevv++; g_evv[i].val = val; g_evv[i].v = *val; }
     g_evv[i].v = mode == NVN_EVENT_SIGNAL_MODE_ADD ? g_evv[i].v + v : v;
 }
-static int wait_met(const uint8_t *rec) { const p_wait_event *w = (const p_wait_event *)(rec + 8); uint32_t have = ev_get(w->val); return w->mode == NVN_EVENT_WAIT_MODE_EQUAL ? have == w->value : (int32_t)(have - w->value) >= 0; }
-static int interleave_on(void) { return !V.multi && VKA_ENV("DM_VK_QUEUE_INTERLEAVE", 0) != 0; }
-// With the NVN queues as Vulkan queues (V.multi) an event's GPU signals are counted on timeline semaphores (dotfiles-25x.4): each signal walked is the next value of
+// With the NVN queues as Vulkan queues (V.multi) an event's GPU signals are counted on timeline semaphores: each signal walked is the next value of
 // the event's semaphore for its Vulkan queue, whatever 32-bit value it writes, and the values written since the last CPU write are kept with the queue and timeline
 // value that wrote them. A wait for "at least v" waits for the first of them that wrote v or more (that very signal, on its queue's semaphore), or, when none has yet,
 // for a gate (evgate) the first later signal that writes v or more signals: Mario Kart World's second queue waits for values 1, 2, 3 and 5 of one event before the first
@@ -1033,7 +937,7 @@ enum { EVG = 16 };
 // is its next value (val; pending: the highest not signalled yet, a round of waits the next signal that meets them signals at once), and the first signal walked that writes
 // a value meeting it signals the gate there. A new round starts only once the gate's last signal has run (else another gate takes the wait): the next round's signal may
 // come from another queue, and must not run before the last one. Lichii: a gate holds the waits of one Vulkan queue (q).
-// Stopgap (dotfiles-25x.97): when the signal that meets a gate is walked on the gate's own Vulkan queue, its waits sit ahead of their signal in one queue, which the GPU
+// Stopgap: when the signal that meets a gate is walked on the gate's own Vulkan queue, its waits sit ahead of their signal in one queue, which the GPU
 // never gets past, so the host signals the gate there and its waits run before the signalling part instead of after it (that ordering is given up; the other queues'
 // gates wait for the part's GPU signal). It fires only where NVN queues share a Vulkan queue: the replay gives every live NVN queue one of its own while the family has
 // enough (vka_dev.c: up to NVN_DIRECT_MAX_QUEUES, the last the host's; NVIDIA's family has 16, so 15 live NVN queues), and moves one off a queue it shares with an NVN
@@ -1073,7 +977,7 @@ static void psy_signal(VkSemaphore s, uint64_t v) {
     if (g_psy.ns < PWS) { g_psy.ss[g_psy.ns] = s; g_psy.sv[g_psy.ns++] = v; } else VRED_ONCE("more than %d event signals in one part", PWS);
 }
 // The last NEVTR queue-event steps in replay order (C: a CPU write, S: a GPU signal walked, W: a wait that ends the part, G: one on a gate, w: a wait met on its own queue), for a GPU hang's
-// report (dotfiles-25x.4): the stuck part's wait, the semaphores' values and the queue timelines then
+// report: the stuck part's wait, the semaphores' values and the queue timelines then
 enum { NEVTR = 128 };
 static struct { char k; int q; uint64_t serial, fence; const void *ev; uint32_t v; uint64_t t; } g_evtr[NEVTR]; static unsigned g_nevtr;
 static void evtr(char k, const evsem *e, uint32_t v, uint64_t t) {
@@ -1126,7 +1030,6 @@ static VkSemaphore evsem_queue(evsem *e, int q) {   // the event's semaphore for
 static void evsem_cpu(volatile uint32_t *val, int mode, uint32_t v) {
     evsem *e = evsem_of(val); if (!e) return;
     if (mode == NVN_EVENT_SIGNAL_MODE_ADD) v += e->cur;
-    if (VKA_ENV("DM_VK_EVENTLOG", 0) && g_n_sub) { static int n; if (n++ < 40) VLOG("event CPU: event %p = %u", (void *)val, v); }
     e->nw = 0;
     for (int i = 0; i < e->ng; i++) { evgate *g = &e->g[i];   // gates the CPU's value meets: by the host (a gate is signalled only where its waits are met)
         if (!g->pending || !gate_met(g, v)) continue;
@@ -1141,9 +1044,7 @@ static void evsem_signal(volatile uint32_t *val, uint32_t mode, uint32_t v) {   
     uint64_t t = s ? ++e->qv[g_qi] : 0;   // (no semaphore: a wait for it is met)
     evsem_wrote(e, v, g_qi, t);
     evtr('S', e, v, t);
-    if (VKA_ENV("DM_VK_EVENTLOG", 0)) { static int n; if (n++ < 60) VLOG("event signal: queue %d event %p value %u -> timeline %llu (frame %llu, part %d)", g_qi, (void *)val, v, (unsigned long long)t, (unsigned long long)g_frame, g_nx); }
     vka_rp_end();
-    vka_checkpoint_op(-3000 - (int)(v > 999 ? 999 : v));   // (lab: the part ends with this event signal, EDEN_NX2_NVN_CHECKPOINTS)
     if (s) psy_signal(s, t);
     for (int i = 0; i < e->ng; i++) { evgate *g = &e->g[i];
         if (!g->pending || !gate_met(g, v)) continue;
@@ -1165,16 +1066,13 @@ static void evsem_wait(const p_wait_event *w) {   // a wait walked here: met on 
     VkSemaphore s = g ? g->sem : e->w[k].q >= 0 ? e->qs[e->w[k].q] : VK_NULL_HANDLE;
     uint64_t t = g ? (g->pending = ++g->val) : e->w[k].t;
     if (g && g_qn >= 0 && g_qn < 32) g->wn |= 1u << g_qn;
-    if (VKA_ENV("DM_VK_EVENTLOG", 0)) { static int n; if (n++ < 60) VLOG("event wait: queue %d event %p %s %u -> %s %llu (frame %llu, part %d)", g_qi, (void *)w->val, eq ? "==" : ">=", w->value,
-                                                                      g ? "gate" : k < e->nw && e->w[k].q >= 0 ? "signal" : "reached", (unsigned long long)t, (unsigned long long)g_frame, g_nx); }
     if (!t || !s || (!g && e->w[k].q == g_qi)) { evtr('w', e, w->value, t); return; }   // reached already, or signalled earlier on this queue: queue order
     evtr(g ? 'G' : 'W', e, w->value, t);
     vka_rp_end();
-    vka_checkpoint_op(-4000 - (int)(w->value > 999 ? 999 : w->value));   // (lab: the part ends before this event wait)
     if (!chunk()) VRED_ONCE("an event wait in a submission of more than %d parts: the whole part waits", NCHUNK);
     psy_wait(s, t);
 }
-// Lichii (dotfiles-25x.100): CommandBufferWaitSync. The sync's fence is read as the command runs; a submission on another Vulkan queue that has not completed is waited
+// Lichii: CommandBufferWaitSync. The sync's fence is read as the command runs; a submission on another Vulkan queue that has not completed is waited
 // for from here on: the part ends and the next one waits for that queue's timeline value (as vka_rp_sub_wait for QueueWaitSync). One queue, or other NVN queues sharing
 // this one: queue order already puts the fence's submission first
 static void wait_sync(uint64_t fence) {
@@ -1185,7 +1083,7 @@ static void wait_sync(uint64_t fence) {
     for (uint32_t i = 0; i < g_psy.nw; i++) if (g_psy.ws[i] == sm) { if (g_psy.wv[i] < v) g_psy.wv[i] = v; return; }
     if (g_psy.nw < PWS) { g_psy.ws[g_psy.nw] = sm; g_psy.wv[g_psy.nw++] = v; } else VRED_ONCE("more than %d waits in one part", PWS);
 }
-// Lichii (dotfiles-25x.100): debug groups and markers as VK_EXT_debug_utils labels (V.label_begin: a debugging tool or renderer debug). Groups are kept balanced in each
+// Lichii: debug groups and markers as VK_EXT_debug_utils labels (V.label_begin: a debugging tool or renderer debug). Groups are kept balanced in each
 // of the replay's command buffers: a pop with none open there is dropped, and the ones still open when it ends are closed (labels_close)
 static int g_label_depth;
 typedef struct { VkCommandBuffer cb; int what; char name[256]; } label_arg;
@@ -1204,9 +1102,8 @@ static void label_op(const p_debug_label *l) {
     label_put(l->what, l->name);
 }
 static void labels_close(void) { for (; g_label_depth > 0; g_label_depth--) label_put(LABEL_POP, NULL); }
-static void try_resume(void);
-// Walks w until its lists end (0) or a wait is not met (1: w stops at the wait)
-static int walk(walk_t *w) {
+// Walks w until its lists end
+static void walk(walk_t *w) {
     while (w->n > 0) {
         const uint8_t *p = w->p[w->n - 1];
         op_hdr h; memcpy(&h, p, sizeof h);
@@ -1229,14 +1126,11 @@ static int walk(walk_t *w) {
         case OP_CALL: { uint64_t t; memcpy(&t, a, 8); w->p[w->n - 1] = p + h.size;
             if (w->n < WDEPTH) w->p[w->n++] = (const uint8_t *)(uintptr_t)t; else VRED_ONCE("command lists nested deeper than 16");
             continue; }
-        case OP_WAIT_EVENT: if (V.multi) { evsem_wait(a); break; }
-            if (w->skip) w->skip = 0; else if (interleave_on() && !wait_met(p)) return 1;
-            break;
-        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val}); rpt_note(val & ~7ull, 0x100 | (v & 0xff));
+        case OP_WAIT_EVENT: if (V.multi) evsem_wait(a); break;
+        case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val});
             w->p[w->n - 1] = p + h.size;
             if (V.multi) { evsem_signal((volatile uint32_t *)(uintptr_t)val, m, v); ev_set((volatile uint32_t *)(uintptr_t)val, (int)m, v); continue; }   // (the event is first met at its value before this signal)
             ev_set((volatile uint32_t *)(uintptr_t)val, (int)m, v);
-            if (g_npark) try_resume();   // (a queue held at a wait this meets goes on here)
             continue; }
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
             uint32_t q = 0;
@@ -1245,13 +1139,7 @@ static int walk(walk_t *w) {
                 struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w = {g_cb, t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q - 1};
                 if (!vka_enc_call(seg_write, &w, sizeof w)) seg_write(&w);
             }
-            if (g_rct.on > 0) { static uint64_t n[33], t0; n[t < 32 ? t : 32]++; uint64_t now = now_ns();   // (DM_VK_RC_TRACE_FROM: also the reports by counter type every 10 s)
-              if (now >= t0 + 10000000000ull) { if (t0) { char b[400]; size_t o = 0; for (int k = 0; k < 33; k++) if (n[k] && o < sizeof b - 24) o += (size_t)snprintf(b + o, sizeof b - o, " type %d: %llu", k, (unsigned long long)n[k]);
-                  VLOG("counter reports in the last 10 s:%s", b); } memset(n, 0, sizeof n); t0 = now; } }
-            if (rct_on() && (rct_cond_addr(ad, 0) || rct_cond_addr(ad - 16, 0))) { uint64_t v = 0; memcpy(&v, (const void *)(uintptr_t)ad, 8);
-                VLOG("rct p %llu q %llu R %#llx type %llu (held %llu)", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial, (unsigned long long)nvn_direct_guest_of(ad), (unsigned long long)t, (unsigned long long)v); }
             post((pop){2, rc_counter(ad, (uint32_t)t), q, (uint32_t)t, ad});
-            rpt_note(ad, (uint32_t)t);
             if ((t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP) && DM_GAME_RENDER_COND && g_nrc_ts < RC_PEND) g_rc_ts[g_nrc_ts++] = ad;
             if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());
@@ -1259,18 +1147,10 @@ static int walk(walk_t *w) {
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1; s->fenced = 1; break; }   // the fence this submission commits with
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
-            else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); rc_note(rc, x, y, known, S.rc_skip); }
-            if (g_rct.on) {
-                rct_flush();
-                if (rc->mode < 2) rct_cond_addr(rc->addr, 1);
-                if (rct_on()) { uint64_t x = 0, y = 0; if (rc->addr) { memcpy(&x, (const void *)(uintptr_t)rc->addr, 8); memcpy(&y, (const void *)(uintptr_t)(rc->addr + 16), 8); }
-                    VLOG("rct p %llu q %llu C mode %u %#llx: x %llu y %llu: %s", (unsigned long long)vka_present_filled(), (unsigned long long)S.serial, rc->mode,
-                         (unsigned long long)(rc->addr ? nvn_direct_guest_of(rc->addr) : 0), (unsigned long long)x, (unsigned long long)y, S.rc_skip ? "skip" : "draw");
-                    g_rct.c.open = 1; g_rct.c.skip = S.rc_skip; g_rct.c.draws = 0; g_rct.c.addr = rc->addr; }
-            }
+            else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); rc_note(rc, S.rc_skip); }
             break; }
         case OP_RESET_COUNTER: break;
-        case OP_ENABLE_COND: { const p_enable_cond *ec = a; int skip = ec->mode == 3;   // (Lichii, dotfiles-25x.100: as OP_RENDER_COND, for dispatches or copies)
+        case OP_ENABLE_COND: { const p_enable_cond *ec = a; int skip = ec->mode == 3;   // (Lichii: as OP_RENDER_COND, for dispatches or copies)
             if (ec->mode < 2) { uint64_t x = 0, y = 0; skip = rc_known(ec->addr, &x) && rc_known(ec->addr + 16, &y) && (ec->mode ? x == y : x != y); }
             if (ec->target) S.copy_skip = skip; else S.compute_skip = skip;
             break; }
@@ -1278,17 +1158,10 @@ static int walk(walk_t *w) {
         case OP_DEBUG_LABEL: if (g_cb && V.label_begin) label_op(a); break;
         default: break;
         }
-        switch (h.op) {   // (lab: EDEN_NX2_NVN_CHECKPOINTS, vka_draw.c)
-        case OP_CLEAR_BUF: case OP_COPY_B2B: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_CLEAR_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_BARRIER: vka_checkpoint_op(-1000 - (int)h.op); break;
-        default: break;
-        }
         switch (h.op) {
-        case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; if (cb->size <= 64) for (uint64_t o = 0; o < cb->size; o += 8) rpt_note(cb->addr + o, 0x200 | (cb->value & 0xff)); buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
+        case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
         case OP_COPY_B2B: if (g_cb && !S.copy_skip) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
-        case OP_UPDATE_UB: { static uint64_t wa = ~0ull; if (wa == ~0ull) { const char *e = getenv("DM_VK_WATCHADDR"); wa = e ? strtoull(e, NULL, 16) : 0; }
-            uint64_t d_, n_; memcpy(&d_, a, 8); memcpy(&n_, (const uint8_t *)a + 8, 8);
-            if (wa && wa >= d_ && wa < d_ + n_) { static int k; if (k++ < 16) VLOG("watchaddr: frame %llu queue %llu UpdateUniformBuffer %#llx+%#llx covers it", (unsigned long long)g_frame, (unsigned long long)S.serial, (unsigned long long)d_, (unsigned long long)n_); } }
-            g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); } break;
+        case OP_UPDATE_UB: g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); } break;
         case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; break;
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
@@ -1299,8 +1172,8 @@ static int walk(walk_t *w) {
         case OP_COPY_T2B: if (g_cb && !S.copy_skip) copy_bt(a, 0); break;
         case OP_COPY_T2T: if (g_cb && !S.copy_skip) copy_t2t(a); break;
         case OP_BARRIER: if (g_cb && !bar_kept) vka_barrier(g_cb); break;
-        case OP_DRAW: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, draw_rec(a, h.size, &t), NULL); } break;
-        case OP_DRAW_IDX: if (g_rct.c.open) rct_draw(); if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
+        case OP_DRAW: if (!S.rc_skip && g_cb) { p_draw t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, draw_rec(a, h.size, &t), NULL); } break;
+        case OP_DRAW_IDX: if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); } break;
         case OP_DISPATCH: if (g_cb && !S.compute_skip) vka_dispatch(&S.d, a); break;
         case OP_DRAW_TEX: not_yet(h.op); break;
         case OP_DLSS: if (g_cb) { vka_dlss_eval(g_cb, a); g_stat_ops++; } break;
@@ -1310,42 +1183,12 @@ static int walk(walk_t *w) {
         if (h.size < 8) { VRED("command record of size %u at %p (op %u): the list is cut here", h.size, (const void *)p, h.op); w->n--; continue; }
         w->p[w->n - 1] = p + h.size;
     }
-    return 0;
-}
-static park_t *park_of(uint64_t serial) { for (int i = 0; i < g_npark; i++) if (g_park[i]->serial == serial) return g_park[i]; return NULL; }
-static void park_drop(park_t *k) { for (int i = 0; i < g_npark; i++) if (g_park[i] == k) { g_park[i] = g_park[--g_npark]; break; } free(k->h); free(k); }
-// Resumes the held queues whose wait is met now (or that waited PARK_SUBS submissions), each with its own queue state, after a barrier; the current queue's state back after
-static void try_resume(void) {
-    static int depth; if (depth > 4) return;
-    for (int i = 0; i < g_npark; i++) {
-        park_t *k = g_park[i];
-        if (k->busy || k->serial == S.serial) continue;
-        int stale = g_n_sub - k->since > PARK_SUBS;
-        if (!stale && !wait_met(k->w.p[k->w.n - 1])) continue;
-        if (stale) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("queue %llu waited %d submissions for an event no replayed signal met: let through", (unsigned long long)k->serial, PARK_SUBS); }
-        k->busy = 1; depth++;
-        uint64_t cur = S.serial; int corig = g_queue_origin_ll;
-        if (g_cb) { vka_rp_end(); vka_barrier(g_cb); }
-        vka_rp_queue_activate(k->serial); g_queue_origin_ll = k->origin;
-        k->w.skip = 1; int parked = walk(&k->w);
-        while (!parked && k->ih < k->nh) { k->w.n = 1; k->w.skip = 0; k->w.p[0] = k->h[k->ih++]; parked = walk(&k->w); }
-        if (g_cb) vka_rp_end();
-        vka_rp_queue_activate(cur); g_queue_origin_ll = corig;
-        depth--; k->busy = 0;
-        if (parked) k->since = g_n_sub; else { park_drop(k); i = -1; }   // (one queue's progress may meet another's wait: scan again)
-    }
 }
 void vka_rp_event(volatile uint32_t *val, int mode, uint32_t v) { ev_set(val, mode, v); if (V.multi && vka_ok()) evsem_cpu(val, mode, v); }
 void vka_rp_exec(const uint8_t *handle, uint64_t fence) {
     if (fence) g_cur_fence = fence;
     if (!handle) return;
-    if (g_npark) try_resume();   // (CPU signals since, or a wait held too long)
-    park_t *k = park_of(S.serial);
-    if (k) { if (k->nh == k->cap) { k->cap = k->cap ? 2 * k->cap : 8; k->h = realloc(k->h, (size_t)k->cap * sizeof *k->h); } k->h[k->nh++] = handle; return; }   // behind its held list
-    walk_t w = {{handle}, 1, 0};
-    if (!walk(&w)) return;
-    if (g_npark == NPARK) { VRED_ONCE("more than %d queues held at event waits: the wait is let through", NPARK); w.skip = 1; walk(&w); return; }
-    k = calloc(1, sizeof *k); k->serial = S.serial; k->origin = g_queue_origin_ll; k->since = g_n_sub; k->w = w; g_park[g_npark++] = k;
-    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("queue %llu waits for an event no replayed signal has met yet: its commands are held until one does (DM_VK_QUEUE_INTERLEAVE)", (unsigned long long)S.serial);
+    walk_t w = {{handle}, 1};
+    walk(&w);
 }
 #endif
