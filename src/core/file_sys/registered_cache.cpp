@@ -1338,6 +1338,25 @@ bool ManualContentProvider::AddEntriesFromContainer(VirtualFile file, bool only_
 void ManualContentProvider::ClearAllEntries() {
     entries.clear();
     multi_version_entries.clear();
+    application_files.clear();
+}
+
+void ManualContentProvider::AddApplicationFile(u64 program_id, VirtualFile file) {
+    application_files.insert_or_assign(program_id, std::move(file));
+}
+
+VirtualFile ManualContentProvider::GetApplicationFile(u64 program_id) const {
+    const auto it = application_files.find(program_id);
+    return it != application_files.end() ? it->second : nullptr;
+}
+
+std::vector<u64> ManualContentProvider::ListApplicationFiles() const {
+    std::vector<u64> program_ids;
+    program_ids.reserve(application_files.size());
+    for (const auto& [program_id, file] : application_files) {
+        program_ids.push_back(program_id);
+    }
+    return program_ids;
 }
 
 void ManualContentProvider::Refresh() {}

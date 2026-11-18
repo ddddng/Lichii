@@ -527,7 +527,7 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
             std::vector<u64> program_ids;
             loader->ReadProgramIds(program_ids);
 
-            const auto addEntry = [this, physical_name,
+            const auto addEntry = [this, physical_name, file,
                                    parent_dir](std::unique_ptr<Loader::AppLoader>& app_loader,
                                                const u64 id) {
                 std::vector<u8> icon;
@@ -572,6 +572,7 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                 RecordEvent([=](GameListModel* model) {
                     model->AddEntry(pending->Release(), parent_dir);
                 });
+                provider->AddApplicationFile(id, file);
             };
 
             if (res2 == Loader::ResultStatus::Success && program_ids.size() > 1 &&

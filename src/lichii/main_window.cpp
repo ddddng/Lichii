@@ -756,7 +756,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         } else if (lp.launch_setup) {
             LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::Starter), std::nullopt);
         } else if (lp.launch_qlaunch) {
-            LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
+            // The HOME Menu lists the game list's games, and booting stops the scan.
+            connect(
+                game_list, &GameList::PopulatingCompleted, this,
+                [this] {
+                    LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
+                },
+                Qt::SingleShotConnection);
         } else if (lp.launch_hlaunch) {
             std::filesystem::path const sd_dir =
                 Common::FS::GetEdenPathString(Common::FS::EdenPath::SDMCDir);

@@ -269,6 +269,12 @@ public:
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
 
+    /// The game file the frontend's game list shows for an application. The HOME Menu lists these
+    /// next to installed applications, which covers games with no program NCA (NUP, NX).
+    void AddApplicationFile(u64 program_id, VirtualFile file);
+    VirtualFile GetApplicationFile(u64 program_id) const;
+    std::vector<u64> ListApplicationFiles() const;
+
     void Refresh() override;
     bool HasEntry(u64 title_id, ContentRecordType type) const override;
     std::optional<u32> GetEntryVersion(u64 title_id) const override;
@@ -285,6 +291,7 @@ public:
 private:
     std::map<std::tuple<TitleType, ContentRecordType, u64>, VirtualFile> entries;
     std::vector<ExternalUpdateEntry> multi_version_entries;
+    std::map<u64, VirtualFile> application_files;
 };
 
 class ExternalContentProvider : public ContentProvider {
