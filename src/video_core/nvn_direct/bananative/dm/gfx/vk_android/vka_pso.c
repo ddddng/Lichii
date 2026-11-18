@@ -795,7 +795,7 @@ static const char PW_MAGIC[8] = "NXVKPW1", PW_MAGIC2[8] = "NXVKPW2";
 static uint32_t gkey_layout(void) {
     static const uint32_t o[] = {offsetof(vka_gkey, dfmt), offsetof(vka_gkey, ncolor), offsetof(vka_gkey, samples), offsetof(vka_gkey, topo), offsetof(vka_gkey, poly_mode),
         offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att), offsetof(vka_gkey, sample_mask), offsetof(vka_gkey, vin_static),
-        offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 3 /* the format's own version */};
+        offsetof(vka_gkey, vin_types), offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 4};
     return (uint32_t)fnv(o, sizeof o, 1469598103934665603ull);
 }
 // A record of the file before it is used: a file from another build, a truncated or damaged one must not reach pstate_fill (an ncolor of 200 indexes past cf[8]).
@@ -962,8 +962,8 @@ static void *pw_main(void *a) {
         vka_shader *sh[VKA_NSTAGE]; memset(sh, 0, sizeof sh); int bad = !pw_rec_ok(&r, kb);
         vka_gkey k; memset(&k, 0, sizeof k); if (!bad && r.kind != 1) memcpy(&k, kb, r.klen < sizeof k ? r.klen : sizeof k);
         if (bad) {}
-        else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0], 1))) bad = 1; }
-        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s], k.gl_depth))) bad = 1;   // (Lichii: recompiled in the record's depth mode)
+        else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0], 1, 0))) bad = 1; }
+        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s], k.gl_depth, s == 0 ? k.vin_types : 0))) bad = 1;
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == 1, &lay)) bad = 1;
         int made = 0;
@@ -1242,7 +1242,7 @@ static void lib_ahead_make(vka_shader *s, int part, const vka_gkey *k, int scrat
 }
 static void lib_ahead_one(const ahead_item *it) {
     vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
-    lib_ahead_make(vka_shader_by_key(it->key, k.gl_depth), it->part, &k, 0);
+    lib_ahead_make(vka_shader_by_key(it->key, k.gl_depth, 0), it->part, &k, 0);
 }
 // Lichii: a speculative translation's compute pipeline, for the caches only (nvn_recompile.c spec_one): made and destroyed, so the first dispatch of the program makes
 // its own from the pipeline and driver caches instead of compiling on the frame path when the two translations are the same. s is a vka_shader_scratch one

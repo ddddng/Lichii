@@ -403,13 +403,13 @@ typedef struct vka_shader {
 } vka_shader;
 // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped). Lichii: depth, recompiled shaders' depth mode
 // (1 + gl_depth: the pre-rasterization stages are translated for one, vka_rc_shader; 0: any)
-typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; uint8_t depth; } vka_progsh;
+typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; uint32_t vin_types; uint8_t depth; } vka_progsh;
 int vka_progsh_current(const vka_progsh *ps);   // 1 = ps's shaders fit the depth mode now
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
 int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no program
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
-vka_shader *vka_shader_by_key(uint64_t key, int gl_depth);   // the recompiled shader of key in depth mode gl_depth (vka_rc_by_key); NULL = not translated or refused
+vka_shader *vka_shader_by_key(uint64_t key, int gl_depth, uint32_t vin_types);
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_SET_FS 2   // Lichii: a graphics pipeline's pixel shader resources: their own set (vka_pso.c layout_slow; its module remapped, vka_shader.c)
@@ -424,10 +424,11 @@ VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t sma
 void vka_rc_keep(const prog_t *p);
 typedef struct vka_dstate vka_dstate;
 void vka_rc_draw(const vka_dstate *d);
+uint32_t vka_rc_vin_types(void);
 vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t prim_inputs, int gl_depth, int *st);
 int vka_rc_stage(uint64_t key);         // NVN stage of a kept control section, -1 none
 uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic outputs per primitive
-vka_shader *vka_rc_by_key(uint64_t key, int gl_depth);
+vka_shader *vka_rc_by_key(uint64_t key, int gl_depth, uint32_t vin_types);
 unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' shader keys of NVN stage st (malloc'd)
 void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs
 vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key);   // a shader for a cache-only stage library: not in the shader table, given back with vka_shader_scratch_free
@@ -443,6 +444,7 @@ typedef struct {   // what a graphics pipeline is made from beyond its shaders a
     uint32_t cfmt[8], dfmt, sfmt;     // attachment formats (VK_FORMAT_UNDEFINED = none)
     uint8_t ncolor, samples, topo, poly_mode, depth_clamp, a2c, logic_en, logic_op, gl_depth, fs_variant, alpha_func, gs_fx;   // fs_variant: DMSH_VK_MOD_*; alpha_func: NVN_ALPHA_FUNC_* or 0; gs_fx: 1 = the geometry module with the claim (vka_shader_gs_module)
     uint32_t vin_u, vin_s;            // float vertex inputs fed UINT / SINT formats: retyped in the vertex module (vka_spvpatch.c), by location
+    uint32_t vin_types;
     struct { uint8_t en, src, dst, op, srca, dsta, opa, mask; } att[8];
     // Lichii: the sample mask (of the key's samples), the patch's control points (0: no tessellation), conservative rasterization (cons: on, dilate:
     // quarter pixels), the last vertex provoking, VK_NV_viewport_swizzle's swizzles of viewport 0 (0: none), the exclusive scissor's dynamic state, a shading rate attachment
@@ -469,7 +471,7 @@ typedef struct vka_dstate {   // (named: nvn_recompile.c declares it ahead)
     vka_bstate b;
     const prog_t *bst[VKA_NSTAGE], *cprog;   // the program bound per graphics stage (NVN stage bits; [5] unused, [6] / [7] NVN2's task and mesh bits), the compute program
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
+    va_st attr[16]; int nattr; uint32_t vin_types; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; uint8_t vp_sw[16][4]; p_depth_bounds dbounds;
     float blend_color[4], alpha_ref;
