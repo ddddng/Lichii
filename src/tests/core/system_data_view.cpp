@@ -50,6 +50,7 @@
 #include "core/hle/service/set/system_settings_server.h"
 #include "core/hle/service/system_data_view.h"
 #include "core/loader/deconstructed_rom_directory.h"
+#include "core/reporter.h"
 #include "tests/audio_core/sysmix_test_context.h"
 
 namespace {
@@ -228,6 +229,55 @@ std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesyst
 }
 
 } // namespace
+
+TEST_CASE("Scratch Core leaves the shared filesystem access log untouched",
+          "[core][native_home_reporter]") {
+    using Common::FS::EdenPath;
+    ScopedSystemTestContext environment;
+    const auto sdmc = Common::FS::GetEdenPath(EdenPath::NANDDir) / "sdmc";
+    const auto previous_sdmc = Common::FS::GetEdenPath(EdenPath::SDMCDir);
+    REQUIRE(std::filesystem::create_directory(sdmc));
+    Common::FS::SetEdenPath(EdenPath::SDMCDir, sdmc);
+    SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::SDMCDir, previous_sdmc); };
+
+    const auto log = sdmc / "FsAccessLog.txt";
+    const auto read_log = [&] {
+        std::ifstream file{log, std::ios::binary};
+        REQUIRE(file.is_open());
+        return std::string{std::istreambuf_iterator<char>{file}, {}};
+    };
+    constexpr std::string_view sentinel = "Ordinary session access log";
+    {
+        std::ofstream file{log, std::ios::binary};
+        REQUIRE(file.is_open());
+        file << sentinel;
+    }
+    {
+        Core::System scratch{Service::Account::ProfileStorage::Scratch};
+        CHECK(read_log() == sentinel);
+        scratch.GetReporter().SaveFSAccessLog("scratch append");
+    }
+    CHECK(read_log() == sentinel);
+    REQUIRE(std::filesystem::remove(log));
+    {
+        Core::System scratch{Service::Account::ProfileStorage::Scratch};
+        CHECK_FALSE(std::filesystem::exists(log));
+        scratch.GetReporter().SaveFSAccessLog("scratch append");
+    }
+    CHECK_FALSE(std::filesystem::exists(log));
+
+    std::filesystem::remove(log);
+    {
+        Core::System ordinary;
+        CHECK(read_log().empty());
+        ordinary.GetReporter().SaveFSAccessLog(sentinel);
+        CHECK(read_log() == sentinel);
+    }
+    {
+        Core::System ordinary;
+        CHECK(read_log().empty());
+    }
+}
 
 TEST_CASE("Native HOME accounts do not persist across Core and ACC lifetimes",
           "[core][native_home_accounts]") {
