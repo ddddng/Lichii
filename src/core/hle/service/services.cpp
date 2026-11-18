@@ -75,7 +75,8 @@ namespace Service {
 
 Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                    std::stop_token token,
-                   std::shared_ptr<const SystemDataView> isolated_system_data) {
+                   std::shared_ptr<const SystemDataView> isolated_system_data,
+                   std::shared_ptr<Glue::Time::TimeZoneBinary> isolated_time_zone) {
     auto& kernel = system.Kernel();
 
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
@@ -125,7 +126,9 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
                            Set::LoopProcess(s, isolated_system_data);
                        }},
         {"psc",        &PSC::LoopProcess},
-        {"glue",       &Glue::LoopProcess},
+        {"glue",       [isolated_time_zone = std::move(isolated_time_zone)](Core::System& s) {
+                           Glue::LoopProcess(s, isolated_time_zone);
+                       }},
         {"grc",        &GRC::LoopProcess},
         {"hid",        &HID::LoopProcess},
         {"jit",        &JIT::LoopProcess},
