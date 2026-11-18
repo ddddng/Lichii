@@ -62,6 +62,7 @@
 #include "core/hle/service/filesystem/fsp/fs_read_trace.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
+#include "core/hle/service/glue/time/time_zone_binary.h"
 #include "core/hle/service/psc/time/static.h"
 #include "core/hle/service/psc/time/steady_clock.h"
 #include "core/hle/service/psc/time/system_clock.h"
@@ -438,6 +439,16 @@ struct System::Impl {
     SystemResultStatus SetupForApplicationProcess(
         System& system, Frontend::EmuWindow& emu_window,
         std::shared_ptr<const Service::SystemDataView> isolated_system_data = {}) {
+        std::shared_ptr<Service::Glue::Time::TimeZoneBinary> isolated_time_zone;
+        if (isolated_system_data) {
+            isolated_time_zone = std::make_shared<Service::Glue::Time::TimeZoneBinary>(system);
+            const auto result = isolated_time_zone->Mount(isolated_system_data);
+            if (result.IsFailure()) {
+                LOG_ERROR(Core, "Cannot mount isolated time-zone data: {:#x}", result.raw);
+                return SystemResultStatus::ErrorSystemFiles;
+            }
+        }
+
         host1x_core.emplace(system);
         VideoCore::CreateGPU(gpu_core, emu_window, system);
         if (!gpu_core)
@@ -447,7 +458,7 @@ struct System::Impl {
 
         service_manager = std::make_shared<Service::SM::ServiceManager>(kernel);
         services.emplace(service_manager, system, stop_event.get_token(),
-                         std::move(isolated_system_data));
+                         std::move(isolated_system_data), std::move(isolated_time_zone));
 
         is_powered_on = true;
         exit_locked = false;
