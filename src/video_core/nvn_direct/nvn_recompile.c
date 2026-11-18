@@ -114,7 +114,7 @@ static rc_map g_ctl;      // key -> rc_control
 static rc_map g_sh;       // key -> rc_shader
 static uint64_t rc_key(uint64_t k) { return k ? k : 1; }   // (0 marks an empty slot)
 
-static void spec_add(uint64_t key, uint64_t data, const rc_control* control);
+static void spec_add(uint64_t key, uint64_t data, const rc_control* control, const uint8_t* source_control);
 // nvnProgramSetShaders (mtl_prog_prefetch): the control sections, while they are valid
 void vka_rc_keep(const prog_t* p) {
     for (unsigned i = 0; i < p->nstage && i < 6; i++) {
@@ -139,7 +139,7 @@ void vka_rc_keep(const prog_t* p) {
             if (copy) { copy->stage = (uint32_t)st; copy->size = size; memcpy(copy->bytes, c, size); rc_put(&g_ctl, key, copy); }
         }
         pthread_mutex_unlock(&g_mu);
-        if (copy) spec_add(key, p->sd[i].data, copy);
+        if (copy) spec_add(key, p->sd[i].data, copy, c);
     }
 }
 static const rc_control* rc_control_of(uint64_t key) {
@@ -701,11 +701,14 @@ int vka_rc_park(uint64_t timeout_ns) {
     while (atomic_load(&g_spec_busy) && now_ns() - t0 < timeout_ns) usleep(1000);
     return !atomic_load(&g_spec_busy);
 }
-static void spec_add(uint64_t key, uint64_t data, const rc_control* control) {
+static void spec_add(uint64_t key, uint64_t data, const rc_control* control, const uint8_t* source_control) {
     if ((control->stage > 1 && control->stage != 5) || vka_stopping()) return;
     uint32_t size;
     uint8_t* code = rc_copy_code(data, control, &size);
     if (!code) return;
+    uint8_t snapshot_key[8];
+    nvn_shader_hash(source_control, code, size, snapshot_key);
+    if (rc_key(vka_shlib_key(snapshot_key)) != key) { free(code); return; }
     pthread_mutex_lock(&g_spec_mu);
     static int on;
     if (!on) {

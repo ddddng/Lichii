@@ -396,10 +396,12 @@ uint64_t nvn_pool_live(const void *pool, unsigned *flags, int *sparse) {
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     pthread_mutex_lock(&g_pl_mu);   // (a pool initialized again without a Finalize: readers see its new fields only with its new serial)
+    const int reinit = pl_find(o) != NULL;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     pl_put(o, ++g_plgen); pthread_mutex_unlock(&g_pl_mu);
+    if (reinit) nvn_dirty_remove_range(o);
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range, which its mappings fill (see MapVirtual)
-    else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); pc_add(o); }
+    else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o, o->mem, o->size); pc_add(o); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
@@ -407,12 +409,12 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
 static void hostseg_release(uintptr_t lo, uintptr_t hi);   // (command memory, below)
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { pthread_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { pthread_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); nvn_dirty_remove_range(p); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  // Lichii: recordings in the pool's memory are dead with it, and so are the host-lent segments they continue in (the game's out-of-memory callback is never called
  // here, so a game that adds command memory only from it never gives that memory out again, and those segments were reclaimed by nothing else)
  hostseg_release((uintptr_t)((pool_t *)p)->mem, (uintptr_t)((pool_t *)p)->mem + ((pool_t *)p)->size);
- nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
+ mtl_pool_del(((pool_t *)p)->mem); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
 static void ft_flush(const uint8_t *a, uint64_t n);
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {   // see ft_add and nvn_flushed
     const pool_t *o = (const pool_t *)p;
@@ -832,24 +834,29 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
     memcpy(&own, c + 0x20, 4);
     *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
 }
+void nvn_shader_hash(const void *control, const void *code, uint32_t size, uint8_t out[8]) {
+    uint32_t nctl, ncode;
+    nvn_ctl_lens(control, &nctl, &ncode);
+    uint8_t md[32]; plat_sha256_t hc; plat_sha256_init(&hc);
+    // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
+    // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
+    if (nvn2_ctl(control)) {
+        uint8_t ctl[NVN2_KEY_CTL]; memcpy(ctl, control, NVN2_KEY_CTL); memset(ctl + 0x30, 0, 4);
+        plat_sha256_update(&hc, ctl, NVN2_KEY_CTL);
+    } else if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
+        uint8_t ctl[0x880]; memcpy(ctl, control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
+        plat_sha256_update(&hc, ctl, nctl);
+    } else plat_sha256_update(&hc, control, nctl);
+    if (code && size == ncode) plat_sha256_update(&hc, code, size);
+    plat_sha256_final(md, &hc); memcpy(out, md, 8);
+}
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl; void *mb; uint64_t mo;
     if (!sd->control) return 0;
     nvn_ctl_lens(sd->control, &nctl, &ncode);
     int code = sd->data && ncode && ncode < (1u << 24);
     if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
-    uint8_t md[32]; plat_sha256_t hc; plat_sha256_init(&hc);
-    // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
-    // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
-    if (nvn2_ctl(sd->control)) {
-        uint8_t ctl[NVN2_KEY_CTL]; memcpy(ctl, sd->control, NVN2_KEY_CTL); memset(ctl + 0x30, 0, 4);
-        plat_sha256_update(&hc, ctl, NVN2_KEY_CTL);
-    } else if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
-        uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
-        plat_sha256_update(&hc, ctl, nctl);
-    } else plat_sha256_update(&hc, sd->control, nctl);
-    if (code) plat_sha256_update(&hc, (const void *)(uintptr_t)sd->data, ncode);
-    plat_sha256_final(md, &hc); memcpy(out, md, 8);
+    nvn_shader_hash(sd->control, code ? (const void *)(uintptr_t)sd->data : NULL, ncode, out);
     return 1;
 }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
