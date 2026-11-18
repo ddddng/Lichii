@@ -35,7 +35,6 @@ IOlscServiceForSystemService::IOlscServiceForSystemService(Core::System& system_
         {204, nullptr, "ClearDataTransferPolicyCache"},
         {205, nullptr, "RequestGetDataTransferPolicyAsync"},
         {206, nullptr, "Unknown206"}, //21.0.0+
-        {209, D<&IOlscServiceForSystemService::GetDataTransferPolicy>, "GetDataTransferPolicy"}, //22.5.0+
         {300, nullptr, "GetUserSaveDataProperty"},
         {301, nullptr, "SetUserSaveDataProperty"},
         {302, nullptr, "Unknown302"}, //21.0.0+
