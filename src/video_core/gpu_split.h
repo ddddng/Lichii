@@ -489,10 +489,10 @@ public:
     /// runs it, and only noted releases to other words sent after it; or memory, once the back ran
     /// every write sent there, shader stores included, and each landed. None, with `why`, where
     /// queued work may still change it or acquires read it elsewhere. Every release the front did
-    /// not note must have landed for either.
+    /// not note must have landed for either. Sends the state writes gathered so far first.
     [[nodiscard]] std::optional<SettledWord> SettledWordAt(const Tegra::MemoryManager& memory,
                                                            GPUVAddr address, u64 device_address,
-                                                           AcquireUnsettled& why) const;
+                                                           AcquireUnsettled& why);
     /// A release just sent writes `size` bytes from `device_address` that the front does not
     /// value (a report's timestamp, a mirrored release): noted word by word as unknown, so that
     /// nothing takes memory there for what the back finds until they landed.
