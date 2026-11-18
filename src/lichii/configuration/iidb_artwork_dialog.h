@@ -39,7 +39,7 @@ private:
     void LoadVisibleThumbnail();
     void ClearPreview();
     void Preview();
-    void UpdateSearchButton();
+    void UpdateRequestControls();
 
     struct GalleryItem {
         Asset asset;
@@ -64,12 +64,14 @@ private:
 
     QLineEdit* title;
     QPushButton* search_button;
+    QPushButton* key_button;
     QComboBox* matches;
     QTabBar* categories;
     QListWidget* gallery;
     QPushButton* more;
     QPushButton* preview_button;
     QLabel* status;
+    QLabel* thumbnail_status;
     QLabel* source_preview;
     QLabel* icon_preview;
     QLabel* preview_status;

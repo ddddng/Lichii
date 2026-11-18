@@ -25,7 +25,7 @@ namespace {
 
 using namespace Qt::StringLiterals;
 
-enum class Storage { Empty, SessionOnly, Saved, VaultUnavailable, DeleteFailed };
+enum class Storage { Empty, SessionOnly, Saved, VaultUnavailable, SaveFailed, DeleteFailed };
 
 struct Credentials {
     QByteArray key;
@@ -81,12 +81,10 @@ void UseKey(QByteArray key, bool remember) {
     auto& credentials = CurrentCredentials();
     credentials = {std::move(key), Storage::SessionOnly};
 #ifdef _WIN32
-    if (remember && WriteVaultKey(credentials.key)) {
-        credentials.storage = Storage::Saved;
+    if (remember) {
+        credentials.storage = WriteVaultKey(credentials.key) ? Storage::Saved : Storage::SaveFailed;
     } else if (!DeleteVaultKey()) {
         credentials.storage = Storage::DeleteFailed;
-    } else if (remember) {
-        credentials.storage = Storage::VaultUnavailable;
     }
 #else
     Q_UNUSED(remember);
@@ -220,6 +218,11 @@ private:
         case Storage::VaultUnavailable:
             storage_status->setText(tr("Windows Credential Manager is unavailable. "
                                        "Keys are available for this session only."));
+            break;
+        case Storage::SaveFailed:
+            storage_status->setText(
+                tr("Lichii couldn't save this key in Windows Credential Manager. "
+                   "It is available for this session only. Any saved key is unchanged."));
             break;
         case Storage::DeleteFailed:
             storage_status->setText(
