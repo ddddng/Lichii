@@ -38,10 +38,14 @@ NcaReader::NcaReader()
 NcaReader::~NcaReader() {}
 
 Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfiguration& crypto_cfg,
-                             const NcaCompressionConfiguration& compression_cfg) {
+                             const NcaCompressionConfiguration& compression_cfg,
+                             NcaHeaderSignaturePolicy signature_policy) {
     // Validate preconditions.
     ASSERT(base_storage != nullptr);
     ASSERT(m_body_storage == nullptr);
+
+    const bool require_signature = signature_policy == NcaHeaderSignaturePolicy::RequireVerified;
+    R_UNLESS(!require_signature || crypto_cfg.verify_sign1 != nullptr, ResultNotImplemented);
 
     // Create the work header storage storage.
     VirtualFile work_header_storage;
@@ -86,6 +90,8 @@ Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfigurat
 
     // Validate the magic.
     if (const Result magic_result = CheckNcaMagic(m_header.magic); R_FAILED(magic_result)) {
+        R_UNLESS(!require_signature, magic_result);
+
         // Try to use a plaintext header, as a decrypted NCA (DNCA magic) has.
         base_storage->ReadObject(std::addressof(m_header), 0);
         R_UNLESS(m_header.magic == NcaHeader::MagicDecrypted ||
@@ -102,6 +108,7 @@ Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfigurat
     }
 
     // Verify the header sign1.
+    bool signature_valid = false;
     if (crypto_cfg.verify_sign1 != nullptr) {
         const u8* sig = m_header.header_sign_1.data();
         const size_t sig_size = NcaHeader::HeaderSignSize;
@@ -110,10 +117,11 @@ Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfigurat
         const size_t msg_size =
             NcaHeader::Size - NcaHeader::HeaderSignSize * NcaHeader::HeaderSignCount;
 
-        m_is_header_sign1_signature_valid = crypto_cfg.verify_sign1(
-            sig, sig_size, msg, msg_size, m_header.header1_signature_key_generation);
+        signature_valid = crypto_cfg.verify_sign1(sig, sig_size, msg, msg_size,
+                                                  m_header.header1_signature_key_generation);
 
-        if (!m_is_header_sign1_signature_valid) {
+        R_UNLESS(!require_signature || signature_valid, ResultInvalidNcaSignature);
+        if (!signature_valid) {
             LOG_WARNING(Common_Filesystem, "Invalid NCA header sign1");
         }
     }
@@ -166,6 +174,7 @@ Result NcaReader::Initialize(VirtualFile base_storage, const NcaCryptoConfigurat
     // Set our storages.
     m_header_storage = std::move(work_header_storage);
     m_body_storage = std::move(base_storage);
+    m_is_header_sign1_signature_valid = signature_valid;
 
     R_SUCCEED();
 }
