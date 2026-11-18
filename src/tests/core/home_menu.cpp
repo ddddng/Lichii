@@ -165,7 +165,7 @@ TEST_CASE("The HOME Menu lists game list applications next to installed ones",
           "[core][ns][home_menu]") {
     ScopedSystemTestContext environment;
     Core::System system;
-    system.Initialize();
+    REQUIRE(system.Initialize());
     std::optional<Kernel::KThread> thread;
     thread.emplace(system.Kernel());
     REQUIRE(Kernel::KThread::InitializeDummyThread(system, &*thread, nullptr).IsSuccess());
