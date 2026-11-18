@@ -5,6 +5,9 @@
 
 #include "core/hle/service/services.h"
 
+#include <functional>
+#include <utility>
+
 #include "core/hle/service/acc/acc.h"
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/aoc/addon_content_manager.h"
@@ -71,7 +74,8 @@
 namespace Service {
 
 Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
-                   std::stop_token token) {
+                   std::stop_token token,
+                   std::shared_ptr<const SystemDataView> isolated_system_data) {
     auto& kernel = system.Kernel();
 
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
@@ -99,7 +103,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
     vi_worker = kernel.RunOnHostCoreProcess("vi", [&, token] { VI::LoopProcess(system, token); });
     // Avoid cold clones of lambdas -- succintly
-    for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
+    for (auto& [name, run] :
+         std::vector<std::pair<std::string_view, std::function<void(Core::System&)>>>{
         {"sm",         &SM::LoopProcess},
         {"account",    &Account::LoopProcess},
         {"am",         &AM::LoopProcess},
@@ -116,7 +121,9 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"fatal",      &Fatal::LoopProcess},
         {"fgm",        &FGM::LoopProcess},
         {"friends",    &Friend::LoopProcess},
-        {"settings",   &Set::LoopProcess},
+        {"settings",   [isolated_system_data](Core::System& s) {
+                           Set::LoopProcess(s, isolated_system_data);
+                       }},
         {"psc",        &PSC::LoopProcess},
         {"glue",       &Glue::LoopProcess},
         {"grc",        &GRC::LoopProcess},
@@ -137,7 +144,9 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"nim",        &NIM::LoopProcess},
         {"nvnflinger", &Nvnflinger::LoopProcess},
         {"npns",       &NPNS::LoopProcess},
-        {"ns",         &NS::LoopProcess},
+        {"ns",         [isolated_system_data](Core::System& s) {
+                           NS::LoopProcess(s, isolated_system_data.get());
+                       }},
         {"olsc",       &OLSC::LoopProcess},
         {"omm",        &OMM::LoopProcess},
         {"pcie",       &PCIe::LoopProcess},
@@ -155,7 +164,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"i2c",        &I2C::LoopProcess},
         {"gpio",        &GPIO::LoopProcess},
     })
-        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
+        kernel.RunOnGuestCoreProcess(std::string(name),
+                                     [&system, run = std::move(run)] { run(system); });
 }
 
 } // namespace Service

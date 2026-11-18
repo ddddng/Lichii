@@ -435,7 +435,9 @@ struct System::Impl {
         return SystemResultStatus::Success;
     }
 
-    SystemResultStatus SetupForApplicationProcess(System& system, Frontend::EmuWindow& emu_window) {
+    SystemResultStatus SetupForApplicationProcess(
+        System& system, Frontend::EmuWindow& emu_window,
+        std::shared_ptr<const Service::SystemDataView> isolated_system_data = {}) {
         host1x_core.emplace(system);
         VideoCore::CreateGPU(gpu_core, emu_window, system);
         if (!gpu_core)
@@ -444,7 +446,8 @@ struct System::Impl {
         audio_core.emplace(system);
 
         service_manager = std::make_shared<Service::SM::ServiceManager>(kernel);
-        services.emplace(service_manager, system, stop_event.get_token());
+        services.emplace(service_manager, system, stop_event.get_token(),
+                         std::move(isolated_system_data));
 
         is_powered_on = true;
         exit_locked = false;
