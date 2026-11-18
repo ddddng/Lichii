@@ -121,6 +121,13 @@ struct Fixture {
         return uploaded;
     }
 
+    /// EDEN_NX2_TRACK_CHECK over the tracker's pages.
+    Core::TrackedCountCheck Check() {
+        std::vector<std::pair<DAddr, size_t>> tracked;
+        tracker.ForEachTrackedRun([&](DAddr addr, size_t size) { tracked.emplace_back(addr, size); });
+        return device_memory.CheckTrackedCounts(tracked);
+    }
+
     /// The GPU back thread untracks the page for a guest write: the page is held.
     void BackUntrack() {
         VideoCommon::Nx2LazyUntrack::t_hold = true;
@@ -200,6 +207,7 @@ TEST_CASE("Lazy untrack: a map over a held page protects the new backing",
     REQUIRE(!f.Protected(GuestPageA));
     f.Upload();
     REQUIRE(f.Protected(GuestPageB));
+    REQUIRE(f.Check().mismatches == 0);
 }
 
 TEST_CASE("Lazy untrack: the frame tick releases a held page after two frames",
@@ -219,4 +227,39 @@ TEST_CASE("Lazy untrack: the frame tick releases a held page after two frames",
     REQUIRE(f.Protected(GuestPageA));
     f.tracker.MarkRegionAsCpuModified(DevicePage, PageSize);
     REQUIRE(!f.Protected(GuestPageA));
+}
+
+TEST_CASE("Lazy untrack: the tracked page check finds a page that lost its count",
+          "[video_core][lazy_untrack]") {
+    Fixture f;
+    f.device_memory.Map(DevicePage, GuestPageA << 12, PageSize, f.asid);
+    f.Upload();
+    Core::TrackedCountCheck check = f.Check();
+    REQUIRE(check.pages == 1);
+    REQUIRE(check.mismatches == 0);
+
+    // Held: the buffer cache no longer tracks the page, and the hold accounts for its count.
+    f.BackUntrack();
+    check = f.Check();
+    REQUIRE(check.held == 1);
+    REQUIRE(check.mismatches == 0);
+
+    // A stray drop takes the held count away.
+    f.device_memory.UpdatePagesCachedCount(DevicePage, PageSize, -1);
+    REQUIRE(!f.Protected(GuestPageA));
+    check = f.Check();
+    REQUIRE(check.mismatches == 1);
+    REQUIRE(check.first[0].address == DevicePage);
+    REQUIRE(check.first[0].count == 0);
+    REQUIRE(check.first[0].held);
+    REQUIRE(!check.first[0].tracked);
+
+    // Tracked again over the lost count, the page stays unprotected: a CPU write would be lost.
+    f.Upload();
+    REQUIRE(!f.Protected(GuestPageA));
+    check = f.Check();
+    REQUIRE(check.held == 0);
+    REQUIRE(check.mismatches == 1);
+    REQUIRE(check.first[0].tracked);
+    REQUIRE(!check.first[0].held);
 }

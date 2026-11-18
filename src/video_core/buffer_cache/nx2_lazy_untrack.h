@@ -107,6 +107,13 @@ public:
         return TakeIf([&](u64 page, u64) { return page >= first && page < end; }, ReleasedByMap);
     }
 
+    /// Calls `inspect` with the held pages (device page -> frame held on) under the lock.
+    template <class Func>
+    void Inspect(Func&& inspect) {
+        std::scoped_lock lock{mutex};
+        inspect(std::as_const(held));
+    }
+
     /// Frame tick: takes the pages held for HoldFrames frames, for the caller to drop their
     /// counts. With `log_stats`, logs the counters every 600 frames.
     Runs Tick(bool log_stats) {

@@ -320,6 +320,18 @@ struct WordManager {
             : std::make_pair<u64, u64>(0, 0);
     }
 
+    /// Calls func(addr, size) for each run of pages this manager has the device tracker count.
+    template <typename Func>
+    void ForEachTrackedRun(Func&& func) const {
+        const std::span<const u64> untracked_words = Span(Type::Untracked);
+        for (size_t index = 0; index < num_words; ++index) {
+            IteratePages(~untracked_words[index], [&](size_t offset, size_t size) {
+                func(cpu_addr + (index * PAGES_PER_WORD + offset) * BYTES_PER_PAGE,
+                     size * BYTES_PER_PAGE);
+            });
+        }
+    }
+
     void FlushCachedWrites() noexcept {
         auto const cached_words = Span(Type::CachedCPU);
         auto const untracked_words = Span(Type::Untracked);

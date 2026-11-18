@@ -118,6 +118,40 @@ void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
 }
 
 template <class P>
+void BufferCache<P>::CheckTrackedPages() {
+    std::vector<std::pair<DAddr, size_t>> tracked;
+    memory_tracker.ForEachTrackedRun(
+        [&](DAddr addr, size_t size) { tracked.emplace_back(addr, size); });
+    const Core::TrackedCountCheck check = device_memory.CheckTrackedCounts(tracked);
+    static u64 checks{};
+    static u64 pages{};
+    static u64 mismatches{};
+    static size_t logged{};
+    static auto last_log = std::chrono::steady_clock::now();
+    ++checks;
+    pages += check.pages;
+    mismatches += check.mismatches;
+    for (size_t i = 0; i < std::min(check.mismatches, check.first.size()) && logged < 16;
+         ++i, ++logged) {
+        const auto& mismatch = check.first[i];
+        LOG_ERROR(HW_GPU,
+                  "Tracked page check: device page {:#x} has count {} (buffer cache tracks it: {}, "
+                  "held: {}); a CPU write there is not seen by the GPU",
+                  mismatch.address, mismatch.count, mismatch.tracked, mismatch.held);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_log < std::chrono::seconds{10}) {
+        return;
+    }
+    LOG_INFO(HW_GPU,
+             "Tracked page check (EDEN_NX2_TRACK_CHECK) in 10 s: {} checks, {} pages compared, {} "
+             "held now; {} pages with a device count below their trackers (must stay 0)",
+             checks, pages, check.held, mismatches);
+    checks = pages = mismatches = 0;
+    last_log = now;
+}
+
+template <class P>
 void BufferCache<P>::TickFrame() {
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
@@ -126,6 +160,10 @@ void BufferCache<P>::TickFrame() {
     runtime.TickFrame(slot_buffers);
     frame_created_buffers.clear();
     native_indirect_uniforms_this_frame.clear();
+    static const bool track_check = std::getenv("EDEN_NX2_TRACK_CHECK") != nullptr;
+    if (track_check && frame_tick % 60 == 0) {
+        CheckTrackedPages();
+    }
     static const bool mem_trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
     if (static std::chrono::steady_clock::time_point last{}; mem_trace) {
         if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{2}) {

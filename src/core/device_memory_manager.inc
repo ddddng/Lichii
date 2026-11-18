@@ -1019,6 +1019,41 @@ void DeviceMemoryManager<Traits>::TickHeldPages(bool log_stats) {
 }
 
 template <typename Traits>
+TrackedCountCheck DeviceMemoryManager<Traits>::CheckTrackedCounts(
+    std::span<const std::pair<DAddr, size_t>> tracked) {
+    TrackedCountCheck result;
+    const auto compare = [&](size_t page, bool is_tracked, bool is_held) {
+        // Count changes skip pages without a CPU backing, and the CPU cannot write them.
+        if (ExtractCPUBacking(page).second == 0) {
+            return;
+        }
+        ++result.pages;
+        const u32 count = cached_pages->at(page >> subentries_shift).Count(page).load(
+            std::memory_order_relaxed);
+        if (count >= u32{is_tracked} + u32{is_held}) {
+            return;
+        }
+        if (result.mismatches < result.first.size()) {
+            result.first[result.mismatches] = {DAddr{page} << page_bits, count, is_tracked, is_held};
+        }
+        ++result.mismatches;
+    };
+    lazy_untrack.Inspect([&](const auto& held) {
+        result.held = held.size();
+        for (const auto& [addr, size] : tracked) {
+            const size_t page_end = Common::DivCeil(addr + size, page_size);
+            for (size_t page = addr >> page_bits; page < page_end; ++page) {
+                compare(page, true, held.contains(page));
+            }
+        }
+        for (const auto& [page, frame] : held) {
+            compare(page, false, true);
+        }
+    });
+    return result;
+}
+
+template <typename Traits>
 void DeviceMemoryManager<Traits>::ArmReadTraps(DAddr addr, size_t size) {
     const auto MarkRegionReadTrap = &DeviceMemoryManager<Traits>::DeviceMethods::MarkRegionReadTrap;
     Memory::Memory* run_inter = nullptr;

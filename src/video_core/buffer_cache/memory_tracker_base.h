@@ -169,6 +169,16 @@ public:
         return ((synchronized_mask >> slot) & 1) != 0;
     }
 
+    /// Calls func(addr, size) for each run of pages the device tracker counts for this tracker.
+    template <typename Func>
+    void ForEachTrackedRun(Func&& func) const {
+        for (const Manager* manager : top_tier) {
+            if (manager != nullptr) {
+                manager->ForEachTrackedRun(func);
+            }
+        }
+    }
+
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     template <typename Func>
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, Func&& func) {

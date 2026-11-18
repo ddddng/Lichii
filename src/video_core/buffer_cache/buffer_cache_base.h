@@ -249,6 +249,9 @@ public:
 
     void TickFrame();
 
+    /// EDEN_NX2_TRACK_CHECK: every page the memory tracker tracks has a device count.
+    void CheckTrackedPages();
+
     bool BindMultiRangeStorage(const Binding& binding, bool is_written,
                                std::span<const MultiRangeSegment> pool,
                                u64 write_mark_limit = ~u64{0});

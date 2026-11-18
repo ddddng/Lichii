@@ -42,6 +42,22 @@ struct Asid {
     size_t id;
 };
 
+/// EDEN_NX2_TRACK_CHECK: pages whose cached count is below what tracks them (DeviceMemoryManager::
+/// CheckTrackedCounts). Such a page is not protected while the buffer cache trusts its copy, so a
+/// CPU write there never reaches the GPU.
+struct TrackedCountCheck {
+    struct Mismatch {
+        DAddr address;
+        u32 count;
+        bool tracked;
+        bool held;
+    };
+    size_t pages{};
+    size_t held{};
+    size_t mismatches{};
+    std::array<Mismatch, 16> first{};
+};
+
 template <typename Traits>
 class DeviceMemoryManager {
     using DeviceInterface = typename Traits::DeviceInterface;
@@ -184,6 +200,11 @@ public:
     /// Frame tick of the GPU back thread's held untracks (VideoCommon::Nx2LazyUntrack): drops
     /// the counts held for two frames.
     void TickHeldPages(bool log_stats);
+
+    /// Compares the count of every CPU-backed page in `tracked` (one tracker each) and every held
+    /// page (Nx2LazyUntrack, one more) with what they need. Counts only ever exceed it by the
+    /// other trackers (texture cache) and by drops not applied yet.
+    TrackedCountCheck CheckTrackedCounts(std::span<const std::pair<DAddr, size_t>> tracked);
 
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
