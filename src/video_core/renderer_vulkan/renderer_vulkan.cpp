@@ -288,6 +288,18 @@ private:
 struct NvnDirectMemory {
     const Device* device;
     NvmlProcessMemory nvml;
+    bool owns_cache_dir{};
+
+    ~NvnDirectMemory() {
+        if (!owns_cache_dir) {
+            return;
+        }
+#ifdef _WIN32
+        _putenv_s("DM_TEMP", "");
+#else
+        unsetenv("DM_TEMP");
+#endif
+    }
 };
 
 namespace {
@@ -297,7 +309,7 @@ namespace {
 /// submission of the replay holds the scheduler's submit lock. Returns whether the replay is up.
 bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const Device& device,
                     Scheduler& scheduler, NvnDirectAstc* astc, NvnDirectShaders& shaders,
-                    NvnDirectMemory& memory, VideoCore::ShaderNotify& shader_notify) {
+                    NvnDirectMemory& memory_source, VideoCore::ShaderNotify& shader_notify) {
     std::vector<const char*> extensions;
     for (const std::string& name : device.GetLoadedExtensions()) {
         extensions.push_back(name.c_str());
@@ -330,7 +342,7 @@ bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
         .memory_budget = [](void* context) -> uint64_t {
             return static_cast<NvnDirectMemory*>(context)->device->GetDeviceMemoryBudget();
         },
-        .memory_context = &memory,
+        .memory_context = &memory_source,
         .pipeline_building = [](void* notify) {
             static_cast<VideoCore::ShaderNotify*>(notify)->MarkShaderBuilding();
         },
@@ -360,10 +372,11 @@ bool AdoptNvnDirect(const vk::InstanceDispatch& dld, VkInstance instance, const 
             dir /= fmt::format("{:016x}", title);
         }
         if (Common::FS::CreateDirs(dir)) {
+            const auto cache_dir = Common::FS::PathToUTF8String(dir);
 #ifdef _WIN32
-            _putenv_s("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str()); // (getenv's environment)
+            memory_source.owns_cache_dir = _putenv_s("DM_TEMP", cache_dir.c_str()) == 0;
 #else
-            setenv("DM_TEMP", Common::FS::PathToUTF8String(dir).c_str(), 0);
+            memory_source.owns_cache_dir = setenv("DM_TEMP", cache_dir.c_str(), 1) == 0;
 #endif
         }
     }
@@ -521,6 +534,23 @@ try
             Core::NvnHook::DirectFailed();
         }
     }
+    if (const char* trace = std::getenv("EDEN_NX2_VRAM_TRACE");
+        trace != nullptr && std::strcmp(trace, "1") == 0) {
+        vram_trace = std::jthread([this](std::stop_token stop) {
+            NvmlProcessMemory nvml{device};
+            while (!stop.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                const u64 process = nvml.Get();
+                const u64 slack = device.GetDeviceMemorySlack();
+                const u64 heaps = device.GetDeviceMemoryUsage() + slack;
+                LOG_INFO(Render_Vulkan,
+                         "VRAM trace: NVML {} MiB, heap usage {} MiB (VMA unused {} MiB), "
+                         "outside the heaps {} MiB",
+                         process >> 20, heaps >> 20, slack >> 20,
+                         (static_cast<s64>(process) - static_cast<s64>(heaps)) >> 20);
+            }
+        });
+    }
 #endif
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
@@ -536,6 +566,7 @@ RendererVulkan::~RendererVulkan() {
         nvn_direct_park();
         void(device.GetLogical().WaitIdle());
         nvn_direct_destroy();
+        return;
     }
 #endif
     void(device.GetLogical().WaitIdle());

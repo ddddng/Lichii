@@ -3375,7 +3375,11 @@ NVN_NOPROTO(nvnCommandBufferPushComputeConstantsDeferred, void, NVNcommandBuffer
 void nvn_hle_destroy(void) {
     for (int i = 0; i < g_nvp; i++) {
         struct vpool *v = g_vp[i];
+#if defined(_WIN32)
+        nvn_direct_alias_release(v->base);
+#else
         munmap(v->base, v->len);
+#endif
         for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
         free(v->pt); free(v);
     }
