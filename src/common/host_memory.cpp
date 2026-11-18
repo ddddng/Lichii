@@ -132,6 +132,7 @@ using PFN_UnmapViewOfFile2 = BOOL(WINAPI*)(_In_ HANDLE Process, _In_ PVOID BaseA
 // remaps in progress and retries the access when the page allows it now.
 namespace {
 std::atomic<int> remaps_in_progress{};
+std::atomic<u64> remaps_started{};
 thread_local bool remapping{};
 SRWLOCK retry_ranges_lock = SRWLOCK_INIT;
 std::vector<std::pair<uintptr_t, size_t>> retry_ranges; ///< (base, size)
@@ -155,27 +156,35 @@ LONG CALLBACK RetryRemappedAccess(EXCEPTION_POINTERS* pointers) {
     if (!in_range) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    while (remaps_in_progress.load(std::memory_order_acquire) != 0) {
-        SwitchToThread();
-    }
-    MEMORY_BASIC_INFORMATION info{};
-    if (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) == 0 ||
-        info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
     constexpr DWORD Writable =
         PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (access == 1 && (info.Protect & Writable) == 0) {
+    // Another remap can start between the wait and the query: the page is then looked at again
+    // once it is done. Only a page that stays inaccessible with no remap since is a real fault.
+    u64 started;
+    bool allowed;
+    do {
+        while (remaps_in_progress.load(std::memory_order_acquire) != 0) {
+            SwitchToThread();
+        }
+        started = remaps_started.load(std::memory_order_acquire);
+        MEMORY_BASIC_INFORMATION info{};
+        allowed = VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) != 0 &&
+                  info.State == MEM_COMMIT && (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0 &&
+                  (access == 0 || (info.Protect & Writable) != 0);
+    } while (!allowed && (remaps_in_progress.load(std::memory_order_acquire) != 0 ||
+                          remaps_started.load(std::memory_order_acquire) != started));
+    if (!allowed) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    // A page that allows the access and still faults would retry forever.
+    // A page that allows the access and faults again with no remap in between would retry
+    // forever. Faults across remaps (a reader of a view that is remapped again and again) are not
+    // counted.
     thread_local uintptr_t last_address{};
-    thread_local ULONGLONG last_tick{};
+    thread_local u64 last_started{};
     thread_local int retries{};
-    const ULONGLONG tick = GetTickCount64();
-    retries = address == last_address && tick - last_tick < 100 ? retries + 1 : 0;
+    retries = address == last_address && started == last_started ? retries + 1 : 0;
     last_address = address;
-    last_tick = tick;
+    last_started = started;
     return retries < 64 ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -202,6 +211,7 @@ public:
         if (active) {
             remapping = true;
             remaps_in_progress.fetch_add(1, std::memory_order_acq_rel);
+            remaps_started.fetch_add(1, std::memory_order_acq_rel);
         }
     }
     ~RemapScope() {
