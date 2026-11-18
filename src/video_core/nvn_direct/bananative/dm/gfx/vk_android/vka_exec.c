@@ -111,8 +111,6 @@ static int seg_ts(void) {
                      VLOG("counter timestamps: %s (DM_NVN_GPU_TS=gpu / segment / submission)", g_seg == 2 ? "each report's GPU time on the guest clock" : g_seg ? "GPU time of their place in the submission" : "one time for the whole submission"); }
     return g_seg;
 }
-// Lab: DM_VK_TS_LOG=1, a line per frame: its timestamp reports' span as written and as the GPU timed it, and every 600 frames the calls that read them
-static int ts_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_LOG"); v = e && atoi(e) > 0; } return v; }
 extern uint64_t g_t0_ns;   // nvn_direct_host.c: guest_ns() = CLOCK_MONOTONIC - g_t0_ns
 static int64_t gpu_offset(uint64_t g, uint64_t tmax) {   // (completion thread) guest ns of GPU tick 0
     static PFN_vkGetCalibratedTimestampsKHR cal; static int state; static int64_t off; static uint64_t at; static int have;
@@ -142,7 +140,6 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
     }
     int64_t off = g_seg == 2 && nq ? gpu_offset(g, tmax) : 0;
     static uint64_t last_ts;   // (gpu) the latest report written: reports stay in submission order
-    static uint64_t lf = ~0ull, f_n, f_wmin, f_wmax, f_gmin, f_gmax; uint64_t frame = ~0ull;   // DM_VK_TS_LOG: the frame being summed
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) for (int i = 0; i < n; i++) if (ops[i].kind == 2 && ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP) {
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
     for (int i = 0, q = 0; i < n; i++) {
@@ -152,32 +149,17 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             if (atomic_load(&g_fstart_f[k]) == f) { uint64_t t0 = atomic_load(&g_fstart[k]), t1 = now_ns(); if (t1 > t0) vka_floor_span(f, t1 - t0); }
             continue;
         }
-        if (ops[i].kind == 4) {   // (DM_VK_TS_LOG) the submission's frame: the frame before it is summed up
-            frame = ops[i].addr;
-            if (frame != lf && lf != ~0ull && f_n) VLOG("ts frame %llu: %llu reports, written span %.3f ms, GPU span %.3f ms, last at %.3f s", (unsigned long long)lf, (unsigned long long)f_n,
-                                                         (f_wmax - f_wmin) / 1e6, f_gmax > f_gmin ? (f_gmax - f_gmin) / 1e6 : 0.0, f_wmax / 1e9);
-            if (frame != lf) { lf = frame; f_n = 0; }
-            if (frame % 600 == 0 && !f_n) { uint64_t nvn_direct_calls(const char *); VLOG("ts calls so far: GetTimestampInNanoseconds %llu, GetCurrentTimestampInNanoseconds %llu, ReportCounter %llu, CommandBufferWaitSync %llu, QueueWaitSync %llu",
-                (unsigned long long)nvn_direct_calls("nvnDeviceGetTimestampInNanoseconds"), (unsigned long long)nvn_direct_calls("nvnDeviceGetCurrentTimestampInNanoseconds"),
-                (unsigned long long)nvn_direct_calls("nvnCommandBufferReportCounter"), (unsigned long long)nvn_direct_calls("nvnCommandBufferWaitSync"), (unsigned long long)nvn_direct_calls("nvnQueueWaitSync")); }
-            continue;
-        }
         if (ops[i].kind == 2 && ops[i].v) {   // a segment timestamp: the completion time less the GPU time from this report to the last (gpu: its own GPU time)
             uint64_t gns = (uint64_t)((double)gq[q] * g_sq_ns), back = (uint64_t)((double)(tmax - gq[q]) * g_sq_ns), ns; q++;
             if (g_seg == 2) { int64_t x = (int64_t)gns + off; ns = x < 0 ? 0 : (uint64_t)x; if (ns > g) ns = g; if (ns < last_ts) ns = last_ts; last_ts = ns; }
             else ns = g > back ? g - back : 0;
-            if (frame != ~0ull && (ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP || ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
-                uint64_t w = g_seg ? ns : g;
-                if (!f_n || w < f_wmin) f_wmin = w; if (!f_n || w > f_wmax) f_wmax = w; if (!f_n || gns < f_gmin) f_gmin = gns; if (!f_n || gns > f_gmax) f_gmax = gns; f_n++;
-            }
-            if (!g_seg) goto plain;   // (DM_VK_TS_LOG with one time a submission: the query only for the log)
             uint64_t tk = nvn_timestamp_from_ns(ns), tt = ops[i].type;
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
             if (ops[i].mode) { memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8); continue; }   // (Lichii: its counter written at replay, rc_counter)
             memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
-        else plain: {
+        else {
             if (g > last_ts) last_ts = g;
             // A timestamp report's counter: the time, or 0 under render_cond (as on the GPU, nvn_mtl.m rc_value). Samples passed: 1, so occlusion culling keeps everything visible until draws count
             uint64_t t = ops[i].type, rec[2] = {t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP ? (DM_GAME_RENDER_COND ? 0 : ticks) : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 1 : 0, ticks};
@@ -329,7 +311,6 @@ void vka_rp_sub_begin(void) {
     { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
     rct_flush();
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
-    if (ts_log()) { uint64_t vka_present_filled(void); post((pop){4, 0, 0, 0, vka_present_filled()}); }   // (the frame: presents filled before this submission, nvn_present.c)
     if (!vka_init()) return;
     vka_tex_budget();
     memset(&g_psy, 0, sizeof g_psy); g_qi = queue_of(S.serial); if (g_qn >= 0 && g_qshared >> g_qi & 1) g_qi = queue_move(g_qn);
@@ -355,7 +336,7 @@ void vka_rp_sub_begin(void) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ;
-        if ((seg_ts() || ts_log()) && !g_sqp) {
+        if (seg_ts() && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
             if (qf.create(V.dev, &ci, NULL, &g_sqp)) { g_sqp = VK_NULL_HANDLE; g_seg = 0; VRED("segment timestamps: no query pool: one time for the whole submission"); }
             g_sq_get = qf.get; g_sq_ns = g_ts_ns;
@@ -1143,7 +1124,6 @@ static void evsem_signal(volatile uint32_t *val, uint32_t mode, uint32_t v) {   
     evtr('S', e, v, t);
     if (VKA_ENV("DM_VK_EVENTLOG", 0)) { static int n; if (n++ < 60) VLOG("event signal: queue %d event %p value %u -> timeline %llu (frame %llu, part %d)", g_qi, (void *)val, v, (unsigned long long)t, (unsigned long long)g_frame, g_nx); }
     vka_rp_end();
-    vka_checkpoint_op(-3000 - (int)(v > 999 ? 999 : v));   // (lab: the part ends with this event signal, EDEN_NX2_NVN_CHECKPOINTS)
     if (s) psy_signal(s, t);
     for (int i = 0; i < e->ng; i++) { evgate *g = &e->g[i];
         if (!g->pending || !gate_met(g, v)) continue;
@@ -1170,7 +1150,6 @@ static void evsem_wait(const p_wait_event *w) {   // a wait walked here: met on 
     if (!t || !s || (!g && e->w[k].q == g_qi)) { evtr('w', e, w->value, t); return; }   // reached already, or signalled earlier on this queue: queue order
     evtr(g ? 'G' : 'W', e, w->value, t);
     vka_rp_end();
-    vka_checkpoint_op(-4000 - (int)(w->value > 999 ? 999 : w->value));   // (lab: the part ends before this event wait)
     if (!chunk()) VRED_ONCE("an event wait in a submission of more than %d parts: the whole part waits", NCHUNK);
     psy_wait(s, t);
 }
@@ -1276,10 +1255,6 @@ static int walk(walk_t *w) {
             break; }
         case OP_WAIT_SYNC: { const sync_t *sy; memcpy(&sy, a, 8); if (sy && sy->magic == MAGIC('S', 'Y', 'N', 'C') && sy->fenced && sy->fence) wait_sync(sy->fence); break; }
         case OP_DEBUG_LABEL: if (g_cb && V.label_begin) label_op(a); break;
-        default: break;
-        }
-        switch (h.op) {   // (lab: EDEN_NX2_NVN_CHECKPOINTS, vka_draw.c)
-        case OP_CLEAR_BUF: case OP_COPY_B2B: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_CLEAR_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_BARRIER: vka_checkpoint_op(-1000 - (int)h.op); break;
         default: break;
         }
         switch (h.op) {

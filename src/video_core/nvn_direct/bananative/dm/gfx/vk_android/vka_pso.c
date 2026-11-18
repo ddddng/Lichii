@@ -1261,7 +1261,6 @@ VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; re
 // are made whole by prewarm. A library a draw needs first is made by its frame path
 typedef struct { uint64_t key; uint8_t part; } ahead_item;   // part 1 pre-rasterization (key: a vertex shader), 2 fragment shader
 static ahead_item *g_la; static uint32_t g_la_n; static _Atomic uint32_t g_la_next, g_la_done; static int g_la_threads; static uint64_t g_la_t0; static _Atomic uint64_t g_la_cpu_ns;
-_Thread_local char vka_crash_note[96];   // (nvn_dispatch.c crash_stack)
 static void lib_default_key(vka_gkey *k) { k->samples = 1; k->gl_depth = 1; k->topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; k->vin_static = !V.vin_dyn; }
 // Made outside the library map and destroyed: only the caches keep it. scratch: s is given back after (vka_shader_scratch), so its layout is not kept by its address
 static void lib_ahead_make(vka_shader *s, int part, const vka_gkey *k, int scratch) {
@@ -1275,7 +1274,6 @@ static void lib_ahead_make(vka_shader *s, int part, const vka_gkey *k, int scrat
     free(P);
 }
 static void lib_ahead_one(const ahead_item *it) {
-    snprintf(vka_crash_note, sizeof vka_crash_note, "making ahead: %s library of %016llx", it->part == 1 ? "pre-rasterization" : "fragment shader", (unsigned long long)it->key);
     vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
     lib_ahead_make(vka_shader_by_key(it->key, k.gl_depth), it->part, &k, 0);
 }
@@ -1284,7 +1282,6 @@ static void lib_ahead_one(const ahead_item *it) {
 void vka_lib_ahead_shader(vka_shader *s, int part) {
     if (!gpl_on()) return;
     vka_gkey k; memset(&k, 0, sizeof k); lib_default_key(&k);
-    snprintf(vka_crash_note, sizeof vka_crash_note, "made speculatively: %s library of %016llx", part == 1 ? "pre-rasterization" : "fragment shader", s ? (unsigned long long)s->key : 0ull);
     vka_pipeline_notify(0);
     lib_ahead_make(s, part, &k, 1);
     vka_pipeline_notify(1);

@@ -63,15 +63,9 @@ static span_t* find(uintptr_t a, size_t len) {
     return s;
 }
 
-// EDEN_NX2_NVN_TRACK=0: nothing tracked (a texture is uploaded once, at its first use).
-static int track_on(void) {
-    static int on = -1;
-    if (on < 0) { const char* e = getenv("EDEN_NX2_NVN_TRACK"); on = !e || atoi(e) != 0; }
-    return on;
-}
 void nvn_dirty_add_range(const void* mem, size_t size) {
     const uintptr_t lo = (uintptr_t)mem, hi = lo + size;
-    if (!size || nvn_direct_guest_of(lo) == lo || !track_on()) return; // not guest memory (a host segment)
+    if (!size || nvn_direct_guest_of(lo) == lo) return; // not guest memory (a host segment)
     span_t* s = calloc(1, sizeof *s);
     const size_t pages = (size + PAGE_SIZE - 1 + (lo & (PAGE_SIZE - 1))) >> PAGE_SHIFT;
     if (s) { s->gen = calloc(pages, sizeof *s->gen); s->armed = calloc(pages, 1); s->host = calloc(pages, 1); }

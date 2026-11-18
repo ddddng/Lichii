@@ -271,18 +271,7 @@ private:
             const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_EVERY");
             return value != nullptr ? (std::max)(u64{1}, static_cast<u64>(std::strtoull(value, nullptr, 10))) : u64{120};
         }();
-        // EDEN_NX2_FRAME_CAPTURE_FROM=<present> (+ _COUNT, default 60): also every present of that
-        // window (consecutive frames, to see what changes between them: dotfiles-25x.17).
-        static const u64 from = [] {
-            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_FROM");
-            return value != nullptr ? static_cast<u64>(std::strtoull(value, nullptr, 10)) : u64{0};
-        }();
-        static const u64 count = [] {
-            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_COUNT");
-            return value != nullptr ? static_cast<u64>(std::strtoull(value, nullptr, 10)) : u64{60};
-        }();
-        const bool in_window = from != 0 && presents >= from && presents < from + count;
-        if (directory == nullptr || (!in_window && (presents % every) != 1 % every) ||
+        if (directory == nullptr || (presents % every) != 1 % every ||
             m_capture_pending->exchange(true)) {
             return;
         }

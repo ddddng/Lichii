@@ -1063,13 +1063,6 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
                 loaded_extensions.insert(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME);
             }
         }
-        // EDEN_NX2_NVN_CHECKPOINTS=1 (lab, dotfiles-25x.15): a checkpoint before each of the
-        // replay's draws and dispatches, logged at a GPU hang (vka_draw.c vka_checkpoint_report).
-        if (const char* checkpoints = std::getenv("EDEN_NX2_NVN_CHECKPOINTS");
-            checkpoints != nullptr && checkpoints[0] == '1' &&
-            supported_extensions.contains(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)) {
-            loaded_extensions.insert(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
-        }
         const auto ci = std::ranges::find(queue_cis, graphics_family,
                                           &VkDeviceQueueCreateInfo::queueFamilyIndex);
         const u32 available = physical.GetQueueFamilyProperties()[graphics_family].queueCount;
@@ -2110,9 +2103,8 @@ void Device::RemoveUnsuitableExtensions() {
                                        features.vertex_input_dynamic_state,
                                        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 
-    // VK_KHR_pipeline_executable_properties (also for the NVN2 direct renderer's pipeline
-    // statistics, lab: DM_VK_PIPE_STATS=1, dotfiles-25x.8)
-    if (Settings::values.renderer_shader_feedback.GetValue() || std::getenv("DM_VK_PIPE_STATS") != nullptr) {
+    // VK_KHR_pipeline_executable_properties
+    if (Settings::values.renderer_shader_feedback.GetValue()) {
         extensions.pipeline_executable_properties =
             features.pipeline_executable_properties.pipelineExecutableInfo;
         RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_executable_properties,
