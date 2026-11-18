@@ -188,8 +188,8 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
         LoadPage();
     });
     connect(categories, &QTabBar::currentChanged, this, [this] {
-        ResetGallery();
         if (selected_parent) {
+            ResetGallery();
             LoadPage();
         }
     });
