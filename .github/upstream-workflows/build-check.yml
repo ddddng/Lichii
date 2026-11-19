@@ -2,7 +2,7 @@ name: build-check
 
 on:
   pull_request:
-    branches: [nx2]
+    branches: [nx2, 'capy/nce-*']
   push:
     branches: [nx2]
   workflow_dispatch:
@@ -162,6 +162,56 @@ jobs:
             .cache/cpm
             .ccache
           key: gcc13-qt683-${{ runner.os }}-${{ github.sha }}
+
+  linux-arm64-nce:
+    name: Linux ARM64 NCE build check
+    needs: changes
+    if: needs.changes.outputs.build == 'true' && (startsWith(github.head_ref, 'capy/nce-') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf g++-13 git glslang-tools libpulse-dev libtool libudev-dev \
+            ninja-build libavfilter-dev libavcodec-dev libswscale-dev pkg-config \
+            zlib1g-dev libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev libasound2-dev pipx
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure headless build and tests
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DENABLE_WERROR=ON \
+            -DBUILD_TESTING=ON \
+            -DLICHII_TESTS=ON \
+            -DENABLE_QT=OFF \
+            -DENABLE_OPENGL=OFF \
+            -DLICHII_CMD=OFF \
+            -DLICHII_ROOM=OFF \
+            -DLICHII_ROOM_STANDALONE=OFF \
+            -DLICHII_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+
+      - name: Compile NCE and run configuration tests
+        run: |
+          cmake --build build --parallel "$(nproc)" --target config_tests \
+            src/core/CMakeFiles/core.dir/arm/nce/arm_nce.cpp.o \
+            src/core/CMakeFiles/core.dir/arm/nce/arm_nce.s.o \
+            src/core/CMakeFiles/core.dir/arm/nce/interpreter_visitor.cpp.o \
+            src/core/CMakeFiles/core.dir/arm/nce/patcher.cpp.o
+          ctest --test-dir build --output-on-failure --no-tests=error -R '^config_tests$'
 
   windows-clang-cl:
     name: Windows clang-cl production build and tests
