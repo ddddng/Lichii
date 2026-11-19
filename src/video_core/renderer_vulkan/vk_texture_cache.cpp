@@ -5017,11 +5017,9 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         .unnormalizedCoordinates = VK_FALSE,
     };
     variants.reserve(1);
-    VkSampler fallback = runtime.fallback_sampler.load(std::memory_order_relaxed);
-    const VkSampler base_sampler = Emplace(VariantKey{}, fallback);
-    if (fallback == VK_NULL_HANDLE) {
-        runtime.fallback_sampler.compare_exchange_strong(fallback, base_sampler,
-                                                         std::memory_order_relaxed);
+    Emplace(VariantKey{}, &runtime.fallback_sampler);
+    if (!runtime.fallback_sampler.handle) {
+        runtime.fallback_sampler = variants.front().binding;
     }
 }
 
@@ -5058,10 +5056,10 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
     if (it == variants.end()) {
         return VK_NULL_HANDLE;
     }
-    return it->handle;
+    return it->binding.handle;
 }
 
-VkSampler Sampler::Emplace(VariantKey key, VkSampler fallback) {
+VkSampler Sampler::Emplace(VariantKey key, const SamplerBinding* fallback) {
     bool custom_border = has_custom_border_colors && !key.drop_custom_border;
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
         static bool warned_budget = false;
@@ -5129,10 +5127,26 @@ VkSampler Sampler::Emplace(VariantKey key, VkSampler fallback) {
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
     }
-    Variant variant{.key = key, .sampler = {}, .handle = VK_NULL_HANDLE};
+    Variant variant{
+        .key = key,
+        .sampler = {},
+        .binding = {.compatibility = {
+                        .mag_linear = create_info.magFilter == VK_FILTER_LINEAR,
+                        .min_linear = create_info.minFilter == VK_FILTER_LINEAR,
+                        .mipmap_linear = create_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                        .anisotropy = create_info.anisotropyEnable != VK_FALSE,
+                        .compare = create_info.compareEnable != VK_FALSE,
+                        .minmax = has_minmax_reduction && !key.drop_reduction,
+                        .clamp_to_border =
+                            create_info.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER ||
+                            create_info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER ||
+                            create_info.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+                        .custom_border = custom_border,
+                    }},
+    };
     try {
         variant.sampler = device_ptr->GetLogical().CreateSampler(create_info);
-        variant.handle = *variant.sampler;
+        variant.binding.handle = *variant.sampler;
     } catch (const vk::Exception& exception) {
         if (custom_border) {
             custom_border_color_budget.Release(1);
@@ -5142,8 +5156,17 @@ VkSampler Sampler::Emplace(VariantKey key, VkSampler fallback) {
             result != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
             throw;
         }
-        variant.handle = variants.empty() ? fallback : Handle();
-        if (variant.handle == VK_NULL_HANDLE) {
+        const auto compatible = std::ranges::find_if(variants, [&](const Variant& existing) {
+            return existing.binding.compatibility == variant.binding.compatibility &&
+                   (!custom_border || existing.key.swizzle == key.swizzle);
+        });
+        if (compatible != variants.end()) {
+            variant.binding.handle = compatible->binding.handle;
+        } else if (fallback && fallback->compatibility == variant.binding.compatibility &&
+                   !custom_border) {
+            variant.binding.handle = fallback->handle;
+        }
+        if (!variant.binding.handle) {
             throw;
         }
         static std::atomic<u32> warnings{0};
@@ -5154,7 +5177,7 @@ VkSampler Sampler::Emplace(VariantKey key, VkSampler fallback) {
         }
     }
     variants.push_back(std::move(variant));
-    return variants.back().handle;
+    return variants.back().binding.handle;
 }
 
 VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
