@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -74,6 +73,24 @@ struct ByteAddressedRange {
     }
     return VkExtent2D{width / 2, height};
 }
+
+struct SamplerBinding {
+    struct Compatibility {
+        bool mag_linear : 1;
+        bool min_linear : 1;
+        bool mipmap_linear : 1;
+        bool anisotropy : 1;
+        bool compare : 1;
+        bool minmax : 1;
+        bool clamp_to_border : 1;
+        bool custom_border : 1;
+
+        bool operator==(const Compatibility&) const noexcept = default;
+    };
+
+    VkSampler handle{};
+    Compatibility compatibility{};
+};
 
 class TextureCacheRuntime {
 public:
@@ -278,7 +295,7 @@ public:
     std::optional<f32> ocarina_fsr_lod_bias;
     /// Set when the Ocarina upscaler fails during the session: samplers drop the bias again.
     bool ocarina_fsr_failed{};
-    std::atomic<VkSampler> fallback_sampler{VK_NULL_HANDLE};
+    SamplerBinding fallback_sampler{};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
     std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
@@ -870,7 +887,7 @@ public:
     explicit Sampler(TextureCacheRuntime&, const Tegra::Texture::TSCEntry&);
 
     [[nodiscard]] VkSampler Handle() const noexcept {
-        return variants.front().handle;
+        return variants.front().binding.handle;
     }
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
@@ -905,14 +922,14 @@ private:
     struct Variant {
         VariantKey key;
         vk::Sampler sampler;
-        VkSampler handle;
+        SamplerBinding binding;
     };
 
     static constexpr size_t MAX_VARIANTS = 32;
 
     [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
     [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
-    VkSampler Emplace(VariantKey key, VkSampler fallback = VK_NULL_HANDLE);
+    VkSampler Emplace(VariantKey key, const SamplerBinding* fallback = nullptr);
 
     CustomBorderColorBudget custom_border_color_budget;
     std::vector<Variant> variants;
