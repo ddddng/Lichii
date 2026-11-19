@@ -37,6 +37,11 @@ public:
         return control.fallback_attempts;
     }
 
+    /// Makes every CommitBacking of the memory fail, as when Windows is out of commit.
+    static void FailCommits(HostMemory& memory, bool fail) {
+        memory.fail_commits_for_test = fail;
+    }
+
 private:
     HostMemory::AllocationTestControl* previous;
     HostMemory::AllocationTestControl control;

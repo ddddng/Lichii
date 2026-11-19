@@ -402,6 +402,12 @@ void Replayer::MapGmmu(const GmmuMapRecord& map) {
 void Replayer::MapSmmu(const SmmuMapRecord& map) {
     auto& table = process->GetPageTable().GetImpl();
     auto& backing = system.DeviceMemory().buffer;
+    if (map.physical_address > backing.BackingSize() ||
+        map.size > backing.BackingSize() - map.physical_address) {
+        LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} is outside guest memory",
+                  map.physical_address, map.size);
+        return;
+    }
     // The GPU reads these pages, zero ones the trace skipped included: commit them.
     if (!backing.CommitBacking(map.physical_address, map.size)) {
         LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} could not be committed",
@@ -442,9 +448,11 @@ void Replayer::InvalidateDevice(u64 physical, u64 size) {
 
 void Replayer::WriteMemory(const MemoryRecord& record, const std::vector<u8>& bytes) {
     auto& backing = system.DeviceMemory().buffer;
+    // False past the end of guest memory too: the write is dropped, not made out of bounds.
     if (!backing.CommitBacking(record.physical_address, bytes.size())) {
-        LOG_ERROR(HW_GPU, "GPU trace replay: memory at {:#x} could not be committed",
-                  record.physical_address);
+        LOG_ERROR(HW_GPU, "GPU trace replay: memory at {:#x}+{:#x} could not be committed",
+                  record.physical_address, bytes.size());
+        return;
     }
     u8* const pointer = backing.BackingBasePointer() + record.physical_address;
     std::memcpy(pointer, bytes.data(), bytes.size());

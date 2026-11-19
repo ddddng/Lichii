@@ -78,14 +78,15 @@ public:
 
     /// Windows: commits the section pages behind [physical_offset, physical_offset + length), 64
     /// KiB at a time and once each. A committed page can't be decommitted again. Elsewhere, and
-    /// when the section was committed whole (EDEN_BACKING_COMMIT_ALL=1), it does nothing.
+    /// when the section was committed whole (EDEN_BACKING_COMMIT_ALL=1), it does nothing. False
+    /// for a range that ends past the backing, and when Windows is out of commit.
     [[nodiscard]] bool CommitBacking(size_t physical_offset, size_t length);
 
-    /// Bytes of guest memory committed so far (Windows, reserved section only).
-    static u64 CommittedBytes() noexcept;
+    /// Bytes of this guest memory committed so far (Windows, reserved section only).
+    [[nodiscard]] u64 CommittedBytes() const noexcept;
 
-    /// Host accesses that found a reserved guest memory page and committed it on the fault.
-    static u64 CommitFaults() noexcept;
+    /// Logs the host faults on reserved pages that the fault handler recorded since the last call.
+    void ReportCommitFaults();
 
     /// Pages given back to the kernel: their contents are no longer known to be zero.
     void MarkDirty(size_t physical_offset, size_t length);
@@ -153,6 +154,7 @@ private:
     size_t num_granules{};
     // Windows requires it for kernels whom lack proper support for some functions!
     bool fallback_buffer{false};
+    bool fail_commits_for_test{false}; ///< Tests: every CommitBacking fails
 };
 
 } // namespace Common

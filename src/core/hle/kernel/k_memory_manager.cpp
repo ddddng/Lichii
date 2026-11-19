@@ -297,6 +297,10 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
                     cur_manager->Free(allocated_block, pages_per_alloc);
                 };
 
+                // Windows commits the pages here, before anything tracks the block: out of
+                // commit, the allocation fails instead of the access.
+                R_UNLESS(this->MarkUsed(allocated_block, pages_per_alloc), ResultOutOfMemory);
+
                 // Add the block to our group.
                 R_TRY(out->AddBlock(allocated_block, pages_per_alloc));
 
@@ -313,11 +317,6 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
 
     // Only succeed if we allocated as many pages as we wanted.
     R_UNLESS(num_pages == 0, ResultOutOfMemory);
-
-    // Windows commits the pages here: out of commit, the allocation fails instead of the access.
-    for (const auto& block : *out) {
-        R_UNLESS(this->MarkUsed(block.GetAddress(), block.GetNumPages()), ResultOutOfMemory);
-    }
 
     // We succeeded!
     R_SUCCEED();

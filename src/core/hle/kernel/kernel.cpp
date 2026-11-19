@@ -782,6 +782,7 @@ struct KernelCore::Impl {
             if (!buffer.CommitBacking(begin, end - begin)) {
                 LOG_CRITICAL(Kernel, "Failed to commit kernel memory region {:#x}+{:#x}",
                              region.GetAddress(), region.GetSize());
+                continue;
             }
             committed += end - begin;
         }
