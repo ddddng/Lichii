@@ -24,9 +24,10 @@ ARM64, aka aarch64, is the only supported architecture for Android, with limited
 
 ### Caveats
 
-NCE (Native Code Execution) is currently only available on Android and (experimentally) Linux. Support for macOS is in the works, but Windows is extremely unlikely to ever happen (if you want it--submit patches!). Generally, if NCE is available, you should pretty much always use it due to the massive performance hit JIT has.
-
-When NCE is enabled, do note that the GPU will almost always be the limiting factor. This is especially the case for Android, as well as desktops that lack dedicated GPUs; Adreno, Mali, PowerVR, etc. GPUs are generally significantly weaker relative to their respective CPUs.
+Dynarmic (JIT) is the default CPU backend. ARM64 builds for Android and Linux also offer
+Native (NCE) for supported 39-bit applications on hosts with 4 KiB pages. NCE runs guest
+instructions in the emulator's process and does not isolate them from the host process.
+Do not use NCE with software you don't trust. NCE is not available on macOS or Windows.
 
 Windows/arm64 is *very* experimental and is unlikely to work at all. Support and testing is in the works.
 
