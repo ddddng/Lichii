@@ -782,7 +782,7 @@ bool DmaPusher::Step() {
 
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset,
                                   std::string_view source, const CommandHeader* snapshot) {
-    if (VideoCommon::MmeCapture::active && g_nx2_ampere) [[unlikely]] {
+    if (VideoCommon::MmeCapture::active && g_nx2_ampere) {
         std::array<u32, 128> words;
         const auto shown = std::span{words}.first(std::min(commands.size(), words.size()));
         for (size_t i = 0; i < shown.size(); ++i) {
@@ -806,7 +806,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             if (g_nx2_ampere && dma_state.method < non_puller_methods) {
                 max_write = 1; // a semaphore acquire may suspend the channel after any word
             }
-            if (VideoCommon::MmeCapture::active) [[unlikely]] {
+            if (VideoCommon::MmeCapture::active) {
                 CaptureMmeWords({&command_header.argument, max_write}, word_offset + index, source,
                                 snapshot);
             }
@@ -848,7 +848,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             auto const command_header = commands[index]; //can copy
             dma_state.dma_word_offset = u64((word_offset + index) * sizeof(u32));
             dma_state.is_last_call = dma_state.method_count <= 1;
-            if (VideoCommon::MmeCapture::active) [[unlikely]] {
+            if (VideoCommon::MmeCapture::active) {
                 CaptureMmeWords({&command_header.argument, 1}, word_offset + index, source,
                                 snapshot);
             }
@@ -875,7 +875,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 dma_state.method = command_header.method;
                 dma_state.subchannel = command_header.subchannel;
                 dma_state.dma_word_offset = u64(-s64(dma_state.dma_get)); // negate to set address as 0
-                if (VideoCommon::MmeCapture::active) [[unlikely]] {
+                if (VideoCommon::MmeCapture::active) {
                     const u32 argument = command_header.arg_count;
                     CaptureMmeWords({&argument, 1}, word_offset + index, source, snapshot,
                                     command_header.argument);
