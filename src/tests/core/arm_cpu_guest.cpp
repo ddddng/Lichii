@@ -140,6 +140,23 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expe
     auto& memory = process->GetMemory();
     const auto data = process->GetEntryPoint() + ARM_GUEST_DATA_OFFSET;
     const u64 report_address = GetInteger(data);
+    if (mode == ARM_GUEST_CHECKS_NATIVE) {
+        const u64 tracked_data = report_address + ARM_GUEST_PAGE_SIZE;
+        const u64 tracked_rodata = report_address - ARM_GUEST_PAGE_SIZE;
+        for (const u64 address : {tracked_data, tracked_rodata}) {
+            memory.RasterizerMarkRegionCached(address, ARM_GUEST_PAGE_SIZE, true);
+            memory.RasterizerMarkRegionCached(address, ARM_GUEST_PAGE_SIZE, false);
+        }
+        if (!memory.RecoverNceAccess(tracked_data, true, true) ||
+            !memory.RecoverNceAccess(tracked_rodata, false, true) ||
+            memory.RecoverNceAccess(tracked_data, true, false) ||
+            memory.RecoverNceAccess(tracked_rodata, true, true) ||
+            memory.RecoverNceAccess(report_address, true, true)) {
+            std::fputs("NCE did not handle a cleared cache trap with the base permissions\n",
+                       stderr);
+            return EXIT_FAILURE;
+        }
+    }
     memory.Write32(report_address + ARM_GUEST_MODE, mode);
     system.RegisterExitCallback([&] {
         auto& thread = Kernel::GetCurrentThread(system.Kernel());

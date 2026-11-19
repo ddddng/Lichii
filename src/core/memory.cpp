@@ -1135,7 +1135,7 @@ struct Memory::Impl {
         finish_run(end);
     }
 
-    bool RecoverNceAccess(u64 fault_address, bool write) {
+    bool RecoverNceAccess(u64 fault_address, bool write, bool allow_resolved_trap) {
         const u64 address = fault_address & ~LICHII_PAGEMASK;
         const u64 page = address >> LICHII_PAGEBITS;
         const auto access = write ? Common::MemoryPermission::Write : Common::MemoryPermission::Read;
@@ -1146,8 +1146,14 @@ struct Memory::Impl {
         const auto state = (*nce_pages)[page];
         const auto base = static_cast<Common::MemoryPermission>(state & NceBaseMask);
         const auto [ptr, type, block] = current_page_table->entries[page].PointerTypeBlock(true);
-        if (ptr == 0 || type != Common::PageType::RasterizerCachedMemory ||
-            !True(base & access) || True(NceHostPermission(state) & access)) {
+        if (ptr == 0 || !True(base & access) ||
+            (type != Common::PageType::Memory && type != Common::PageType::RasterizerCachedMemory)) {
+            return false;
+        }
+        if (True(NceHostPermission(state) & access)) {
+            return allow_resolved_trap && state >= NceCacheGeneration;
+        }
+        if (type != Common::PageType::RasterizerCachedMemory) {
             return false;
         }
         lock.unlock();
@@ -1419,8 +1425,8 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
 }
 
 #if defined(HAS_NCE) && !defined(__ANDROID__)
-bool Memory::RecoverNceAccess(u64 fault_address, bool write) {
-    return impl->RecoverNceAccess(fault_address, write);
+bool Memory::RecoverNceAccess(u64 fault_address, bool write, bool allow_resolved_trap) {
+    return impl->RecoverNceAccess(fault_address, write, allow_resolved_trap);
 }
 #endif
 

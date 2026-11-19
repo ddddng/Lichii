@@ -18,6 +18,8 @@ without executing its post-fault marker. A backend check combines the loader's
 trampoline state with a TLS marker execution wrote into the NCE thread state.
 The native cases check both physical and virtual counter reads against
 `GetSystemTick` at the 19.2 MHz and 31.25 MHz guest frequencies.
+They also test a delayed fault after a cache mark is cleared, without lifting
+the guest's read-only protection or retrying an unrelated access.
 
 The null renderer cannot exercise a tracked write trap. For a separate Vulkan
 integration check, back two GPU device addresses with the same guest page.

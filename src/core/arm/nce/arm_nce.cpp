@@ -249,7 +249,7 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     if (info->si_code == SEGV_ACCERR && record && (record->esr >> 26) == 0x24 &&
         (record->esr & (u64{1} << 8)) == 0) {
         auto* const cpu = guest_ctx->parent;
-        cpu->m_access_fault = AccessFault{reinterpret_cast<u64>(info->si_addr),
+        cpu->m_access_fault = AccessFault{reinterpret_cast<u64>(info->si_addr), host_ctx.pc,
                                           (record->esr & (u64{1} << 6)) ? Access::Write
                                                                          : Access::Read};
         cpu->m_running_thread->GetNativeExecutionParameters().lock.store(SpinLockLocked);
@@ -363,8 +363,11 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
     m_running_thread = nullptr;
 
 #ifndef __ANDROID__
-    if (const auto fault = std::exchange(m_access_fault, {})) {
-        if (!process->GetMemory().RecoverNceAccess(fault->address, fault->access == Access::Write)) {
+    const auto fault = std::exchange(m_access_fault, {});
+    const auto previous = std::exchange(m_last_access_fault, fault);
+    if (fault) {
+        if (!process->GetMemory().RecoverNceAccess(
+                fault->address, fault->access == Access::Write, fault != previous)) {
             LOG_ERROR(Core_ARM, "Unrecoverable native guest memory {} at {:#x}, PC {:#x}",
                       fault->access == Access::Write ? "write" : "read",
                       fault->address, m_guest_ctx.pc);

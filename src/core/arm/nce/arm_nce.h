@@ -98,9 +98,13 @@ private:
     enum class Access { Read, Write };
     struct AccessFault {
         u64 address;
+        u64 pc;
         Access access;
+
+        bool operator==(const AccessFault&) const = default;
     };
     std::optional<AccessFault> m_access_fault;
+    std::optional<AccessFault> m_last_access_fault;
 #endif
 };
 

@@ -506,7 +506,7 @@ public:
 
     bool InvalidateNCE(Common::ProcessAddress vaddr, size_t size);
 #if defined(HAS_NCE) && !defined(__ANDROID__)
-    bool RecoverNceAccess(u64 fault_address, bool write);
+    bool RecoverNceAccess(u64 fault_address, bool write, bool allow_resolved_trap);
 #endif
 
     bool InvalidateSeparateHeap(void* fault_address);
