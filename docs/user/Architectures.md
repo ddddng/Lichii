@@ -29,6 +29,12 @@ Native (NCE) for supported 39-bit applications on hosts with 4 KiB pages. NCE ru
 instructions in the emulator's process and does not isolate them from the host process.
 Do not use NCE with software you don't trust. NCE is not available on macOS or Windows.
 
+On Linux, NCE also needs multicore mode, the normal CPU clock, and speed control
+independent of CPU timing. It falls back to Dynarmic before loading guest code
+if those requirements aren't met, if a debugger is enabled, or if it can't
+reserve a shared identity mapping. The Linux tests cover synthetic guest code;
+they don't establish retail game, Direct NVN, or dynamically generated code compatibility.
+
 Windows/arm64 is *very* experimental and is unlikely to work at all. Support and testing is in the works.
 
 ## riscv64
