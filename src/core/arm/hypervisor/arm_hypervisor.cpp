@@ -185,7 +185,7 @@ void ArmHypervisor::ArmHeartbeat() {
     hv_vcpu_set_vtimer_mask(m_vcpu, false);
 }
 
-bool ArmHypervisor::RunFlushStub(bool instruction_cache) {
+HaltReason ArmHypervisor::RunFlushStub(bool instruction_cache) {
     u64 pc{}, cpsr{}, x0{};
     hv_vcpu_get_reg(m_vcpu, HV_REG_PC, &pc);
     hv_vcpu_get_reg(m_vcpu, HV_REG_CPSR, &cpsr);
@@ -194,27 +194,43 @@ bool ArmHypervisor::RunFlushStub(bool instruction_cache) {
                     instruction_cache ? HvVm::FlushStubVa : HvVm::DataFlushStubVa);
     hv_vcpu_set_reg(m_vcpu, HV_REG_CPSR, PstateEl1h);
 
-    bool done = false;
-    for (int attempt = 0; attempt < 64 && !done; attempt++) {
-        if (m_vm->Run(m_core_index, m_vcpu, std::nullopt) != HV_SUCCESS) {
+    HaltReason halt{};
+    while (true) {
+        if (const u64 pending = m_halt.exchange(0); pending != 0) {
+            halt = static_cast<HaltReason>(pending);
             break;
+        }
+        if (m_vm->Run(m_core_index, m_vcpu, std::nullopt) != HV_SUCCESS) {
+            LOG_CRITICAL(Core_ARM, "Hypervisor: hv_vcpu_run failed in flush stub on core {}",
+                         m_core_index);
+            halt = HaltReason::PrefetchAbort;
+            break;
+        }
+        if (m_exit->reason == HV_EXIT_REASON_CANCELED) {
+            continue;
         }
         if (m_exit->reason == HV_EXIT_REASON_VTIMER_ACTIVATED) {
             ArmHeartbeat();
-        } else if (m_exit->reason == HV_EXIT_REASON_EXCEPTION) {
-            const u64 syndrome = m_exit->exception.syndrome;
-            done = ExceptionClass(syndrome) == ExceptionClassHvc64 && (syndrome & 0xFFFF) == 1;
-            if (!done) {
-                LOG_CRITICAL(Core_ARM, "Hypervisor: unexpected exit {:#x} in flush stub", syndrome);
-                break;
-            }
+            continue;
         }
+        if (m_exit->reason == HV_EXIT_REASON_EXCEPTION) {
+            const u64 syndrome = m_exit->exception.syndrome;
+            if (ExceptionClass(syndrome) != ExceptionClassHvc64 || (syndrome & 0xFFFF) != 1) {
+                LOG_CRITICAL(Core_ARM, "Hypervisor: unexpected exit {:#x} in flush stub", syndrome);
+                halt = HaltReason::PrefetchAbort;
+            }
+        } else {
+            LOG_CRITICAL(Core_ARM, "Hypervisor: unexpected flush stub exit reason {}",
+                         static_cast<u32>(m_exit->reason));
+            halt = HaltReason::PrefetchAbort;
+        }
+        break;
     }
 
     hv_vcpu_set_reg(m_vcpu, HV_REG_PC, pc);
     hv_vcpu_set_reg(m_vcpu, HV_REG_CPSR, cpsr);
     hv_vcpu_set_reg(m_vcpu, HV_REG_X0, x0);
-    return done;
+    return halt;
 }
 
 bool ArmHypervisor::EmulateSystemRegister(u64 esr) {
@@ -368,8 +384,8 @@ HaltReason ArmHypervisor::RunThread(Kernel::KThread* thread) {
             if (const u64 generation = m_vm->FlushGeneration(); generation != m_flushed_generation) {
                 const u64 code_generation = m_vm->CodeFlushGeneration();
                 const bool instruction_cache = code_generation != m_code_flushed_generation;
-                if (!RunFlushStub(instruction_cache)) {
-                    hr |= HaltReason::PrefetchAbort;
+                if (const auto halt = RunFlushStub(instruction_cache); True(halt)) {
+                    hr |= halt;
                     break;
                 }
                 m_flushed_generation = generation;

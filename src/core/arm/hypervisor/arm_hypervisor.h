@@ -23,6 +23,7 @@ class HvVm;
 class ArmHypervisor final : public ArmInterface {
 public:
     ArmHypervisor(std::shared_ptr<HvVm> vm, std::size_t core_index);
+    bool EnsureVcpu();
 
     Architecture GetArchitecture() const override {
         return Architecture::AArch64;
@@ -50,11 +51,10 @@ protected:
     void RewindBreakpointInstruction() override {}
 
 private:
-    bool EnsureVcpu();
     void LoadVcpuContext();
     void ReadVcpuContext(Kernel::Svc::ThreadContext& ctx) const;
     bool VcpuHoldsContext() const;
-    bool RunFlushStub(bool instruction_cache = true);
+    HaltReason RunFlushStub(bool instruction_cache);
     void ArmHeartbeat();
     bool EmulateSystemRegister(u64 esr);
     HaltReason HandleGuestException(Kernel::KThread* thread);
