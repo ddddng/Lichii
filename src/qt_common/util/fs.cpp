@@ -19,7 +19,7 @@ namespace QtCommon::FS {
 namespace {
 
 u128 ReadLastOpenedProfile(const fs::path& root) {
-    constexpr u128 default_profile{0, 1};
+    constexpr u128 default_profile{1, 0};
     QFile file{QString::fromStdU16String((root / "system/Profiles.json").u16string())};
     if (!file.open(QIODevice::ReadOnly)) {
         return default_profile;
@@ -31,8 +31,8 @@ u128 ReadLastOpenedProfile(const fs::path& root) {
     }
     u128 profile{};
     const auto* const begin = id.constData();
-    const auto high = std::from_chars(begin, begin + 16, profile[1], 16);
-    const auto low = std::from_chars(begin + 16, begin + 32, profile[0], 16);
+    const auto high = std::from_chars(begin, begin + 16, profile[0], 16);
+    const auto low = std::from_chars(begin + 16, begin + 32, profile[1], 16);
     return high.ptr == begin + 16 && low.ptr == begin + 32 && high.ec == std::errc{} &&
                    low.ec == std::errc{} && profile != u128{}
                ? profile
@@ -135,8 +135,8 @@ std::optional<Common::FS::RyujinxSave> ChooseRyujinxSave(fs::path& root, u64 pro
             options.append(tr("Save %1 (device save)").arg(id));
         } else {
             const auto profile = QStringLiteral("%1%2")
-                                     .arg(save.user_id[1], 16, 16, QLatin1Char('0'))
-                                     .arg(save.user_id[0], 16, 16, QLatin1Char('0'));
+                                     .arg(save.user_id[0], 16, 16, QLatin1Char('0'))
+                                     .arg(save.user_id[1], 16, 16, QLatin1Char('0'));
             if (save.user_id == last) {
                 options.append(tr("Save %1 (last used Ryujinx profile: %2)").arg(id, profile));
             } else {
