@@ -364,10 +364,15 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
 
 #ifndef __ANDROID__
     const auto fault = std::exchange(m_access_fault, {});
-    const auto previous = std::exchange(m_last_access_fault, fault);
+    const auto previous = std::exchange(m_last_access_retry, {});
     if (fault) {
-        if (!process->GetMemory().RecoverNceAccess(
-                fault->address, fault->access == Access::Write, fault != previous)) {
+        const auto prior_trap =
+            previous && previous->first == *fault ? std::optional{previous->second} : std::nullopt;
+        const auto trap = process->GetMemory().RecoverNceAccess(
+            fault->address, fault->access == Access::Write, prior_trap);
+        if (trap) {
+            m_last_access_retry.emplace(*fault, *trap);
+        } else {
             LOG_ERROR(Core_ARM, "Unrecoverable native guest memory {} at {:#x}, PC {:#x}",
                       fault->access == Access::Write ? "write" : "read",
                       fault->address, m_guest_ctx.pc);

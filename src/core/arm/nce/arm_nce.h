@@ -4,6 +4,7 @@
 
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "core/arm/arm_interface.h"
 #include "core/arm/nce/guest_context.h"
@@ -104,7 +105,7 @@ private:
         bool operator==(const AccessFault&) const = default;
     };
     std::optional<AccessFault> m_access_fault;
-    std::optional<AccessFault> m_last_access_fault;
+    std::optional<std::pair<AccessFault, u64>> m_last_access_retry;
 #endif
 };
 
