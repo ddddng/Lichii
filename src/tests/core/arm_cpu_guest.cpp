@@ -305,3 +305,6 @@ int main(int argc, char** argv) try {
     std::fprintf(stderr, "%s\n", error.what());
     return EXIT_FAILURE;
 }
+
+#define VMA_IMPLEMENTATION
+#include "video_core/vulkan_common/vma.h"
