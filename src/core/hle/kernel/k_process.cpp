@@ -19,6 +19,9 @@
 
 #include "core/arm/dynarmic/arm_dynarmic_32.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/arm_hypervisor.h"
+#endif
 #ifdef HAS_NCE
 #include "core/arm/nce/arm_nce.h"
 #endif
@@ -323,7 +326,7 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     };
 
     // Ensure our memory is initialized.
-    m_memory.SetCurrentPageTable(*this);
+    m_memory.SetCurrentPageTable(*this, params.flags);
     m_memory.SetGPUDirtyManagers(kernel.System().GetGPUDirtyMemoryManager());
 
     // Ensure we can insert the code region.
@@ -425,7 +428,7 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     };
 
     // Ensure our memory is initialized.
-    m_memory.SetCurrentPageTable(*this);
+    m_memory.SetCurrentPageTable(*this, params.flags);
     m_memory.SetGPUDirtyManagers(kernel.System().GetGPUDirtyMemoryManager());
 
     // Ensure we can insert the code region.
@@ -1312,6 +1315,15 @@ void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress 
 void KProcess::InitializeInterfaces(KernelCore& kernel) {
     m_exclusive_monitor =
         Core::MakeExclusiveMonitor(this->GetMemory(), Core::Hardware::NUM_CPU_CORES);
+
+#ifdef HAS_HYPERVISOR
+    if (auto vm = m_memory.GetHypervisor()) {
+        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+            m_arm_interfaces[i] = std::make_unique<Core::ArmHypervisor>(vm, i);
+        }
+        return;
+    }
+#endif
 
 #ifdef HAS_NCE
     if (this->UsesNativeExecution()) {

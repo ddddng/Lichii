@@ -26,6 +26,9 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/swap.h"
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/hv_vm.h"
+#endif
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/device_memory.h"
@@ -60,10 +63,24 @@ static inline bool AddressSpaceContains(const Common::PageTable& table, const Co
 struct Memory::Impl {
     explicit Impl(Core::System& system_) : system{system_} {}
 
-    void SetCurrentPageTable(Kernel::KProcess& process) {
+    void SetCurrentPageTable(Kernel::KProcess& process,
+                             [[maybe_unused]] Kernel::Svc::CreateProcessFlag flags) {
         current_page_table = &process.GetPageTable().GetImpl();
 
         bool use_fastmem = process.IsApplication() && Settings::IsFastmemEnabled();
+#ifdef HAS_HYPERVISOR
+        using Flag = Kernel::Svc::CreateProcessFlag;
+        if (True(flags & Flag::IsApplication) && True(flags & Flag::Is64Bit) &&
+            Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Hypervisor) {
+            if (system.IsMulticore()) {
+                hv_vm = HvVm::Create(system);
+            }
+            if (!hv_vm) {
+                LOG_WARNING(Core_ARM, "Hypervisor unavailable or not in multicore mode; using Dynarmic");
+            }
+        }
+        use_fastmem = use_fastmem && !hv_vm;
+#endif
 #ifdef HAS_NCE
         use_fastmem = use_fastmem &&
                       (!system.DeviceMemory().buffer.IsDirectMapped() || process.UsesNativeExecution());
@@ -80,8 +97,12 @@ struct Memory::Impl {
 #else
         host_buffer = std::addressof(system.DeviceMemory().buffer);
 #endif
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+#else
         if (process.UsesNativeExecution()) {
+#endif
             nce_pages = std::make_unique<Common::SparseLargeVector<u32>>(
                 u64{1} << (current_page_table->GetAddressSpaceBits() - LICHII_PAGEBITS));
         }
@@ -95,7 +116,7 @@ struct Memory::Impl {
         ASSERT_MSG((base & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
         ASSERT_MSG(target >= DramMemoryMap::Base, "Out of bounds target: {:016X}",
                    GetInteger(target));
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
         std::unique_lock lock{nce_page_mutex, std::defer_lock};
         if (nce_pages) {
             lock.lock();
@@ -110,6 +131,12 @@ struct Memory::Impl {
         MapPages(page_table, base / LICHII_PAGESIZE, size / LICHII_PAGESIZE, target,
                  Common::PageType::Memory);
 
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+            hv_vm->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms);
+            return;
+        }
+#endif
         if (current_page_table->fastmem_arena) {
             host_buffer->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms, separate_heap);
         }
@@ -119,12 +146,17 @@ struct Memory::Impl {
                      bool separate_heap) {
         ASSERT_MSG((size & LICHII_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((base & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
         std::unique_lock lock{nce_page_mutex, std::defer_lock};
         if (nce_pages) {
             lock.lock();
             const u64 first = GetInteger(base) >> LICHII_PAGEBITS;
             nce_pages->ZeroRegion(first, first + (size >> LICHII_PAGEBITS));
+        }
+#endif
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+            hv_vm->Unmap(GetInteger(base), size);
         }
 #endif
         MapPages(page_table, base / LICHII_PAGESIZE, size / LICHII_PAGESIZE, 0,
@@ -140,11 +172,15 @@ struct Memory::Impl {
         ASSERT_MSG((size & LICHII_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((vaddr & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", vaddr);
 
-        if (!current_page_table->fastmem_arena) {
+        if (!current_page_table->fastmem_arena
+#ifdef HAS_HYPERVISOR
+            && !hv_vm
+#endif
+        ) {
             return;
         }
 
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
         if (nce_pages) {
             std::scoped_lock lock{nce_page_mutex};
             UpdateNceProtection(vaddr, size, [&](u32 state) {
@@ -540,7 +576,7 @@ struct Memory::Impl {
             return;
         }
 
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
         std::unique_lock lock{nce_page_mutex, std::defer_lock};
         if (nce_pages) {
             lock.lock();
@@ -661,7 +697,7 @@ struct Memory::Impl {
     void RasterizerArmReadTraps(u64 vaddr, u64 size) {
         // Clean cached read areas also need invalidation when reactive flushing is enabled.
         read_trap_generation.fetch_add(1, std::memory_order_release);
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
         if (nce_pages && vaddr != 0 && size != 0 &&
             AddressSpaceContains(*current_page_table, vaddr, size)) {
             std::scoped_lock lock{nce_page_mutex};
@@ -1087,7 +1123,7 @@ struct Memory::Impl {
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
     }
 
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
     static constexpr u32 NceBaseMask = 0x7;
     static constexpr u32 NceCached = 1u << 3;
     static constexpr u32 NceReadReady = 1u << 4;
@@ -1113,8 +1149,13 @@ struct Memory::Impl {
         auto run_permission = Common::MemoryPermission{};
         const auto finish_run = [&](u64 page) {
             if (page > run_start) {
+#ifdef HAS_HYPERVISOR
+                hv_vm->Protect(run_start << LICHII_PAGEBITS,
+                               (page - run_start) << LICHII_PAGEBITS, run_permission);
+#else
                 host_buffer->Protect(run_start << LICHII_PAGEBITS,
                                      (page - run_start) << LICHII_PAGEBITS, run_permission);
+#endif
             }
             run_start = page;
         };
@@ -1191,6 +1232,9 @@ struct Memory::Impl {
     std::unique_ptr<Common::SparseLargeVector<u32>> nce_pages;
     std::mutex nce_page_mutex;
 #endif
+#ifdef HAS_HYPERVISOR
+    std::shared_ptr<HvVm> hv_vm;
+#endif
 
     Core::System& system;
     Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
@@ -1225,9 +1269,15 @@ void Memory::Reset() {
     impl = std::make_unique<Impl>(system);
 }
 
-void Memory::SetCurrentPageTable(Kernel::KProcess& process) {
-    impl->SetCurrentPageTable(process);
+void Memory::SetCurrentPageTable(Kernel::KProcess& process, Kernel::Svc::CreateProcessFlag flags) {
+    impl->SetCurrentPageTable(process, flags);
 }
+
+#ifdef HAS_HYPERVISOR
+std::shared_ptr<HvVm> Memory::GetHypervisor() const {
+    return impl->hv_vm;
+}
+#endif
 
 void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                              Common::PhysicalAddress target, Common::MemoryPermission perms,
@@ -1434,7 +1484,7 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
     return mapped && ptr != nullptr;
 }
 
-#if defined(HAS_NCE) && !defined(__ANDROID__)
+#ifdef HAS_NATIVE_PAGE_PROTECTION
 std::optional<u64> Memory::RecoverNceAccess(u64 fault_address, bool write,
                                            std::optional<u64> prior_trap) {
     return impl->RecoverNceAccess(fault_address, write, prior_trap);
