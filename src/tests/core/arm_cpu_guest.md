@@ -21,6 +21,8 @@ The native cases check both physical and virtual counter reads against
 `GetSystemTick` at the 19.2 MHz and 31.25 MHz guest frequencies.
 They also test a delayed fault after a cache mark is cleared, without lifting
 the guest's read-only protection or retrying an unrelated access.
+On macOS, the relaunch case boots and stops two HVF guests in the same emulator
+process and requires native execution on both boots.
 
 On macOS, CMake signs the runner ad hoc with the Hypervisor entitlement. The
 `hvf` cases use the same fixture and require the application to have selected

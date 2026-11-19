@@ -360,7 +360,9 @@ if ((HAS_NCE AND LINUX) OR HAS_HYPERVISOR)
             VERBATIM)
         add_test(NAME arm_cpu_guest_hvf_execute_fault COMMAND arm_cpu_guest_tests hvf --execute-fault)
         add_test(NAME arm_cpu_guest_hvf_revoke_fault COMMAND arm_cpu_guest_tests hvf --revoke-fault)
+        add_test(NAME arm_cpu_guest_hvf_relaunch COMMAND arm_cpu_guest_tests hvf --relaunch)
         set_tests_properties(arm_cpu_guest_hvf_execute_fault arm_cpu_guest_hvf_revoke_fault
+            arm_cpu_guest_hvf_relaunch
             PROPERTIES LABELS arm_cpu_guest RESOURCE_LOCK arm_cpu_guest TIMEOUT 35)
     else()
         set(native_backend nce)

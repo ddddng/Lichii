@@ -90,6 +90,7 @@ public:
 
 #ifdef HAS_HYPERVISOR
     std::shared_ptr<Core::HvVm> GetHypervisor() const;
+    void ReleaseHypervisor();
 #endif
 
     /**

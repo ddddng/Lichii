@@ -97,7 +97,8 @@ const char* StageName(u32 stage) {
     }
 }
 
-int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expected_frequency) {
+int RunGuest(Core::System& system, const fs::path& image, std::string_view backend, u32 mode,
+             u64 expected_frequency) {
     const bool nce = backend == "nce";
 #ifdef HAS_HYPERVISOR
     const bool hvf = backend == "hvf";
@@ -114,18 +115,10 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expe
     Settings::values.cpu_backend.SetValue(cpu_backend);
     Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
     Settings::values.sink_id.SetValue(Settings::AudioEngine::Null);
-    Settings::values.use_multi_core.SetValue(true);
-    Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_4Gb);
 
     HeadlessWindow window;
     std::promise<ExitThread> exited;
     auto completion = exited.get_future();
-    Core::System system;
-    if (!system.Initialize()) {
-        std::fputs("Failed to initialize the guest system\n", stderr);
-        return EXIT_FAILURE;
-    }
-
     Service::AM::FrontendAppletParameters params{
         .applet_id = Service::AM::AppletId::Application,
         .applet_type = Service::AM::AppletType::Application,
@@ -137,6 +130,7 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expe
     }
     SCOPE_EXIT {
         system.ShutdownMainProcess();
+        system.RegisterExitCallback({});
     };
 
     auto* const process = system.Kernel().ApplicationProcess();
@@ -311,17 +305,20 @@ int main(int argc, char** argv) try {
 #ifdef HAS_HYPERVISOR
     const bool native = backend == "hvf";
     const bool fallback = backend == "hvf-fallback";
+    const bool relaunch = native && option == "--relaunch";
     constexpr long host_page_size = 16384;
 #else
     const bool native = backend == "nce";
     const bool fallback = false;
+    constexpr bool relaunch = false;
     constexpr long host_page_size = ARM_GUEST_PAGE_SIZE;
 #endif
     if (argc > 3 || (!native && !fallback && backend != "dynarmic") ||
-        (!option.empty() && option != "--benchmark" && !nx2_clock &&
+        (!option.empty() && option != "--benchmark" && !nx2_clock && !relaunch &&
          !(fault_option && native))) {
         std::fputs("Usage: arm_cpu_guest_tests BACKEND "
-                   "[--benchmark|--nx2-clock|--fault|--permission-fault|--execute-fault|--revoke-fault]\n",
+                   "[--benchmark|--nx2-clock|--fault|--permission-fault|--execute-fault|"
+                   "--revoke-fault|--relaunch]\n",
                    stderr);
         return EXIT_FAILURE;
     }
@@ -378,7 +375,18 @@ int main(int argc, char** argv) try {
                      : option == "--revoke-fault"     ? ARM_GUEST_REVOKE_FAULT
                      : native                          ? ARM_GUEST_CHECKS_NATIVE
                                                       : ARM_GUEST_CHECKS;
-    return RunGuest(image, backend, mode, expected_frequency);
+    Settings::values.use_multi_core.SetValue(true);
+    Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_4Gb);
+    Core::System system;
+    if (!system.Initialize()) {
+        std::fputs("Failed to initialize the guest system\n", stderr);
+        return EXIT_FAILURE;
+    }
+    const int status = RunGuest(system, image, backend, mode, expected_frequency);
+    if (status == EXIT_SUCCESS && relaunch) {
+        return RunGuest(system, image, backend, mode, expected_frequency);
+    }
+    return status;
 } catch (const std::exception& error) {
     std::fprintf(stderr, "%s\n", error.what());
     return EXIT_FAILURE;
