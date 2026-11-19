@@ -344,6 +344,17 @@ target_compile_definitions(tests PRIVATE
 
 add_test(NAME tests COMMAND tests)
 
+if (HAS_NCE AND LINUX)
+    enable_language(ASM)
+    add_executable(arm_cpu_guest_tests core/arm_cpu_guest.cpp core/arm_cpu_guest.S)
+    target_link_libraries(arm_cpu_guest_tests PRIVATE core video_core)
+    add_test(NAME arm_cpu_guest_nce COMMAND arm_cpu_guest_tests nce)
+    add_test(NAME arm_cpu_guest_dynarmic COMMAND arm_cpu_guest_tests dynarmic)
+    add_test(NAME arm_cpu_guest_nce_fault COMMAND arm_cpu_guest_tests nce --fault)
+    set_tests_properties(arm_cpu_guest_nce arm_cpu_guest_dynarmic arm_cpu_guest_nce_fault
+        PROPERTIES LABELS arm_cpu_guest RESOURCE_LOCK arm_cpu_guest TIMEOUT 35)
+endif()
+
 add_executable(profile_migration_tests
     common/profile_migration.cpp)
 target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
