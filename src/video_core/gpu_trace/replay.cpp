@@ -703,6 +703,11 @@ bool Replayer::Stream(std::string& error) {
         }
     }
     gpu.WaitForIdle();
+    // WaitForIdle's request can run at a tick that comes before the queued memory writes and
+    // maps: an ordered callback runs after them, as in Present.
+    std::promise<void> drained;
+    gpu.RunInOrder([&drained] { drained.set_value(); });
+    drained.get_future().wait();
     // The GPU then read zeros where the trace had data: the replay's output isn't the trace's.
     if (memory_dropped) {
         error = "guest memory for an SMMU map or a memory record could not be committed";
