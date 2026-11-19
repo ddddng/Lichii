@@ -99,13 +99,19 @@ const char* StageName(u32 stage) {
 
 int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expected_frequency) {
     const bool nce = backend == "nce";
+#ifdef HAS_HYPERVISOR
     const bool hvf = backend == "hvf";
     const bool hvf_fallback = backend == "hvf-fallback";
+#endif
     const bool expect_fault = mode == ARM_GUEST_FAULT || mode == ARM_GUEST_PERMISSION_FAULT ||
                               mode == ARM_GUEST_EXECUTE_FAULT || mode == ARM_GUEST_REVOKE_FAULT;
-    Settings::values.cpu_backend.SetValue(nce ? Settings::CpuBackend::Nce
-                                       : (hvf || hvf_fallback) ? Settings::CpuBackend::Hypervisor
-                                                               : Settings::CpuBackend::Dynarmic);
+    auto cpu_backend = nce ? Settings::CpuBackend::Nce : Settings::CpuBackend::Dynarmic;
+#ifdef HAS_HYPERVISOR
+    if (hvf || hvf_fallback) {
+        cpu_backend = Settings::CpuBackend::Hypervisor;
+    }
+#endif
+    Settings::values.cpu_backend.SetValue(cpu_backend);
     Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
     Settings::values.sink_id.SetValue(Settings::AudioEngine::Null);
     Settings::values.use_multi_core.SetValue(true);
@@ -159,10 +165,12 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expe
     if (mode == ARM_GUEST_EXECUTE_FAULT) {
         memory.Write32(report_address + ARM_GUEST_PAGE_SIZE, 0xD65F03C0);
     }
+#ifdef HAS_HYPERVISOR
     if (hvf && mode == ARM_GUEST_PERMISSION_FAULT) {
         memory.RasterizerMarkRegionCached(report_address - ARM_GUEST_PAGE_SIZE,
                                           ARM_GUEST_PAGE_SIZE, true);
     }
+#endif
     if (mode == ARM_GUEST_CHECKS_NATIVE) {
         const u64 tracked_data = report_address + ARM_GUEST_PAGE_SIZE;
         const u64 tracked_rodata = report_address - ARM_GUEST_PAGE_SIZE;

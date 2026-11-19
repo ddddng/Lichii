@@ -70,13 +70,18 @@ struct Memory::Impl {
         bool use_fastmem = process.IsApplication() && Settings::IsFastmemEnabled();
 #ifdef HAS_HYPERVISOR
         using Flag = Kernel::Svc::CreateProcessFlag;
-        if (True(flags & Flag::IsApplication) && True(flags & Flag::Is64Bit) &&
+        if (True(flags & Flag::IsApplication) &&
             Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Hypervisor) {
-            if (system.IsMulticore()) {
+            if (True(flags & Flag::Is64Bit) &&
+                (flags & Flag::AddressSpaceMask) == Flag::AddressSpace64Bit &&
+                system.IsMulticore() && !system.DebuggerEnabled() &&
+                Settings::values.cpu_clock.GetValue() == Settings::CpuClock::Normal &&
+                !Settings::values.sync_core_speed.GetValue()) {
                 hv_vm = HvVm::Create(system);
             }
             if (!hv_vm) {
-                LOG_WARNING(Core_ARM, "Hypervisor unavailable or not in multicore mode; using Dynarmic");
+                LOG_WARNING(Core_ARM, "Hypervisor unavailable for this guest or CPU configuration; "
+                                      "using Dynarmic");
             }
         }
         use_fastmem = use_fastmem && !hv_vm;
