@@ -1706,7 +1706,7 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         }
         return;
     }
-    if (VideoCommon::MmeCapture::active) [[unlikely]] {
+    if (VideoCommon::MmeCapture::active) {
         FrontCaptureMmeWrite(fs, method, value, from_macro);
     }
     if (!execution_mask[method]) {
@@ -1882,7 +1882,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             } else if (fs.control == Regs::ShadowRamControl::Replay) {
                 value = fs.shadow[method];
             }
-            if (VideoCommon::MmeCapture::active) [[unlikely]] {
+            if (VideoCommon::MmeCapture::active) {
                 FrontCaptureMmeWrite(fs, method, value, false);
             }
             fs.regs[method] = value;

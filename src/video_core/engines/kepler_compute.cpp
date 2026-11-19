@@ -1983,7 +1983,7 @@ void KeplerCompute::FrontApply(FrontState& fs, u32 method, u32 argument, bool fr
     if (method == 0x45 || method == 0x47) {
         fs.compute_uploaded = true;
     }
-    if (VideoCommon::MmeCapture::active && method - 0x45 < 4) [[unlikely]] {
+    if (VideoCommon::MmeCapture::active && method - 0x45 < 4) {
         VideoCommon::MmeCapture::RecordWrite(
             memory_manager.GetID(), this, from_macro ? "compute macro" : "compute dma",
             !native_context ? "standalone" : fs.compute_uploaded ? "compute" : "3d",
@@ -2384,7 +2384,7 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         macro.native_execution_failed = true;
         LOG_ERROR(HW_GPU, "Native MME (split front) failed: compute start={:#x}, consumed={}, error={}",
                   start, result.consumed, result.error);
-        if (VideoCommon::MmeCapture::active) [[unlikely]] {
+        if (VideoCommon::MmeCapture::active) {
             VideoCommon::MmeCapture::Fail(
                 memory_manager.GetID(), this,
                 !native_context ? "standalone" : use_compute_bank ? "compute" : "3d",
