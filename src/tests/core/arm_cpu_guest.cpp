@@ -143,17 +143,24 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expe
     if (mode == ARM_GUEST_CHECKS_NATIVE) {
         const u64 tracked_data = report_address + ARM_GUEST_PAGE_SIZE;
         const u64 tracked_rodata = report_address - ARM_GUEST_PAGE_SIZE;
-        for (const u64 address : {tracked_data, tracked_rodata}) {
+        const auto release_trap = [&](u64 address) {
             memory.RasterizerMarkRegionCached(address, ARM_GUEST_PAGE_SIZE, true);
             memory.RasterizerMarkRegionCached(address, ARM_GUEST_PAGE_SIZE, false);
-        }
-        if (!memory.RecoverNceAccess(tracked_data, true, true) ||
-            !memory.RecoverNceAccess(tracked_rodata, false, true) ||
-            memory.RecoverNceAccess(tracked_data, true, false) ||
-            memory.RecoverNceAccess(tracked_rodata, true, true) ||
-            memory.RecoverNceAccess(report_address, true, true)) {
+        };
+        release_trap(tracked_data);
+        release_trap(tracked_rodata);
+        const auto first = memory.RecoverNceAccess(tracked_data, true, std::nullopt);
+        if (!first || !memory.RecoverNceAccess(tracked_rodata, false, std::nullopt) ||
+            memory.RecoverNceAccess(tracked_data, true, first) ||
+            memory.RecoverNceAccess(tracked_rodata, true, std::nullopt) ||
+            memory.RecoverNceAccess(report_address, true, std::nullopt)) {
             std::fputs("NCE did not handle a cleared cache trap with the base permissions\n",
                        stderr);
+            return EXIT_FAILURE;
+        }
+        release_trap(tracked_data);
+        if (!memory.RecoverNceAccess(tracked_data, true, first)) {
+            std::fputs("NCE rejected a newly cleared cache trap at the same address\n", stderr);
             return EXIT_FAILURE;
         }
     }

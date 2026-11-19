@@ -1135,26 +1135,32 @@ struct Memory::Impl {
         finish_run(end);
     }
 
-    bool RecoverNceAccess(u64 fault_address, bool write, bool allow_resolved_trap) {
+    std::optional<u64> RecoverNceAccess(u64 fault_address, bool write,
+                                        std::optional<u64> prior_trap) {
         const u64 address = fault_address & ~LICHII_PAGEMASK;
         const u64 page = address >> LICHII_PAGEBITS;
         const auto access = write ? Common::MemoryPermission::Write : Common::MemoryPermission::Read;
         if (!nce_pages || page >= nce_pages->size()) {
-            return false;
+            return std::nullopt;
         }
         std::unique_lock lock{nce_page_mutex};
         const auto state = (*nce_pages)[page];
         const auto base = static_cast<Common::MemoryPermission>(state & NceBaseMask);
         const auto [ptr, type, block] = current_page_table->entries[page].PointerTypeBlock(true);
+        const auto trap_key = [](u16 mapping, u32 page_state) {
+            return (static_cast<u64>(mapping) << 32) | (page_state / NceCacheGeneration);
+        };
         if (ptr == 0 || !True(base & access) ||
             (type != Common::PageType::Memory && type != Common::PageType::RasterizerCachedMemory)) {
-            return false;
+            return std::nullopt;
         }
         if (True(NceHostPermission(state) & access)) {
-            return allow_resolved_trap && state >= NceCacheGeneration;
+            const u64 trap = trap_key(block, state);
+            return state >= NceCacheGeneration && prior_trap != trap ? std::optional{trap}
+                                                                    : std::nullopt;
         }
         if (type != Common::PageType::RasterizerCachedMemory) {
-            return false;
+            return std::nullopt;
         }
         lock.unlock();
         if (write) {
@@ -1166,7 +1172,7 @@ struct Memory::Impl {
         const auto [current_ptr, current_type, current_block] =
             current_page_table->entries[page].PointerTypeBlock(true);
         if (current_ptr != ptr || current_block != block) {
-            return false;
+            return std::nullopt;
         }
         const auto current = (*nce_pages)[page];
         if (!write && current_type == Common::PageType::RasterizerCachedMemory &&
@@ -1175,7 +1181,11 @@ struct Memory::Impl {
                 return previous | NceReadReady;
             });
         }
-        return True(NceHostPermission((*nce_pages)[page]) & access);
+        const auto resolved = (*nce_pages)[page];
+        if (!True(NceHostPermission(resolved) & access)) {
+            return std::nullopt;
+        }
+        return trap_key(current_block, resolved);
     }
 
     std::unique_ptr<Common::SparseLargeVector<u32>> nce_pages;
@@ -1425,8 +1435,9 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
 }
 
 #if defined(HAS_NCE) && !defined(__ANDROID__)
-bool Memory::RecoverNceAccess(u64 fault_address, bool write, bool allow_resolved_trap) {
-    return impl->RecoverNceAccess(fault_address, write, allow_resolved_trap);
+std::optional<u64> Memory::RecoverNceAccess(u64 fault_address, bool write,
+                                           std::optional<u64> prior_trap) {
+    return impl->RecoverNceAccess(fault_address, write, prior_trap);
 }
 #endif
 
