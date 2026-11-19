@@ -69,6 +69,7 @@ static_assert(offsetof(GuestReport, svc_ticks) == ARM_GUEST_SVC_TICKS);
 struct ExitThread {
     u64 thread_id;
     u64 native_tls;
+    bool fault_thread_suspended;
 };
 
 const char* StageName(u32 stage) {
@@ -84,7 +85,7 @@ const char* StageName(u32 stage) {
     case ARM_GUEST_CHECK_PREEMPTION:
         return "same-core preemption and TLS isolation";
     case ARM_GUEST_CHECK_FAULT:
-        return "unmapped load recovery";
+        return "guest data fault";
     case ARM_GUEST_CHECK_BENCHMARK:
         return "benchmark";
     case ARM_GUEST_PASS:
@@ -96,6 +97,7 @@ const char* StageName(u32 stage) {
 
 int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
     const bool nce = backend == "nce";
+    const bool expect_fault = mode == ARM_GUEST_FAULT || mode == ARM_GUEST_PERMISSION_FAULT;
     Settings::values.cpu_backend.SetValue(nce ? Settings::CpuBackend::Nce
                                               : Settings::CpuBackend::Dynarmic);
     Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
@@ -137,10 +139,21 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
     }
     auto& memory = process->GetMemory();
     const auto data = process->GetEntryPoint() + ARM_GUEST_DATA_OFFSET;
-    memory.Write32(GetInteger(data) + ARM_GUEST_MODE, mode);
+    const u64 report_address = GetInteger(data);
+    memory.Write32(report_address + ARM_GUEST_MODE, mode);
     system.RegisterExitCallback([&] {
         auto& thread = Kernel::GetCurrentThread(system.Kernel());
-        exited.set_value({thread.GetThreadId(), thread.GetNativeExecutionParameters().tpidr_el0});
+        bool fault_thread_suspended = false;
+        if (expect_fault) {
+            const auto handle = memory.Read32(report_address + ARM_GUEST_HANDLE_A);
+            auto fault_thread =
+                process->GetHandleTable().GetObject<Kernel::KThread>(system.Kernel(), handle);
+            fault_thread_suspended =
+                fault_thread.IsNotNull() &&
+                True(fault_thread->GetRawState() & Kernel::ThreadState::DebugSuspended);
+        }
+        exited.set_value({thread.GetThreadId(), thread.GetNativeExecutionParameters().tpidr_el0,
+                          fault_thread_suspended});
     });
     system.GPU().Start();
     system.GetCpuManager().OnGpuReady();
@@ -162,7 +175,17 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
                      backend.data());
         return EXIT_FAILURE;
     }
-    if (mode != ARM_GUEST_FAULT && report.frequency != Common::WallClock::CNTFRQ) {
+    if (expect_fault) {
+        const u32 entered = memory.Read32(report_address + ARM_GUEST_FAULT_ENTERED);
+        const u32 continued = memory.Read32(report_address + ARM_GUEST_FAULT_CONTINUED);
+        if (!thread.fault_thread_suspended || entered != 1 || continued != 0) {
+            std::fprintf(stderr,
+                         "NCE fault worker: suspended=%d, entered=%u, continued=%u\n",
+                         thread.fault_thread_suspended, entered, continued);
+            return EXIT_FAILURE;
+        }
+    }
+    if (!expect_fault && report.frequency != Common::WallClock::CNTFRQ) {
         std::fprintf(stderr, "%s guest returned an unexpected counter frequency: %llu\n",
                      backend.data(), static_cast<unsigned long long>(report.frequency));
         return EXIT_FAILURE;
@@ -180,7 +203,9 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
                     static_cast<double>(report.svc_ticks) * ns_per_tick / ARM_GUEST_SVC_ITERATIONS);
     } else {
         std::printf("%s guest passed%s\n", backend.data(),
-                    mode == ARM_GUEST_FAULT ? " unmapped load recovery" : "");
+                    mode == ARM_GUEST_FAULT ? " unmapped load halt"
+                    : mode == ARM_GUEST_PERMISSION_FAULT ? " read-only store halt"
+                                                         : "");
     }
     return EXIT_SUCCESS;
 }
@@ -190,10 +215,11 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
 int main(int argc, char** argv) try {
     const std::string_view backend = argc > 1 ? argv[1] : "";
     const std::string_view option = argc > 2 ? argv[2] : "";
+    const bool fault_option = option == "--fault" || option == "--permission-fault";
     if (argc > 3 || (backend != "nce" && backend != "dynarmic") ||
-        (!option.empty() && option != "--benchmark" && !(option == "--fault" && backend == "nce"))) {
+        (!option.empty() && option != "--benchmark" && !(fault_option && backend == "nce"))) {
         std::fputs("Usage: arm_cpu_guest_tests {nce|dynarmic} [--benchmark]\n"
-                   "       arm_cpu_guest_tests nce --fault\n",
+                   "       arm_cpu_guest_tests nce {--fault|--permission-fault}\n",
                    stderr);
         return EXIT_FAILURE;
     }
@@ -236,9 +262,10 @@ int main(int argc, char** argv) try {
     SCOPE_EXIT {
         Common::Log::Stop();
     };
-    const u32 mode = option == "--benchmark" ? ARM_GUEST_BENCHMARK
-                     : option == "--fault"   ? ARM_GUEST_FAULT
-                                             : ARM_GUEST_CHECKS;
+    const u32 mode = option == "--benchmark"          ? ARM_GUEST_BENCHMARK
+                     : option == "--fault"            ? ARM_GUEST_FAULT
+                     : option == "--permission-fault" ? ARM_GUEST_PERMISSION_FAULT
+                                                      : ARM_GUEST_CHECKS;
     return RunGuest(image, backend, mode);
 } catch (const std::exception& error) {
     std::fprintf(stderr, "%s\n", error.what());

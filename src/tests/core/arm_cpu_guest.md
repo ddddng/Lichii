@@ -12,9 +12,18 @@ The runner writes an assembly-built, keyless NRO to a private temporary director
 and boots it through the normal application loader, with null graphics and audio.
 The NCE and Dynarmic cases use the same guest code to check SVC arguments and
 results, TLS across thread switches, the guest counter and sleep, exclusive
-reservations, and involuntary preemption. The NCE-only case exercises the current
-unmapped data-load recovery path. A backend check combines the loader's
+reservations, and involuntary preemption. The NCE-only fault cases require
+an unmapped load and a store to a read-only page to suspend the faulting worker
+without executing its post-fault marker. A backend check combines the loader's
 trampoline state with a TLS marker execution wrote into the NCE thread state.
+
+The null renderer cannot exercise a tracked write trap. For a separate Vulkan
+integration check, back two GPU device addresses with the same guest page.
+Have the GPU write a pattern through the first alias and fence it. Verify the
+page is cache-marked before allowing the guest to overwrite one word. Re-read
+through the second GPU alias and check that the guest's word and the adjacent
+GPU-written words survive. Require the guest to finish under a watchdog, and
+record the page's cache-mark transition so an unarmed page cannot pass.
 
 The benchmark is opt-in. Run the following both ways on the same native ARM64
 host and with the same affinity, alternating the order between pairs:

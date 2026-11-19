@@ -45,6 +45,8 @@ arm_cpu_guest_begin:
     ldr w0, [x19, #ARM_GUEST_MODE]
     cmp w0, #ARM_GUEST_FAULT
     b.eq .Lfault
+    cmp w0, #ARM_GUEST_PERMISSION_FAULT
+    b.eq .Lfault
     cmp w0, #ARM_GUEST_BENCHMARK
     b.eq .Lbenchmark
 
@@ -182,13 +184,34 @@ arm_cpu_guest_begin:
 
 .Lfault:
     stage ARM_GUEST_CHECK_FAULT
+    mov w2, w0
+    adr x1, .Lfault_worker
+    add x3, x19, #2, lsl #12
+    mov w4, #43
+    mov w5, #0
+    svc #0x8
+    cbnz w0, .Lexit
+    str w1, [x19, #ARM_GUEST_HANDLE_A]
+    mov w0, w1
+    svc #0x9
+    cbnz w0, .Lexit
+    b .Lpass
+
+.Lfault_worker:
+    adr x19, .Ldata
+    mov w1, #1
+    str w1, [x19, #ARM_GUEST_FAULT_ENTERED]
+    cmp w0, #ARM_GUEST_PERMISSION_FAULT
+    b.eq 1f
     mov x0, #0
-    mov x1, #0x47ad
-    ldr x1, [x0]
-    mov x2, #0x47ad
-    cmp x1, x2
-    b.eq .Lpass
-    b .Lexit
+    ldr x2, [x0]
+    b 2f
+1:
+    adr x0, .Lrodata
+    str x2, [x0]
+2:
+    str w1, [x19, #ARM_GUEST_FAULT_CONTINUED]
+    b .Lworker_exit
 
 .Lbenchmark:
     stage ARM_GUEST_CHECK_BENCHMARK
@@ -231,6 +254,8 @@ arm_cpu_guest_begin:
     svc #0x7
     b .
 
+    .org .Limage + ARM_GUEST_PAGE_SIZE
+.Lrodata:
     .org .Limage + ARM_GUEST_DATA_OFFSET
 .Ldata:
     .org .Limage + ARM_GUEST_IMAGE_SIZE
