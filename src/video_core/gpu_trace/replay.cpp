@@ -412,6 +412,7 @@ void Replayer::MapSmmu(const SmmuMapRecord& map) {
     if (!backing.CommitBacking(map.physical_address, map.size)) {
         LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} could not be committed",
                   map.physical_address, map.size);
+        return;
     }
     auto* const base = backing.BackingBasePointer();
     for (u64 offset = 0; offset < map.size; offset += PageSize) {

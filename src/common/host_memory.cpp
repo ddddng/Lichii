@@ -142,14 +142,15 @@ constexpr size_t FaultSlots = 32;
 // (MarkUsed) or a view maps them (Map). A host access that reaches a page neither did (a path that
 // writes guest memory no kernel allocated) faults in the backing view: the handler commits that
 // 64 KiB and records it. It only touches atomics and makes system calls (no logging, no locks,
-// no allocation: the faulting thread may hold the logger's or the heap's lock); ReportFaults logs
-// what it recorded later, from ordinary code.
+// no allocation: the faulting thread may hold the logger's or the heap's lock); the zero-page pass
+// logs what it recorded later. The counters live in static storage, one set per range slot, so a
+// handler that read a range's stats just before it was released never touches freed memory.
 struct CommitStats {
     std::atomic<u64> committed_bytes{};
     std::atomic<u64> faults{};        ///< Faults the handler committed
     std::atomic<u64> failed_faults{}; ///< Faults whose commit failed (the process then ends)
     std::atomic<u64> recorded{};      ///< Slots handed out, committed or failed
-    std::atomic<u64> reported{};      ///< Slots logged
+    std::atomic<u64> reported{};      ///< Slots logged (only the zero-page pass writes it)
     std::array<std::atomic<uintptr_t>, FaultSlots> offsets{};
     std::array<std::atomic<uintptr_t>, FaultSlots> pcs{};
     std::array<std::atomic<u8>, FaultSlots> failed{};
@@ -163,17 +164,35 @@ struct AddressRange {
 };
 constexpr size_t MaxRanges = 16;
 std::array<AddressRange, MaxRanges> g_backing_ranges;
+std::array<CommitStats, MaxRanges> g_backing_stats;
+CommitStats g_untracked_stats; ///< Counts for guest memory that found no free slot
 
-void AddRange(uintptr_t begin, uintptr_t end, CommitStats* stats) {
-    for (auto& range : g_backing_ranges) {
+void ResetStats(CommitStats& stats) {
+    stats.committed_bytes.store(0, std::memory_order_relaxed);
+    stats.faults.store(0, std::memory_order_relaxed);
+    stats.failed_faults.store(0, std::memory_order_relaxed);
+    stats.recorded.store(0, std::memory_order_relaxed);
+    stats.reported.store(0, std::memory_order_relaxed);
+    for (size_t i = 0; i < FaultSlots; ++i) {
+        stats.ready[i].store(false, std::memory_order_relaxed);
+    }
+}
+
+/// Registers a backing range for the fault handler; returns the counters of its slot.
+CommitStats* AddRange(uintptr_t begin, uintptr_t end) {
+    for (size_t i = 0; i < MaxRanges; ++i) {
+        auto& range = g_backing_ranges[i];
         uintptr_t expected = 0;
         if (range.begin.compare_exchange_strong(expected, begin, std::memory_order_acq_rel)) {
-            range.stats.store(stats, std::memory_order_release);
+            // The handler skips the slot until its end is stored.
+            ResetStats(g_backing_stats[i]);
+            range.stats.store(&g_backing_stats[i], std::memory_order_release);
             range.end.store(end, std::memory_order_release);
-            return;
+            return &g_backing_stats[i];
         }
     }
     LOG_ERROR(HW_Memory, "No room to track guest memory range {:#x}", begin);
+    return &g_untracked_stats;
 }
 
 void RemoveRange(uintptr_t begin) {
@@ -323,8 +342,11 @@ public:
             GlobalMemoryStatusEx(&status);
             LOG_WARNING(HW_Memory, "Failed to allocate {} MiB of backing memory (attempt {}, error {}, {} MiB of commit free)",
                         backing_size >> 20, attempt, error, status.ullAvailPageFile >> 20);
-            if (void* const probe = VirtualAlloc(nullptr, backing_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
-                VirtualFree(probe, 0, MEM_RELEASE);
+            // A reserved section charges nothing: growing the page file can't help it.
+            if (!reserve_only) {
+                if (void* const probe = VirtualAlloc(nullptr, backing_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
+                    VirtualFree(probe, 0, MEM_RELEASE);
+                }
             }
             if (attempt < BackingAttempts) {
                 Sleep(50);
@@ -358,7 +380,7 @@ public:
         if (reserve_only) {
             static std::once_flag handler_flag;
             std::call_once(handler_flag, [] { AddVectoredExceptionHandler(1, ReservedBackingFaultHandler); });
-            AddRange(reinterpret_cast<uintptr_t>(backing_base), reinterpret_cast<uintptr_t>(backing_base) + backing_size, &stats);
+            stats = AddRange(reinterpret_cast<uintptr_t>(backing_base), reinterpret_cast<uintptr_t>(backing_base) + backing_size);
             LOG_INFO(HW_Memory, "Guest memory section reserves {} MiB; pages are committed as the kernel hands them out", backing_size >> 20);
         }
         return true;
@@ -369,27 +391,31 @@ public:
         return VirtualAlloc(backing_base + offset, length, MEM_COMMIT, PAGE_READWRITE) != nullptr;
     }
 
-    /// Logs the faults the handler recorded since the last call.
+    /// Logs the faults the handler recorded since the last call. Only the zero-page pass calls it,
+    /// from one thread and without locks held.
     void ReportFaults() {
-        const u64 recorded = (std::min<u64>)(stats.recorded.load(std::memory_order_acquire), FaultSlots);
-        u64 reported = stats.reported.load(std::memory_order_relaxed);
-        while (reported < recorded && stats.ready[reported].load(std::memory_order_acquire)) {
+        const u64 recorded = (std::min<u64>)(stats->recorded.load(std::memory_order_acquire), FaultSlots);
+        u64 reported = stats->reported.load(std::memory_order_relaxed);
+        while (reported < recorded && stats->ready[reported].load(std::memory_order_acquire)) {
             LOG_WARNING(HW_Memory, "{} guest memory at backing offset {:#x} on a host fault (pc {:#x})",
-                        stats.failed[reported].load(std::memory_order_relaxed) ? "Failed to commit" : "Committed",
-                        stats.offsets[reported].load(std::memory_order_relaxed),
-                        stats.pcs[reported].load(std::memory_order_relaxed));
+                        stats->failed[reported].load(std::memory_order_relaxed) ? "Failed to commit" : "Committed",
+                        stats->offsets[reported].load(std::memory_order_relaxed),
+                        stats->pcs[reported].load(std::memory_order_relaxed));
             ++reported;
         }
-        if (reported != stats.reported.load(std::memory_order_relaxed)) {
-            stats.reported.store(reported, std::memory_order_relaxed);
-            if (reported == FaultSlots) {
-                LOG_WARNING(HW_Memory, "Further host faults on reserved guest memory are only counted");
-            }
+        stats->reported.store(reported, std::memory_order_relaxed);
+        const u64 faults = stats->faults.load(std::memory_order_relaxed);
+        const u64 failed = stats->failed_faults.load(std::memory_order_relaxed);
+        if (faults + failed != reported_faults) {
+            reported_faults = faults + failed;
+            LOG_WARNING(HW_Memory, "Host faults on reserved guest memory so far: {} committed, {} failed{}",
+                        faults, failed, reported_faults > FaultSlots ? " (only the first 32 are logged)" : "");
         }
     }
 
     bool reserve_only{};
-    CommitStats stats;
+    CommitStats* stats{&g_untracked_stats};
+    u64 reported_faults{}; ///< Faults in the last summary line
 
     ~Impl() {
         Release();
@@ -1555,7 +1581,6 @@ bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
     if (!impl || !impl->reserve_only) {
         return true;
     }
-    impl->ReportFaults();
     static_assert((size_t{1} << GranuleShift) == CommitGranule);
     const size_t last = (physical_offset + length - 1) >> GranuleShift;
     for (size_t index = physical_offset >> GranuleShift; index <= last;) {
@@ -1578,7 +1603,7 @@ bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
                       "is {} of {} MiB, {} MiB of guest memory committed",
                       (end - begin) >> 10, begin, error, usage.system_commit >> 20,
                       usage.system_commit_limit >> 20,
-                      impl->stats.committed_bytes.load(std::memory_order_relaxed) >> 20);
+                      impl->stats->committed_bytes.load(std::memory_order_relaxed) >> 20);
             return false;
         }
         // Racing commits of one granule are harmless (committing again does nothing): count it
@@ -1590,7 +1615,7 @@ bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
                 added += (std::min)((i + 1) << GranuleShift, limit) - (i << GranuleShift);
             }
         }
-        const u64 before = impl->stats.committed_bytes.fetch_add(added, std::memory_order_relaxed);
+        const u64 before = impl->stats->committed_bytes.fetch_add(added, std::memory_order_relaxed);
         constexpr int StepShift = 30;
         if ((before >> StepShift) != ((before + added) >> StepShift)) {
             LOG_INFO(HW_Memory, "Guest memory committed: {} MiB", (before + added) >> 20);
@@ -1604,7 +1629,7 @@ bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
 u64 HostMemory::CommittedBytes() const noexcept {
 #ifdef _WIN32
     if (impl && impl->reserve_only) {
-        return impl->stats.committed_bytes.load(std::memory_order_relaxed);
+        return impl->stats->committed_bytes.load(std::memory_order_relaxed);
     }
 #endif
     return 0;
