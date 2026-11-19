@@ -349,11 +349,12 @@ if (HAS_NCE AND LINUX)
     add_executable(arm_cpu_guest_tests core/arm_cpu_guest.cpp core/arm_cpu_guest.S)
     target_link_libraries(arm_cpu_guest_tests PRIVATE core video_core)
     add_test(NAME arm_cpu_guest_nce COMMAND arm_cpu_guest_tests nce)
+    add_test(NAME arm_cpu_guest_nce_nx2_clock COMMAND arm_cpu_guest_tests nce --nx2-clock)
     add_test(NAME arm_cpu_guest_dynarmic COMMAND arm_cpu_guest_tests dynarmic)
     add_test(NAME arm_cpu_guest_nce_fault COMMAND arm_cpu_guest_tests nce --fault)
     add_test(NAME arm_cpu_guest_nce_permission_fault COMMAND arm_cpu_guest_tests nce --permission-fault)
     set_tests_properties(
-        arm_cpu_guest_nce arm_cpu_guest_dynarmic
+        arm_cpu_guest_nce arm_cpu_guest_nce_nx2_clock arm_cpu_guest_dynarmic
         arm_cpu_guest_nce_fault arm_cpu_guest_nce_permission_fault
         PROPERTIES LABELS arm_cpu_guest RESOURCE_LOCK arm_cpu_guest TIMEOUT 35)
 endif()

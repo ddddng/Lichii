@@ -16,6 +16,8 @@ reservations, and involuntary preemption. The NCE-only fault cases require
 an unmapped load and a store to a read-only page to suspend the faulting worker
 without executing its post-fault marker. A backend check combines the loader's
 trampoline state with a TLS marker execution wrote into the NCE thread state.
+The native cases check both physical and virtual counter reads against
+`GetSystemTick` at the 19.2 MHz and 31.25 MHz guest frequencies.
 
 The null renderer cannot exercise a tracked write trap. For a separate Vulkan
 integration check, back two GPU device addresses with the same guest page.
@@ -29,8 +31,8 @@ The benchmark is opt-in. Run the following both ways on the same native ARM64
 host and with the same affinity, alternating the order between pairs:
 
 ```sh
-build/src/tests/arm_cpu_guest_tests nce --benchmark
-build/src/tests/arm_cpu_guest_tests dynarmic --benchmark
+build/bin/arm_cpu_guest_tests nce --benchmark
+build/bin/arm_cpu_guest_tests dynarmic --benchmark
 ```
 
 Each loop runs once before its measured sample. The reported times use the

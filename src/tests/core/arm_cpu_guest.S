@@ -67,6 +67,17 @@ arm_cpu_guest_begin:
     b.lo .Lexit
     cmp x0, x1
     b.hi .Lexit
+    ldr w0, [x19, #ARM_GUEST_MODE]
+    cmp w0, #ARM_GUEST_CHECKS_NATIVE
+    b.ne 3f
+    mrs x22, cntvct_el0
+    svc #0x1e
+    mrs x1, cntvct_el0
+    cmp x0, x22
+    b.lo .Lexit
+    cmp x0, x1
+    b.hi .Lexit
+3:
     movz w0, #(3000000 & 0xffff)
     movk w0, #(3000000 >> 16), lsl #16
     mrs x22, cntpct_el0
