@@ -74,7 +74,8 @@ struct Memory::Impl {
             Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Hypervisor) {
             if (True(flags & Flag::Is64Bit) &&
                 (flags & Flag::AddressSpaceMask) == Flag::AddressSpace64Bit &&
-                !system.IsPoweredOn() && system.IsMulticore() && !system.DebuggerEnabled() &&
+                !system.IsPoweredOn() && system.IsHypervisorAllowedForLoad() &&
+                system.IsMulticore() && !system.DebuggerEnabled() &&
                 Settings::values.cpu_clock.GetValue() == Settings::CpuClock::Normal &&
                 !Settings::values.sync_core_speed.GetValue()) {
                 hv_vm = HvVm::Create(system);
@@ -1221,8 +1222,12 @@ struct Memory::Impl {
             return std::nullopt;
         }
         const auto current = (*nce_pages)[page];
+        const bool rearmed = current / NceCacheGeneration != state / NceCacheGeneration;
         if (!write && current_type == Common::PageType::RasterizerCachedMemory &&
-            current / NceCacheGeneration == state / NceCacheGeneration) {
+            True(static_cast<Common::MemoryPermission>(current & NceBaseMask) & access)) {
+            if (rearmed) {
+                return trap_key(current_block, current);
+            }
             UpdateNceProtection(address, LICHII_PAGESIZE, [](u32 previous) {
                 return previous | NceReadReady;
             });

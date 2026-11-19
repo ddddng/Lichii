@@ -36,11 +36,14 @@ reserve a shared identity mapping. The Linux tests cover synthetic guest code;
 they don't establish retail game, Direct NVN, or dynamically generated code compatibility.
 
 Apple Silicon offers an experimental Hypervisor backend for 64-bit, 39-bit applications.
+It requires multicore mode and an executable signed with the `com.apple.security.hypervisor`
+entitlement.
 It runs guest instructions directly in a VM, so guest CPU faults exit through Hypervisor.framework
 instead of the Linux signals. The VM maps 4 KiB guest pages over 16 KiB host backing, with guest
 read, write, and execute permissions applied separately. The host backing is not executable in
 the emulator process: Dynarmic's separate `MAP_JIT` arena is unchanged. If VM creation is
-unavailable, or the title uses unsupported CPU settings, Lichii uses Dynarmic.
+unavailable, or the title uses unsupported CPU settings, Lichii uses Dynarmic. If vCPU setup
+fails before execution, Lichii reloads the title once with Dynarmic without changing the setting.
 
 Windows/arm64 is *very* experimental and is unlikely to work at all. Support and testing is in the works.
 
