@@ -41,6 +41,17 @@ DeviceMemory::~DeviceMemory() = default;
 #ifdef HAS_NCE
 u64 DeviceMemory::PrepareNativeExecution(bool has_39bit_address_space) {
     const bool requested = Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Nce;
+#ifndef __ANDROID__
+    if (requested && (!Settings::values.use_multi_core.GetValue() ||
+                      Settings::values.cpu_clock.GetValue() != Settings::CpuClock::Normal ||
+                      Settings::values.sync_core_speed.GetValue() ||
+                      Settings::values.use_gdbstub.GetValue())) {
+        Settings::SetNceEnabled(false);
+        LOG_WARNING(Core, "NCE requires multicore, the normal CPU clock, independent speed "
+                          "control, and no debugger; falling back to Dynarmic");
+        return 0;
+    }
+#endif
     const bool enabled = requested && has_39bit_address_space && Settings::IsFastmemEnabled() &&
                          buffer.EnableDirectMappedAddress();
     Settings::SetNceEnabled(enabled);

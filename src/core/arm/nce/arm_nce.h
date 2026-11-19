@@ -3,6 +3,7 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 
 #include "core/arm/arm_interface.h"
 #include "core/arm/nce/guest_context.h"
@@ -90,8 +91,17 @@ public:
     GuestContext m_guest_ctx{};
     Kernel::KThread* m_running_thread{};
 
-    // Stack for signal processing.
-    std::unique_ptr<u8[]> m_stack{};
+    bool m_signals_ready{};
+
+#ifndef __ANDROID__
+private:
+    enum class Access { Read, Write };
+    struct AccessFault {
+        u64 address;
+        Access access;
+    };
+    std::optional<AccessFault> m_access_fault;
+#endif
 };
 
 } // namespace Core
