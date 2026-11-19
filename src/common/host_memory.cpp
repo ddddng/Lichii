@@ -1283,7 +1283,7 @@ void HostMemory::Swap(HostMemory& other) noexcept {
     std::swap(granules, other.granules);
     std::swap(num_granules, other.num_granules);
     std::swap(fallback_buffer, other.fallback_buffer);
-    std::swap(fail_commits_for_test, other.fail_commits_for_test);
+    std::swap(commits_left_for_test, other.commits_left_for_test);
 }
 
 namespace {
@@ -1568,20 +1568,24 @@ bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
     if (length == 0) {
         return true;
     }
-    const size_t limit = AlignUp(backing_size, PageAlignment);
-    if (physical_offset >= limit || length > limit - physical_offset) {
+    if (physical_offset >= backing_size || length > backing_size - physical_offset) {
         LOG_ERROR(HW_Memory, "Can't commit {:#x} bytes of guest memory at {:#x}: it ends past {:#x}",
-                  length, physical_offset, limit);
+                  length, physical_offset, backing_size);
         return false;
     }
-    if (fail_commits_for_test) {
+    if (commits_left_for_test == 0) {
         return false;
+    }
+    if (commits_left_for_test != NoCommitLimit) {
+        --commits_left_for_test;
     }
 #ifdef _WIN32
     if (!impl || !impl->reserve_only) {
         return true;
     }
     static_assert((size_t{1} << GranuleShift) == CommitGranule);
+    // Requests stay within backing_size; the commits cover whole pages of the section.
+    const size_t limit = AlignUp(backing_size, PageAlignment);
     const size_t last = (physical_offset + length - 1) >> GranuleShift;
     for (size_t index = physical_offset >> GranuleShift; index <= last;) {
         if ((granules[index].load(std::memory_order_acquire) & GranuleCommitted) != 0) {

@@ -58,6 +58,20 @@ TEST_CASE("CommitBacking refuses ranges that end past guest memory", "[host_memo
 #endif
 }
 
+TEST_CASE("CommitBacking checks requests against the exact guest memory size",
+          "[host_memory_commit]") {
+    // The section's last page is only partly guest memory.
+    constexpr size_t Unaligned = Backing + 0x1001;
+    Common::HostMemory memory{Unaligned, Virtual};
+    REQUIRE(memory.BackingBasePointer() != nullptr);
+    CHECK(memory.CommitBacking(Unaligned - 1, 1));
+    CHECK(memory.CommitBacking(Backing, 0x1001));
+    CHECK_FALSE(memory.CommitBacking(Unaligned, 1));
+    CHECK_FALSE(memory.CommitBacking(Backing + 0x1800, 1));
+    CHECK_FALSE(memory.CommitBacking(Backing, 0x1002));
+    CHECK(memory.CommitBacking(Unaligned, 0));
+}
+
 #ifdef _WIN32
 TEST_CASE("Windows guest memory is committed as it is handed out or mapped",
           "[host_memory_commit]") {
@@ -122,6 +136,17 @@ TEST_CASE("Kernel allocations fail softly when guest memory can't be committed",
     }
     // Nothing leaked: every page went back to the pool.
     CHECK(manager.GetFreeSize(Manager::Pool::Application) == free_before);
+
+    // A failure after the first blocks frees those too.
+    for (size_t succeeded = 1; succeeded <= 3; ++succeeded) {
+        Kernel::KPageGroup group{kernel,
+                                 kernel.GetSystemSystemResource().GetBlockInfoManagerPointer()};
+        Common::HostMemoryTestAccess::FailCommitsAfter(buffer, succeeded);
+        CHECK(manager.AllocateAndOpen(&group, Pages * 4 + 1, option) ==
+              Kernel::ResultOutOfMemory);
+        CHECK(group.GetNumPages() == 0);
+        CHECK(manager.GetFreeSize(Manager::Pool::Application) == free_before);
+    }
 
     Common::HostMemoryTestAccess::FailCommits(buffer, false);
     const Kernel::KPhysicalAddress block = manager.AllocateAndOpenContinuous(Pages, 1, option);

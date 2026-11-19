@@ -154,7 +154,8 @@ private:
     size_t num_granules{};
     // Windows requires it for kernels whom lack proper support for some functions!
     bool fallback_buffer{false};
-    bool fail_commits_for_test{false}; ///< Tests: every CommitBacking fails
+    static constexpr size_t NoCommitLimit = ~size_t{0};
+    size_t commits_left_for_test{NoCommitLimit}; ///< Tests: CommitBacking calls left to succeed
 };
 
 } // namespace Common

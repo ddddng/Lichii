@@ -39,7 +39,12 @@ public:
 
     /// Makes every CommitBacking of the memory fail, as when Windows is out of commit.
     static void FailCommits(HostMemory& memory, bool fail) {
-        memory.fail_commits_for_test = fail;
+        memory.commits_left_for_test = fail ? 0 : HostMemory::NoCommitLimit;
+    }
+
+    /// Lets the next `count` CommitBacking calls of the memory succeed and fails the ones after.
+    static void FailCommitsAfter(HostMemory& memory, size_t count) {
+        memory.commits_left_for_test = count;
     }
 
 private:

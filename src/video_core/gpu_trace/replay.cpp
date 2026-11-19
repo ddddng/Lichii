@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -155,6 +156,8 @@ private:
     Clock::time_point last_frame;
     u32 presents = 0;
     bool stop = false;
+    /// Set on the GPU thread when a write or SMMU map was dropped; read after WaitForIdle.
+    std::atomic<bool> memory_dropped{false};
 };
 
 bool Replayer::Run(std::string& error) {
@@ -406,12 +409,14 @@ void Replayer::MapSmmu(const SmmuMapRecord& map) {
         map.size > backing.BackingSize() - map.physical_address) {
         LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} is outside guest memory",
                   map.physical_address, map.size);
+        memory_dropped = true;
         return;
     }
     // The GPU reads these pages, zero ones the trace skipped included: commit them.
     if (!backing.CommitBacking(map.physical_address, map.size)) {
         LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} could not be committed",
                   map.physical_address, map.size);
+        memory_dropped = true;
         return;
     }
     auto* const base = backing.BackingBasePointer();
@@ -453,6 +458,7 @@ void Replayer::WriteMemory(const MemoryRecord& record, const std::vector<u8>& by
     if (!backing.CommitBacking(record.physical_address, bytes.size())) {
         LOG_ERROR(HW_GPU, "GPU trace replay: memory at {:#x}+{:#x} could not be committed",
                   record.physical_address, bytes.size());
+        memory_dropped = true;
         return;
     }
     u8* const pointer = backing.BackingBasePointer() + record.physical_address;
@@ -697,6 +703,11 @@ bool Replayer::Stream(std::string& error) {
         }
     }
     gpu.WaitForIdle();
+    // The GPU then read zeros where the trace had data: the replay's output isn't the trace's.
+    if (memory_dropped) {
+        error = "guest memory for an SMMU map or a memory record could not be committed";
+        return false;
+    }
     if (!options.record.empty()) {
         // The recorder ends at the GPU thread's next command.
         StopRecording();

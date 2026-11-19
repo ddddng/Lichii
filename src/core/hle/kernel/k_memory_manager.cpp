@@ -270,12 +270,19 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
     R_UNLESS(0 <= heap_index, ResultOutOfMemory);
 
     // Ensure that we don't leave anything un-freed.
+    // A node can span adjacent managers (AddBlock joins contiguous blocks): free each portion.
     ON_RESULT_FAILURE {
         for (const auto& it : *out) {
-            auto& manager = this->GetManager(it.GetAddress());
-            const size_t node_num_pages = std::min<u64>(
-                it.GetNumPages(), (manager.GetEndAddress() - it.GetAddress()) / PageSize);
-            manager.Free(it.GetAddress(), node_num_pages);
+            KPhysicalAddress cur_address = it.GetAddress();
+            size_t remaining_pages = it.GetNumPages();
+            while (remaining_pages > 0) {
+                auto& manager = this->GetManager(cur_address);
+                const size_t cur_pages =
+                    (std::min)(remaining_pages, manager.GetPageOffsetToEnd(cur_address));
+                manager.Free(cur_address, cur_pages);
+                cur_address += cur_pages * PageSize;
+                remaining_pages -= cur_pages;
+            }
         }
         out->Finalize();
     };
