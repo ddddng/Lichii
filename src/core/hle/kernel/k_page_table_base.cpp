@@ -216,11 +216,11 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
         const auto base = GetInteger(aslr_space_start);
         R_UNLESS(as_width == 39 && buffer.IsDirectMapped() &&
                      base == reinterpret_cast<u64>(buffer.VirtualBasePointer()) &&
-                     base < GetInteger(end) && buffer.VirtualSize() <= end - aslr_space_start,
+                     base < GetInteger(end) && buffer.VirtualSize() <= GetInteger(end) - base,
                  ResultInvalidMemoryRegion);
         placement_end = aslr_space_start + buffer.VirtualSize();
         R_UNLESS(code_address >= aslr_space_start && code_address < placement_end &&
-                     code_size <= placement_end - code_address,
+                     code_size <= GetInteger(placement_end) - GetInteger(code_address),
                  ResultInvalidMemoryRegion);
     }
 #endif

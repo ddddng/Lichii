@@ -95,7 +95,7 @@ const char* StageName(u32 stage) {
     }
 }
 
-int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
+int RunGuest(const fs::path& image, std::string_view backend, u32 mode, u64 expected_frequency) {
     const bool nce = backend == "nce";
     const bool expect_fault = mode == ARM_GUEST_FAULT || mode == ARM_GUEST_PERMISSION_FAULT;
     Settings::values.cpu_backend.SetValue(nce ? Settings::CpuBackend::Nce
@@ -185,7 +185,7 @@ int RunGuest(const fs::path& image, std::string_view backend, u32 mode) {
             return EXIT_FAILURE;
         }
     }
-    if (!expect_fault && report.frequency != Common::WallClock::CNTFRQ) {
+    if (!expect_fault && report.frequency != expected_frequency) {
         std::fprintf(stderr, "%s guest returned an unexpected counter frequency: %llu\n",
                      backend.data(), static_cast<unsigned long long>(report.frequency));
         return EXIT_FAILURE;
@@ -216,11 +216,20 @@ int main(int argc, char** argv) try {
     const std::string_view backend = argc > 1 ? argv[1] : "";
     const std::string_view option = argc > 2 ? argv[2] : "";
     const bool fault_option = option == "--fault" || option == "--permission-fault";
+    const bool nx2_clock = option == "--nx2-clock";
     if (argc > 3 || (backend != "nce" && backend != "dynarmic") ||
-        (!option.empty() && option != "--benchmark" && !(fault_option && backend == "nce"))) {
-        std::fputs("Usage: arm_cpu_guest_tests {nce|dynarmic} [--benchmark]\n"
+        (!option.empty() && option != "--benchmark" && !nx2_clock &&
+         !(fault_option && backend == "nce"))) {
+        std::fputs("Usage: arm_cpu_guest_tests {nce|dynarmic} [--benchmark|--nx2-clock]\n"
                    "       arm_cpu_guest_tests nce {--fault|--permission-fault}\n",
                    stderr);
+        return EXIT_FAILURE;
+    }
+    const u64 expected_frequency =
+        nx2_clock ? Common::WallClock::Switch2CNTFRQ : Common::WallClock::CNTFRQ;
+    const auto frequency = std::to_string(expected_frequency);
+    if (setenv("EDEN_NX2_CNTFRQ", frequency.c_str(), 1) != 0) {
+        std::perror("Setting the synthetic guest counter frequency");
         return EXIT_FAILURE;
     }
     if (sysconf(_SC_PAGESIZE) != ARM_GUEST_PAGE_SIZE) {
@@ -265,8 +274,9 @@ int main(int argc, char** argv) try {
     const u32 mode = option == "--benchmark"          ? ARM_GUEST_BENCHMARK
                      : option == "--fault"            ? ARM_GUEST_FAULT
                      : option == "--permission-fault" ? ARM_GUEST_PERMISSION_FAULT
+                     : backend == "nce"                ? ARM_GUEST_CHECKS_NATIVE
                                                       : ARM_GUEST_CHECKS;
-    return RunGuest(image, backend, mode);
+    return RunGuest(image, backend, mode, expected_frequency);
 } catch (const std::exception& error) {
     std::fprintf(stderr, "%s\n", error.what());
     return EXIT_FAILURE;
