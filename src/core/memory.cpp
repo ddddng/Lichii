@@ -74,7 +74,7 @@ struct Memory::Impl {
             Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Hypervisor) {
             if (True(flags & Flag::Is64Bit) &&
                 (flags & Flag::AddressSpaceMask) == Flag::AddressSpace64Bit &&
-                system.IsMulticore() && !system.DebuggerEnabled() &&
+                !system.IsPoweredOn() && system.IsMulticore() && !system.DebuggerEnabled() &&
                 Settings::values.cpu_clock.GetValue() == Settings::CpuClock::Normal &&
                 !Settings::values.sync_core_speed.GetValue()) {
                 hv_vm = HvVm::Create(system);
@@ -1281,6 +1281,12 @@ void Memory::SetCurrentPageTable(Kernel::KProcess& process, Kernel::Svc::CreateP
 #ifdef HAS_HYPERVISOR
 std::shared_ptr<HvVm> Memory::GetHypervisor() const {
     return impl->hv_vm;
+}
+
+void Memory::ReleaseHypervisor() {
+    std::scoped_lock lock{impl->nce_page_mutex};
+    impl->nce_pages.reset();
+    impl->hv_vm.reset();
 }
 #endif
 

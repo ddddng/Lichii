@@ -181,6 +181,9 @@ void KProcess::Finalize(KernelCore& kernel) {
     for (auto& interface : m_arm_interfaces) {
         interface.reset();
     }
+#ifdef HAS_HYPERVISOR
+    m_memory.ReleaseHypervisor();
+#endif
     m_exclusive_monitor.reset();
 
     // Perform inherited finalization.
@@ -323,6 +326,9 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     }
     ON_RESULT_FAILURE_2 {
         m_page_table.Finalize();
+#ifdef HAS_HYPERVISOR
+        m_memory.ReleaseHypervisor();
+#endif
     };
 
     // Ensure our memory is initialized.
@@ -425,6 +431,9 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     }
     ON_RESULT_FAILURE_2 {
         m_page_table.Finalize();
+#ifdef HAS_HYPERVISOR
+        m_memory.ReleaseHypervisor();
+#endif
     };
 
     // Ensure our memory is initialized.
@@ -1311,6 +1320,17 @@ void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress 
     }
 #endif
 }
+
+#ifdef HAS_HYPERVISOR
+void KProcess::ReleaseHypervisor() {
+    if (m_memory.GetHypervisor()) {
+        for (auto& interface : m_arm_interfaces) {
+            interface.reset();
+        }
+        m_memory.ReleaseHypervisor();
+    }
+}
+#endif
 
 void KProcess::InitializeInterfaces(KernelCore& kernel) {
     m_exclusive_monitor =
