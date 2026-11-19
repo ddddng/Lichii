@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -83,8 +84,8 @@ void WriteIndex(const fs::path& root, std::span<const IndexEntry> entries) {
     for (const auto& item : entries) {
         std::array<char, 0x8c> entry{'I', 'M', 'E', 'N', 0x40, 0, 0, 0, 0x40};
         WriteLe(std::span{entry}.subspan(0x0c, 8), item.program);
-        WriteLe(std::span{entry}.subspan(0x14, 8), item.user[1]);
-        WriteLe(std::span{entry}.subspan(0x1c, 8), item.user[0]);
+        WriteLe(std::span{entry}.subspan(0x14, 8), item.user[0]);
+        WriteLe(std::span{entry}.subspan(0x1c, 8), item.user[1]);
         entry[0x2c] = item.type;
         entry[0x2d] = item.rank;
         WriteLe(std::span{entry}.subspan(0x4c, 8), item.id);
@@ -100,9 +101,12 @@ void WriteIndex(const fs::path& root, std::span<const IndexEntry> entries) {
 TEST_CASE("Ryujinx candidates use title, account, type and committed contents", "[ryujinx]") {
     Fixture f;
     constexpr u64 title = 0x0100f2c0115b6000;
-    constexpr u128 selected{0x0123456789abcdef, 0xfedcba9876543210};
-    constexpr u128 recent{0x0011223344556677, 0x8899aabbccddeeff};
-    constexpr u128 other{0x0403, 0x0201};
+    constexpr std::array<u8, 16> uid_bytes{0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                                          0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
+    constexpr u128 lichii_uid = std::bit_cast<u128>(uid_bytes);
+    constexpr u128 selected{0xfedcba9876543210, 0x0123456789abcdef};
+    constexpr u128 recent{0x8899aabbccddeeff, 0x0011223344556677};
+    constexpr u128 other{0x0201, 0x0403};
     const std::array entries{
         IndexEntry{title, 0x04, other},          IndexEntry{title, 0x0e, selected},
         IndexEntry{title, 0x0d, selected},       IndexEntry{title, 0x0f, recent},
@@ -119,7 +123,7 @@ TEST_CASE("Ryujinx candidates use title, account, type and committed contents", 
     WriteSave(saves_root / "0000000000000002" / "1", "uncommitted");
 
     std::vector<RyujinxSave> saves;
-    REQUIRE(ReadRyujinxSaves(f.ryujinx, title, selected, recent, saves) == IMENReadResult::Success);
+    REQUIRE(ReadRyujinxSaves(f.ryujinx, title, lichii_uid, recent, saves) == IMENReadResult::Success);
     REQUIRE(saves.size() == 5);
     CHECK(saves[0].user_id == selected);
     CHECK(saves[0].type == RyujinxSaveType::Account);
@@ -140,7 +144,7 @@ TEST_CASE("Ryujinx candidates use title, account, type and committed contents", 
 TEST_CASE("Malformed Ryujinx index never exposes a partial result", "[ryujinx]") {
     Fixture f;
     constexpr u64 title = 0x0100f2c0115b6000;
-    constexpr u128 user{0, 1};
+    constexpr u128 user{1, 0};
     const std::array entries{IndexEntry{title, 0x0d, user}, IndexEntry{title, 0x0e, user}};
     WriteIndex(f.ryujinx, entries);
     WriteSave(f.ryujinx / "bis/user/save/000000000000000d/0", "0d");

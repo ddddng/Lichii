@@ -220,7 +220,7 @@ IMENReadResult ReadRyujinxSaves(const fs::path& root, u64 program_id, u128 lichi
         const auto key = bytes.substr(header_size, key_size);
         const auto value = bytes.substr(header_size + key_size, key_size);
         const auto type = static_cast<RyujinxSaveType>(key[0x20]);
-        const u128 user{ReadLe(key.substr(0x10, 8)), ReadLe(key.substr(8, 8))};
+        const u128 user{ReadLe(key.substr(8, 8)), ReadLe(key.substr(0x10, 8))};
         if (ReadLe(key.substr(0, 8)) != program_id || key[0x21] != 0 || value[0x18] != 1 ||
             value[0x19] != 0 ||
             !((type == RyujinxSaveType::Account && user != u128{}) ||
@@ -240,7 +240,7 @@ IMENReadResult ReadRyujinxSaves(const fs::path& root, u64 program_id, u128 lichi
                           : user == lichii_user                ? 0
                           : user == ryujinx_user               ? 1
                                                                : 3,
-                          user[1], user[0], save.save_id};
+                          user[0], user[1], save.save_id};
     };
     std::ranges::sort(found, {}, priority);
     const auto duplicates = std::ranges::unique(found, {}, [](const auto& save) {
