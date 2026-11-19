@@ -54,6 +54,8 @@
 #endif // ^^^ POSIX ^^^
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -130,6 +132,128 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
     }
 }
 
+namespace {
+constexpr size_t CommitGranule = size_t{1} << 16;
+
+// The guest memory section is created with SEC_RESERVE: its pages count against the Windows
+// commit limit only once committed, and HostMemory commits them when the kernel hands them out
+// (MarkUsed) or a view maps them (Map). A host access that reaches a page neither did (a path that
+// writes guest memory the kernel never allocated) faults: the handler commits that 64 KiB and
+// counts it, so the miss shows in the log instead of crashing.
+struct AddressRange {
+    std::atomic<uintptr_t> begin{};
+    std::atomic<uintptr_t> end{};
+};
+constexpr size_t MaxRanges = 16;
+std::array<AddressRange, MaxRanges> g_backing_ranges;
+std::array<AddressRange, MaxRanges> g_view_ranges;
+std::atomic<u64> g_committed_bytes{};
+std::atomic<u64> g_commit_faults{};
+std::atomic<u64> g_view_faults{};
+
+void AddRange(std::array<AddressRange, MaxRanges>& ranges, uintptr_t begin, uintptr_t end) {
+    for (auto& range : ranges) {
+        uintptr_t expected = 0;
+        if (range.begin.compare_exchange_strong(expected, begin, std::memory_order_acq_rel)) {
+            range.end.store(end, std::memory_order_release);
+            return;
+        }
+    }
+    LOG_ERROR(HW_Memory, "No room to track guest memory range {:#x}", begin);
+}
+
+void RemoveRange(std::array<AddressRange, MaxRanges>& ranges, uintptr_t begin) {
+    for (auto& range : ranges) {
+        if (range.begin.load(std::memory_order_acquire) == begin) {
+            range.end.store(0, std::memory_order_release);
+            range.begin.store(0, std::memory_order_release);
+        }
+    }
+}
+
+uintptr_t FindRange(const std::array<AddressRange, MaxRanges>& ranges, uintptr_t address,
+                    uintptr_t& end) {
+    for (const auto& range : ranges) {
+        const uintptr_t begin = range.begin.load(std::memory_order_acquire);
+        end = range.end.load(std::memory_order_acquire);
+        if (begin != 0 && address >= begin && address < end) {
+            return begin;
+        }
+    }
+    return 0;
+}
+
+uintptr_t FaultPc(const CONTEXT* context) {
+#if defined(_M_X64) || defined(__x86_64__)
+    return context->Rip;
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    return context->Pc;
+#else
+    return 0;
+#endif
+}
+
+LONG WINAPI ReservedBackingFaultHandler(PEXCEPTION_POINTERS info) {
+    const auto* record = info->ExceptionRecord;
+    if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const auto address = static_cast<uintptr_t>(record->ExceptionInformation[1]);
+    uintptr_t end = 0;
+    if (const uintptr_t begin = FindRange(g_backing_ranges, address, end); begin != 0) {
+        // Only reads and writes: the backing view is never executable.
+        if (record->ExceptionInformation[0] > 1) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) == 0) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        if (mbi.State == MEM_COMMIT) {
+            // Another thread committed it after the fault: the access succeeds on a retry.
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (mbi.State != MEM_RESERVE) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const uintptr_t granule = begin + ((address - begin) & ~(CommitGranule - 1));
+        const size_t length = (std::min)(CommitGranule, size_t(end - granule));
+        if (!VirtualAlloc(reinterpret_cast<void*>(granule), length, MEM_COMMIT, PAGE_READWRITE)) {
+            LOG_CRITICAL(HW_Memory,
+                         "Failed to commit guest memory at backing offset {:#x} on a fault, "
+                         "error {}",
+                         address - begin, GetLastError());
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        // Not counted in g_committed_bytes: the granule's bit isn't set here, and the next
+        // CommitBacking over it counts it then.
+        const u64 count = g_commit_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 32) {
+            LOG_WARNING(HW_Memory,
+                        "Committed guest memory on a host fault at backing offset {:#x} (pc "
+                        "{:#x}, fault {})",
+                        address - begin, FaultPc(info->ContextRecord), count);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (FindRange(g_view_ranges, address, end) != 0) {
+        // A view page whose section page is only reserved: Map should have committed it.
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(address), &mbi, sizeof(mbi)) != 0 &&
+            mbi.Type == MEM_MAPPED && mbi.State == MEM_RESERVE) {
+            const u64 count = g_view_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count <= 32) {
+                LOG_ERROR(HW_Memory,
+                          "Fault on an uncommitted guest page through a view at {:#x} (pc {:#x}, "
+                          "fault {})",
+                          address, FaultPc(info->ContextRecord), count);
+            }
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
+
 class HostMemory::Impl {
 public:
     explicit Impl(size_t backing_size_, size_t virtual_size_)
@@ -160,13 +284,18 @@ public:
             return false;
         }
 
-        // Allocate backing file map. SEC_COMMIT charges all of it to the commit limit up front, and
-        // when the free commit is only just above its size the call fails with
+        // Allocate backing file map. SEC_COMMIT charged all of it (14 GiB) to the commit limit up
+        // front, though games use a part: SEC_RESERVE charges nothing here, and HostMemory commits
+        // the pages the kernel hands out. EDEN_BACKING_COMMIT_ALL=1 brings SEC_COMMIT back.
+        // With SEC_COMMIT, when the free commit is only just above its size the call fails with
         // ERROR_NO_SYSTEM_RESOURCES without growing a system-managed page file. The emulator then
         // runs the whole session without fastmem (Ocarina of Time: 20-25% fewer fps). A private
         // commit of the same size does grow the page file, so make one, release it and try again.
+        const char* const commit_all = std::getenv("EDEN_BACKING_COMMIT_ALL");
+        reserve_only = commit_all == nullptr || commit_all[0] != '1';
+        const ULONG section_flags = reserve_only ? SEC_RESERVE : SEC_COMMIT;
         for (int attempt = 1; attempt <= BackingAttempts && !backing_handle; ++attempt) {
-            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, section_flags, backing_size, nullptr, nullptr, 0);
             if (backing_handle) {
                 if (attempt > 1) {
                     LOG_INFO(HW_Memory, "Allocated {} MiB of backing memory on attempt {}", backing_size >> 20, attempt);
@@ -211,8 +340,22 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to reserve {} GiB of virtual memory", virtual_size >> 30);
             return false;
         }
+        if (reserve_only) {
+            static std::once_flag handler_flag;
+            std::call_once(handler_flag, [] { AddVectoredExceptionHandler(1, ReservedBackingFaultHandler); });
+            AddRange(g_backing_ranges, reinterpret_cast<uintptr_t>(backing_base), reinterpret_cast<uintptr_t>(backing_base) + backing_size);
+            AddRange(g_view_ranges, reinterpret_cast<uintptr_t>(virtual_base), reinterpret_cast<uintptr_t>(virtual_base) + virtual_size);
+            LOG_INFO(HW_Memory, "Guest memory section reserves {} MiB; pages are committed as the kernel hands them out", backing_size >> 20);
+        }
         return true;
     }
+
+    /// Commits section pages through the backing view, which makes them valid in every view.
+    bool Commit(size_t offset, size_t length) {
+        return VirtualAlloc(backing_base + offset, length, MEM_COMMIT, PAGE_READWRITE) != nullptr;
+    }
+
+    bool reserve_only{};
 
     ~Impl() {
         Release();
@@ -324,6 +467,14 @@ public:
 private:
     /// Release all resources in the object
     void Release() {
+        if (reserve_only) {
+            if (virtual_base) {
+                RemoveRange(g_view_ranges, reinterpret_cast<uintptr_t>(virtual_base));
+            }
+            if (backing_base) {
+                RemoveRange(g_backing_ranges, reinterpret_cast<uintptr_t>(backing_base));
+            }
+        }
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
@@ -1094,6 +1245,12 @@ void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, M
         return;
     }
     g_mapped_bytes.fetch_add(length, std::memory_order_relaxed);
+    // Every page a view reaches is committed: VirtualProtect refuses a view range holding a
+    // reserved page, so a write trap set on it would be lost.
+    if (!CommitBacking(host_offset, length)) {
+        LOG_CRITICAL(HW_Memory, "Mapping {} KiB of guest memory at {:#x} that could not be committed",
+                     length >> 10, host_offset);
+    }
     impl->Map(virtual_offset + virtual_base_offset, host_offset, length, perms);
 #endif
 }
@@ -1289,7 +1446,11 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
     if (length == 0) {
         return;
     }
-    MarkUsed(physical_offset, length);
+    if (!MarkUsed(physical_offset, length)) {
+        // Its callers can't fail: a write below faults and the handler tries once more.
+        LOG_ERROR(HW_Memory, "Clearing {} KiB of guest memory at {:#x} that could not be committed",
+                  length >> 10, physical_offset);
+    }
     if (fill_value != 0) {
         std::memset(backing_base + physical_offset, fill_value, length);
         MarkDirty(physical_offset, length);
@@ -1329,9 +1490,12 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
     }
 }
 
-void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
+bool HostMemory::MarkUsed(size_t physical_offset, size_t length) {
     if (length == 0) {
-        return;
+        return true;
+    }
+    if (!CommitBacking(physical_offset, length)) {
+        return false;
     }
     const size_t last = (physical_offset + length - 1) >> GranuleShift;
     for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
@@ -1339,6 +1503,79 @@ void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
             granules[index].fetch_or(GranuleUsed, std::memory_order_release);
         }
     }
+    return true;
+}
+
+bool HostMemory::CommitBacking(size_t physical_offset, size_t length) {
+#ifdef _WIN32
+    if (length == 0 || !impl || !impl->reserve_only) {
+        return true;
+    }
+    static_assert((size_t{1} << GranuleShift) == CommitGranule);
+    const size_t limit = AlignUp(backing_size, PageAlignment);
+    const size_t last = (physical_offset + length - 1) >> GranuleShift;
+    for (size_t index = physical_offset >> GranuleShift; index <= last;) {
+        if ((granules[index].load(std::memory_order_acquire) & GranuleCommitted) != 0) {
+            ++index;
+            continue;
+        }
+        size_t run_end = index + 1;
+        while (run_end <= last &&
+               (granules[run_end].load(std::memory_order_acquire) & GranuleCommitted) == 0) {
+            ++run_end;
+        }
+        const size_t begin = index << GranuleShift;
+        const size_t end = (std::min)(run_end << GranuleShift, limit);
+        if (!impl->Commit(begin, end - begin)) {
+            const DWORD error = GetLastError();
+            MEMORYSTATUSEX status{};
+            status.dwLength = sizeof(status);
+            GlobalMemoryStatusEx(&status);
+            LOG_ERROR(HW_Memory,
+                      "Failed to commit {} KiB of guest memory at {:#x} (error {}): {} MiB of "
+                      "Windows commit free of {} MiB, {} MiB of guest memory committed",
+                      (end - begin) >> 10, begin, error, status.ullAvailPageFile >> 20,
+                      status.ullTotalPageFile >> 20,
+                      g_committed_bytes.load(std::memory_order_relaxed) >> 20);
+            return false;
+        }
+        // Racing commits of one granule are harmless (committing again does nothing): count it
+        // once.
+        u64 added = 0;
+        for (size_t i = index; i < run_end; ++i) {
+            if ((granules[i].fetch_or(GranuleCommitted, std::memory_order_acq_rel) &
+                 GranuleCommitted) == 0) {
+                added += (std::min)((i + 1) << GranuleShift, limit) - (i << GranuleShift);
+            }
+        }
+        const u64 before = g_committed_bytes.fetch_add(added, std::memory_order_relaxed);
+        constexpr int StepShift = 30;
+        if ((before >> StepShift) != ((before + added) >> StepShift)) {
+            LOG_INFO(HW_Memory, "Guest memory committed: {} MiB", (before + added) >> 20);
+        }
+        index = run_end;
+    }
+#else
+    static_cast<void>(physical_offset);
+    static_cast<void>(length);
+#endif
+    return true;
+}
+
+u64 HostMemory::CommittedBytes() noexcept {
+#ifdef _WIN32
+    return g_committed_bytes.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
+}
+
+u64 HostMemory::CommitFaults() noexcept {
+#ifdef _WIN32
+    return g_commit_faults.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
 }
 
 void HostMemory::MarkDirty(size_t physical_offset, size_t length) {

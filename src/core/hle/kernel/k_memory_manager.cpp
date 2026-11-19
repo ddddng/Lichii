@@ -236,6 +236,12 @@ KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, siz
         return 0;
     }
 
+    // Windows commits the pages here: out of commit, the allocation fails instead of the access.
+    if (!this->MarkUsed(allocated_block, num_pages)) {
+        chosen_manager->Free(allocated_block, num_pages);
+        return 0;
+    }
+
     // Maintain the optimized memory bitmap, if we should.
     if (m_has_optimized_process[static_cast<size_t>(pool)]) {
         chosen_manager->TrackUnoptimizedAllocation(m_system.Kernel(), allocated_block, num_pages);
@@ -243,14 +249,13 @@ KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, siz
 
     // Open the first reference to the pages.
     chosen_manager->OpenFirst(allocated_block, num_pages);
-    this->MarkUsed(allocated_block, num_pages);
 
     return allocated_block;
 }
 
-void KMemoryManager::MarkUsed(KPhysicalAddress address, size_t num_pages) {
-    m_system.DeviceMemory().buffer.MarkUsed(GetInteger(address) - Core::DramMemoryMap::Base,
-                                            num_pages * PageSize);
+bool KMemoryManager::MarkUsed(KPhysicalAddress address, size_t num_pages) {
+    return m_system.DeviceMemory().buffer.MarkUsed(GetInteger(address) - Core::DramMemoryMap::Base,
+                                                   num_pages * PageSize);
 }
 
 void KMemoryManager::MarkDirty(KPhysicalAddress address, size_t num_pages) {
@@ -309,8 +314,9 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
     // Only succeed if we allocated as many pages as we wanted.
     R_UNLESS(num_pages == 0, ResultOutOfMemory);
 
+    // Windows commits the pages here: out of commit, the allocation fails instead of the access.
     for (const auto& block : *out) {
-        this->MarkUsed(block.GetAddress(), block.GetNumPages());
+        R_UNLESS(this->MarkUsed(block.GetAddress(), block.GetNumPages()), ResultOutOfMemory);
     }
 
     // We succeeded!
