@@ -425,7 +425,7 @@ void Patcher::WriteLoadContext(oaknut::VectorCodeGenerator& cg) {
     cg.MSR(oaknut::SystemReg::FPSR, X0);
     cg.LDR(W0, X30, offsetof(GuestContext, fpcr));
     cg.MSR(oaknut::SystemReg::FPCR, X0);
-    cg.LDR(W0, X30, offsetof(GuestContext, nzcv));
+    cg.LDR(W0, X30, offsetof(GuestContext, pstate));
     cg.MSR(oaknut::SystemReg::NZCV, X0);
 
     // Load all vector registers.
@@ -464,8 +464,8 @@ void Patcher::WriteSaveContext(oaknut::VectorCodeGenerator& cg) {
         cg.STP(oaknut::QReg{i}, oaknut::QReg{i + 1}, X30, VEC_OFF + 16 * i);
     }
 
-    // Store guest system registers, X30 and SP, using X0 as a scratch register.
-    cg.STR(X0, SP, PRE_INDEXED, -16);
+    // Store guest system registers, X30 and SP, using X0 and X1 as scratch registers.
+    cg.STP(X0, X1, SP, PRE_INDEXED, -16);
     cg.LDR(X0, SP, 16);
     cg.STR(X0, X30, 8 * 30);
     cg.ADD(X0, SP, 32);
@@ -475,8 +475,10 @@ void Patcher::WriteSaveContext(oaknut::VectorCodeGenerator& cg) {
     cg.MRS(X0, oaknut::SystemReg::FPCR);
     cg.STR(W0, X30, offsetof(GuestContext, fpcr));
     cg.MRS(X0, oaknut::SystemReg::NZCV);
-    cg.STR(W0, X30, offsetof(GuestContext, nzcv));
-    cg.LDR(X0, SP, POST_INDEXED, 16);
+    cg.LDR(W1, X30, offsetof(GuestContext, pstate));
+    cg.BFXIL(W0, W1, 0, 28);
+    cg.STR(W0, X30, offsetof(GuestContext, pstate));
+    cg.LDP(X0, X1, SP, POST_INDEXED, 16);
 
     // Reload our return X30 from the stack, and return.
     cg.LDR(X30, SP, 8);
@@ -530,6 +532,9 @@ void Patcher::WriteSvcTrampoline(ModuleDestLabel module_dest, u32 svc_id, oaknut
     cg.LDP(X2, X3, X1, offsetof(HostContext, host_sp));
     cg.MOV(SP, X2);
     cg.MSR(oaknut::SystemReg::TPIDR_EL0, X3);
+    cg.LDP(W2, W3, X1, offsetof(HostContext, host_fpcr));
+    cg.MSR(oaknut::SystemReg::FPCR, X2);
+    cg.MSR(oaknut::SystemReg::FPSR, X3);
 
     // Load callee-saved host registers and return to host.
     static constexpr size_t HOST_REGS_OFF = offsetof(HostContext, host_saved_regs);
@@ -544,6 +549,7 @@ void Patcher::WriteSvcTrampoline(ModuleDestLabel module_dest, u32 svc_id, oaknut
     cg.LDP(Q10, Q11, X1, HOST_VREGS_OFF + 2 * sizeof(u128));
     cg.LDP(Q12, Q13, X1, HOST_VREGS_OFF + 4 * sizeof(u128));
     cg.LDP(Q14, Q15, X1, HOST_VREGS_OFF + 6 * sizeof(u128));
+    cg.CLREX();
     cg.RET();
 
     // Write the post-SVC trampoline address, which will jump back to the guest after restoring its
