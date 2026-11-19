@@ -4894,12 +4894,16 @@ bool CustomBorderColorBudget::TryAcquire(const Device& device, size_t count) {
     return true;
 }
 
+void CustomBorderColorBudget::Release(size_t count) noexcept {
+    device_ptr->ReleaseCustomBorderColorSamplers(count);
+    held -= count;
+}
+
 void CustomBorderColorBudget::Release() noexcept {
     if (device_ptr != nullptr) {
-        device_ptr->ReleaseCustomBorderColorSamplers(held);
+        Release(held);
     }
     device_ptr = nullptr;
-    held = 0;
 }
 
 f32 TextureCacheRuntime::OcarinaFsrLodBias() {
@@ -5013,7 +5017,12 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         .unnormalizedCoordinates = VK_FALSE,
     };
     variants.reserve(1);
-    Emplace(VariantKey{});
+    VkSampler fallback = runtime.fallback_sampler.load(std::memory_order_relaxed);
+    const VkSampler base_sampler = Emplace(VariantKey{}, fallback);
+    if (fallback == VK_NULL_HANDLE) {
+        runtime.fallback_sampler.compare_exchange_strong(fallback, base_sampler,
+                                                         std::memory_order_relaxed);
+    }
 }
 
 Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth) const noexcept {
@@ -5049,10 +5058,10 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
     if (it == variants.end()) {
         return VK_NULL_HANDLE;
     }
-    return *it->sampler;
+    return it->handle;
 }
 
-VkSampler Sampler::Emplace(VariantKey key) {
+VkSampler Sampler::Emplace(VariantKey key, VkSampler fallback) {
     bool custom_border = has_custom_border_colors && !key.drop_custom_border;
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
         static bool warned_budget = false;
@@ -5120,11 +5129,32 @@ VkSampler Sampler::Emplace(VariantKey key) {
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
     }
-    variants.push_back(Variant{
-        .key = key,
-        .sampler = device_ptr->GetLogical().CreateSampler(create_info),
-    });
-    return *variants.back().sampler;
+    Variant variant{.key = key, .sampler = {}, .handle = VK_NULL_HANDLE};
+    try {
+        variant.sampler = device_ptr->GetLogical().CreateSampler(create_info);
+        variant.handle = *variant.sampler;
+    } catch (const vk::Exception& exception) {
+        if (custom_border) {
+            custom_border_color_budget.Release(1);
+        }
+        const VkResult result = exception.GetResult();
+        if (result != VK_ERROR_TOO_MANY_OBJECTS && result != VK_ERROR_OUT_OF_HOST_MEMORY &&
+            result != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            throw;
+        }
+        variant.handle = variants.empty() ? fallback : Handle();
+        if (variant.handle == VK_NULL_HANDLE) {
+            throw;
+        }
+        static std::atomic<u32> warnings{0};
+        if (warnings.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_ERROR(Render_Vulkan,
+                      "The driver refused a sampler ({}, its limit is {}): using another one",
+                      exception.what(), device_ptr->GetMaxSamplerAllocationCount());
+        }
+    }
+    variants.push_back(std::move(variant));
+    return variants.back().handle;
 }
 
 VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
