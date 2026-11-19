@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -277,6 +278,7 @@ public:
     std::optional<f32> ocarina_fsr_lod_bias;
     /// Set when the Ocarina upscaler fails during the session: samplers drop the bias again.
     bool ocarina_fsr_failed{};
+    std::atomic<VkSampler> fallback_sampler{VK_NULL_HANDLE};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
     std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
@@ -854,6 +856,7 @@ public:
     CustomBorderColorBudget& operator=(CustomBorderColorBudget&& rhs) noexcept;
 
     bool TryAcquire(const Device& device, size_t count);
+    void Release(size_t count) noexcept;
 
 private:
     void Release() noexcept;
@@ -867,7 +870,7 @@ public:
     explicit Sampler(TextureCacheRuntime&, const Tegra::Texture::TSCEntry&);
 
     [[nodiscard]] VkSampler Handle() const noexcept {
-        return *variants.front().sampler;
+        return variants.front().handle;
     }
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
@@ -902,13 +905,14 @@ private:
     struct Variant {
         VariantKey key;
         vk::Sampler sampler;
+        VkSampler handle;
     };
 
     static constexpr size_t MAX_VARIANTS = 32;
 
     [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
     [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
-    VkSampler Emplace(VariantKey key);
+    VkSampler Emplace(VariantKey key, VkSampler fallback = VK_NULL_HANDLE);
 
     CustomBorderColorBudget custom_border_color_budget;
     std::vector<Variant> variants;
