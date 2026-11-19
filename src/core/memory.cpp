@@ -63,7 +63,12 @@ struct Memory::Impl {
     void SetCurrentPageTable(Kernel::KProcess& process) {
         current_page_table = &process.GetPageTable().GetImpl();
 
-        if (process.IsApplication() && Settings::IsFastmemEnabled()) {
+        bool use_fastmem = process.IsApplication() && Settings::IsFastmemEnabled();
+#ifdef HAS_NCE
+        use_fastmem = use_fastmem &&
+                      (!system.DeviceMemory().buffer.IsDirectMapped() || process.UsesNativeExecution());
+#endif
+        if (use_fastmem) {
             current_page_table->fastmem_arena = system.DeviceMemory().buffer.VirtualBasePointer();
         } else {
             current_page_table->fastmem_arena = nullptr;
