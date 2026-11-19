@@ -63,6 +63,8 @@ void* ArmNce::RestoreGuestContext(void* raw_context) {
                 sizeof(guest_ctx->host_ctx.host_saved_vregs));
     std::memcpy(guest_ctx->host_ctx.host_saved_regs.data(), &host_ctx.regs[19],
                 sizeof(guest_ctx->host_ctx.host_saved_regs));
+    guest_ctx->host_ctx.host_fpcr = fpctx->fpcr;
+    guest_ctx->host_ctx.host_fpsr = fpctx->fpsr;
 
     // Save stack pointer.
     guest_ctx->host_ctx.host_sp = host_ctx.sp;
@@ -104,12 +106,15 @@ void ArmNce::SaveGuestContext(GuestContext* guest_ctx, void* raw_context) {
                 sizeof(guest_ctx->host_ctx.host_saved_regs));
     std::memcpy(&fpctx->vregs[8], guest_ctx->host_ctx.host_saved_vregs.data(),
                 sizeof(guest_ctx->host_ctx.host_saved_vregs));
+    fpctx->fpcr = guest_ctx->host_ctx.host_fpcr;
+    fpctx->fpsr = guest_ctx->host_ctx.host_fpsr;
 
     // Return from the call on exit by setting pc to x30.
     host_ctx.pc = guest_ctx->host_ctx.host_saved_regs[11];
 
     // Clear esr_el1 and return it.
     host_ctx.regs[0] = guest_ctx->esr_el1.exchange(0);
+    asm volatile("clrex" ::: "memory");
 }
 
 bool ArmNce::HandleFailedGuestFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
@@ -242,11 +247,7 @@ void ArmNce::LockThread(Kernel::KThread* thread) {
 }
 
 void ArmNce::UnlockThread(Kernel::KThread* thread) {
-    auto* thread_params = &thread->GetNativeExecutionParameters();
-    m_guest_ctx.tpidr_el0 = thread_params->tpidr_el0;
-    m_guest_ctx.tpidrro_el0 = thread_params->tpidrro_el0;
-    thread_params->native_context = nullptr;
-    UnlockThreadParameters(thread_params);
+    UnlockThreadParameters(&thread->GetNativeExecutionParameters());
 }
 
 HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
@@ -288,16 +289,12 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
     // Critical section for thread cleanup
     std::atomic_thread_fence(std::memory_order_acquire);
 
-    // Cache values before releasing thread
-    const u64 final_tpidr_el0 = thread_params->tpidr_el0;
+    m_guest_ctx.tpidr_el0 = thread_params->tpidr_el0;
 
     // Minimize critical section
     thread_params->is_running = false;
     thread_params->native_context = nullptr;
     m_running_thread = nullptr;
-
-    // Non-critical updates can happen after releasing the thread
-    m_guest_ctx.tpidr_el0 = final_tpidr_el0;
 
     // Return the halt reason.
     return hr;
