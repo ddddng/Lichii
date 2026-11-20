@@ -2023,9 +2023,13 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::stop_token stop_loading,
     const std::filesystem::path warm_file = ShaderWarm::ComputeWarmPath(title_id);
     const std::string path = Common::FS::PathToUTF8String(warm_file);
     // The pipelines built here outlive the run only in the driver's own cache or in the Vulkan
-    // pipeline cache saved below; progress is recorded and reused only then.
-    const bool persisted = device.DriverCachesPipelines() ||
-                           (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty());
+    // pipeline cache saved below; progress is recorded and reused only then. Progress kept in the
+    // Vulkan pipeline cache is written once that cache is saved, and read only when this boot's
+    // cache was read back from the file.
+    const bool driver_cache = device.DriverCachesPipelines();
+    const bool vulkan_cache = use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty();
+    const bool persisted = driver_cache || vulkan_cache;
+    const bool progress_kept = driver_cache || (vulkan_cache && vulkan_pipeline_cache_restored);
     const auto stamp = [&](u64 entries) {
         return ShaderWarm::CurrentWarmStamp(warm_file, entries, device.GetDriverVersion(),
                                             device.GetDeviceID(), CACHE_VERSION,
@@ -2047,7 +2051,7 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::stop_token stop_loading,
     } else if (current && marker && marker->Matches(*current)) {
         LOG_INFO(Render_Vulkan, "Shader precache: compute programs already done for this driver");
     } else {
-        if (current && persisted) {
+        if (current && progress_kept) {
             built_before = ShaderWarm::ReadWarmProgress(warm_file, *current);
         }
         // Read the whole file here (its own reader: the disk cache loader deletes files it rejects).
@@ -2197,20 +2201,28 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::stop_token stop_loading,
             ShaderWarm::WriteWarmMarker(warm_file, *stamp_done);
         }
         std::filesystem::remove(ShaderWarm::WarmProgressPath(warm_file), ec);
-    } else if (compute_pending && current && persisted && total_built != 0 &&
-               !stop_loading.stop_requested()) {
+    }
+    std::function<void()> commit_progress;
+    if (compute_pending && skipped && current && persisted && total_built != 0 &&
+        !stop_loading.stop_requested()) {
         // A closed load saves no Vulkan pipeline cache below.
         for (size_t index = 0; index < jobs.size(); ++index) {
             if (built[index]) {
                 built_before.insert(job_keys[index]);
             }
         }
-        ShaderWarm::WriteWarmProgress(warm_file, *current, built_before);
+        commit_progress = [warm_file, at = *current, keys = std::move(built_before)] {
+            ShaderWarm::WriteWarmProgress(warm_file, at, keys);
+        };
+        if (!vulkan_cache) {
+            commit_progress();
+            commit_progress = {};
+        }
     }
     if (!stop_loading.stop_requested() && total_built != 0) {
         // Without this, the builds reach the file only at the next boot, game change or clean
         // close, and are lost if the app ends otherwise.
-        QueueVulkanPipelineCacheSave();
+        QueueVulkanPipelineCacheSave(std::move(commit_progress));
     }
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
@@ -2252,13 +2264,18 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
     });
 }
 
-void PipelineCache::QueueVulkanPipelineCacheSave() {
+void PipelineCache::QueueVulkanPipelineCacheSave(std::function<void()> after_save) {
     if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
         return;
     }
-    const auto save = [this] {
-        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
-                                     CACHE_VERSION);
+    const auto save = [this, after_save = std::move(after_save)] {
+        if (!SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                          CACHE_VERSION)) {
+            return;
+        }
+        if (after_save) {
+            after_save();
+        }
         size_t size = 0;
         vulkan_pipeline_cache.Read(&size, nullptr);
         last_cache_size.store(size, std::memory_order_relaxed);
@@ -3754,7 +3771,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     return {.failure = exception.what()};
 }
 
-void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
+bool PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                                  const vk::PipelineCache& pipeline_cache,
                                                  u32 cache_version) {
     // Written beside the cache and renamed over it: the emulator stopped mid-write left the cache
@@ -3765,7 +3782,7 @@ void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
     if (!file.is_open()) {
         LOG_ERROR(Common_Filesystem, "Failed to open Vulkan driver pipeline cache file {}",
                   Common::FS::PathToUTF8String(temporary));
-        return;
+        return false;
     }
     try {
         file.exceptions(std::ifstream::failbit);
@@ -3796,7 +3813,7 @@ void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
         file.close();
         std::error_code remove_error;
         std::filesystem::remove(temporary, remove_error);
-        return;
+        return false;
     }
     std::error_code error;
     std::filesystem::rename(temporary, filename, error);
@@ -3804,11 +3821,12 @@ void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
         LOG_ERROR(Common_Filesystem, "Failed to replace Vulkan driver pipeline cache file {}: {}",
                   Common::FS::PathToUTF8String(filename), error.message());
         std::filesystem::remove(temporary, error);
-        return;
+        return false;
     }
 
     LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
              Common::FS::PathToUTF8String(filename));
+    return true;
 }
 
 vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::path& filename,
@@ -3822,6 +3840,7 @@ vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::
             .pInitialData = data};
         return device.GetLogical().CreatePipelineCache(pipeline_cache_ci);
     };
+    vulkan_pipeline_cache_restored = false;
     try {
         std::ifstream file(filename, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
@@ -3869,7 +3888,9 @@ vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::
                  "Loaded Vulkan driver pipeline cache: {}", Common::FS::PathToUTF8String(filename));
 
         try {
-            return create_pipeline_cache(cache_size, cache_data.data());
+            auto restored = create_pipeline_cache(cache_size, cache_data.data());
+            vulkan_pipeline_cache_restored = true;
+            return restored;
         } catch (const vk::Exception& e) {
             // The blob came from another driver or driver version (e.g. switching between
             // MoltenVK and KosmicKrisp on macOS): the driver rejects it. Start empty instead of

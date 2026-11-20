@@ -425,6 +425,26 @@ TEST_CASE("ShaderPrecache: a frame of many small blocks is read past its compres
     REQUIRE_FALSE(result.read_failed);
 }
 
+TEST_CASE("ShaderPrecache: a complete frame over max_frame is skipped", "[video_core]") {
+    constexpr size_t window = 4096;
+    constexpr size_t max_frame = 1024;
+    const auto frame = RawBlockFrame(Member({BareProgram(true, 14)}));
+    REQUIRE(frame.size() > max_frame);
+    MemoryPack pack;
+    pack.Place(0, {'P', 'D', 'A', 'T'});
+    pack.Place(8, frame);
+    pack.Place(8 + frame.size() + 5, Frame(Member({BareProgram(true, 15)})));
+    REQUIRE(pack.bytes.size() < window);
+
+    Found found;
+    const auto result =
+        ShaderWarm::ScanFrames(pack.bytes.size(), pack.Reader(), nullptr, found.Counter(), {},
+                               {.window = window, .max_frame = max_frame});
+    REQUIRE(result.oversized == 1);
+    REQUIRE(result.frames == 1);
+    REQUIRE(found.compute == 1);
+}
+
 TEST_CASE("ShaderPrecache: a short read before the end of a pack fails the scan",
           "[video_core]") {
     constexpr size_t window = 256;
