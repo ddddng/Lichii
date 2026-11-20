@@ -11,6 +11,7 @@
 #include <mutex>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -42,9 +43,15 @@
 #include "dynarmic/interface/A64/config.h"
 #ifdef LICHII_NVN_DIRECT
 #include "video_core/nvn_direct/nvn_direct.h"
-#ifdef LICHII_NVN_METAL_LIVE
-#include "video_core/renderer_metal/nvn_pool_bridge.h"
 #endif
+#ifdef LICHII_NVN_METAL
+#include "common/hex_util.h"
+#include "core/nvn_metal_pool_pins.h"
+#include "video_core/renderer_metal/nvn_metal.h"
+#include "video_core/renderer_metal/presentation_host.h"
+#endif
+#if defined(LICHII_NVN_DIRECT) || defined(LICHII_NVN_METAL)
+#define LICHII_NVN_FRONT
 #endif
 
 namespace Core::NvnHook {
@@ -73,13 +80,14 @@ constexpr std::array HaltingCalls{
     std::string_view{"nvnWindowAcquireTexture"}, std::string_view{"nvnQueueAcquireTexture"},
     std::string_view{"nvnMemoryPoolFinalize"},  std::string_view{"nvnTextureReadTexels"},
     std::string_view{"nvnTextureReadTexelsStrided"},
-#ifdef LICHII_NVN_METAL_LIVE
+#ifdef LICHII_NVN_METAL
     std::string_view{"nvnMemoryPoolInitialize"}, // opens page references (MetalPoolPins)
 #endif
 };
 
 struct State {
     u64 program_id{}; ///< DirectProgramId()
+    bool metal{}; ///< MetalMode(): the front end is nxnative's, replayed in Metal
     std::map<u64, std::string> modules; ///< by base
     bool replay_started{};
     bool direct_ready{}; ///< nvn_direct_init ran
@@ -88,6 +96,7 @@ struct State {
     std::optional<Service::Nx2PresentBookkeeping> present;
     u64 presents{};
 
+    Core::System* system{};
     Kernel::KProcess* process{};
     /// Lichii's guest memory (its memfd and backing views, for the replay's pool imports)
     Common::HostMemory* host_memory{};
@@ -105,6 +114,11 @@ struct State {
 
     std::mutex mutex; ///< slots' creation, lookups
     std::unordered_map<std::string, u32> slot_by_name;
+
+#ifdef LICHII_NVN_METAL
+    std::optional<MetalPoolPins> pool_pins; ///< from the first lookup (nvn_direct_init)
+    std::atomic<bool> shader_failed{};
+#endif
 };
 
 /// EDEN_NX2_NVN_DIRECT=0/1 overrides the nvn_direct_renderer setting for a launch.
@@ -121,8 +135,21 @@ bool DirectAsked() {
     return DirectOverride().value_or(Settings::values.nvn_direct_renderer.GetValue());
 }
 
+/// EDEN_NX2_NVN_METAL=1 asks for native Metal NVN (it may still fall back: InstallMetal).
+bool MetalAsked() {
+#ifdef LICHII_NVN_METAL
+    const char* const value = std::getenv("EDEN_NX2_NVN_METAL");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+#else
+    return false;
+#endif
+}
+
 /// The boot's state, from Install to Uninstall (none unless the boot runs the direct renderer).
 std::unique_ptr<State> g_state;
+/// A boot of this process took native Metal NVN: its shader library and Metal state are once per
+/// process, and Metal may hold views of the guest backing until the process exits.
+bool g_metal_ran{};
 /// A boot of this process ran the direct renderer: its replay starts once per process.
 bool g_direct_ran{};
 /// The direct renderer failed to start on the device in this process (DirectFailed).
@@ -231,7 +258,7 @@ bool ReadGuest(Core::Memory::Memory& memory, u64 address, void* out, size_t size
     return true;
 }
 
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
 /// The answers of NVN2's own nvnDeviceGetInteger that are constants in its code, given to the front
 /// end as device integers (dm_sdk_nvn2_item), read from the module at `base` that holds the driver
 /// as upstream's loader.c nvn2_find_switch reads them. Its API and GPU code versions move with the
@@ -307,7 +334,7 @@ u32 ReadNvn2Constants(Kernel::KProcess& process, u64 base) {
 /// At Install: a slot per name the front end knows (upstream's names.txt) and, for NVN2, the
 /// device integers that are constants in the driver's code.
 void InstallDirect(State& state) {
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
     for (int front = 0; front < nvn_direct_name_count(); ++front) {
         const std::string name = nvn_direct_name(front);
         const u32 slot = state.slot_count.load(std::memory_order_relaxed);
@@ -341,7 +368,7 @@ void InstallDirect(State& state) {
 #endif
 }
 
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
 /// Direct mode: the slot answering `name` (a stub slot for a name the front end lacks).
 u32 DirectSlotOf(State& state, const std::string& name) {
     if (name == "nvnDeviceGetProcAddress") {
@@ -361,6 +388,7 @@ u32 DirectSlotOf(State& state, const std::string& name) {
     return slot;
 }
 
+#ifdef LICHII_NVN_DIRECT
 /// nvn_direct_memory.map_view: the pages behind guest [address, address + size)
 /// mapped once more at a range of their own, for the replay to import: each run of pages that lie
 /// one after the other in the backing memory is one mapping of it (HostMemory::MapBackingView);
@@ -451,6 +479,22 @@ void AliasRelease(void* context, void* region) {
     static_cast<State*>(context)->host_memory->ReleaseAliasRegion(static_cast<u8*>(region));
 }
 #endif
+#endif
+
+#ifdef LICHII_NVN_METAL
+/// Metal mode, after a halted call (the kernel's context, as ExitProcess): a guest shader outside
+/// the validated local library latched a failure in the replay. The session stops: the game's NVN
+/// state lives in the Metal replay, so it cannot go on on GPU emulation.
+void CheckMetalShaders(State& state) {
+    if (!lichii_nvn_metal_shader_failed() || state.shader_failed.exchange(true)) {
+        return;
+    }
+    LOG_CRITICAL(Core, "NVN Metal: a guest shader is outside the validated local library: the "
+                       "session stops");
+    nvn_mtl_request_stop();
+    state.system->Exit();
+}
+#endif
 
 /// The guest's x0-x7 and the low halves of v0-v7.
 void ReadArguments(Dynarmic::A64::Jit& jit, std::array<u64, 8>& x, std::array<u64, 8>& v) {
@@ -477,6 +521,18 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
         std::scoped_lock lock{state.mutex};
         if (!state.direct_ready) {
             auto& page_table = state.process->GetPageTable();
+            u8* const arena = page_table.GetImpl().fastmem_arena;
+            const u64 guest_size = u64{1} << page_table.GetAddressSpaceWidth();
+#ifdef LICHII_NVN_METAL
+            // The backing outlives every lease without an owner here: a Metal boot keeps it until
+            // the process exits (MetalRan).
+            const nvn_direct_memory views{.backing_fd = -1};
+            auto& pins = state.pool_pins.emplace(
+                state.system->Kernel(), page_table,
+                std::shared_ptr<Common::HostMemory>{std::shared_ptr<void>{}, state.host_memory});
+            const lichii_metal_pool_mapper mapper = pins.Mapper();
+            lichii_metal_set_pool_mapper(arena, guest_size, &mapper);
+#else
             const nvn_direct_memory views{.map_view = MapPoolView,
                                           .unmap_view = UnmapPoolView,
                                           .track_pages = TrackPages,
@@ -492,9 +548,8 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
                                           .alias_release = AliasRelease,
 #endif
             };
-            nvn_direct_init(page_table.GetImpl().fastmem_arena,
-                            u64{1} << page_table.GetAddressSpaceWidth(), &views,
-                            state.process->IsSwitch2(), state.sdk_major);
+#endif
+            nvn_direct_init(arena, guest_size, &views, state.process->IsSwitch2(), state.sdk_major);
             state.direct_ready = true;
         }
         const u32 found = DirectSlotOf(state, name);
@@ -536,7 +591,17 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
 } // namespace
 
 bool DirectMode() {
-    return Get() != nullptr;
+    const State* const state = Get();
+    return state != nullptr && !state->metal;
+}
+
+bool MetalMode() {
+    const State* const state = Get();
+    return state != nullptr && state->metal;
+}
+
+bool MetalRan() {
+    return g_metal_ran;
 }
 
 u64 DirectProgramId() {
@@ -549,6 +614,28 @@ void StopDirect() {
     if (const auto* state = Get(); state && state->replay_started) {
         nvn_direct_stop();
     }
+#endif
+#ifdef LICHII_NVN_METAL
+    if (const auto* state = Get(); state && state->metal && state->direct_ready) {
+        nvn_mtl_request_stop();
+    }
+#endif
+}
+
+void DrainMetal() {
+#ifdef LICHII_NVN_METAL
+    State* const state = Get();
+    if (state == nullptr || !state->metal) {
+        return;
+    }
+    if (state->direct_ready) {
+        nvn_mtl_drain();
+        // The kernel is shutting down: the pins are freed without closing their pages.
+        lichii_metal_drain_pool_pins(0);
+    }
+    lichii_metal_set_pool_mapper(nullptr, 0, nullptr);
+    Metal::UnbindPresentationHost();
+    LOG_INFO(Core, "NVN Metal: the replay and its presents are drained");
 #endif
 }
 
@@ -644,10 +731,70 @@ void ScanModules(Core::System& system, Kernel::KProcess& process, State& state) 
         }
         address = end;
     }
+    state.system = &system;
     state.process = &process;
     state.host_memory = &system.DeviceMemory().buffer;
     state.program_id = process.GetProgramId();
 }
+
+#ifdef LICHII_NVN_METAL
+/// Why this boot cannot run native Metal NVN, empty when it can. The shader preflight comes last:
+/// it pins the local shader library for the rest of the process.
+std::string MetalRefusal(Core::System& system, Kernel::KProcess& process, const State& state) {
+    if (g_metal_ran) {
+        return "an earlier game in this process ran it, which starts once per process (restart "
+               "Lichii)";
+    }
+    if (!process.IsSwitch2()) {
+        return "the game is not an NVN2 (Switch 2) game";
+    }
+    if (state.bootstrap_entries.empty()) {
+        return "the game exports no nvnBootstrapLoader";
+    }
+    if (state.synthetic_base == 0 || process.GetPageTable().GetImpl().fastmem_arena == nullptr) {
+        return "no fastmem arena or no free range for the synthetic addresses";
+    }
+    const char* const assets = std::getenv("EDEN_NX2_NVN_METAL_ASSETS");
+    if (assets == nullptr || *assets == '\0') {
+        return "EDEN_NX2_NVN_METAL_ASSETS is not set";
+    }
+    const auto& build_id = system.GetApplicationProcessBuildID();
+    if (std::ranges::all_of(build_id, [](u8 byte) { return byte == 0; })) {
+        return "the main NSO's build id is unknown";
+    }
+    const std::string main_build = Common::HexToString(std::span{build_id}.first(16), false);
+    std::array<char, 256> error{};
+    if (!lichii_nvn_metal_prepare_shaders(assets, state.program_id, main_build.c_str(),
+                                          error.data(), error.size())) {
+        return fmt::format("shader preflight for main {}: {}", main_build, error.data());
+    }
+    return {};
+}
+
+/// EDEN_NX2_NVN_METAL=1: the hook state for native Metal NVN, or false (logged) when the boot runs
+/// as it would without it. Nothing has reached the game yet, so every refusal falls back.
+bool InstallMetal(Core::System& system, Kernel::KProcess& process) {
+    if (!process.Is64Bit()) {
+        LOG_WARNING(Core, "Renderer: native Metal NVN refused (a 32-bit game): normal renderer");
+        return false;
+    }
+    auto state = std::make_unique<State>();
+    ScanModules(system, process, *state);
+    if (const std::string refusal = MetalRefusal(system, process, *state); !refusal.empty()) {
+        LOG_WARNING(Core, "Renderer: native Metal NVN refused ({}): normal renderer", refusal);
+        return false;
+    }
+    g_metal_ran = true;
+    state->metal = true;
+    InstallDirect(*state);
+    LOG_INFO(Core,
+             "Renderer: native Metal NVN (nxnative): {} nvnBootstrapLoader exports (SDK {}), "
+             "synthetic addresses from {:#x}",
+             state->bootstrap_entries.size(), state->sdk_major, state->synthetic_base);
+    g_state = std::move(state);
+    return true;
+}
+#endif
 
 } // namespace
 
@@ -658,6 +805,12 @@ void Install(Core::System& system, Kernel::KProcess& process) {
     constexpr bool built = false;
 #endif
     g_state.reset();
+#ifdef LICHII_NVN_METAL
+    if (MetalAsked() && InstallMetal(system, process)) {
+        g_choice = RendererChoice::SettingOff;
+        return;
+    }
+#endif
     const bool asked = DirectAsked();
     // The hook's block entries are A64 only (ArmDynarmic64): a 32-bit game gets no state.
     std::unique_ptr<State> state_owner =
@@ -709,7 +862,17 @@ void DirectFailed() {
     g_state.reset();
 }
 
+void MetalFailed(std::string_view reason) {
+    LOG_WARNING(Core, "Renderer: native Metal NVN refused ({}): normal renderer", reason);
+    g_state.reset();
+}
+
 void Uninstall() {
+#ifdef LICHII_NVN_METAL
+    if (const State* const state = Get(); state != nullptr && state->pool_pins) {
+        lichii_metal_set_pool_mapper(nullptr, 0, nullptr);
+    }
+#endif
     g_state.reset();
 }
 
@@ -722,14 +885,14 @@ bool DirectNeedsFreshProcess() {
     return g_direct_ran && !g_replay_failed && DirectAsked() &&
            Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
 #else
-    return false;
+    return g_metal_ran;
 #endif
 }
 
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc) {
     // Asked for when the process's JIT is made, before Install decides: HookOf answers nothing
     // while the boot has no state.
-    return DirectAsked() ? &HookOf : nullptr;
+    return DirectAsked() || MetalAsked() ? &HookOf : nullptr;
 }
 
 bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
@@ -738,14 +901,14 @@ bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
     if (process != state.process) {
         return false;
     }
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
     return DirectEntry(state, pc, jit, memory);
 #else
     return false;
 #endif
 }
 
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
 namespace {
 /// Every 600 presents: the halted calls and the stub census (names called without an
 /// implementation).
@@ -764,6 +927,7 @@ void LogStubCensus(State& state, u64 present) {
              state.halted_calls.load(), census.empty() ? " none" : census);
 }
 
+#ifdef LICHII_NVN_DIRECT
 /// Direct mode's present (nvnQueuePresentTexture): the replay's image goes to
 /// Lichii's presenter as a layer whose address names the frame (AccelerateDisplay finds it), and
 /// the present's bookkeeping is nx2:vi2's (Service::Nx2PresentBookkeeping): counts, capture,
@@ -830,6 +994,24 @@ void PresentDirect(Core::System& system, State& state) {
     present.PaceToVblank((frame.interval << 16) | 60, system.ApplicationProcess(), own, nullptr);
     LogStubCensus(state, number);
 }
+#else
+/// Metal mode's present (nvnQueuePresentTexture): nxnative presents on the frontend's layer and
+/// paces itself; the present's bookkeeping is nx2:vi2's counts, capture, speed limiter and perf
+/// stats.
+void PresentMetal(Core::System& system, State& state) {
+    if (!state.present) {
+        state.present.emplace(system);
+    }
+    auto& present = *state.present;
+    const u64 own = ++state.presents;
+    const u64 number = present.Count(Kernel::GetCurrentThread(system.Kernel()));
+    if (own <= 4 || own % 600 == 0) {
+        LOG_INFO(Core, "NVN Metal: present #{}", own);
+    }
+    present.Finish(own);
+    LogStubCensus(state, number);
+}
+#endif
 } // namespace
 #endif
 
@@ -865,10 +1047,10 @@ void OnGuestUnmapDone() {
 }
 
 void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
-#ifdef LICHII_NVN_METAL_LIVE
+#ifdef LICHII_NVN_METAL
     lichii_metal_drain_pool_pins(1);
 #endif
-#ifdef LICHII_NVN_DIRECT
+#ifdef LICHII_NVN_FRONT
     State& state = *Get();
     const u32 slot = std::exchange(t_halted_slot, MaxSlots);
     if (slot == MaxSlots) {
@@ -908,10 +1090,17 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     if (sync_wait && waited && args[0] == 0) {
         args[0] = 1; // NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED: it was signalled while waiting
     }
-    if (std::string_view{nvn_direct_name(target.front)} != "nvnQueuePresentTexture") {
-        return;
+    const bool present = std::string_view{nvn_direct_name(target.front)} == "nvnQueuePresentTexture";
+#ifdef LICHII_NVN_METAL
+    if (present) {
+        PresentMetal(system, state);
     }
-    PresentDirect(system, state);
+    CheckMetalShaders(state);
+#else
+    if (present) {
+        PresentDirect(system, state);
+    }
+#endif
 #else
     (void)system;
     (void)args;

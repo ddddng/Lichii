@@ -1,0 +1,30 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index f080f8bf..9d552ed8 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -25,6 +25,7 @@
+ #include "nvn_mtl.h"
+ #ifdef LICHII_NVN_METAL_LIVE
+ #include "video_core/renderer_metal/nvn_pool_bridge.h"
++#include "video_core/renderer_metal/presentation_host.h"
+ #endif
+ #include "nvn_queue.h"
+ #include <mach/mach.h>
+@@ -18969,11 +18970,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     (void)period; [dr present];
+ #else
+     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
++#ifdef LICHII_NVN_METAL_LIVE
++    uint64_t host_generation = lichii_nvn_metal_present_generation();   // the layer this drawable came from: a later host ignores it
++#endif
+     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
+         if (nvn_queue_stopping()) return;
+         CFTimeInterval tt = d.presentedTime;
+         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+         pres_seen(pn, tt);
++#ifdef LICHII_NVN_METAL_LIVE
++        lichii_nvn_metal_presented(host_generation, pn, tt);   // shown on screen: a zero time (dropped) is not
++#endif
+     }];
+     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
+     if (target_ts > 0) [dr present];

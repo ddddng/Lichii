@@ -19,6 +19,7 @@ add_library(core STATIC
     nvn_direct_choice.h
     nvn_hook.cpp
     nvn_hook.h
+    nvn_metal_pool_pins.h
     game_settings.cpp
     game_settings.h
     core_timing.cpp

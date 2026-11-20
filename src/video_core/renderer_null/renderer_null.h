@@ -12,8 +12,11 @@ namespace Null {
 
 class RendererNull final : public VideoCore::RendererBase {
 public:
+    /// frames_displayed: Composite tells the window a frame was displayed (native Metal NVN
+    /// reports its own presents instead).
     explicit RendererNull(Core::Frontend::EmuWindow& emu_window, Tegra::GPU& gpu,
-                          std::unique_ptr<Core::Frontend::GraphicsContext> context);
+                          std::unique_ptr<Core::Frontend::GraphicsContext> context,
+                          bool frames_displayed = true);
     ~RendererNull() override;
 
     void Composite(std::span<const Tegra::FramebufferConfig> framebuffer) override;
@@ -31,6 +34,7 @@ public:
 private:
     Tegra::GPU& m_gpu;
     RasterizerNull m_rasterizer;
+    bool m_frames_displayed;
 };
 
 } // namespace Null

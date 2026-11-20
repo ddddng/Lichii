@@ -33,6 +33,9 @@
 #include "video_core/renderer_opengl/renderer_opengl.h"
 #endif
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+#ifdef LICHII_NVN_METAL
+#include "video_core/renderer_metal/presentation_host.h"
+#endif
 #include "video_core/video_core.h"
 
 namespace {
@@ -89,6 +92,24 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
     const bool use_nvdec = nvdec_value != Settings::NvdecEmulation::Off;
     const bool use_async = Settings::values.use_asynchronous_gpu_emulation.GetValue();
+#ifdef LICHII_NVN_METAL
+    // Native Metal NVN: nxnative presents on the frontend's CAMetalLayer and reports what reached
+    // the screen; no Vulkan device is made and MoltenVK is not loaded for the boot.
+    if (Core::NvnHook::MetalMode()) {
+        const bool bound = Metal::BindPresentationHost(
+            emu_window.GetWindowInfo().metal_layer, [&emu_window](u64 ticket, double seconds) {
+                emu_window.OnMetalFramePresented(ticket, seconds);
+            });
+        if (bound) {
+            gpu.emplace(system, use_async, use_nvdec);
+            gpu->BindRenderer(std::make_unique<Null::RendererNull>(
+                emu_window, *gpu, emu_window.CreateSharedContext(), false));
+            LOG_INFO(HW_GPU, "Native Metal NVN presents on the frontend's CAMetalLayer");
+            return;
+        }
+        Core::NvnHook::MetalFailed("the frontend has no CAMetalLayer to present on");
+    }
+#endif
     for (;;) {
         gpu.emplace(system, use_async, use_nvdec);
         auto context = emu_window.CreateSharedContext();

@@ -709,6 +709,7 @@ struct System::Impl {
         kernel.CloseServices();
         applet_manager.DropPendingProcess();
         kernel.ShutdownCores();
+        Core::NvnHook::DrainMetal();
         // Each step done tells the frontend the teardown still moves (see
         // Common::ShutdownProgress); the GPU's (pipeline caches) reports its own steps.
         Common::NoteShutdownProgress();
@@ -752,7 +753,7 @@ struct System::Impl {
         // The guest RAM section keeps every page the game touched until it is destroyed (up to
         // 12 GiB), and the next Load reuses it. Switch 2 only: Switch 1 keeps its behaviour.
         // InitializeKernel creates it again, sized for the next game.
-        if (Settings::CurrentProgramIsSwitch2()) {
+        if (Settings::CurrentProgramIsSwitch2() && !Core::NvnHook::MetalRan()) {
             device_memory.reset();
             guest_memory_released = true;
             Core::NvnHook::TraceStartup("guest backing released");

@@ -8,8 +8,10 @@
 namespace Null {
 
 RendererNull::RendererNull(Core::Frontend::EmuWindow& emu_window, Tegra::GPU& gpu,
-                           std::unique_ptr<Core::Frontend::GraphicsContext> context_)
-    : RendererBase(emu_window, std::move(context_)), m_gpu(gpu), m_rasterizer(gpu) {}
+                           std::unique_ptr<Core::Frontend::GraphicsContext> context_,
+                           bool frames_displayed)
+    : RendererBase(emu_window, std::move(context_)), m_gpu(gpu), m_rasterizer(gpu),
+      m_frames_displayed(frames_displayed) {}
 
 RendererNull::~RendererNull() = default;
 
@@ -19,7 +21,9 @@ void RendererNull::Composite(std::span<const Tegra::FramebufferConfig> framebuff
     }
 
     m_gpu.RendererFrameEndNotify();
-    render_window.OnFrameDisplayed();
+    if (m_frames_displayed) {
+        render_window.OnFrameDisplayed();
+    }
 }
 
 std::vector<u8> RendererNull::GetAppletCaptureBuffer() {

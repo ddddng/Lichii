@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <string_view>
 
 #include "common/common_types.h"
 #include "core/nvn_direct_choice.h"
@@ -50,13 +51,32 @@ namespace Core::NvnHook {
 /// the Vulkan device, created after Install.
 [[nodiscard]] bool DirectMode();
 
+/// Native Metal NVN mode (LICHII_NVN_METAL, EDEN_NX2_NVN_METAL=1, an NVN2 game whose shaders pass
+/// the local preflight): the game's NVN calls run in nxnative's Metal backend, presenting on the
+/// frontend's CAMetalLayer, and no Vulkan device is made. Decided once per boot by Install.
+[[nodiscard]] bool MetalMode();
+
+/// Metal mode, CreateGPU (before the game runs): the boot cannot present natively. It runs as it
+/// would without Metal mode. Logged.
+void MetalFailed(std::string_view reason);
+
+/// Metal mode, ShutdownMainProcess once the guest cores stopped (no NVN call runs): drains the
+/// replay and its presents, frees the pool pins and unbinds the layer, before guest memory or the
+/// window go.
+void DrainMetal();
+
+/// A boot of this process took Metal mode: Metal may hold views of the guest backing until the
+/// process exits, so the backing stays.
+[[nodiscard]] bool MetalRan();
+
 /// Direct mode's title (0 otherwise): the direct renderer keeps its caches per title
 /// (renderer_vulkan.cpp, DM_TEMP).
 [[nodiscard]] u64 DirectProgramId();
 
 /// Direct mode, the emulator shutting down: the game's threads waiting on the
 /// host inside a halted NVN call return, so the kernel can suspend them. Before the cores are
-/// suspended (System::Pause, ShutdownMainProcess). Nothing otherwise.
+/// suspended (System::Pause, ShutdownMainProcess). Metal mode: nxnative's permanent stop, so never
+/// on a pause that resumes. Nothing otherwise.
 void StopDirect();
 
 /// Decides the boot's renderer (Choice) and, in direct mode, finds the NVN driver's
@@ -81,7 +101,8 @@ void Uninstall();
 
 /// The next boot, under the current settings, asks for the direct renderer, and an earlier boot
 /// of this process ran it: its replay starts once per process, so the boot would fall back
-/// (RendererChoice::EarlierBoot) unless a fresh process runs it.
+/// (RendererChoice::EarlierBoot) unless a fresh process runs it. With Metal mode built: any boot
+/// after a Metal one (MetalRan).
 [[nodiscard]] bool DirectNeedsFreshProcess();
 
 /// UserConfig::block_entry_hook (null unless the direct renderer is asked for).

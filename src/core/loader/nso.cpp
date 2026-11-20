@@ -497,12 +497,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         return load_base + image_size;
     }
 
+    // TODO(Maufeat): Check if there is a better way to check
+    if (name == "main") {
+        system.SetApplicationProcessBuildID(nso_header.build_id);
+    }
+
     // Apply cheats if they exist and the program has a valid title ID
     if (pm) {
-        // TODO(Maufeat): Check if there is a better way to check
-        if (name == "main")
-            system.SetApplicationProcessBuildID(nso_header.build_id);
-
         const auto cheats = pm->CreateCheatList(nso_header.build_id);
         if (!cheats.empty()) {
             system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);
