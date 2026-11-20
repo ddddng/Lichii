@@ -26,6 +26,7 @@
 #include "core/hle/service/filesystem/save_data_controller.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/ns/application_manager_interface.h"
+#include "core/hle/service/ns/read_only_application_control_data_interface.h"
 #include "core/hle/service/ns/service_getter_interface.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/loader/loader.h"
@@ -200,7 +201,8 @@ Result IApplicationFunctions::GetDesiredLanguage(Out<u64> out_language_code) {
 
     // Get desired application language
     NS::ApplicationLanguage desired_language{};
-    R_TRY(app_man->GetApplicationDesiredLanguage(&desired_language, supported_languages));
+    R_TRY(NS::ResolveApplicationDesiredLanguage(&desired_language, supported_languages,
+                                                res.first == nullptr));
 
     // Convert to settings language code.
     R_TRY(app_man->ConvertApplicationLanguageToLanguageCode(out_language_code, desired_language));
