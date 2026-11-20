@@ -65,6 +65,7 @@
 #include "applets/qt_software_keyboard.h"
 #include "applets/qt_web_browser.h"
 
+#include "configuration/configuration_shared.h"
 #include "configuration/configure_dialog.h"
 #include "configuration/configure_input.h"
 #include "configuration/configure_network.h"
@@ -87,6 +88,7 @@
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDate>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -482,14 +484,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     default_theme_paths = QIcon::themeSearchPaths();
 
-    // The first launch after an interface update switches to Lichii Dark and explains what moved.
-    const bool whats_new_pending =
-        UISettings::values.whats_new_version.GetValue() < WhatsNewDialog::Version;
-    if (whats_new_pending) {
-        UISettings::values.whats_new_version = WhatsNewDialog::Version;
-        UISettings::values.theme =
-            UISettings::themes[static_cast<size_t>(UISettings::Theme::LichiiDark)].second;
-    }
     UpdateUITheme();
 
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
@@ -645,11 +639,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         game_list->PopulateAsync(UISettings::values.game_dirs);
     }
 
-    if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
-        UISettings::values.show_whats_new.GetValue()) {
-        QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
-    }
-
     // Set up game list mode checkboxes.
     SetGameListMode(UISettings::values.game_list_mode.GetValue());
 
@@ -780,6 +769,28 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 QString::fromStdString(hbl_path),
                 LibraryAppletParameters(0x010000000000100Dull, Service::AM::AppletId::QLaunch));
         }
+    }
+
+    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
+    const bool launching_content =
+        launch && (!launch->filepath.empty() || launch->launch_setup || launch->launch_qlaunch ||
+                   launch->launch_hlaunch);
+    switch (WhatsNewDialog::OnStartup(build, UISettings::values.last_seen_release.GetValue(),
+                                     UISettings::values.first_start.GetValue(), launching_content)) {
+    case WhatsNewDialog::StartupAction::Remember:
+        UISettings::values.last_seen_release = build;
+        config->SaveAllValues();
+        break;
+    case WhatsNewDialog::StartupAction::Show:
+        QTimer::singleShot(0, this, [this] {
+            if (isVisible() && !UISettings::values.first_start.GetValue() && !boot_in_progress &&
+                !emulation_running && !close_pending && !QApplication::activeModalWidget()) {
+                OnWhatsNew();
+            }
+        });
+        break;
+    case WhatsNewDialog::StartupAction::None:
+        break;
     }
 }
 
@@ -2369,6 +2380,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     if (boot_in_progress || close_pending) {
         return;
+    }
+    if (whats_new_dialog) {
+        whats_new_dialog->close();
     }
     disconnect(startup_qlaunch_connection);
     boot_in_progress = true;
@@ -4847,10 +4861,23 @@ void MainWindow::OnInstallDecryptionKeys() {
 }
 
 void MainWindow::OnWhatsNew() {
-    WhatsNewDialog dialog(this);
-    dialog.exec();
-    if (dialog.OpenConfigureRequested()) {
-        OnConfigure();
+    if (whats_new_dialog && whats_new_dialog->isVisible()) {
+        whats_new_dialog->raise();
+        whats_new_dialog->activateWindow();
+        return;
+    }
+
+    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
+    const auto date = QDate::fromString(QString::fromLatin1(Common::g_build_date).left(10),
+                                       Qt::ISODate);
+    whats_new_dialog = new WhatsNewDialog(build, date, LICHII_USE_PENDING_RELEASE_NOTES, this);
+    whats_new_dialog->setAttribute(Qt::WA_DeleteOnClose);
+    ConfigurationShared::FitToScreen(whats_new_dialog, QSize(600, 740));
+    whats_new_dialog->show();
+
+    if (build && build != UISettings::values.last_seen_release.GetValue()) {
+        UISettings::values.last_seen_release = build;
+        config->SaveAllValues();
     }
 }
 
