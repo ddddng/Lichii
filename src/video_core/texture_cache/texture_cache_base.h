@@ -141,6 +141,8 @@ public:
 
 template <class P>
 class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelInfo> {
+    friend struct TextureCacheTestAccess;
+
     /// Address shift for caching images into a hash table
     static constexpr u64 LICHII_PAGEBITS = 20;
 
