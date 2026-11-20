@@ -2804,7 +2804,8 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         const VirtualSegments* found =
             virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
         if (!found || found->size() < 2) {
-            if (found) {
+            // No segments also means a gap: a shorter range at the address may still be split.
+            if (found && found->size() == 1) {
                 memo = {gpu_memory, map_serial, binding.gpu_addr, binding.size};
             }
             return;
