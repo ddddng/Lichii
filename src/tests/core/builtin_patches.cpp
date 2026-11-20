@@ -1448,11 +1448,12 @@ TEST_CASE("Unchecked add-on lists store off-by-default built-ins when checked", 
     const std::string Double{"Text Speed 2x (built-in)"};
     const std::string Quadruple{"Text Speed 4x (built-in)"};
     const std::string Instant{"Text Speed Instant (built-in)"};
+    const std::string Compaction{"Texture heap compaction interval (built-in)"};
     const std::string MaxResolutionName{MaxResolution};
 
     SECTION("Unchecked off-by-default built-ins are not stored, checked ones get their key") {
         auto stored = FileSys::StoredDisabledAddons(OcarinaTitleId,
-                                                    {MaxResolutionName, Double, Instant});
+                                                    {MaxResolutionName, Double, Instant, Compaction});
         std::ranges::sort(stored);
         std::vector<std::string> expected{MaxResolutionName,
                                           FileSys::EnabledAddonKey(Quadruple)};
