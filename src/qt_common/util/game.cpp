@@ -3,6 +3,8 @@
 
 #include "qt_common/util/game.h"
 
+#include <fmt/format.h>
+
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "core/file_sys/savedata_factory.h"
@@ -14,6 +16,7 @@
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/shader_cache_v2/cache.h"
 
+#include <QBuffer>
 #include <QDesktopServices>
 #include <QStandardPaths>
 #include <QUrl>
@@ -374,6 +377,7 @@ void RemoveCacheStorage(u64 program_id) {
 
 // Metadata //
 void ResetMetadata(bool show_message) {
+    ClearHomeMenuArtworkCache();
     const QString title = tr("Reset Metadata Cache");
 
     if (!Common::FS::Exists(Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) /

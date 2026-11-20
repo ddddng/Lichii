@@ -5,11 +5,7 @@
 
 #pragma once
 
-#include <array>
 #include <limits>
-#include <optional>
-#include <span>
-#include <utility>
 
 #include <boost/container/small_vector.hpp>
 
@@ -17,7 +13,9 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_vulkan/nx2_list_slots.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -40,10 +38,15 @@ public:
     explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr_, u64 size_bytes_,
                     bool sparse_compatible_);
 
-    [[nodiscard]] VkBufferView View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format);
+    [[nodiscard]] VkBufferView View(VkDeviceSize offset, VkDeviceSize size, VkFormat format);
 
     [[nodiscard]] VkBuffer Handle() const noexcept {
         return *buffer;
+    }
+
+    /// True for the buffer cache's null buffer slot, which unmapped bindings share.
+    [[nodiscard]] bool IsNull() const noexcept {
+        return is_null || !buffer;
     }
 
     [[nodiscard]] VkDeviceAddress DeviceAddress() const noexcept {
@@ -82,9 +85,9 @@ public:
 
 private:
     struct BufferView {
-        u32 offset;
-        u32 size;
-        VideoCore::Surface::PixelFormat format;
+        VkDeviceSize offset;
+        VkDeviceSize size;
+        VkFormat format;
         vk::BufferView handle;
     };
 
@@ -128,7 +131,11 @@ public:
         return vertex_repack_mask != 0;
     }
 
-    u64 CurrentTick();
+    /// Scheduler::CurrentTick, inline: the stream uniform reuse asks for it on every small
+    /// uniform buffer bind.
+    u64 CurrentTick() const noexcept {
+        return master_semaphore.CurrentTick();
+    }
 
     bool IsFree(u64 tick);
 
@@ -160,6 +167,9 @@ public:
     u64 GetDeviceMemoryUsage() const;
 
     bool CanReportMemoryUsage() const;
+
+    /// Bytes each cached buffer allocates past its size.
+    u64 GetBufferAllocationTail() const;
 
     u32 GetUniformBufferAlignment() const;
 
@@ -231,6 +241,49 @@ public:
         return last_stream_uniform;
     }
 
+    /// GPU-written list words the host GPU took over (Nx2ListIndirect), owed in [device_addr,
+    /// +size), which `reader` reads from `buffer` at `offset`, filled already: the slot words go
+    /// over the placeholders. `read(device)`: guest memory's word. Whether any went over them.
+    template <typename Read>
+    bool Nx2PatchOwed(DAddr device_addr, u32 size, VkBuffer buffer, u64 offset, Read&& read,
+                      Tegra::Nx2ListIndirect::OwedReader reader) {
+        return nx2_list_slots.HasOwed() &&
+               nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
+    }
+
+    /// Whether [device_addr, +size) holds owed list words (Nx2ListIndirect).
+    [[nodiscard]] bool Nx2Owes(DAddr device_addr, u64 size) const {
+        return nx2_list_slots.Owes(device_addr, size);
+    }
+
+    /// The host GPU wrote [device_addr, +size): the owed list words there are owed no more.
+    void Nx2ForgetOwed(DAddr device_addr, u64 size) {
+        if (nx2_list_slots.HasOwed()) {
+            nx2_list_slots.Forget(device_addr, size);
+        }
+    }
+
+    /// Lands the owed list words in [device_addr, +size) at once for `reader` (Nx2ListIndirect,
+    /// Nx2ListSlots::LandRange): submits and waits for the host GPU if it has to.
+    template <typename Land>
+    void Nx2LandOwed(DAddr device_addr, u64 size, Tegra::Nx2ListIndirect::OwedReader reader,
+                     Land&& land) {
+        if (nx2_list_slots.HasOwed()) {
+            nx2_list_slots.LandRange(device_addr, size, reader, land);
+        }
+    }
+
+    /// [first word, end of the last) of the owed list words in [device_addr, +size).
+    [[nodiscard]] std::optional<std::pair<DAddr, DAddr>> Nx2OwedSpan(DAddr device_addr,
+                                                                     u64 size) const {
+        return nx2_list_slots.OwedSpan(device_addr, size);
+    }
+
+    /// The slots of GPU-written list words (Nx2ListIndirect).
+    [[nodiscard]] Nx2ListSlots& Nx2Slots() noexcept {
+        return nx2_list_slots;
+    }
+
     /// Adds `ref` to the descriptor payload exactly as BindMappedUniformBuffer did when it made
     /// the allocation (it is the very same call). The caller guarantees the allocation is still
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
@@ -289,15 +342,7 @@ public:
     }
 
     void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
-                           VideoCore::Surface::PixelFormat format) {
-        // An unmapped texture buffer has no format; its view is the null buffer's anyway.
-        if (format == VideoCore::Surface::PixelFormat::Invalid) {
-            format = VideoCore::Surface::PixelFormat::R8_UNORM;
-        }
-        guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
-                                              buffer.DeviceAddress(), offset, size,
-                                              TexelBufferFormat(format));
-    }
+                           VideoCore::Surface::PixelFormat format);
 
     bool ShouldLimitDynamicStorageBuffers() const {
         return limit_dynamic_storage_buffers;
@@ -307,52 +352,26 @@ public:
         return max_dynamic_storage_buffers;
     }
 
-    // List-fed grid macros (nx2_list_grid.h): copies of a command list's three words made at the
-    // list's place in the stream, by keep id. The front reads them back when it needs the values,
-    // uploads that carry their markers get them copied over, and dispatches take their grid there.
-    struct ListKeep {
-        u64 keep_id{};
-        u64 tick{}; ///< The submission that copies them
-        bool verified{};
-        u64 hash{};                ///< If verified: the macro the list fed
-        std::array<u32, 3> real{}; ///< If verified: the words the front read the old way
-    };
-    /// Records, outside the render pass, the copy of the three words at `offset` of `source`.
-    /// Verify mode: `real` are the words the front read the old way for the macro `hash`, else
-    /// empty.
-    void KeepListWords(u64 keep_id, VkBuffer source, VkDeviceSize offset, u64 hash,
-                       std::span<const u32> real);
-    /// The keep id ending in `keep_bits` whose slot still holds its words.
-    [[nodiscard]] std::optional<u64> FindKeptList(u32 keep_bits) const;
-    /// The kept words (or with `arguments`, the dispatch arguments made from them), after waiting
-    /// for their copy. False if the slot holds another list.
-    [[nodiscard]] bool ReadKeptListWords(u64 keep_id, std::span<u32> words, bool arguments = false);
-    /// Verify mode: the kept list `keep_id`, if its words were also read the old way.
-    [[nodiscard]] const ListKeep* KeptVerify(u64 keep_id) const;
-    /// Records the copy of kept word `index` over the word at `offset` of `destination`.
-    void CopyKeptWord(u64 keep_id, u32 index, VkBuffer destination, VkDeviceSize offset);
-    /// Where the kept list's dispatch arguments are: x, then y and z as 16 bits, as
-    /// KeplerCompute::DispatchNativeCompute takes them from a QMD.
-    [[nodiscard]] std::pair<VkBuffer, VkDeviceSize> KeptGrid(u64 keep_id) const;
-
 private:
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
         if (handle == VK_NULL_HANDLE) {
             guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
-            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, size);
+            // A descriptor range of 0 is invalid; an unmapped binding covers the null buffer.
+            const VkDeviceSize range = buffer.IsNull() && size == 0 ? NullBufferSize() : size;
+            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, range);
         }
     }
 
-    VkFormat TexelBufferFormat(VideoCore::Surface::PixelFormat format) const;
-
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
+    VkDeviceSize NullBufferSize() const;
 
     const Device& device;
     MemoryAllocator& memory_allocator;
     Scheduler& scheduler;
+    const MasterSemaphore& master_semaphore; ///< The scheduler's, for CurrentTick
     StagingBufferPool& staging_pool;
     GuestDescriptorQueue& guest_descriptor_queue;
 
@@ -360,21 +379,6 @@ private:
     std::shared_ptr<QuadStripIndexBuffer> quad_strip_index_buffer;
 
     vk::Buffer null_buffer;
-
-    /// Kept list words: a host-readable slot per keep id (modulo the slot count) holding the
-    /// three words at 0 and the dispatch arguments at LIST_KEEP_GRID (ListGridArgumentsPass).
-    static constexpr u32 LIST_KEEP_SLOTS = 1024;
-    static constexpr u32 LIST_KEEP_SLOT_BYTES = 32;
-    static constexpr VkDeviceSize LIST_KEEP_GRID = 16;
-    void EnsureListKeepBuffer();
-    [[nodiscard]] static VkDeviceSize ListKeepOffset(u64 keep_id) {
-        return VkDeviceSize{keep_id % LIST_KEEP_SLOTS} * LIST_KEEP_SLOT_BYTES;
-    }
-    vk::Buffer list_keep_buffer;
-    std::unique_ptr<ListGridArgumentsPass> list_grid_arguments_pass;
-    DescriptorPool* list_pass_descriptor_pool{};
-    ComputePassDescriptorQueue* list_pass_descriptor_queue{};
-    std::array<ListKeep, LIST_KEEP_SLOTS> list_keeps{};
 
     std::unique_ptr<Uint8Pass> uint8_pass;
     std::unique_ptr<VertexRepackPass> vertex_repack_pass;
@@ -397,6 +401,8 @@ private:
     VkIndexType bound_index_type = VK_INDEX_TYPE_UINT32;
     u64 bound_index_epoch = 0;
     bool bound_index_valid = false;
+
+    Nx2ListSlots nx2_list_slots{memory_allocator, scheduler};
 };
 
 struct BufferCacheParams {
