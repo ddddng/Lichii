@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <new>
 #include <span>
@@ -13,6 +14,34 @@
 #include "video_core/renderer_metal/nvn_pool_bridge.h"
 
 namespace Metal {
+
+/// A released lease's unpin: queued by the thread that drops the Metal buffer without allocating
+/// or locking, and run by DrainUnpins.
+struct PendingUnpin {
+    void* pin;
+    void (*unpin)(void* pin, int close);
+    PendingUnpin* next;
+};
+
+inline std::atomic<PendingUnpin*> pending_unpins{};
+
+inline void DeferUnpin(PendingUnpin* node) noexcept {
+    node->next = pending_unpins.load(std::memory_order_relaxed);
+    while (!pending_unpins.compare_exchange_weak(node->next, node, std::memory_order_release,
+                                                 std::memory_order_relaxed)) {
+    }
+}
+
+inline void DrainUnpins(bool close) {
+    if (!pending_unpins.load(std::memory_order_relaxed)) {
+        return;
+    }
+    for (auto* node = pending_unpins.exchange(nullptr, std::memory_order_acquire); node;) {
+        const std::unique_ptr<PendingUnpin> done{node};
+        node = node->next;
+        done->unpin(done->pin, close);
+    }
+}
 
 [[nodiscard]] inline bool MapGuestPoolBacking(std::shared_ptr<Common::HostMemory> backing,
                                               size_t length,
@@ -52,7 +81,8 @@ namespace Metal {
                 const auto memory = std::unique_ptr<std::shared_ptr<Common::HostMemory>>{
                     static_cast<std::shared_ptr<Common::HostMemory>*>(context)};
                 (*memory)->UnmapBackingView(static_cast<u8*>(bytes), size);
-            }};
+            },
+            nullptr, nullptr};
     return true;
 }
 

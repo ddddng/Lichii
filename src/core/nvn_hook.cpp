@@ -42,6 +42,9 @@
 #include "dynarmic/interface/A64/config.h"
 #ifdef LICHII_NVN_DIRECT
 #include "video_core/nvn_direct/nvn_direct.h"
+#ifdef LICHII_NVN_METAL_LIVE
+#include "video_core/renderer_metal/nvn_pool_bridge.h"
+#endif
 #endif
 
 namespace Core::NvnHook {
@@ -70,6 +73,9 @@ constexpr std::array HaltingCalls{
     std::string_view{"nvnWindowAcquireTexture"}, std::string_view{"nvnQueueAcquireTexture"},
     std::string_view{"nvnMemoryPoolFinalize"},  std::string_view{"nvnTextureReadTexels"},
     std::string_view{"nvnTextureReadTexelsStrided"},
+#ifdef LICHII_NVN_METAL_LIVE
+    std::string_view{"nvnMemoryPoolInitialize"}, // opens page references (MetalPoolPins)
+#endif
 };
 
 struct State {
@@ -859,6 +865,9 @@ void OnGuestUnmapDone() {
 }
 
 void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
+#ifdef LICHII_NVN_METAL_LIVE
+    lichii_metal_drain_pool_pins(1);
+#endif
 #ifdef LICHII_NVN_DIRECT
     State& state = *Get();
     const u32 slot = std::exchange(t_halted_slot, MaxSlots);

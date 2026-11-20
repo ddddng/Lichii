@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <utility>
 
+#include "video_core/renderer_metal/guest_pool_backing.h"
 #include "video_core/renderer_metal/nvn_pool_bridge.h"
 
 namespace {
@@ -90,6 +91,10 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
     uint64_t bias{};
     uint64_t aligned_length{};
     lichii_metal_pool_lease lease{};
+    auto node = std::unique_ptr<Metal::PendingUnpin>{new (std::nothrow) Metal::PendingUnpin{}};
+    if (!node) {
+        return nil;
+    }
     try {
         {
             std::scoped_lock lock{pool_mapper_mutex};
@@ -114,11 +119,22 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
             }
         }
         if (!lease.release) {
+            if (lease.unpin) {
+                lease.unpin(lease.pin, 1);
+            }
             return nil;
         }
-        auto mapping = std::shared_ptr<void>{lease.bytes, [lease, aligned_length](void* bytes) {
-                                                 lease.release(lease.context, bytes, aligned_length);
-                                             }};
+        auto* const pin = lease.unpin ? node.release() : nullptr;
+        if (pin) {
+            *pin = {lease.pin, lease.unpin, nullptr};
+        }
+        auto mapping =
+            std::shared_ptr<void>{lease.bytes, [lease, aligned_length, pin](void* bytes) {
+                                      lease.release(lease.context, bytes, aligned_length);
+                                      if (pin) {
+                                          Metal::DeferUnpin(pin);
+                                      }
+                                  }};
         id<MTLBuffer> buffer = Metal::ImportGuestBuffer(device, std::move(mapping), aligned_length);
         if (buffer) {
             *buffer_offset = bias;
@@ -127,4 +143,8 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
     } catch (const std::bad_alloc&) {
         return nil;
     }
+}
+
+void lichii_metal_drain_pool_pins(int close) {
+    Metal::DrainUnpins(close != 0);
 }

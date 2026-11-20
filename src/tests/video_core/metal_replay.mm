@@ -150,6 +150,8 @@ void DrawGuestPool(id<MTLDevice> device, id<MTL4CommandQueue> queue) {
         size_t host_offset{ViewSize};
         size_t coverage{ViewSize};
         size_t calls{};
+        size_t opened{};
+        size_t closed{};
     } fixture{backing};
     const lichii_metal_pool_mapper mapper{&fixture, [](void* context, uint64_t address,
                                                       uint64_t length,
@@ -157,8 +159,18 @@ void DrawGuestPool(id<MTLDevice> device, id<MTL4CommandQueue> queue) {
         auto& f = *static_cast<Fixture*>(context);
         ++f.calls;
         Check(address == ViewSize && length == ViewSize, "request the enclosing 16 KiB view");
+        f.opened += length / GuestPage;
         const Common::HostMemory::BackingRun run{0, f.host_offset, f.coverage};
-        return Metal::MapGuestPoolBacking(f.backing, length, std::span{&run, 1}, out);
+        if (!Metal::MapGuestPoolBacking(f.backing, length, std::span{&run, 1}, out)) {
+            f.closed += length / GuestPage;
+            return 0;
+        }
+        out->pin = &f;
+        out->unpin = [](void* pin, int close) {
+            Check(close == 1, "close pins on drain");
+            static_cast<Fixture*>(pin)->closed += ViewSize / GuestPage;
+        };
+        return 1;
     }};
     uint64_t offset = UINT64_MAX;
     lichii_metal_set_pool_mapper(arena, 3 * ViewSize, &mapper);
@@ -174,12 +186,16 @@ void DrawGuestPool(id<MTLDevice> device, id<MTL4CommandQueue> queue) {
     Check(!lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset),
           "reject incongruent backing on the 16 KiB host");
     fixture.host_offset = ViewSize;
+    Check(fixture.opened == fixture.closed, "close pins of refused imports at once");
+    const size_t refused = fixture.closed;
     const std::weak_ptr<Common::HostMemory> lifetime = backing;
     @autoreleasepool {
         id<MTLBuffer> vertices =
             lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset);
         Check(vertices && offset == GuestPage && vertices.length == ViewSize,
               "import a 4 KiB guest pool with its Metal buffer offset");
+        Check(fixture.opened - refused == ViewSize / GuestPage,
+              "pin every 4 KiB guest page of the 16 KiB envelope");
         constexpr std::array<float, 6> points{-0.8f, -0.8f, 0.8f, -0.8f, 0.0f, 0.8f};
         auto* const bytes = backing->BackingBasePointer() + ViewSize + GuestPage;
         std::memcpy(bytes, points.data(), sizeof(points));
@@ -196,6 +212,11 @@ void DrawGuestPool(id<MTLDevice> device, id<MTL4CommandQueue> queue) {
         vertices = nil;
     }
     Check(lifetime.expired(), "release the backing after the finished Metal buffer is released");
+    Check(fixture.closed == refused, "keep the pins after Metal releases the buffer");
+    lichii_metal_drain_pool_pins(1);
+    Check(fixture.closed == fixture.opened, "close every pin on drain");
+    lichii_metal_drain_pool_pins(1);
+    Check(fixture.closed == fixture.opened, "close each pin once");
 }
 
 } // namespace
