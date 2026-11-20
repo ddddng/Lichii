@@ -62,6 +62,7 @@ private:
 
     std::unique_ptr<FileSys::NACP> nacp_file;
     FileSys::VirtualFile icon_file;
+    std::optional<std::size_t> embedded_program_package;
     u64 base_title_id{};
     std::string display_title;
     std::string display_version;
