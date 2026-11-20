@@ -60,7 +60,3 @@ void dm_res_report_register(void (*fn)(uint32_t tick, const char* why)) {
     (void)fn;
 }
 
-void dm_guest_write_prepare(void* addr, size_t len) {
-    (void)addr;
-    (void)len;
-}

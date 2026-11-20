@@ -58,6 +58,7 @@ private:
     void ArmHeartbeat();
     bool EmulateSystemRegister(u64 esr);
     HaltReason HandleGuestException(Kernel::KThread* thread);
+    HaltReason RunNvnThunk(Kernel::KThread* thread, u64 pc, u64 cpsr);
     std::shared_ptr<HvVm> m_vm;
     std::size_t m_core_index;
 

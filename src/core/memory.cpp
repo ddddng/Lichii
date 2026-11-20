@@ -86,7 +86,8 @@ struct Memory::Impl {
                                       "using Dynarmic");
             }
         }
-        use_fastmem = use_fastmem && !hv_vm;
+        // Native Metal NVN reads and writes guest memory through the arena; the vCPUs never use it.
+        use_fastmem = use_fastmem && (!hv_vm || Core::NvnHook::MetalRequested());
 #endif
 #ifdef HAS_NCE
         use_fastmem = use_fastmem &&
@@ -589,6 +590,9 @@ struct Memory::Impl {
             lock.lock();
             const u64 begin = vaddr & ~LICHII_PAGEMASK;
             const u64 end = Common::AlignUp(vaddr + size, LICHII_PAGESIZE);
+            // Direct and Metal mode track pool pages for writes only: their reads never trap.
+            const u32 read_ready =
+                Core::NvnHook::DirectMode() || Core::NvnHook::MetalMode() ? NceReadReady : 0;
             UpdateNceProtection(begin, end - begin, [&](u32 state) {
                 if (!cached) {
                     return (state & NceCached) != 0
@@ -596,7 +600,7 @@ struct Memory::Impl {
                                : state;
                 }
                 if ((state & NceCached) == 0) {
-                    return (state | NceCached) + NceCacheGeneration;
+                    return (state | NceCached | read_ready) + NceCacheGeneration;
                 }
                 return state;
             });
@@ -610,12 +614,13 @@ struct Memory::Impl {
                 const char* value = std::getenv("EDEN_NX2_NO_REACTIVE");
                 return value != nullptr && value[0] == '1';
             }();
-            // NVN2 direct mode tracks pool pages for CPU writes only: the replay reads them in
-            // place and its GPU writes land in the same pages, so nothing is flushed on a read.
+            // NVN2 direct and Metal mode track pool pages for CPU writes only: the replay reads
+            // them in place and its GPU writes land in the same pages, so nothing is flushed on a
+            // read.
             const bool reactive_flushing =
                 Settings::ReactiveFlushing() &&
                 !(nx2_no_reactive && Settings::CurrentProgramIsSwitch2()) &&
-                !Core::NvnHook::DirectMode();
+                !Core::NvnHook::DirectMode() && !Core::NvnHook::MetalMode();
             if (!reactive_flushing || !cached) {
                 perm |= Common::MemoryPermission::Read;
             }
@@ -996,8 +1001,9 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
-        if (Core::NvnHook::DirectMode()) {
-            // NVN2 direct mode: cached pages are the replay's write-tracked pools, read in place.
+        if (Core::NvnHook::DirectMode() || Core::NvnHook::MetalMode()) {
+            // NVN2 direct and Metal mode: cached pages are the replay's write-tracked pools, read
+            // in place.
             return;
         }
         if (!Kernel::Nx2ThreadStats::g_enabled) {
@@ -1055,9 +1061,9 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
-        if (Core::NvnHook::DirectMode()) {
-            // NVN2 direct mode: the replay's write-tracked pools, by guest address (they have no
-            // device address).
+        if (Core::NvnHook::DirectMode() || Core::NvnHook::MetalMode()) {
+            // NVN2 direct and Metal mode: the replay's write-tracked pools, by guest address (they
+            // have no device address).
             Core::NvnHook::OnDirectCpuWrite(v_address & 0xffffffffffffULL, size);
             return;
         }
@@ -1224,7 +1230,9 @@ struct Memory::Impl {
             return std::nullopt;
         }
         lock.unlock();
-        if (write) {
+        if (write && (Core::NvnHook::DirectMode() || Core::NvnHook::MetalMode())) {
+            Core::NvnHook::OnDirectCpuWrite(address, LICHII_PAGESIZE);
+        } else if (write) {
             InvalidateGPUMemory(reinterpret_cast<u8*>(ptr + address), LICHII_PAGESIZE);
         } else {
             DownloadFromRasterizer(address, LICHII_PAGESIZE);

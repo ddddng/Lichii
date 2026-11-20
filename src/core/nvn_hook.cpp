@@ -30,6 +30,9 @@
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/hle/kernel/svc.h"
 #include "core/arm/debug.h"
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/hv_vm.h"
+#endif
 #include "core/arm/symbols.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
@@ -433,15 +436,6 @@ void UnmapPoolView(void* context, void* view, u64 size) {
     static_cast<State*>(context)->host_memory->UnmapBackingView(static_cast<u8*>(view), size);
 }
 
-/// nvn_direct_memory.track_pages: arms or disarms the write tracking of pool pages by guest
-/// address: rasterizer-cached pages, which stay readable in direct mode (Core::Memory); a write
-/// to one reaches OnDirectCpuWrite. The pools stay out of the SMMU: with them mapped there MKW
-/// stalls.
-void TrackPages(void* context, u64 address, u64 size, int armed) {
-    static_cast<State*>(context)->process->GetMemory().RasterizerMarkRegionCached(address, size,
-                                                                                  armed != 0);
-}
-
 /// nvn_direct_memory's native_image: nx2:gsv's images.
 int NativeImage(void*, u64 handle, u64* address, u64* size) {
     auto& lookup = Service::g_nx2_native_image_lookup;
@@ -477,6 +471,15 @@ void AliasRelease(void* context, void* region) {
 #endif
 
 #ifdef LICHII_NVN_FRONT
+/// nvn_direct_memory.track_pages: arms or disarms the write tracking of pool pages by guest
+/// address: rasterizer-cached pages, which stay readable in direct and Metal mode (Core::Memory); a write
+/// to one reaches OnDirectCpuWrite. The pools stay out of the SMMU: with them mapped there MKW
+/// stalls.
+void TrackPages(void* context, u64 address, u64 size, int armed) {
+    static_cast<State*>(context)->process->GetMemory().RasterizerMarkRegionCached(address, size,
+                                                                                  armed != 0);
+}
+
 /// nvn_direct_memory.backing: the backing memory of a guest page (never write-protected).
 void* Backing(void* context, u64 address) {
     State& state = *static_cast<State*>(context);
@@ -516,10 +519,10 @@ void CheckMetalShaders(State& state) {
 #endif
 
 /// The guest's x0-x7 and the low halves of v0-v7.
-void ReadArguments(Dynarmic::A64::Jit& jit, std::array<u64, 8>& x, std::array<u64, 8>& v) {
-    for (size_t i = 0; i < 8; ++i) {
-        x[i] = jit.GetRegister(i);
-        v[i] = jit.GetVector(i)[0];
+void ReadArguments(ThunkRegisters& registers, std::array<u64, 8>& x, std::array<u64, 8>& v) {
+    for (int i = 0; i < 8; ++i) {
+        x[i] = registers.GetRegister(i);
+        v[i] = registers.GetVector(i);
     }
 }
 
@@ -529,14 +532,14 @@ thread_local u32 t_halted_slot = MaxSlots;
 thread_local u64 t_halted_lr = 0;
 
 /// Direct mode's block entries. Returns whether the JIT halts for the call (HaltedCallSvc).
-bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory) {
-    const u64 lr = jit.GetRegister(30);
+bool DirectEntry(State& state, u64 pc, ThunkRegisters& registers, Core::Memory::Memory& memory) {
+    const u64 lr = registers.GetRegister(30);
     const bool bootstrap = IsBootstrap(state, pc);
     const u32 slot = bootstrap ? MaxSlots : static_cast<u32>((pc - state.synthetic_base) / 4);
     if (bootstrap || slot == LookupSlot) {
         // nvnBootstrapLoader(name) or nvnDeviceGetProcAddress(device, name): the name's
         // synthetic address, without the driver.
-        const std::string name = memory.ReadCString(jit.GetRegister(bootstrap ? 0 : 1), 128);
+        const std::string name = memory.ReadCString(registers.GetRegister(bootstrap ? 0 : 1), 128);
         std::scoped_lock lock{state.mutex};
         if (!state.direct_ready) {
             auto& page_table = state.process->GetPageTable();
@@ -548,6 +551,7 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
             // reached through it.
             const auto arena_pages = state.host_memory->ArenaReadWritePages();
             const nvn_direct_memory views{
+                .track_pages = TrackPages,
                 .backing = Backing,
                 .context = &state,
                 .backing_fd = -1,
@@ -588,13 +592,13 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
             state.direct_ready = true;
         }
         const u32 found = DirectSlotOf(state, name);
-        jit.SetRegister(0, found == MaxSlots ? 0 : SyntheticAddress(state, found));
+        registers.SetRegister(0, found == MaxSlots ? 0 : SyntheticAddress(state, found));
         ClearPrivate0(state, memory);
-        jit.SetRegister(16, lr);
+        registers.SetRegister(16, lr);
         return false;
     }
     const Slot& target = state.slots[slot];
-    jit.SetRegister(16, lr);
+    registers.SetRegister(16, lr);
     if (target.front < 0 || !nvn_direct_implemented(target.front)) {
         if (state.stub_calls[slot].fetch_add(1, std::memory_order_relaxed) == 0) {
             std::scoped_lock lock{state.mutex};
@@ -604,7 +608,7 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
                 }
             }
         }
-        jit.SetRegister(0, 0);
+        registers.SetRegister(0, 0);
         return false;
     }
     if (target.halts) {
@@ -613,11 +617,12 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
         return true;
     }
     std::array<u64, 8> x, v;
-    ReadArguments(jit, x, v);
+    ReadArguments(registers, x, v);
     u64 v0 = 0;
-    jit.SetRegister(0, nvn_direct_call(target.front, x.data(), v.data(), jit.GetSP(), lr, &v0));
+    registers.SetRegister(
+        0, nvn_direct_call(target.front, x.data(), v.data(), registers.GetSP(), lr, &v0));
     if (nvn_direct_float_args(target.front)) {
-        jit.SetVector(0, {v0, 0});
+        registers.SetVector(0, v0);
     }
 #ifdef LICHII_NVN_METAL
     if (nvn_direct_failure() != nullptr && !state.dispatch_failed.load(std::memory_order_relaxed)) {
@@ -828,6 +833,17 @@ bool InstallMetal(Core::System& system, Kernel::KProcess& process) {
     g_metal_ran = true;
     state->metal = true;
     InstallDirect(*state);
+#ifdef HAS_HYPERVISOR
+    if (const auto vm = process.GetMemory().GetHypervisor()) {
+        // The vCPUs run the guest's own code: a BRK at nvnBootstrapLoader stops it there (the
+        // synthetic addresses are unmapped: a call to one faults), and ArmHypervisor runs the hook.
+        constexpr u32 Brk = 0xd4200000 | (0x4e56 << 5);
+        for (const u64 entry : state->bootstrap_entries) {
+            process.GetMemory().Write32(entry, Brk);
+        }
+        vm->RequestFlush();
+    }
+#endif
     LOG_INFO(Core,
              "Renderer: native Metal NVN (nxnative): {} nvnBootstrapLoader exports (SDK {}), "
              "synthetic addresses from {:#x}, fastmem arena {}",
@@ -941,14 +957,22 @@ Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc) {
     return DirectAsked() || MetalAsked() ? &HookOf : nullptr;
 }
 
-bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
+bool MetalRequested() {
+    return MetalAsked();
+}
+
+bool IsThunk(u64 pc) {
+    return HookOf(pc) == BlockEntryHook::Thunk;
+}
+
+bool OnBlockEntry(u64 pc, ThunkRegisters& registers, Core::Memory::Memory& memory,
                   Kernel::KProcess* process) {
     State& state = *Get();
     if (process != state.process) {
         return false;
     }
 #ifdef LICHII_NVN_FRONT
-    return DirectEntry(state, pc, jit, memory);
+    return DirectEntry(state, pc, registers, memory);
 #else
     return false;
 #endif
@@ -1054,6 +1078,9 @@ void PresentMetal(Core::System& system, State& state) {
     if (own <= 4 || own % 600 == 0) {
         LOG_INFO(Core, "NVN Metal: present #{}", own);
     }
+    // No frame reaches the GPU's composite (RendererFrameEndNotify): the game's frames are counted
+    // here, for the fps the status bar and the overlay show.
+    system.GetPerfStats().EndGameFrame();
     present.Finish(own);
     LogStubCensus(state, number);
 }
@@ -1064,6 +1091,8 @@ void PresentMetal(Core::System& system, State& state) {
 void OnDirectCpuWrite(u64 address, u64 size) {
 #ifdef LICHII_NVN_DIRECT
     nvn_direct_cpu_written(address, size);
+#elif defined(LICHII_NVN_METAL)
+    nvn_dirty_cpu_written(reinterpret_cast<void*>(nvn_direct_host_of(address)), size);
 #else
     (void)address;
     (void)size;

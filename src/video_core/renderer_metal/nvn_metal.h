@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "video_core/nvn_direct/nvn_direct_dispatch.h"
@@ -27,6 +28,12 @@ void nvn_direct_set_device_integer(unsigned item, int value);
 /// Why the dispatch stopped running calls (a guest address it could not translate safely on 16 KiB
 /// host pages, nvn_guest_address.h), NULL while it runs them.
 const char* nvn_direct_failure(void);
+
+/// The arena address of guest address (nvn_dispatch.c).
+uint64_t nvn_direct_host_of(uint64_t guest);
+/// A CPU write to tracked pool pages (TrackPages), at their arena address: the textures over them
+/// are uploaded again at their next use (nxnative's nvn_dirty.c).
+void nvn_dirty_cpu_written(void* addr, size_t len);
 
 /// Permanent close, before the guest cores are suspended (never on a pause): waiters return.
 void nvn_mtl_request_stop(void);
