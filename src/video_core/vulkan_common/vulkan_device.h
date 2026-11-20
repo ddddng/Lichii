@@ -454,6 +454,7 @@ public:
     FN_MAX_LIMIT_ELEM(PerStageDescriptorStorageBuffers) \
     FN_MAX_LIMIT_ELEM(PerStageResources) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSamplers) \
+    FN_MAX_LIMIT_ELEM(SamplerAllocationCount) \
     FN_MAX_LIMIT_ELEM(DescriptorSetSamplers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetUniformBuffers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetUniformBuffersDynamic) \
@@ -1141,6 +1142,13 @@ FN_MAX_LIMIT_LIST
         return has_broken_cube_compatibility;
     }
 
+    /// Returns true for AMD GCN4 and older (Polaris and earlier, found by device ID or by the
+    /// lack of float16) on AMD's own drivers (CheezyEmu 132cc46c9e). Their driver uses a lot of
+    /// RAM per compile of a large Switch 2 shader, so pipelines build on fewer threads there.
+    bool IsAmdLegacyGcn() const {
+        return is_amd_legacy_gcn;
+    }
+
     /// Returns true if parallel shader compiling has issues with the current driver.
     bool HasBrokenParallelShaderCompiling() const {
         return has_broken_parallel_compiling;
@@ -1496,6 +1504,7 @@ private:
     bool host_float16_supported{};             ///< shaderFloat16 for host-only shaders
     bool has_broken_descriptor_aliasing{};     ///< Miscompiles descriptors aliased on one binding
     bool has_broken_parallel_compiling{};      ///< Has broken parallel shader compiling.
+    bool is_amd_legacy_gcn{};                  ///< AMD GCN4 or older on an AMD driver.
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.
