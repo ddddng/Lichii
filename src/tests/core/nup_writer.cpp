@@ -473,6 +473,7 @@ TEST_CASE("NUP only layers an enabled upgrade pack onto the selected Edition pro
         ScopedSystemTestContext context;
         Core::System system;
         system.SetFilesystem(vfs);
+        system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
         auto& controller = system.GetFileSystemController();
         controller.CreateFactories(*vfs);
         const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
