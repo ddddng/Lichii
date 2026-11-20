@@ -7,6 +7,10 @@ static NSString *lichii_shader_root, *lichii_shader_map, *lichii_c1_full, *lichi
 static NSSet<NSString *> *lichii_shader_keys;
 static _Atomic bool lichii_shader_failed;
 
+bool lichii_nvn_metal_shader_scoped(void) {
+    return lichii_shader_keys != nil;
+}
+
 bool lichii_nvn_metal_shader_failed(void) {
     return atomic_load_explicit(&lichii_shader_failed, memory_order_acquire);
 }
@@ -24,7 +28,7 @@ static void lichii_shader_uncovered(NSString *key) {
 }
 
 static bool lichii_shader_path(NSString *path) {
-    return lichii_shader_root && [path hasPrefix:[g_msl_dir stringByAppendingString:@"/"]];
+    return lichii_shader_root && g_msl_dir && [path hasPrefix:[g_msl_dir stringByAppendingString:@"/"]];
 }
 
 static NSString *lichii_digest_hex(const uint8_t *digest) {
@@ -70,6 +74,31 @@ static bool lichii_shader_hex(NSString *text, NSUInteger length) {
     return text.length == length &&
         [text rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location
             == NSNotFound;
+}
+
+static bool lichii_shader_image_covers(const romfs_img *image, NSString *map, NSSet<NSString *> *keys) {
+    NSMutableSet<NSString *> *remaining = [keys mutableCopy];
+    for (NSString *line in [map componentsSeparatedByString:@"\n"]) {
+        if (!line.length || [line hasPrefix:@"#"] || [line hasPrefix:@"package"])
+            continue;
+        NSArray<NSString *> *cols = [line componentsSeparatedByString:@"\t"];
+        if (cols.count < 4 || ![remaining containsObject:cols[3]])
+            continue;
+        const char *key = cols[3].UTF8String;
+        char name[40];
+        snprintf(name, sizeof(name), "%s_b.json", key);
+        const img_ent *reflection = msl_image_find(image, name);
+        if (!reflection || !reflection->b)
+            return false;
+        if (![cols[2] isEqualToString:@"geometry"]) {
+            snprintf(name, sizeof(name), "%s_b.metallib", key);
+            const img_ent *library = msl_image_find(image, name);
+            if (!library || !library->b)
+                return false;
+        }
+        [remaining removeObject:cols[3]];
+    }
+    return !remaining.count;
 }
 
 static bool lichii_shader_preflight_error(char *error, size_t size, const char *reason) {
@@ -137,6 +166,10 @@ bool lichii_nvn_metal_prepare_shaders(const char *assets_dir, uint64_t program_i
                 romfs_image_close(image);
             return lichii_shader_preflight_error(error, error_size, "shader image is missing, invalid or changed after preflight");
         }
+        if (!lichii_shader_image_covers(image, map, keys)) {
+            romfs_image_close(image);
+            return lichii_shader_preflight_error(error, error_size, "sealed key scope is not present in the map and shader image");
+        }
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device.hasUnifiedMemory || ![device supportsFamily:MTLGPUFamilyMetal4]) {
             romfs_image_close(image);
@@ -149,6 +182,8 @@ bool lichii_nvn_metal_prepare_shaders(const char *assets_dir, uint64_t program_i
         lichii_shader_keys = [keys copy];
         lichii_shader_root = root;
         atomic_store_explicit(&g_msl_img, image, memory_order_release);
+        if (error && error_size)
+            *error = '\0';
         MLOG("Lichii native Metal shader coverage: %s scope, %lu keys", mode.UTF8String, (unsigned long)keys.count);
         return true;
     }
