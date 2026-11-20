@@ -888,7 +888,8 @@ TEST_CASE("A nonwaiting lookup leaves the running prebuild registered until it c
     const auto translate = [&] {
         return std::make_unique<BlockingPipeline>(building, release);
     };
-    REQUIRE(prebuild.Add(1, 0, 0, translate));
+    ShaderJobHandle job;
+    REQUIRE(prebuild.Add(1, 0, 0, translate, &job));
     building.Wait();
 
     auto lookup = std::async(std::launch::async, [&] { return prebuild.TryTakeReady(1); });
@@ -900,7 +901,7 @@ TEST_CASE("A nonwaiting lookup leaves the running prebuild registered until it c
     REQUIRE_FALSE(lookup.get().has_value());
     REQUIRE(still_registered);
 
-    prebuild.Batch().Wait();
+    job.Wait();
     const auto ready = prebuild.TryTakeReady(1);
     REQUIRE(ready.has_value());
     REQUIRE(*ready != nullptr);
