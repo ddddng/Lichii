@@ -25,10 +25,13 @@
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/ns/game_list_applications.h"
+#include "core/loader/deconstructed_rom_directory.h"
 #include "core/loader/nup.h"
 #include "tests/core/system_test_context.h"
 
@@ -397,6 +400,25 @@ void SetLe(std::string& buf, size_t at, u64 value, size_t bytes) {
     for (size_t i = 0; i < bytes; ++i) {
         buf[at + i] = static_cast<char>(value >> (8 * i));
     }
+}
+
+std::string BootNpdm(u64 program_id, bool switch2) {
+    const u32 shift = switch2 ? 0x100 : 0;
+    std::string npdm(0x480 + shift, '\0');
+    npdm.replace(0, 4, "META");
+    SetLe(npdm, 0x70, 0x400 + shift, 4);
+    SetLe(npdm, 0x74, 0x40, 4);
+    SetLe(npdm, 0x78, 0x100, 4);
+    SetLe(npdm, 0x7C, 0x240 + shift, 4);
+    npdm.replace(0x300 + shift, 4, "ACID");
+    SetLe(npdm, 0x320 + shift, 0x240 + shift, 4);
+    SetLe(npdm, 0x324 + shift, 0x2C, 4);
+    npdm.replace(0x400 + shift, 4, "ACI0");
+    SetLe(npdm, 0x410 + shift, program_id, 8);
+    SetLe(npdm, 0x420 + shift, 0x40, 4);
+    SetLe(npdm, 0x424 + shift, 0x1C, 4);
+    SetLe(npdm, 0x430 + shift, 0x60, 4);
+    return npdm;
 }
 
 std::string LoaderTlv(u16 type, std::string_view value) {
@@ -1430,4 +1452,210 @@ TEST_CASE("NUP loader leaves standalone update metadata unchanged", "[nup][loade
     u64 program_id{};
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
     REQUIRE(program_id == TitleId);
+}
+
+TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boot-inputs]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    constexpr u64 edition_program = TitleId + 1;
+    const u64 legacy_program = FileSys::GetSwitch1ApplicationID(TitleId);
+    bool have_base = true;
+    bool base_switch2 = true;
+    bool update_switch2 = false;
+    bool foreign_update = false;
+    std::optional<u64> embedded_id;
+    bool embedded_switch2 = true;
+    bool have_embedded_romfs = true;
+    char expected_build = 'B';
+
+    SECTION("legacy update program 0 does not replace native program 1") {}
+    SECTION("native update for program 1 supersedes its base") {
+        update_switch2 = true;
+        expected_build = 'U';
+    }
+    SECTION("a matching native program 1 update determines the legacy base's executable ID") {
+        base_switch2 = false;
+        update_switch2 = true;
+        expected_build = 'U';
+    }
+    SECTION("a legacy base does not claim a foreign native update") {
+        base_switch2 = false;
+        update_switch2 = true;
+        foreign_update = true;
+    }
+    SECTION("legacy update supersedes its legacy base") {
+        base_switch2 = false;
+        expected_build = 'U';
+    }
+    SECTION("a legacy update without a native ExeFS stays Switch 1") {
+        have_base = false;
+        expected_build = 'U';
+    }
+    SECTION("a legacy standalone update uses its exact native sibling") {
+        have_base = false;
+        embedded_id = edition_program;
+        expected_build = 'E';
+    }
+    SECTION("an embedded native program can share the standalone update's RomFS") {
+        have_base = false;
+        embedded_id = edition_program;
+        have_embedded_romfs = false;
+        expected_build = 'E';
+    }
+    SECTION("an unrelated embedded native program is ignored") {
+        have_base = false;
+        embedded_id = edition_program + 0x2000;
+        expected_build = 'U';
+    }
+    SECTION("an embedded program without native metadata is ignored") {
+        have_base = false;
+        embedded_id = edition_program;
+        embedded_switch2 = false;
+        expected_build = 'U';
+    }
+
+    const auto write_exefs = [](const fs::path& path, u64 program_id, bool switch2, char build) {
+        std::string main(0x100, '\0');
+        main.replace(0, 4, "NSO0");
+        main[0x40] = build;
+        Put(path / "main", main);
+        Put(path / "main.npdm", BootNpdm(program_id, switch2));
+    };
+    if (have_base) {
+        write_exefs(root / "base/exefs", base_switch2 ? edition_program : legacy_program,
+                    base_switch2, 'B');
+        Put(root / "base/romfs/base.bin", "base");
+    }
+    const auto update_program_id =
+        update_switch2 ? edition_program + (foreign_update ? 0x2000 : 0) : legacy_program;
+    write_exefs(root / "updates/65536/exefs", update_program_id, update_switch2, 'U');
+    if (embedded_id) {
+        write_exefs(root / "updates/65536/program1/exefs", *embedded_id, embedded_switch2, 'E');
+        if (have_embedded_romfs) {
+            Put(root / "updates/65536/program1/romfs/update.bin", "edition");
+        }
+    }
+    Put(root / "updates/65536/romfs/update.bin", "update");
+    Put(root / "updates/65536/romfs/shared.bin", "shared");
+    const auto archive = t.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem vfs;
+    const auto file = vfs.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    const auto switch2_id = Core::FindSwitch2Program(file, 0, 0);
+    Loader::AppLoader_NUP loader{file};
+    u64 program_id{};
+    if (foreign_update) {
+        CHECK_FALSE(switch2_id);
+        CHECK(loader.ReadProgramId(program_id) == Loader::ResultStatus::ErrorNotInitialized);
+        return;
+    }
+    if ((have_base && base_switch2) || update_switch2 || expected_build == 'E') {
+        CHECK(switch2_id == edition_program);
+    } else {
+        CHECK_FALSE(switch2_id);
+    }
+
+    Core::System system{Service::Account::ProfileStorage::Scratch};
+    system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    std::array<u8, 0x20> build_id{};
+    REQUIRE(loader.ReadMainBuildId(system, build_id) == Loader::ResultStatus::Success);
+    CHECK(build_id.front() == expected_build);
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    CHECK(program_id == (switch2_id ? edition_program : legacy_program));
+    if (have_base && !base_switch2 && update_switch2) {
+        FileSys::NACP control;
+        REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+        CHECK(control.raw.save_data_owner_id == legacy_program);
+    }
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+    const auto tree = FileSys::ExtractRomFS(romfs);
+    REQUIRE(tree != nullptr);
+    REQUIRE(tree->GetFile("update.bin") != nullptr);
+    const auto expected_data = expected_build == 'E' && have_embedded_romfs ? "edition" : "update";
+    CHECK(Read(tree->GetFile("update.bin")) == expected_data);
+    REQUIRE(tree->GetFile("shared.bin") != nullptr);
+    CHECK(Read(tree->GetFile("shared.bin")) == "shared");
+    if (switch2_id) {
+        FileSys::RomFSFactory factory{loader, system.GetContentProvider(),
+                                      system.GetFileSystemController()};
+        constexpr auto type = FileSys::ContentRecordType::Program;
+        const auto own_romfs = factory.OpenPatchedRomFSWithProgramIndex(edition_program, 1, type);
+        REQUIRE(own_romfs != nullptr);
+        const auto own_tree = FileSys::ExtractRomFS(own_romfs);
+        REQUIRE(own_tree != nullptr);
+        REQUIRE(own_tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(own_tree->GetFile("update.bin")) == expected_data);
+        CHECK_FALSE(factory.OpenPatchedRomFSWithProgramIndex(edition_program, 2, type));
+    }
+}
+
+TEST_CASE("Loose Edition folders read program, matching update and base data", "[boot-inputs]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    const auto version = root / "updates/65536";
+    auto edition = version / "program1";
+    constexpr u64 edition_program = TitleId + 1;
+    const u64 legacy_program = FileSys::GetSwitch1ApplicationID(TitleId);
+    bool boot_edition = true;
+    bool native_npdm = true;
+    bool have_base = true;
+    u64 program_id = edition_program;
+
+    SECTION("direct program1") {}
+    SECTION("wrapped program1") {
+        edition = version / "program/program1";
+    }
+    SECTION("a non-native program1 cannot replace the legacy base") {
+        boot_edition = false;
+        native_npdm = false;
+    }
+    SECTION("a foreign program1 cannot replace the legacy base") {
+        program_id += 0x2000;
+        boot_edition = false;
+    }
+    SECTION("a standalone native program does not require a base") {
+        have_base = false;
+    }
+
+    const auto base = root / "base";
+    if (have_base) {
+        Put(base / "exefs/main", "legacy");
+        Put(base / "exefs/main.npdm", BootNpdm(legacy_program, false));
+        Put(base / "romfs/base.bin", "base data");
+    }
+    Put(version / "romfs/update.bin", "update data");
+    Put(version / "romfs/shared.bin", "legacy data");
+    Put(edition / "exefs/main", "edition");
+    Put(edition / "exefs/main.npdm", BootNpdm(program_id, native_npdm));
+    Put(edition / "romfs/shared.bin", "edition data");
+
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    const auto native = Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(root));
+    REQUIRE(native != nullptr);
+    CHECK(Read(native) == (boot_edition ? "edition" : "legacy"));
+    if (have_base) {
+        const auto explicit_legacy =
+            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base / "exefs/main"));
+        REQUIRE(explicit_legacy != nullptr);
+        CHECK(Read(explicit_legacy) == "legacy");
+    }
+
+    Loader::AppLoader_DeconstructedRomDirectory loader{native};
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+    const auto tree = FileSys::ExtractRomFS(romfs);
+    REQUIRE(tree != nullptr);
+    CHECK(static_cast<bool>(tree->GetFile("base.bin")) == have_base);
+    if (boot_edition) {
+        REQUIRE(tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(tree->GetFile("update.bin")) == "update data");
+        REQUIRE(tree->GetFile("shared.bin") != nullptr);
+        CHECK(Read(tree->GetFile("shared.bin")) == "edition data");
+    } else {
+        CHECK_FALSE(tree->GetFile("update.bin"));
+        CHECK_FALSE(tree->GetFile("shared.bin"));
+    }
 }

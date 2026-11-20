@@ -116,29 +116,20 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
 
     const auto base_index = nup->FindBasePackage();
     const auto update_index = nup->FindBestUpdatePackage();
-
-    // The program comes from the base package; a standalone update container
-    // (SPEC §4.1.2) carries a complete patched tree and boots on its own.
-    std::optional<std::size_t> program_index;
-    std::optional<std::size_t> exefs_index;
-    if (base_index && nup->GetExeFSDir(*base_index) != nullptr) {
-        program_index = base_index;
-        exefs_index = update_index && nup->GetExeFSDir(*update_index) != nullptr
-                          ? update_index
-                          : base_index;
-    } else if (update_index && nup->GetExeFSDir(*update_index) != nullptr) {
-        LOG_INFO(Loader,
-                 "NUP container is a standalone update; booting the update program directly");
-        program_index = update_index;
-        exefs_index = update_index;
-    }
-    if (!program_index || !exefs_index) {
+    const auto selected = nup->SelectProgram();
+    if (!selected) {
         LOG_ERROR(Loader, "NUP container has no package with a usable ExeFS");
         return;
     }
 
-    const auto& program = nup->GetPackages()[*program_index];
-    base_title_id = program.title_id;
+    const auto program_index = base_index && nup->GetExeFSDir(*base_index) != nullptr
+                                   ? *base_index
+                                   : selected->package_index;
+    const auto& program = nup->GetPackages()[program_index];
+    base_title_id = selected->program_id;
+    if (selected->embedded_program_id) {
+        embedded_program_package = selected->package_index;
+    }
 
     const auto* raw_control = &program.nacp;
     NupContainer::PackageInfo meta;
@@ -149,7 +140,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     meta.publisher = program.publisher;
     meta.icon = program.icon;
     meta.localized_icons = program.localized_icons;
-    if (base_index && *base_index != *program_index) {
+    if (base_index && *base_index != program_index) {
         const auto& base = nup->GetPackages()[*base_index];
         if (raw_control->empty()) {
             raw_control = &base.nacp;
@@ -177,12 +168,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
             display_title = name;
         }
     }
-    const auto exefs = nup->GetExeFSDir(*exefs_index);
-    if (exefs == nullptr || exefs->GetFile("main") == nullptr ||
-        exefs->GetFile("main.npdm") == nullptr) {
-        LOG_ERROR(Loader, "NUP package has no usable ExeFS");
-        return;
-    }
+    const auto exefs = selected->exefs;
     secondary_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true, false);
     has_program = true;
 
@@ -284,7 +270,11 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
-    const auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    if (embedded_program_package) {
+        merged = NupContainer::MergeShadowDirs(
+            merged, nup->GetPackageSubdirectory(*embedded_program_package, "program1/romfs"));
+    }
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }
