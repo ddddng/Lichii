@@ -784,16 +784,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
         startup_whats_new_pending = true;
-#ifdef ENABLE_UPDATE_CHECKER
-        if (update_check_running) {
-            connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
-                    &MainWindow::MaybeShowStartupWhatsNew,
-                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
-        } else
-#endif
-        {
-            QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
-        }
+        QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
     }
 }
 
@@ -4874,16 +4865,20 @@ void MainWindow::MaybeShowStartupWhatsNew() {
         boot_in_progress || emulation_running || close_pending) {
         return;
     }
+    constexpr auto retry_connection = Qt::ConnectionType(Qt::QueuedConnection |
+                                                         Qt::SingleShotConnection |
+                                                         Qt::UniqueConnection);
 #ifdef ENABLE_UPDATE_CHECKER
     if (update_check_running) {
+        connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
+                &MainWindow::MaybeShowStartupWhatsNew, retry_connection);
         return;
     }
 #endif
     if (auto* const modal = QApplication::activeModalWidget()) {
         if (auto* const dialog = qobject_cast<QDialog*>(modal)) {
             connect(dialog, &QDialog::finished, this, &MainWindow::MaybeShowStartupWhatsNew,
-                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection |
-                                       Qt::UniqueConnection));
+                    retry_connection);
         }
         return;
     }
