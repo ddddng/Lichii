@@ -441,8 +441,14 @@ TEST_CASE("NUP only layers an enabled upgrade pack onto the selected Edition pro
         Put(pack / "System/AoCUpgradeVersion.txt", "120");
         Settings::values.disabled_addons[TitleId] = {"DLC"};
     }
-    SECTION("the selected update ExeFS is from Switch 1 despite Edition base metadata") {
+    SECTION("a legacy update does not disable the pack for the retained native base") {
         Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(LegacyId, false));
+        enabled = true;
+    }
+    SECTION("legacy ExeFS does not activate the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "base/exefs/main.npdm", EditionNpdm(ProgramId, false));
         Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(LegacyId, false));
     }
     SECTION("an Edition title ID alone does not make the selected ExeFS Switch 2") {
@@ -1590,6 +1596,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     std::optional<u64> embedded_id;
     bool embedded_switch2 = true;
     bool have_embedded_romfs = true;
+    bool have_marked_pack = false;
     char expected_build = 'B';
 
     SECTION("legacy update program 0 does not replace native program 1") {}
@@ -1624,6 +1631,12 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
         have_base = false;
         embedded_id = edition_program;
         have_embedded_romfs = false;
+        expected_build = 'E';
+    }
+    SECTION("the native sibling's RomFS wins over the upgrade pack") {
+        have_base = false;
+        embedded_id = edition_program;
+        have_marked_pack = true;
         expected_build = 'E';
     }
     SECTION("an unrelated embedded native program is ignored") {
@@ -1661,6 +1674,12 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     }
     Put(root / "updates/65536/romfs/update.bin", "update");
     Put(root / "updates/65536/romfs/shared.bin", "shared");
+    if (have_marked_pack) {
+        const auto pack = root / "dlc/0100ABCD00011001/0/romfs";
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(pack / "update.bin", "pack");
+        Put(pack / "shared.bin", "pack");
+    }
     const auto archive = t.path / "Game.nup";
     REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
 
@@ -1701,7 +1720,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     const auto expected_data = expected_build == 'E' && have_embedded_romfs ? "edition" : "update";
     CHECK(Read(tree->GetFile("update.bin")) == expected_data);
     REQUIRE(tree->GetFile("shared.bin") != nullptr);
-    CHECK(Read(tree->GetFile("shared.bin")) == "shared");
+    CHECK(Read(tree->GetFile("shared.bin")) == (have_marked_pack ? "pack" : "shared"));
     if (switch2_id) {
         FileSys::RomFSFactory factory{loader, system.GetContentProvider(),
                                       system.GetFileSystemController()};

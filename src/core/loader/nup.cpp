@@ -280,14 +280,11 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
+    const auto native_romfs =
+        embedded_program_package
+            ? nup->GetPackageSubdirectory(*embedded_program_package, "program1/romfs")
+            : FileSys::VirtualDir{};
     auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
-    if (embedded_program_package) {
-        merged = NupContainer::MergeShadowDirs(
-            merged, nup->GetPackageSubdirectory(*embedded_program_package, "program1/romfs"));
-    }
-    if (merged == nullptr) {
-        return ResultStatus::ErrorNoRomFS;
-    }
     const auto dlc_disabled = [](u64 id) {
         const auto& disabled = Settings::values.disabled_addons;
         const auto it = disabled.find(id);
@@ -296,11 +293,16 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
     if (upgrade_program_id != 0 && !dlc_disabled(base_title_id) &&
         !dlc_disabled(upgrade_program_id) &&
         !dlc_disabled(FileSys::GetBaseTitleID(upgrade_program_id))) {
-        if (const auto pack = nup->FindUpgradePack(upgrade_program_id)) {
+        if (const auto pack = nup->FindUpgradePack(upgrade_program_id);
+            pack && (merged || native_romfs)) {
             merged = FileSys::NupContainer::MergeShadowDirs(merged, nup->GetRomFSDir(*pack));
             LOG_INFO(Loader, "NUP upgrade pack {:016X} layered over the program RomFS",
                      nup->GetPackages()[*pack].title_id);
         }
+    }
+    merged = NupContainer::MergeShadowDirs(merged, native_romfs);
+    if (merged == nullptr) {
+        return ResultStatus::ErrorNoRomFS;
     }
     out_file = FileSys::CreateRomFS(merged);
     if (out_file == nullptr) {
