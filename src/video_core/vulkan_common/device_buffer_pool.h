@@ -14,9 +14,10 @@ constexpr u64 SmallDeviceBufferPoolBlockSize = u64{4} << 20;
                                                            u64 heap_budget) {
     constexpr u64 small_heap = u64{9} << 30;
     constexpr u64 small_budget = u64{7680} << 20;
-    const bool small = discrete && heap_size != 0 &&
-                       (heap_size < small_heap || (heap_budget != 0 && heap_budget < small_budget));
-    return small ? SmallDeviceBufferPoolBlockSize : DefaultSeparatePoolBlockSize;
+    const bool use_small_blocks =
+        discrete && heap_size != 0 &&
+        (heap_size < small_heap || (heap_budget != 0 && heap_budget < small_budget));
+    return use_small_blocks ? SmallDeviceBufferPoolBlockSize : DefaultSeparatePoolBlockSize;
 }
 
 [[nodiscard]] constexpr bool FitsDeviceBufferPool(u64 size, u64 min_alignment, u64 block_size) {
