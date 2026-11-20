@@ -121,8 +121,12 @@ void DisplayHdrMonitor::Run(std::stop_token stop) {
             break;
         }
         // A factory kept between reads outlived the module holding its vtable once emulation
-        // stopped, and IsCurrent crashed; a new one per read cannot go stale.
-        Update(QueryDisplayHdr(window.load()));
+        // stopped, and IsCurrent crashed.
+        Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            continue;
+        }
+        Update(QueryDisplayHdr(factory.Get(), static_cast<HWND>(window.load())));
     }
 }
 #else
