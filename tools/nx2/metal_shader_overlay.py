@@ -6,15 +6,27 @@ import argparse
 from pathlib import Path
 
 
-def overlay(source):
+def overlay(source, hle=False):
     def replace(old, new, count=1):
         nonlocal source
         if source.count(old) != count:
             raise ValueError(f"unexpected nxnative Metal shader hook: {old.splitlines()[0]}")
         source = source.replace(old, new)
 
+    if hle:
+        replace("int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {",
+                '#include "nvn_metal_shaders.h"\n\nint prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {')
+        replace("if (!p->serial) return keys_hash(&p->sd[st], 0, key);",
+                "if (!p->serial) return keys_hash(&p->sd[st], lichii_nvn_metal_shader_scoped(), key);")
+        replace("if (!keys_hash(&p->sd[st], 0, k->key[st])) return 0;",
+                "if (!keys_hash(&p->sd[st], lichii_nvn_metal_shader_scoped(), k->key[st])) return 0;")
+        return source
+
     replace("static _Atomic(romfs_img *) g_msl_img;",
             'static _Atomic(romfs_img *) g_msl_img;\n#include "nvn_metal_shaders.inc"')
+    replace("static const img_ent *msl_image_file(NSString *path, romfs_img **img) {",
+            "static const img_ent *msl_image_file(NSString *path, romfs_img **img) {\n"
+            "    if (lichii_shader_root && !lichii_shader_path(path)) return NULL;")
     replace("NSData *d = [NSData dataWithContentsOfFile:path];\n    if (d) return d;",
             "NSData *d = lichii_shader_path(path) ? nil : [NSData dataWithContentsOfFile:path];\n    if (d) return d;")
     replace("NSString *path = e ? @(e) : exe_rel([NSString stringWithFormat:",
@@ -119,6 +131,12 @@ def overlay(source):
             "    NvProg *cs_program = prog_get(S.cprog);\n    if (!cs_program || lichii_nvn_metal_shader_failed()) return;\n"
             "    NvShader *cs = cs_program->sh[5];")
     replace("    image_prepare(prog_get(S.cprog), 0x20);", "    image_prepare(cs_program, 0x20);")
+    replace('if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline',
+            'if (!ps) { lichii_shader_failure("Metal rejected the requested compute pipeline");\n'
+            '            cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline')
+    replace('if (!ps) { char hint[200]; MLOG("[RED] failed to create render pipeline',
+            'if (!ps) { lichii_shader_failure("Metal rejected the requested render pipeline");\n'
+            '               char hint[200]; MLOG("[RED] failed to create render pipeline')
     replace("    for (;;) {\n        op_hdr h; memcpy(&h, p, sizeof h);\n        g_exec_cur = p;",
             """    for (;;) {
         if (lichii_shader_keys && lichii_nvn_metal_shader_failed()) {
@@ -131,12 +149,13 @@ def overlay(source):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Apply Lichii's shader hooks to a generated copy of pinned nvn_mtl.m.")
+    parser = argparse.ArgumentParser(description="Apply Lichii's shader hooks to a generated copy of pinned nxnative.")
+    parser.add_argument("--hle", action="store_true", help="overlay hle_nvn.c instead of nvn_mtl.m")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     try:
-        output = overlay(args.source.read_text())
+        output = overlay(args.source.read_text(), args.hle)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output)
     except (OSError, ValueError) as e:

@@ -273,7 +273,9 @@ def preflight(args):
     keys, records = shader_map(map_file.read_text())
     skip = profile.get("shader_key_skip", "0+0").split("+")
     require(len(skip) == 2, "malformed shader_key_skip")
-    check_package(args.package, records, tuple(int(x, 0) for x in skip))
+    skip = tuple(int(x, 0) for x in skip)
+    require(all(x >= 0 for x in skip), "malformed shader_key_skip")
+    check_package(args.package, records, skip)
     selected = required_keys(args.required_keys, profile, args.package, keys) if args.required_keys else keys
     with args.main.open("rb") as f:
         header = f.read(0x60)
