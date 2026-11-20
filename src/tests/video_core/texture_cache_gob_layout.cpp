@@ -23,10 +23,24 @@
 
 namespace {
 
-struct TestAsyncBuffer {};
+struct TestAsyncBuffer {
+    std::span<u8> mapped_span;
+};
 
 struct TestRuntime {
-    TestAsyncBuffer DownloadStagingBuffer(size_t, bool);
+    TestAsyncBuffer DownloadStagingBuffer(size_t size, bool deferred = false) {
+        REQUIRE(deferred);
+        staging.resize(size);
+        ++downloads;
+        return {staging};
+    }
+    void FreeDeferredStagingBuffer(TestAsyncBuffer&) {
+        staging.clear();
+    }
+    u64 CurrentTick() const { return 1; }
+    bool IsFree(u64 tick) const { return completed_tick >= tick; }
+    void FlushDeferredClear() {}
+    void Finish() { FAIL("A texture lookup must not wait for the GPU"); }
 
     bool HasBrokenTextureViewFormats() const {
         return false;
@@ -34,6 +48,9 @@ struct TestRuntime {
     bool HasNativeBgr() const {
         return false;
     }
+    std::vector<u8> staging;
+    u64 completed_tick{};
+    u32 downloads{};
 };
 
 struct TestImage : VideoCommon::ImageBase {
@@ -43,6 +60,12 @@ struct TestImage : VideoCommon::ImageBase {
     explicit TestImage(const VideoCommon::NullImageParams& params) : ImageBase{params} {}
     TestImage(TestImage&&) = default;
     TestImage& operator=(TestImage&&) = default;
+    void DownloadMemory(const TestAsyncBuffer& map,
+                        std::span<const VideoCommon::BufferImageCopy>) {
+        REQUIRE(map.mapped_span.size() == gpu_bytes.size());
+        std::ranges::copy(gpu_bytes, map.mapped_span.begin());
+    }
+    std::vector<u8> gpu_bytes;
 };
 
 struct TestImageView : VideoCommon::ImageViewBase {
@@ -86,6 +109,7 @@ struct Policy {
     static constexpr bool HAS_EMULATED_COPIES = false;
     static constexpr bool HAS_DEVICE_MEMORY_INFO = false;
     static constexpr bool IMPLEMENTS_ASYNC_DOWNLOADS = false;
+    static constexpr bool HAS_MSAA_DOWNLOADS = false;
 };
 
 using Cache = VideoCommon::TextureCache<Policy>;
@@ -114,7 +138,23 @@ struct TextureCacheTestAccess {
     }
     template <class C>
     static ImageId Find(C& cache, const ImageInfo& info, GPUVAddr gpu_addr) {
-        return cache.FindImage(info, gpu_addr, RelaxedOptions{});
+        bool retry = false;
+        if constexpr (requires { cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry); }) {
+            return cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry);
+        } else {
+            return cache.FindImage(info, gpu_addr, RelaxedOptions{});
+        }
+    }
+    template <class C>
+    static void WriteGpu(C& cache, ImageId id, std::vector<u8> bytes) {
+        auto& image = cache.slot_images[id];
+        image.gpu_bytes = std::move(bytes);
+        image.flags &= ~ImageFlagBits::CpuModified;
+        cache.MarkModification(image);
+    }
+    template <class C>
+    static void PollWritebacks(C& cache) {
+        cache.FinishAsyncOverlapDownloads(false);
     }
     template <class C>
     static const ImageInfo& Info(C& cache, ImageId id) {
@@ -139,7 +179,7 @@ struct Fixture {
     std::unique_ptr<Cache> cache;
     std::unique_ptr<Kernel::KProcess> process;
     Core::Asid asid{};
-    std::optional<Tegra::MemoryManager> memory;
+    std::shared_ptr<Tegra::MemoryManager> memory;
     Tegra::Control::ChannelState state{0};
     u8* bytes{};
 
@@ -159,11 +199,11 @@ struct Fixture {
         asid = device.RegisterProcess(&process->GetMemory());
         device.BindInterface(&rasterizer);
         device.Map(0x10000, 0x10000, 0x40000, asid);
-        memory.emplace(system, device, 32, 1ULL << 31, 16);
+        memory = std::make_shared<Tegra::MemoryManager>(system, device, 32, 1ULL << 31, 16);
         memory->BindRasterizer(&rasterizer);
         memory->EnableNativeTiling();
         memory->Map(0x100000, 0x10000, 0x10000, Tegra::PTEKind::PITCH, true);
-        state.memory_manager = &*memory;
+        state.memory_manager = memory.get();
         state.payload.emplace(system, *memory, state);
         cache = std::make_unique<Cache>(runtime, device);
         cache->CreateChannel(state);
@@ -267,4 +307,40 @@ TEST_CASE("Partial texture transfers and writeback use the image GOB order",
             CHECK(actual[native ? 0x40 : 0x20] == linear[16]);
         }
     }
+}
+
+TEST_CASE("Hinted BC7 lookup waits for GPU-written native overlap bytes",
+          "[video_core][texture_cache][gob_layout]") {
+    using namespace VideoCommon;
+
+    Fixture f;
+    constexpr GPUVAddr gpu_addr = 0x100000;
+    constexpr DAddr cpu_addr = 0x10000;
+    auto native = MakeInfo();
+    native.native_tiling = true;
+    auto gob = native;
+    gob.format = PixelFormat::BC7_UNORM;
+    gob.native_tiling = false;
+    gob.maxwell_gob_layout = true;
+    const auto target = Access::Insert(*f.cache, native, gpu_addr, cpu_addr);
+    const auto hinted = Access::Insert(*f.cache, gob, gpu_addr, cpu_addr);
+    std::vector<u8> written(CalculateUnswizzledSizeBytes(native));
+    written[16] = 0x5a;
+    Access::WriteGpu(*f.cache, target, std::move(written));
+
+    REQUIRE(Access::Find(*f.cache, gob, gpu_addr) == NULL_IMAGE_ID);
+    CHECK(f.runtime.downloads == 1);
+    CHECK(f.bytes[0x40] == 0);
+    CHECK(Access::Find(*f.cache, gob, gpu_addr) == NULL_IMAGE_ID);
+    CHECK(f.runtime.downloads == 1);
+
+    f.bytes[0x41] = 0x73;
+    f.cache->WriteMemory(cpu_addr + 0x41, 1);
+    f.runtime.completed_tick = 1;
+    Access::PollWritebacks(*f.cache);
+    CHECK(f.bytes[0x40] == 0x5a);
+    CHECK(f.bytes[0x41] == 0x73);
+    CHECK(f.bytes[0x20] == 0);
+    CHECK(Access::Find(*f.cache, gob, gpu_addr) == hinted);
+    CHECK(f.runtime.downloads == 1);
 }
