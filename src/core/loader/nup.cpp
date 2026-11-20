@@ -52,7 +52,12 @@ void CopyDeveloperToEntry(FileSys::LanguageEntry& entry, std::string_view develo
 }
 
 std::unique_ptr<FileSys::NACP> BuildNacp(const NupContainer::PackageInfo& base,
-                                         const std::string& version) {
+                                       const std::string& version,
+                                       const std::vector<u8>& raw_control) {
+    if (!raw_control.empty()) {
+        return std::make_unique<FileSys::NACP>(
+            std::make_shared<FileSys::VectorVfsFile>(raw_control, "control.nacp"));
+    }
     const std::string& effective_title =
         !base.title_name.empty() ? base.title_name : base.source_dump;
     if (effective_title.empty() && base.localized_titles.empty() && base.publisher.empty() &&
@@ -135,6 +140,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     const auto& program = nup->GetPackages()[*program_index];
     base_title_id = program.title_id;
 
+    const auto* raw_control = &program.nacp;
     NupContainer::PackageInfo meta;
     meta.title_id = program.title_id;
     meta.title_name = program.title_name;
@@ -145,6 +151,9 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     meta.localized_icons = program.localized_icons;
     if (base_index && *base_index != *program_index) {
         const auto& base = nup->GetPackages()[*base_index];
+        if (raw_control->empty()) {
+            raw_control = &base.nacp;
+        }
         if (!base.title_name.empty()) {
             meta.title_name = base.title_name;
         }
@@ -179,13 +188,17 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
 
     if (update_index) {
         const auto& update = nup->GetPackages()[*update_index];
+        if (update.title_id == program.title_id && !update.nacp.empty()) {
+            raw_control = &update.nacp;
+        }
         display_version = update.display_version.empty() ? DecodeVersion(update.version)
                                                          : update.display_version;
     } else {
         display_version = program.display_version.empty() ? DecodeVersion(program.version)
                                                           : program.display_version;
     }
-    nacp_file = BuildNacp(meta, display_version);
+    nacp_file = BuildNacp(meta, display_version, *raw_control);
+    display_publisher = std::move(meta.publisher);
     if (!meta.icon.empty()) {
         icon_file = std::make_shared<FileSys::VectorVfsFile>(meta.icon, "icon.dat");
     } else {
@@ -332,6 +345,22 @@ ResultStatus AppLoader_NUP::ReadControlData(FileSys::NACP& control) {
     }
     control = *nacp_file;
     return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NUP::ReadDeveloper(std::string& developer) {
+    if (!display_publisher.empty()) {
+        developer = display_publisher;
+        return ResultStatus::Success;
+    }
+    return AppLoader::ReadDeveloper(developer);
+}
+
+ResultStatus AppLoader_NUP::ReadDisplayVersion(std::string& version) {
+    if (!display_version.empty()) {
+        version = display_version;
+        return ResultStatus::Success;
+    }
+    return AppLoader::ReadDisplayVersion(version);
 }
 
 ResultStatus AppLoader_NUP::ReadNSOModules(Modules& modules) {
