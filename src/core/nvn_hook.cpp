@@ -118,6 +118,7 @@ struct State {
 #ifdef LICHII_NVN_METAL
     std::optional<MetalPoolPins> pool_pins; ///< from the first lookup (nvn_direct_init)
     std::atomic<bool> shader_failed{};
+    std::atomic<bool> dispatch_failed{};
 #endif
 };
 
@@ -441,12 +442,6 @@ void TrackPages(void* context, u64 address, u64 size, int armed) {
                                                                                   armed != 0);
 }
 
-/// nvn_direct_memory.backing: the backing memory of a guest page (never write-protected).
-void* Backing(void* context, u64 address) {
-    State& state = *static_cast<State*>(context);
-    return state.process->GetMemory().GetPointerSilent(address);
-}
-
 /// nvn_direct_memory's native_image: nx2:gsv's images.
 int NativeImage(void*, u64 handle, u64* address, u64* size) {
     auto& lookup = Service::g_nx2_native_image_lookup;
@@ -481,7 +476,31 @@ void AliasRelease(void* context, void* region) {
 #endif
 #endif
 
+#ifdef LICHII_NVN_FRONT
+/// nvn_direct_memory.backing: the backing memory of a guest page (never write-protected).
+void* Backing(void* context, u64 address) {
+    State& state = *static_cast<State*>(context);
+    return state.process->GetMemory().GetPointerSilent(address);
+}
+#endif
+
 #ifdef LICHII_NVN_METAL
+/// The halted "call" of a guest thread whose NVN call found the dispatch failed: the session stops
+/// from the kernel (CheckMetalDispatch).
+constexpr u32 DispatchFailedSlot = MaxSlots + 1;
+
+/// Metal mode, from the kernel: the dispatch could not translate a guest address safely (16 KiB
+/// host pages, nvn_guest_address.h) and runs no call any more. The session stops, as for a shader.
+void CheckMetalDispatch(State& state) {
+    const char* const failure = nvn_direct_failure();
+    if (failure == nullptr || state.dispatch_failed.exchange(true)) {
+        return;
+    }
+    LOG_CRITICAL(Core, "NVN Metal: {}: the session stops", failure);
+    nvn_mtl_request_stop();
+    state.system->Exit();
+}
+
 /// Metal mode, after a halted call (the kernel's context, as ExitProcess): a guest shader outside
 /// the validated local library latched a failure in the replay. The session stops: the game's NVN
 /// state lives in the Metal replay, so it cannot go on on GPU emulation.
@@ -525,8 +544,24 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
             const u64 guest_size = u64{1} << page_table.GetAddressSpaceWidth();
 #ifdef LICHII_NVN_METAL
             // The backing outlives every lease without an owner here: a Metal boot keeps it until
-            // the process exits (MetalRan).
-            const nvn_direct_memory views{.backing_fd = -1};
+            // the process exits (MetalRan). With 16 KiB host pages, guest pages outside the arena are
+            // reached through it.
+            const auto arena_pages = state.host_memory->ArenaReadWritePages();
+            const nvn_direct_memory views{
+                .backing = Backing,
+                .context = &state,
+                .backing_fd = -1,
+                .backing_base = state.host_memory->BackingBasePointer(),
+                .backing_size = state.host_memory->BackingSize(),
+                .arena_pages = arena_pages.bits,
+                .arena_page_first = arena_pages.first,
+                .arena_page_shift = arena_pages.shift,
+            };
+            if (arena_pages.bits != nullptr) {
+                LOG_INFO(Core, "NVN Metal: {:#x} byte host pages: guest pages outside the fastmem "
+                               "arena are reached through backing memory",
+                         u64{1} << arena_pages.shift);
+            }
             auto& pins = state.pool_pins.emplace(
                 state.system->Kernel(), page_table,
                 std::shared_ptr<Common::HostMemory>{std::shared_ptr<void>{}, state.host_memory});
@@ -584,6 +619,12 @@ bool DirectEntry(State& state, u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Me
     if (nvn_direct_float_args(target.front)) {
         jit.SetVector(0, {v0, 0});
     }
+#ifdef LICHII_NVN_METAL
+    if (nvn_direct_failure() != nullptr && !state.dispatch_failed.load(std::memory_order_relaxed)) {
+        t_halted_slot = DispatchFailedSlot;
+        return true;
+    }
+#endif
     return false;
 }
 #endif
@@ -1058,6 +1099,12 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
 #ifdef LICHII_NVN_FRONT
     State& state = *Get();
     const u32 slot = std::exchange(t_halted_slot, MaxSlots);
+#ifdef LICHII_NVN_METAL
+    if (slot == DispatchFailedSlot) {
+        CheckMetalDispatch(state);
+        return;
+    }
+#endif
     if (slot == MaxSlots) {
         LOG_CRITICAL(Core, "NVN direct: a halted call without its slot");
         return;
@@ -1100,6 +1147,7 @@ void RunHaltedCall(Core::System& system, std::array<u64, 8>& args) {
     if (present) {
         PresentMetal(system, state);
     }
+    CheckMetalDispatch(state);
     CheckMetalShaders(state);
 #else
     if (present) {

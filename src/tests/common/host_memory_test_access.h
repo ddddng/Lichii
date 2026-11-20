@@ -29,6 +29,12 @@ public:
         control.fail_fallback = true;
     }
 
+    /// Fastmem as on a host whose pages are page_size bytes (POSIX).
+    void EmulateHostPages(size_t page_size) {
+        control.fail_fastmem = false;
+        control.host_page_size = page_size;
+    }
+
     size_t FastmemAttempts() const {
         return control.fastmem_attempts;
     }

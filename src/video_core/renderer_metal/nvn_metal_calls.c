@@ -8,13 +8,13 @@
 #include "nvn_obj.h"
 #include "nvn_queue.h"
 
-uint64_t nvn_direct_host_of(uint64_t guest);
+uint64_t nvn_direct_host_object(uint64_t guest, uint64_t size);
 
 int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
     if (nvn_queue_stopping() || strcmp(nvn_direct_name(slot), "nvnSyncWait") != 0) {
         return 0;
     }
-    const sync_t* const sync = (const sync_t*)(uintptr_t)nvn_direct_host_of(x[0]);
+    const sync_t* const sync = (const sync_t*)(uintptr_t)nvn_direct_host_object(x[0], sizeof(NVNsync));
     if (!sync->fenced) {
         return 0;
     }

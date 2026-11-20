@@ -23,6 +23,7 @@
 #include "common/host_memory.h"
 #include "common/literals.h"
 #include "common/thread.h"
+#include "tests/common/host_memory_test_access.h"
 
 using Common::HostMemory;
 using namespace Common::Literals;
@@ -513,3 +514,52 @@ TEST_CASE("HostMemory: Backing view maps runs and zero pages of its own", "[comm
     REQUIRE(zero_view[Page] == 0);
     mem.UnmapBackingView(zero_view, 2 * Page);
 }
+
+#if !defined(_WIN32) && !defined(__OPENORBIS__) && !defined(__managarm__)
+TEST_CASE("HostMemory: arena read-write pages on 16 KiB host pages", "[common]") {
+    constexpr size_t GuestPage = 0x1000;
+    constexpr size_t HostPage = 0x4000;
+    Common::HostMemoryTestAccess access;
+    access.EmulateHostPages(HostPage);
+    HostMemory mem(0x10000, 0x400000);
+    REQUIRE(mem.VirtualBasePointer() != nullptr);
+    const auto pages = mem.ArenaReadWritePages();
+    REQUIRE(pages.bits != nullptr);
+    REQUIRE(pages.shift == 14);
+    const auto read_write = [&](size_t offset) {
+        const size_t page = pages.first + (offset >> pages.shift);
+        return (__atomic_load_n(&pages.bits[page / 64], __ATOMIC_RELAXED) >> (page % 64) & 1) != 0;
+    };
+
+    // Four guest pages contiguous and aligned in the backing: the host page is in the arena.
+    mem.Map(0x10000, 0x4000, HostPage, PERMS, HEAP);
+    CHECK(read_write(0x10000));
+    CHECK(read_write(0x13fff));
+    mem.VirtualBasePointer()[0x11008] = 7;
+    CHECK(mem.BackingBasePointer()[0x5008] == 7);
+
+    // Contiguous but not 16 KiB aligned in the backing (a stack alias), or out of order: not.
+    mem.Map(0x20000, 0x1000, HostPage, PERMS, HEAP);
+    CHECK_FALSE(read_write(0x20000));
+    for (size_t i = 0; i < 4; ++i) {
+        mem.Map(0x30000 + i * GuestPage, 0x8000 + ((i * 3) % 4) * GuestPage, GuestPage, PERMS, HEAP);
+    }
+    CHECK_FALSE(read_write(0x30000));
+    CHECK(read_write(0x10000));
+
+    // Write protection and unmapping one guest page take the host page out; mapping it back
+    // returns it.
+    mem.Protect(0x10000, GuestPage, Common::MemoryPermission::Read);
+    CHECK_FALSE(read_write(0x10000));
+    mem.Protect(0x10000, GuestPage, PERMS);
+    CHECK(read_write(0x10000));
+    mem.Unmap(0x12000, GuestPage, HEAP);
+    CHECK_FALSE(read_write(0x10000));
+    mem.Map(0x12000, 0x6000, GuestPage, PERMS, HEAP);
+    CHECK(read_write(0x10000));
+    CHECK(mem.VirtualBasePointer()[0x11008] == 7);
+
+    mem.ResetVirtualMappings();
+    CHECK_FALSE(read_write(0x10000));
+}
+#endif

@@ -35,6 +35,15 @@ typedef struct nvn_direct_memory {
     /// imported as udmabufs of it where the driver refuses host-pointer imports of it (amdgpu).
     int backing_fd;
     const uint8_t* backing_base;
+    /// The backing memory's bytes from backing_base (native Metal: its reverse map's extent).
+    uint64_t backing_size;
+    /// Native Metal on hosts whose pages are larger than the guest's
+    /// (HostMemory::ArenaReadWritePages): bit arena_page_first + (address >> arena_page_shift) is
+    /// set while the arena's host page holding guest address is mapped read-write; the dispatch
+    /// reaches the others through backing. NULL: every mapped guest page is in the arena.
+    const uint64_t* arena_pages;
+    uint64_t arena_page_first;
+    uint32_t arena_page_shift;
 #if defined(_WIN32)
     /// Windows, where there is no file to map: a virtual pool's host range (HostMemory's alias
     /// regions), inaccessible until alias_map maps backing memory [backing_offset, backing_offset
@@ -64,6 +73,8 @@ int nvn_direct_float_args(int slot);
 
 #define NVN_DISPATCH_FLOAT_ARGS 1
 #define NVN_DISPATCH_FLOAT_RETURN 2
+/// Native dispatchers: the guest stack slots the function reads, from this bit of its flags.
+#define NVN_DISPATCH_STACK_SHIFT 8
 
 /// Runs an implemented slot's function with the guest's x0-x7 and v0-v7 (low 64 bits) as its
 /// arguments, and the guest's stack at sp for the arguments past them; returns x0, and v0 through

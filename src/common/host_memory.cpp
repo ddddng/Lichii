@@ -55,6 +55,7 @@
 #endif // ^^^ POSIX ^^^
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -990,7 +991,9 @@ public:
 #endif
 
     bool Init() {
-        const long page_size = sysconf(_SC_PAGESIZE);
+        const long page_size = allocation_test_control && allocation_test_control->host_page_size
+                                   ? static_cast<long>(allocation_test_control->host_page_size)
+                                   : sysconf(_SC_PAGESIZE);
         if (allocation_test_control) {
             ++allocation_test_control->fastmem_attempts;
             if (allocation_test_control->fail_fastmem) {
@@ -1100,6 +1103,14 @@ public:
                 return false;
             }
             page_states = static_cast<u32*>(states);
+            read_write_pages_size = Common::DivCeil(virtual_size / host_page_size, size_t{64}) * sizeof(u64);
+            void* const pages = mmap(nullptr, read_write_pages_size, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (pages == MAP_FAILED) {
+                LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
+                return false;
+            }
+            read_write_pages = static_cast<u64*>(pages);
             LOG_INFO(Common_Memory, "Fastmem maps {:#x} byte host pages whose guest pages are contiguous",
                      host_page_size);
         }
@@ -1239,6 +1250,14 @@ public:
         munmap(view, length);
     }
 
+    HostMemory::ReadWritePages ArenaReadWritePages(size_t virtual_base_offset) const noexcept {
+        if (read_write_pages == nullptr) {
+            return {};
+        }
+        const u32 shift = static_cast<u32>(std::countr_zero(host_page_size));
+        return {read_write_pages, virtual_base_offset >> shift, shift};
+    }
+
 #ifdef HAS_NCE
     bool PrepareDirectMapping(size_t offset, size_t length) {
         if (fd < 0 || host_page_size != PageAlignment) {
@@ -1264,6 +1283,9 @@ private:
     void Release() {
         if (page_states != nullptr) {
             munmap(page_states, page_states_size);
+        }
+        if (read_write_pages != nullptr) {
+            munmap(read_write_pages, read_write_pages_size);
         }
 
         if (virtual_base != MAP_FAILED) {
@@ -1345,6 +1367,13 @@ private:
         const auto apply = [&](size_t run_begin, size_t run_end, const HostPage& page) {
             u8* const address = virtual_base + run_begin;
             const size_t size = run_end - run_begin;
+            // ArenaReadWritePages' readers hold no lock: a page leaves the set before it goes, and
+            // joins it once mapped.
+            const bool read_write = page.mapped && (page.prot & (PROT_READ | PROT_WRITE)) ==
+                                                       (PROT_READ | PROT_WRITE);
+            if (!read_write) {
+                MarkReadWrite(run_begin, run_end, false);
+            }
             if (!page.mapped) {
                 if (remap) {
                     void* ret = mmap(address, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -1356,6 +1385,9 @@ private:
             } else {
                 int ret = mprotect(address, size, page.prot);
                 ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
+            }
+            if (read_write) {
+                MarkReadWrite(run_begin, run_end, true);
             }
         };
         size_t run_begin = begin;
@@ -1374,12 +1406,30 @@ private:
         apply(run_begin, end, run);
     }
 
+    void MarkReadWrite(size_t begin, size_t end, bool read_write) {
+        const size_t last = end / host_page_size;
+        for (size_t page = begin / host_page_size; page < last;) {
+            const size_t bit = page % 64;
+            const size_t count = (std::min)(64 - bit, last - page);
+            const u64 mask = (count == 64 ? ~u64{0} : (u64{1} << count) - 1) << bit;
+            u64* const word = read_write_pages + page / 64;
+            if (read_write) {
+                __atomic_fetch_or(word, mask, __ATOMIC_RELEASE);
+            } else {
+                __atomic_fetch_and(word, ~mask, __ATOMIC_RELEASE);
+            }
+            page += count;
+        }
+    }
+
     int fd{-1}; // memfd file descriptor, -1 is the error value of memfd_create
     FreeRegionManager free_manager{};
     size_t host_page_size{PageAlignment};
     u32* page_states{};
     size_t page_states_size{};
     std::mutex page_states_mutex;
+    u64* read_write_pages{}; ///< ArenaReadWritePages, with page_states
+    size_t read_write_pages_size{};
 };
 
 #endif // ^^^ POSIX ^^^
@@ -1488,6 +1538,14 @@ u8* HostMemory::MapBackingView(size_t length, std::span<const BackingRun> runs) 
 #endif
     LOG_ERROR(HW_Memory, "Backing view: the backing memory is mapped twice only with fastmem");
     return nullptr;
+}
+
+HostMemory::ReadWritePages HostMemory::ArenaReadWritePages() const noexcept {
+#if defined(_WIN32) || defined(__OPENORBIS__) || defined(__managarm__)
+    return {};
+#else
+    return impl && virtual_base ? impl->ArenaReadWritePages(virtual_base_offset) : ReadWritePages{};
+#endif
 }
 
 void HostMemory::UnmapBackingView([[maybe_unused]] u8* view, [[maybe_unused]] size_t length) {

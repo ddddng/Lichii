@@ -8,7 +8,8 @@
 // host pointers back. Objects and command records stay in place in the game's memory (nxnative's
 // model). Values at or past the guest address space are host addresses the front end made itself
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
-// ways unchanged.
+// ways unchanged. Native Metal on 16 KiB host pages reaches guest pages outside the arena through
+// their backing memory (nvn_guest_address.h).
 
 #ifndef LICHII_NVN_METAL_BRIDGE
 #include <sys/mman.h>   // (Windows: bananative/shim/win32)
@@ -20,6 +21,7 @@
 #include "hle.h"
 #include "nvn_count.h"
 #include "nvn_direct_dispatch.h"
+#include "nvn_guest_address.h"
 #include "nvn_protos.h"
 #ifndef LICHII_NVN_METAL_BRIDGE
 #include "nvn_direct_front.h"
@@ -31,19 +33,36 @@ typedef struct { NVNbufferAddress data; const void* control; uint64_t ext; } sha
 typedef struct { NVNmemoryPool* phys; int64_t poff, voff; uint64_t size; int32_t storage_class, pad; } mapping_request;
 _Static_assert(sizeof(mapping_request) == 0x28, "NVNmappingRequest");
 
-static uintptr_t g_arena;
-static uint64_t g_guest_size;
-static nvn_direct_memory g_memory;
-
-static inline uint64_t host_addr(uint64_t a) {
-    return a != 0 && a < g_guest_size ? (uint64_t)g_arena + a : a;
-}
-static inline void* host_ptr(uint64_t a) { return (void*)(uintptr_t)host_addr(a); }
-static inline uint64_t guest_addr(uint64_t h) {
-    return h >= g_arena && h - g_arena < g_guest_size ? h - g_arena : h;
-}
 uint64_t nvn_direct_guest_of(uint64_t host) { return guest_addr(host); }
 uint64_t nvn_direct_host_of(uint64_t guest) { return host_addr(guest); }
+#ifdef LICHII_NVN_METAL_BRIDGE
+uint64_t nvn_direct_host_object(uint64_t guest, uint64_t size) { return host_addr_n(guest, size); }
+const char* nvn_direct_failure(void) {
+    return atomic_load_explicit(&g_failure_ready, memory_order_acquire) ? g_failure : NULL;
+}
+// nvnMemoryPoolInitialize (nxnative-pool-lease.patch): a pool's storage must be in the arena on every
+// host page. nxnative finds pools by GPU address (= CPU address) and the game gets those addresses
+// back through guest_addr, so a pool reached through backing memory would not be found again from
+// the arena addresses of its other pages; the zero-copy lease needs the same 16 KiB alignment anyway.
+int nvn_direct_pool_storage(const void* mem, uint64_t size) {
+    if (!g_memory.arena_pages || !size) return 1;
+    const uint64_t guest = guest_addr((uint64_t)(uintptr_t)mem);
+    if (guest == 0 || guest >= g_guest_size || size > g_guest_size - guest) {
+        xl_fail("memory pool %p+%#llx: storage is not guest memory", mem, (unsigned long long)size);
+        return 0;
+    }
+    const unsigned shift = g_memory.arena_page_shift;
+    const uint64_t first = guest >> shift, last = (guest + size - 1) >> shift;
+    uint64_t unmapped = 0;
+    for (uint64_t page = first; page <= last; page++) unmapped += !arena_mapped(page << shift, 1);
+    if (!unmapped && (uintptr_t)mem == g_arena + guest) return 1;
+    xl_fail("memory pool guest %#llx+%#llx: %llu of %llu host pages (%#x bytes) are not in the fastmem arena; "
+            "pools need storage whose guest pages are contiguous and aligned in backing memory",
+            (unsigned long long)guest, (unsigned long long)size, (unsigned long long)unmapped,
+            (unsigned long long)(last - first + 1), 1u << shift);
+    return 0;
+}
+#endif
 #ifndef LICHII_NVN_METAL_BRIDGE
 void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped) {
     *unmapped = 0;
@@ -143,38 +162,45 @@ static void* scratch(int k, size_t bytes) {
     }
     return g_scratch[k].p;
 }
-static void* xl_pointers(uint64_t a, int n, int k) {
+// size: the bytes of each object the pointers name (0: unknown)
+static void* xl_pointers_n(uint64_t a, int n, int k, uint64_t size) {
     if (!a || n <= 0) return host_ptr(a);
-    const uint64_t* in = host_ptr(a);
+    const uint64_t* in = host_ptr_n(a, sizeof *in * (uint64_t)n);
+    if (XL_FAILED()) return NULL;
     uint64_t* out = scratch(k, sizeof *out * (size_t)n);
-    for (int i = 0; i < n; i++) out[i] = host_addr(in[i]);
+    for (int i = 0; i < n; i++) out[i] = host_addr_n(in[i], size);
     return out;
 }
+static void* xl_pointers(uint64_t a, int n, int k) { return xl_pointers_n(a, n, k, 0); }
 static void* xl_handles(uint64_t a, int n, int k) { return xl_pointers(a, n, k); }
 static void* xl_buffer_ranges(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
-    const NVNbufferRange* in = host_ptr(a);
+    const NVNbufferRange* in = host_ptr_n(a, sizeof *in * (uint64_t)n);
+    if (XL_FAILED()) return NULL;
     NVNbufferRange* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (NVNbufferRange){host_addr(in[i].address), in[i].size};
     return out;
 }
 static void* xl_shader_data(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
-    const NVNshaderData* in = host_ptr(a);
+    const NVNshaderData* in = host_ptr_n(a, sizeof *in * (uint64_t)n);
+    if (XL_FAILED()) return NULL;
     NVNshaderData* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (NVNshaderData){host_addr(in[i].data), host_ptr((uint64_t)(uintptr_t)in[i].control)};
     return out;
 }
 static void* xl_shader_data_ext(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
-    const shader_data_ext* in = host_ptr(a);
+    const shader_data_ext* in = host_ptr_n(a, sizeof *in * (uint64_t)n);
+    if (XL_FAILED()) return NULL;
     shader_data_ext* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) out[i] = (shader_data_ext){host_addr(in[i].data), host_ptr((uint64_t)(uintptr_t)in[i].control), in[i].ext};
     return out;
 }
 static void* xl_mapping_requests(uint64_t a, int n, int k) {
     if (!a || n <= 0) return host_ptr(a);
-    const mapping_request* in = host_ptr(a);
+    const mapping_request* in = host_ptr_n(a, sizeof *in * (uint64_t)n);
+    if (XL_FAILED()) return NULL;
     mapping_request* out = scratch(k, sizeof *out * (size_t)n);
     for (int i = 0; i < n; i++) {
         out[i] = in[i];
@@ -245,7 +271,17 @@ void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memor
     g_memory = *memory;
     g_switch2 = switch2 != 0;
     g_sdk_major = sdk_major;
-#ifndef LICHII_NVN_METAL_BRIDGE
+#ifdef LICHII_NVN_METAL_BRIDGE
+    if (g_memory.arena_pages) {
+        g_guest_page_of = !g_memory.backing || !g_memory.backing_size || (guest_size >> GUEST_PAGE_SHIFT) >= UINT32_MAX
+                              ? NULL
+                              : calloc(g_memory.backing_size >> GUEST_PAGE_SHIFT, sizeof *g_guest_page_of);
+        if (!g_guest_page_of) {
+            g_memory.arena_pages = NULL;
+            xl_fail("no backing memory map for guest pages outside the fastmem arena (16 KiB host pages)");
+        }
+    }
+#else
     nvn_nops_register();
 #endif
     for (int i = 0; i < NVN_NFUNC; i++) {
@@ -288,7 +324,15 @@ int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
 #endif
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
+#ifdef LICHII_NVN_METAL_BRIDGE
+    if (XL_FAILED()) return 0;
+    const uint64_t stack = (uint64_t)(g_slot[slot].d->flags >> NVN_DISPATCH_STACK_SHIFT) * 8;
+    const uint64_t* const s = stack ? (const uint64_t*)host_ptr_n(sp, stack) : NULL;
+    if (XL_FAILED()) return 0;
+    return g_slot[slot].d->d(g_slot[slot].fn, x, v, s, v0);
+#else
     return g_slot[slot].d->d(g_slot[slot].fn, x, v, (const uint64_t*)host_ptr(sp), v0);
+#endif
 }
 
 // nvnDeviceGetInteger: the game's own NVN2 driver's answers, as Lichii captured them or read the

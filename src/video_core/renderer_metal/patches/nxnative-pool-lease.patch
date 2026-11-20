@@ -2,12 +2,14 @@ diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
 index 712acfa2..edf14171 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
-@@ -285,8 +285,17 @@ static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);
+@@ -285,8 +285,19 @@ static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);
  NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
      const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
      o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
 +#ifdef LICHII_NVN_METAL_LIVE
-+    if (!o->mem || (o->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || !mtl_pool_add(o->mem, o->size)) {
++    int nvn_direct_pool_storage(const void *mem, uint64_t size);   // nvn_dispatch.c: the storage is in the fastmem arena
++    if (!o->mem || (o->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || !nvn_direct_pool_storage(o->mem, o->size) ||
++        !mtl_pool_add(o->mem, o->size)) {
 +        LOG("[RED] MemoryPoolInitialize: no leased Metal backing mem=%p size=%#llx flags=%#x",
 +            (void *)o->mem, (unsigned long long)o->size, o->flags);
 +        memset(o, 0, sizeof *o);
