@@ -136,6 +136,13 @@ cmake_dependent_option(ENABLE_EXPERIMENTAL_METAL_REPLAY "Build the experimental 
 if (ENABLE_EXPERIMENTAL_METAL_REPLAY)
     enable_language(OBJCXX)
 endif()
+# Native Metal NVN: NVN2 games' NVN calls run in nxnative's Metal backend, chosen per launch with
+# EDEN_NX2_NVN_METAL=1 (src/video_core/renderer_metal/nvn_metal.cmake).
+cmake_dependent_option(ENABLE_NVN_METAL "Build the opt-in native Metal NVN mode (nxnative)"
+                       OFF "ENABLE_EXPERIMENTAL_METAL_REPLAY" OFF)
+if (ENABLE_NVN_METAL)
+    enable_language(OBJC ASM)
+endif()
 
 # non-linux bundled qt are static
 if (LICHII_USE_BUNDLED_QT AND (APPLE OR NOT UNIX))

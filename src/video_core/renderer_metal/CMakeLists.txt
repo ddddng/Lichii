@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-add_library(metal_replay STATIC guest_buffer.h guest_buffer.mm)
+add_library(metal_replay STATIC guest_buffer.h guest_buffer.mm presentation_host.cpp presentation_host.h)
 target_include_directories(metal_replay PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 target_compile_options(metal_replay PRIVATE -fobjc-arc)
 set_target_properties(metal_replay PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
 target_link_libraries(metal_replay PUBLIC "-framework Metal" "-framework Foundation")
+
+set(LICHII_NXNATIVE_SOURCE_DIR "" CACHE PATH "Pinned nxnative checkout for native Metal NVN")
+if (ENABLE_NVN_METAL)
+    include(nvn_metal.cmake)
+endif()
 
 if (BUILD_TESTING AND LICHII_TESTS)
     add_executable(metal_replay_test ../../tests/video_core/metal_replay.mm)
@@ -16,7 +21,6 @@ if (BUILD_TESTING AND LICHII_TESTS)
     add_test(NAME metal_replay_test COMMAND metal_replay_test)
     set_tests_properties(metal_replay_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
 
-    set(LICHII_NXNATIVE_SOURCE_DIR "" CACHE PATH "Pinned nxnative checkout for the NVN Metal bridge test")
     if (LICHII_NXNATIVE_SOURCE_DIR)
         enable_language(OBJC ASM)
         include(nvn_metal_bridge_test.cmake)
