@@ -749,7 +749,6 @@ void GpuSplit::FlushStateSlow() {
     const size_t size = 1 + StateFlagWords + count;
     u64* const entry = Reserve(size);
     entry[0] = static_cast<u64>(Kind::State) | (state_breaks ? HasBreak : 0) |
-               (state_anywhere ? StateMayDraw : 0) |
                (u64{state_break & 0xffff} << 8) | (u64{count} << 32);
     std::memcpy(entry + 1, state_flags.data(), sizeof(state_flags));
     std::memcpy(entry + 1 + StateFlagWords, state_writes.data(), size_t{count} * sizeof(u64));
@@ -958,7 +957,7 @@ bool GpuSplit::CanOverlapRender(u64 entry) const {
     if (kind == Kind::Wrap || kind == Kind::Engine) {
         return true;
     }
-    if (kind != Kind::State || (entry & StateMayDraw) || !back_engine->method_sink.empty()) {
+    if (kind != Kind::State || !back_engine->method_sink.empty()) {
         return false;
     }
     const auto& engine = *static_cast<Tegra::Engines::Maxwell3D*>(back_engine);

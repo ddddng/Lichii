@@ -643,7 +643,6 @@ private:
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
     static constexpr u64 HasBreak = 1 << 4; ///< State: a write ends fast draw reuse
-    static constexpr u64 StateMayDraw = 1 << 5;
     static constexpr size_t StateFlagWords = 4;
     static constexpr u32 MaxStateWrites = 128;
 
