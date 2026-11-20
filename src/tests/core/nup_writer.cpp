@@ -1257,6 +1257,63 @@ TEST_CASE("A booted NUP update's control takes precedence over legacy base contr
     CHECK(control.GetRawBytes() == edition);
 }
 
+TEST_CASE("PackDump preserves control metadata owned by an update",
+          "[nup][nup-control-identity][nup-update-control]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    const auto update = root / "updates/65536";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/shared.bin", "base");
+    Put(update / "romfs/shared.bin", "update");
+
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = TitleId;
+    source.raw.supported_languages = FileSys::SupportedLanguage::AmericanEnglish;
+    const auto base = source.GetRawBytes();
+    Put(root / "base/control.nacp", {reinterpret_cast<const char*>(base.data()), base.size()});
+
+    source.raw.save_data_owner_id = TitleId + 1;
+    source.raw.supported_languages = FileSys::SupportedLanguage::Japanese;
+    const auto patched = source.GetRawBytes();
+    const std::string_view patched_bytes{reinterpret_cast<const char*>(patched.data()),
+                                         patched.size()};
+    const std::vector<u8>* expected = &patched;
+    SECTION("Executable update has its own control") {
+        Put(update / "exefs/main", "update main");
+        Put(update / "exefs/main.npdm", Npdm(TitleId));
+        Put(update / "exefs/control.nacp", patched_bytes);
+    }
+    SECTION("RomFS-only update has its own control") {
+        Put(update / "control.nacp", patched_bytes);
+    }
+    SECTION("An ancestor's control does not belong to the update") {
+        Put(update / "exefs/main", "update main");
+        Put(update / "exefs/main.npdm", Npdm(TitleId));
+        Put(root / "updates/control.nacp", patched_bytes);
+        expected = &base;
+    }
+
+    const auto archive = tmp.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem vfs;
+    const auto file = vfs.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    Loader::AppLoader_NUP loader{file};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == *expected);
+
+    NupContainer parsed{file};
+    REQUIRE(parsed.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(parsed.GetPackages().size() == 2);
+    CHECK(parsed.GetPackages()[0].nacp == base);
+    if (expected == &base) {
+        CHECK(parsed.GetPackages()[1].nacp.empty());
+    } else {
+        CHECK(parsed.GetPackages()[1].nacp == patched);
+    }
+}
+
 TEST_CASE("A malformed compressed control title leaves the NUP identity readable",
           "[nup][nup-control-identity]") {
     TempDir tmp;
