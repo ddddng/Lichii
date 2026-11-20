@@ -1853,6 +1853,7 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool root_main = false;
     std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
     auto base = root / "base";
+    auto base_romfs = fs::path{};
     u64 program_id = edition_program;
 
     SECTION("direct program1") {}
@@ -1882,6 +1883,11 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         base = root;
         root_main = true;
     }
+    SECTION("a bare root main can use shared RomFS from the base package") {
+        base = root;
+        root_main = true;
+        base_romfs = root / "base/romfs";
+    }
     SECTION("a bare root main with no NPDM cannot be matched to an Edition") {
         base = root;
         root_main = true;
@@ -1901,7 +1907,7 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         if (base_npdm) {
             Put(base_exefs / "main.npdm", *base_npdm);
         }
-        Put(base / "romfs/base.bin", "base data");
+        Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
     }
     Put(version / "romfs/update.bin", "update data");
     Put(version / "romfs/shared.bin", "legacy data");
