@@ -783,12 +783,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
 
     if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
-        QTimer::singleShot(0, this, [this] {
-            if (isVisible() && !UISettings::values.first_start.GetValue() && !boot_in_progress &&
-                !emulation_running && !close_pending && !QApplication::activeModalWidget()) {
-                OnWhatsNew();
-            }
-        });
+        QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
     }
 }
 
@@ -4856,6 +4851,24 @@ void MainWindow::OnInstallDecryptionKeys() {
 
     game_list->PopulateAsync(UISettings::values.game_dirs);
     OnCheckFirmwareDecryption();
+}
+
+void MainWindow::MaybeShowStartupWhatsNew() {
+    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
+    if (!isVisible() || boot_in_progress || emulation_running || close_pending ||
+        WhatsNewDialog::OnStartup(build, UISettings::values.last_seen_release.GetValue(),
+                                 UISettings::values.first_start.GetValue(),
+                                 false) != WhatsNewDialog::StartupAction::Show) {
+        return;
+    }
+    if (auto* const modal = QApplication::activeModalWidget()) {
+        if (auto* const dialog = qobject_cast<QDialog*>(modal)) {
+            connect(dialog, &QDialog::finished, this, &MainWindow::MaybeShowStartupWhatsNew,
+                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+        }
+        return;
+    }
+    OnWhatsNew();
 }
 
 void MainWindow::OnWhatsNew() {

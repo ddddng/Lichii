@@ -22,9 +22,9 @@
       "body": "Fixes title-screen textures and a docked/handheld crash."
     },
     {
-      "icon": "sparkles",
+      "icon": "bug",
       "title": "Yoshi and the Mysterious Book",
-      "body": "An optional add-on sharpens version 2.0.0 with full resolution and FXAA."
+      "body": "Invalid Vulkan texture-buffer views no longer crash the game."
     }
   ]
 }
