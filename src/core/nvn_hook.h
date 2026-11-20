@@ -24,7 +24,6 @@
 #include "core/nvn_direct_choice.h"
 
 namespace Dynarmic::A64 {
-class Jit;
 enum class BlockEntryHook : std::uint8_t;
 } // namespace Dynarmic::A64
 
@@ -105,12 +104,34 @@ void Uninstall();
 /// after a Metal one (MetalRan).
 [[nodiscard]] bool DirectNeedsFreshProcess();
 
+/// EDEN_NX2_NVN_METAL=1 asks this launch for native Metal NVN (Install may still refuse it).
+[[nodiscard]] bool MetalRequested();
+
 /// UserConfig::block_entry_hook (null unless the direct renderer is asked for).
 Dynarmic::A64::BlockEntryHook (*BlockEntryHookFunction())(u64 pc);
 
-/// InstructionCacheOperationRaised(BlockEntryHook, pc) from a core's JIT. Returns whether the
-/// JIT must halt for a call that may block: it then runs from the kernel as SVC HaltedCallSvc.
-[[nodiscard]] bool OnBlockEntry(u64 pc, Dynarmic::A64::Jit& jit, Core::Memory::Memory& memory,
+/// Whether guest code reaching pc runs the hook instead (a synthetic address or
+/// nvnBootstrapLoader): the Hypervisor backend asks at the fault or BRK that stops it there.
+[[nodiscard]] bool IsThunk(u64 pc);
+
+/// The guest registers a thunk reads and writes: the JIT's or a Hypervisor vCPU's.
+class ThunkRegisters {
+public:
+    virtual u64 GetRegister(int index) = 0;
+    virtual void SetRegister(int index, u64 value) = 0;
+    /// The low 64 bits of v<index>; a set clears the high ones.
+    virtual u64 GetVector(int index) = 0;
+    virtual void SetVector(int index, u64 value) = 0;
+    virtual u64 GetSP() = 0;
+
+protected:
+    ~ThunkRegisters() = default;
+};
+
+/// Guest code reached a thunk at pc (IsThunk): runs it and sets X16 to where the guest goes on.
+/// Returns whether the core must halt for a call that may block: it then runs from the kernel as
+/// SVC HaltedCallSvc.
+[[nodiscard]] bool OnBlockEntry(u64 pc, ThunkRegisters& registers, Core::Memory::Memory& memory,
                                 Kernel::KProcess* process);
 
 /// The SVC number a halted NVN call takes (no real SVC is above 0xffff).

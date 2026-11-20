@@ -152,7 +152,26 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
     if (op == Dynarmic::A64::InstructionCacheOperation::BlockEntryHook) {
-        if (Core::NvnHook::OnBlockEntry(value, *m_parent.m_jit, m_memory, m_process)) {
+        struct JitRegisters final : Core::NvnHook::ThunkRegisters {
+            Dynarmic::A64::Jit& jit;
+            explicit JitRegisters(Dynarmic::A64::Jit& jit_) : jit{jit_} {}
+            u64 GetRegister(int index) override {
+                return jit.GetRegister(index);
+            }
+            void SetRegister(int index, u64 value) override {
+                jit.SetRegister(index, value);
+            }
+            u64 GetVector(int index) override {
+                return jit.GetVector(index)[0];
+            }
+            void SetVector(int index, u64 value) override {
+                jit.SetVector(index, {value, 0});
+            }
+            u64 GetSP() override {
+                return jit.GetSP();
+            }
+        } registers{*m_parent.m_jit};
+        if (Core::NvnHook::OnBlockEntry(value, registers, m_memory, m_process)) {
             // An NVN call that may block: it runs from the kernel, as an SVC.
             m_parent.m_svc = Core::NvnHook::HaltedCallSvc;
             m_parent.m_jit->HaltExecution(SupervisorCall);

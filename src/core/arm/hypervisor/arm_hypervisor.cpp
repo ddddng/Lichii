@@ -13,6 +13,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/memory.h"
+#include "core/nvn_hook.h"
 
 namespace Core {
 
@@ -28,6 +29,41 @@ constexpr u32 ExceptionClassBrk64 = 0x3C;
 
 constexpr u64 PstateEl1h = 0x3C5; // EL1h with DAIF masked
 constexpr u64 PstateNzcvMask = 0xF0000000;
+
+/// A vCPU's registers, for the NVN hook's thunks.
+class VcpuRegisters final : public NvnHook::ThunkRegisters {
+public:
+    explicit VcpuRegisters(hv_vcpu_t vcpu_) : vcpu{vcpu_} {}
+
+    u64 GetRegister(int index) override {
+        u64 value{};
+        hv_vcpu_get_reg(vcpu, static_cast<hv_reg_t>(HV_REG_X0 + index), &value);
+        return value;
+    }
+    void SetRegister(int index, u64 value) override {
+        hv_vcpu_set_reg(vcpu, static_cast<hv_reg_t>(HV_REG_X0 + index), value);
+    }
+    u64 GetVector(int index) override {
+        hv_simd_fp_uchar16_t q;
+        hv_vcpu_get_simd_fp_reg(vcpu, static_cast<hv_simd_fp_reg_t>(HV_SIMD_FP_REG_Q0 + index), &q);
+        u64 value{};
+        std::memcpy(&value, &q, sizeof(value));
+        return value;
+    }
+    void SetVector(int index, u64 value) override {
+        hv_simd_fp_uchar16_t q{};
+        std::memcpy(&q, &value, sizeof(value));
+        hv_vcpu_set_simd_fp_reg(vcpu, static_cast<hv_simd_fp_reg_t>(HV_SIMD_FP_REG_Q0 + index), q);
+    }
+    u64 GetSP() override {
+        u64 value{};
+        hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_SP_EL0, &value);
+        return value;
+    }
+
+private:
+    hv_vcpu_t vcpu;
+};
 
 // SCTLR_EL1: MMU, caches, and EL0 access to DC ZVA, CTR_EL0, WFI/WFE and cache maintenance.
 constexpr u64 SctlrEl1 = 0x30D00800ULL | (1ULL << 0) | (1ULL << 2) | (1ULL << 12) | (1ULL << 14) |
@@ -305,6 +341,10 @@ HaltReason ArmHypervisor::HandleGuestException(Kernel::KThread* thread) {
     case ExceptionClassDataAbortLower:
     case ExceptionClassInstructionAbortLower: {
         const bool prefetch = ExceptionClass(esr) == ExceptionClassInstructionAbortLower;
+        if (prefetch && NvnHook::IsThunk(elr)) {
+            // A call to one of the NVN hook's synthetic addresses, which are never mapped.
+            return RunNvnThunk(thread, elr, spsr);
+        }
         const bool write = !prefetch && (esr & (1U << 6)) != 0;
         const u32 fault_status = static_cast<u32>(esr) & 0x3F;
         const bool page_fault = (fault_status & ~3U) == 4 || (fault_status & ~3U) == 12;
@@ -337,6 +377,9 @@ HaltReason ArmHypervisor::HandleGuestException(Kernel::KThread* thread) {
     }
 
     case ExceptionClassBrk64:
+        if (NvnHook::IsThunk(elr)) {
+            return RunNvnThunk(thread, elr, spsr);
+        }
         return_to(elr);
         return HaltReason::InstructionBreakpoint;
 
@@ -348,6 +391,21 @@ HaltReason ArmHypervisor::HandleGuestException(Kernel::KThread* thread) {
         return_to(elr);
         return HaltReason::PrefetchAbort;
     }
+}
+
+/// Guest code reached an NVN hook thunk at pc: runs it, then the guest goes on where it says (X16)
+/// with cpsr. A call that may block runs from the kernel, as SVC HaltedCallSvc.
+HaltReason ArmHypervisor::RunNvnThunk(Kernel::KThread* thread, u64 pc, u64 cpsr) {
+    VcpuRegisters registers{m_vcpu};
+    auto* const process = thread->GetOwnerProcess();
+    const bool halt = NvnHook::OnBlockEntry(pc, registers, process->GetMemory(), process);
+    HV_CHECK(hv_vcpu_set_reg(m_vcpu, HV_REG_PC, registers.GetRegister(16)));
+    HV_CHECK(hv_vcpu_set_reg(m_vcpu, HV_REG_CPSR, cpsr));
+    if (!halt) {
+        return {};
+    }
+    m_svc = NvnHook::HaltedCallSvc;
+    return HaltReason::SupervisorCall;
 }
 
 HaltReason ArmHypervisor::RunThread(Kernel::KThread* thread) {
@@ -436,7 +494,16 @@ HaltReason ArmHypervisor::RunThread(Kernel::KThread* thread) {
             if (ec == ExceptionClassHvc64 && (syndrome & 0xFFFF) == 0) {
                 hr |= HandleGuestException(thread);
             } else if (ec == ExceptionClassBrk64) {
-                hr |= HaltReason::InstructionBreakpoint;
+                u64 pc{};
+                hv_vcpu_get_reg(m_vcpu, HV_REG_PC, &pc);
+                if (NvnHook::IsThunk(pc)) {
+                    // The BRK the NVN hook put at nvnBootstrapLoader.
+                    u64 cpsr{};
+                    hv_vcpu_get_reg(m_vcpu, HV_REG_CPSR, &cpsr);
+                    hr |= RunNvnThunk(thread, pc, cpsr);
+                } else {
+                    hr |= HaltReason::InstructionBreakpoint;
+                }
             } else if (ec == ExceptionClassWfx) {
                 u64 pc{};
                 hv_vcpu_get_reg(m_vcpu, HV_REG_PC, &pc);

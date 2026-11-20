@@ -1,0 +1,69 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 30d4278..5f25c50 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -294,6 +294,7 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
+         memset(o, 0, sizeof *o);
+         return 0;
+     }
++    nvn_dirty_add_range(o->mem, o->size);
+ #else
+     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
+     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+diff --git a/dm/gfx/nvn/nvn_dirty.c b/dm/gfx/nvn/nvn_dirty.c
+index 803cd27..e8d706a 100644
+--- a/dm/gfx/nvn/nvn_dirty.c
++++ b/dm/gfx/nvn/nvn_dirty.c
+@@ -54,9 +54,18 @@ static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation
+ static _Atomic uint64_t g_range_epoch;
+ static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
+ static _Atomic uint64_t g_mp_begun, g_mp_done;   // this module's protection changes begun and finished: on_fault tells from them whether its scan saw the protection as it is
++#ifdef LICHII_NVN_METAL_LIVE
++uint64_t nvn_direct_guest_of(uint64_t host);
++void nvn_direct_track_pages(uint64_t address, uint64_t size, int armed);
++#endif
+ static void mp(uintptr_t a, size_t len, int prot) {
+     atomic_fetch_add(&g_mp_begun, 1);
++#ifdef LICHII_NVN_METAL_LIVE
++    // Lichii owns the guest pages' protection: read-only pages are its write-tracked (rasterizer-cached) pages, whose writes reach nvn_dirty_cpu_written
++    uint64_t t = mach_absolute_time(); nvn_direct_track_pages(nvn_direct_guest_of(a), len, prot == PROT_READ); atomic_fetch_add(&g_mp_done, 1);
++#else
+     uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot); atomic_fetch_add(&g_mp_done, 1);
++#endif
+     atomic_fetch_add(&g_mp_ticks, mach_absolute_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
+ }
+ 
+@@ -284,6 +293,21 @@ __attribute__((constructor)) static void dirty_init(void) {
+     dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write);
+ #endif
+ }
++#ifdef LICHII_NVN_METAL_LIVE
++// A guest write to a tracked page, reported by Lichii's memory (counted as the fault it replaces), and the host's own writes into guest memory
++void nvn_dirty_cpu_written(void *addr, size_t len) {
++    uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
++    if (!len) return;
++    for (int i = 0; i < n; i++) {
++        range_t *r = rg(i);
++        if (!live_at(i) || e <= rb(r) || a >= re(r) || !pin(r)) continue;
++        uintptr_t base = rb(r), end = re(r);
++        if (e > base && a < end) { uintptr_t lo = a > base ? a : base, hi = e < end ? e : end; release_pages(r, (lo - base) >> g_shift, (hi - 1 - base) >> g_shift, &g_faults); }
++        unpin(r);
++    }
++}
++void dm_guest_write_prepare(void *addr, size_t len) { prep_write(addr, len); }
++#endif
+ 
+ void nvn_dirty_add_range(const void *mem, size_t size) {
+     atomic_fetch_add(&g_adds_total, 1);
+diff --git a/dm/gfx/nvn/nvn_dirty.h b/dm/gfx/nvn/nvn_dirty.h
+index 48d155c..492b8c2 100644
+--- a/dm/gfx/nvn/nvn_dirty.h
++++ b/dm/gfx/nvn/nvn_dirty.h
+@@ -25,6 +25,7 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
+ // Pages of [addr, addr+len) written after the stamp that hold no byte of the ranges ex[0..nex) (a host write the caller accounts for): how many, the first one's address in *first
+ // (when not NULL); SIZE_MAX when the span is untracked
+ size_t nvn_dirty_since_except(const void *span, const void *addr, size_t len, uint64_t stamp, const uintptr_t (*ex)[2], int nex, uintptr_t *first);
++void nvn_dirty_cpu_written(void *addr, size_t len);                // Lichii: a guest write to a tracked page, reported by its memory (LICHII_NVN_METAL_LIVE)
+ void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // Cumulative: number of page faults triggered by game writes, number of pages unprotected before host writes
+ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // Cumulative: this module's mprotect call count, pages covered, time spent
+ void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n);   // Diagnostic: every live range over the host page at addr (state, generation, registration; span = the caller's kept range) and the kernel's protection of it
