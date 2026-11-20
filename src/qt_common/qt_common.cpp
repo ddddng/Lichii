@@ -129,8 +129,12 @@ Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window)
         if (!metal_layer || wsi.type != Core::Frontend::WindowSystemType::Cocoa) {
             return wsi;
         }
-        const id device = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
-            metal_layer, sel_registerName("defaultDevice"));
+        id device = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(metal_layer,
+                                                                  sel_registerName("device"));
+        if (!device) {
+            device = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+                metal_layer, sel_registerName("preferredDevice"));
+        }
         if (!device) {
             return wsi;
         }
