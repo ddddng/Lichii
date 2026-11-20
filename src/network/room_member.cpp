@@ -375,8 +375,10 @@ void RoomMember::RoomMemberImpl::HandleJoinPacket(const ENetEvent* event, u64 ge
     packet.IgnoreBytes(sizeof(u8)); // Ignore the message type
 
     // Parse the MAC Address from the packet
-    IPv4Address ip;
-    packet.Read(ip);
+    IPv4Address ip{};
+    if (!packet.Read(ip) || ip == IPv4Address{}) {
+        return;
+    }
     {
         std::lock_guard lock{enet_identity_mutex};
         if (generation != enet_generation || state != State::Joining)

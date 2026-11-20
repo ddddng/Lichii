@@ -63,8 +63,9 @@ ProxySocket::~ProxySocket() {
 }
 
 bool ProxySocket::MatchesPacket(const ProxyPacket& packet) const {
-    if (protocol != packet.protocol || local_endpoint.portno != packet.remote_endpoint.portno ||
-        closed) {
+    if (closed || packet.local_endpoint.family != Domain::INET ||
+        packet.remote_endpoint.family != Domain::INET || protocol != packet.protocol ||
+        local_endpoint.portno != packet.remote_endpoint.portno) {
         return false;
     }
     if (!broadcast && packet.broadcast) {
@@ -113,6 +114,9 @@ Errno ProxySocket::SetSockOpt(SOCKET fd_, int option, T value) {
 }
 
 Errno ProxySocket::Initialize(Domain domain, Type type, Protocol socket_protocol) {
+    if (domain != Domain::INET) {
+        return Errno::AFNOSUPPORT;
+    }
     {
         std::lock_guard guard(packets_mutex);
         socket_type = type;
@@ -129,6 +133,9 @@ std::pair<ProxySocket::AcceptResult, Errno> ProxySocket::Accept() {
 }
 
 Errno ProxySocket::Connect(SockAddrIn addr_in) {
+    if (addr_in.family == Domain::INET6) {
+        return Errno::AFNOSUPPORT;
+    }
     LOG_WARNING(Network, "(STUBBED) called");
     return Errno::SUCCESS;
 }
@@ -164,13 +171,11 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
     }
 
     bool local_bind = false;
-    const auto member = GetRoomMember().lock();
-    auto own = GetRoomIPv4Address();
-    if (member && !own)
-        return Errno::NOTCONN;
-    if (own) {
-        if (!member)
+    if (const auto member = GetRoomMember().lock()) {
+        const auto identity = member->GetENetIdentity();
+        if (IsDirectLanActive() || !identity) {
             return Errno::NOTCONN;
+        }
         std::vector<IPv4Address> local, peers;
         if (local_addresses) {
             local = local_addresses();
@@ -180,18 +185,26 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
             }
         }
         for (const auto& peer : member->GetMemberInformationSnapshot()) {
-            if (peer.fake_ip != *own)
+            if (peer.fake_ip != identity->ip)
                 peers.push_back(peer.fake_ip);
         }
-        local_bind = IsRoomLocalBind(addr.ip, *own, local, peers);
+        const auto current = member->GetENetIdentity();
+        if (!current || current->generation != identity->generation) {
+            return Errno::NOTCONN;
+        }
+        local_bind = IsRoomLocalBind(addr.ip, identity->ip, local, peers);
         if (!local_bind)
             return Errno::INVAL;
     }
 
-    const auto binding_protocol =
-        protocol == Protocol::Unspecified
-            ? (socket_type == Type::STREAM ? Protocol::TCP : Protocol::UDP)
-            : protocol;
+    auto binding_protocol = protocol;
+    if (protocol == Protocol::Unspecified || protocol == Protocol::IP) {
+        if (socket_type == Type::STREAM) {
+            binding_protocol = Protocol::TCP;
+        } else if (socket_type == Type::DGRAM) {
+            binding_protocol = Protocol::UDP;
+        }
+    }
     auto& registry = GetBindings();
     std::lock_guard registry_guard(registry.mutex);
     const auto occupied = [&](u16 port, bool automatic) {
@@ -343,17 +356,6 @@ std::pair<s32, Errno> ProxySocket::Send(std::span<const u8> message, int flags) 
     return {static_cast<s32>(0), Errno::SUCCESS};
 }
 
-bool ProxySocket::SendPacket(ProxyPacket& packet) {
-    if (auto room_member = Network::GetRoomMember().lock()) {
-        if (room_member->IsConnected()) {
-            packet.data = Common::Compression::CompressDataZSTDDefault(packet.data.data(),
-                                                                       packet.data.size());
-            return room_member->SendProxyPacket(packet);
-        }
-    }
-    return false;
-}
-
 std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message,
                                           const SockAddrIn* addr) {
     ASSERT((flags & ~FLAG_MSG_DONTWAIT) == 0);
@@ -367,6 +369,9 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
         if (closed) {
             return {-1, Errno::BADF};
         }
+        if (addr->family != Domain::INET) {
+            return {-1, Errno::AFNOSUPPORT};
+        }
         bound = is_bound;
         local_bind = room_local_bind;
         packet.local_endpoint = local_endpoint;
@@ -379,18 +384,14 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
         return {static_cast<s32>(message.size()), Errno::SUCCESS};
     }
 
-    if (auto room_member = Network::GetRoomMember().lock()) {
-        if (!room_member->IsConnected()) {
-            return {-1, Errno::CONNRESET};
-        }
+    const auto room_member = Network::GetRoomMember().lock();
+    if (room_member && !room_member->IsConnected()) {
+        return {-1, Errno::CONNRESET};
     }
 
     packet.remote_endpoint = *addr;
 
-    if (!local_bind)
-        return {-1, Errno::NOTCONN};
-    const auto room_member = Network::GetRoomMember().lock();
-    if (!room_member)
+    if (!local_bind || !room_member)
         return {-1, Errno::NOTCONN};
     const auto identity = room_member->GetENetIdentity();
     if (!identity)
@@ -398,10 +399,8 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
     packet.local_endpoint.ip = identity->ip;
     packet.enet_generation = identity->generation;
 
-    packet.data.clear();
-    std::copy(message.begin(), message.end(), std::back_inserter(packet.data));
-
-    if (!SendPacket(packet))
+    packet.data = Common::Compression::CompressDataZSTDDefault(message.data(), message.size());
+    if (!room_member->SendProxyPacket(packet))
         return {-1, Errno::CONNRESET};
 
     return {static_cast<s32>(message.size()), Errno::SUCCESS};
