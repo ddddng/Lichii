@@ -10,18 +10,22 @@
 // (host-lent command segments, the shared empty recording, virtual pool ranges): they pass both
 // ways unchanged.
 
+#ifndef LICHII_NVN_METAL_BRIDGE
 #include <sys/mman.h>   // (Windows: bananative/shim/win32)
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "hle.h"
 #include "nvn_count.h"
-#include "nvn_direct.h"
-#include "nvn_direct_front.h"
+#include "nvn_direct_dispatch.h"
 #include "nvn_protos.h"
+#ifndef LICHII_NVN_METAL_BRIDGE
+#include "nvn_direct_front.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#endif
 
 typedef struct { NVNbufferAddress data; const void* control; uint64_t ext; } shader_data_ext;
 typedef struct { NVNmemoryPool* phys; int64_t poff, voff; uint64_t size; int32_t storage_class, pad; } mapping_request;
@@ -40,6 +44,7 @@ static inline uint64_t guest_addr(uint64_t h) {
 }
 uint64_t nvn_direct_guest_of(uint64_t host) { return guest_addr(host); }
 uint64_t nvn_direct_host_of(uint64_t guest) { return host_addr(guest); }
+#ifndef LICHII_NVN_METAL_BRIDGE
 void* nvn_direct_map_view(uint64_t address, uint64_t size, uint64_t* unmapped) {
     *unmapped = 0;
     return g_memory.map_view ? g_memory.map_view(g_memory.context, address, size, unmapped) : NULL;
@@ -121,6 +126,7 @@ const void* nvn_direct_readable(uint64_t host) {
     if (!g_memory.backing) return (const void*)(uintptr_t)host;
     return g_memory.backing(g_memory.context, host - g_arena);
 }
+#endif
 static inline float F_float(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 static inline double F_double(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
 static inline uint64_t R_float(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -185,12 +191,17 @@ typedef uint64_t (*dispatch_fn)(void* fn, const uint64_t* x, const uint64_t* v, 
         (void)x; (void)v; (void)s; (void)v0;                                                       \
         body                                                                                       \
     }
-#include "nvn_dispatch.inc"
+#ifdef LICHII_NVN_METAL_BRIDGE
+#define NVN_DISPATCH_INC "nvn_metal_dispatch.inc"
+#else
+#define NVN_DISPATCH_INC "nvn_dispatch.inc"
+#endif
+#include NVN_DISPATCH_INC
 #undef D
 typedef struct { const char* name; dispatch_fn d; int flags; } dispatch_entry;
 #define D(name, flags, body) {#name, d_##name, flags},
 static const dispatch_entry g_dispatch[] = {
-#include "nvn_dispatch.inc"
+#include NVN_DISPATCH_INC
 };
 #undef D
 
@@ -203,19 +214,23 @@ extern const char* nvn_names[NVN_NFUNC];
 void nvn_unimpl_entry(void);
 void nvn_prof_entry(void);
 void nvn_big_entry(void);
+#ifndef LICHII_NVN_METAL_BRIDGE
 void nvn_nops_register(void);
 void* nvn_nop_fn(void);
+#endif
 
 _Thread_local uint64_t nvn_direct_guest_lr;
 static struct { void* fn; const dispatch_entry* d; } g_slot[NVN_NFUNC];
 // The empty implementations of names without a prototype (hle_nvn.c g_nops: the shading-rate calls):
 // they take no arguments and return nothing.
+#ifndef LICHII_NVN_METAL_BRIDGE
 static uint64_t d_empty(void* fn, const uint64_t* x, const uint64_t* v, const uint64_t* s, uint64_t* v0) {
     (void)x; (void)v; (void)s; (void)v0;
     ((void (*)(void))fn)();
     return 0;
 }
 static const dispatch_entry g_empty = {"(empty)", d_empty, 0};
+#endif
 
 // The game's NVN (nvn_direct_init): the front end and the replay choose NVN2's behaviour by
 // dm_sdk_ounce and NVN1's API version by dm_sdk_major (upstream's loader.c reads both from the sdk).
@@ -230,8 +245,11 @@ void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memor
     g_memory = *memory;
     g_switch2 = switch2 != 0;
     g_sdk_major = sdk_major;
+#ifndef LICHII_NVN_METAL_BRIDGE
     nvn_nops_register();
+#endif
     for (int i = 0; i < NVN_NFUNC; i++) {
+        g_slot[i].d = NULL;
         void* fn = nvn_slot[i].fn;
         if (fn == (void*)nvn_prof_entry) fn = nvn_real[i];
         if (fn == (void*)nvn_big_entry) fn = nvn_big_real[i];
@@ -240,7 +258,9 @@ void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memor
             if (!strcmp(g_dispatch[k].name, nvn_names[i])) g_slot[i].d = &g_dispatch[k];
         // Without a dispatch entry: an empty implementation, or a name the hook answers itself
         // (nvnBootstrapLoader, nvnDeviceGetProcAddress: gen_dispatch.py HOOK_OWN).
+#ifndef LICHII_NVN_METAL_BRIDGE
         if (fn && !g_slot[i].d && fn == nvn_nop_fn()) g_slot[i].d = &g_empty;
+#endif
         g_slot[i].fn = g_slot[i].d ? fn : NULL;
     }
 }
@@ -252,6 +272,7 @@ int nvn_direct_float_args(int slot) {
     return g_slot[slot].d && (g_slot[slot].d->flags & (NVN_DISPATCH_FLOAT_ARGS | NVN_DISPATCH_FLOAT_RETURN));
 }
 
+#ifndef LICHII_NVN_METAL_BRIDGE
 int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
     const char* const name = nvn_direct_name(slot);
     if (!strcmp(name, "nvnSyncWait")) {
@@ -264,6 +285,7 @@ int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
         return mtl_tex_gpu_owned(((const tex_t*)host_ptr(x[0]))->serial) && !mtl_wait_acq(mtl_last_fence(), 0);
     return 0;
 }
+#endif
 uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr, uint64_t* v0) {
     nvn_direct_guest_lr = lr;
     return g_slot[slot].d->d(g_slot[slot].fn, x, v, (const uint64_t*)host_ptr(sp), v0);
