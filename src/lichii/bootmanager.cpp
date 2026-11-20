@@ -62,6 +62,9 @@
 #include "qt_common/qt_common.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+#include "video_core/renderer_metal/presentation_host.h"
+#endif
 #include "lichii/bootmanager.h"
 #include "lichii/main_window.h"
 
@@ -118,6 +121,50 @@ struct VulkanRenderWidget : public RenderWidget {
         windowHandle()->setSurfaceType(QWindow::VulkanSurface);
     }
 };
+
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+class MetalRenderWidget final : public RenderWidget {
+public:
+    explicit MetalRenderWidget(GRenderWindow* parent) : RenderWidget(parent) {
+        windowHandle()->setSurfaceType(QWindow::MetalSurface);
+        windowHandle()->installEventFilter(this);
+        connect(windowHandle(), &QWindow::screenChanged, this, &MetalRenderWidget::ResizeDrawable);
+    }
+
+    void SetLayer(const std::shared_ptr<void>& layer) {
+        metal_layer = layer;
+        QtCommon::UpdateMetalDrawableSize(*windowHandle(), layer.get());
+    }
+
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override {
+        if (object == windowHandle()) {
+            switch (event->type()) {
+            case QEvent::Resize:
+            case QEvent::Expose:
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+            case QEvent::DevicePixelRatioChange:
+#endif
+                ResizeDrawable();
+                break;
+            default:
+                break;
+            }
+        }
+        return RenderWidget::eventFilter(object, event);
+    }
+
+private:
+    void ResizeDrawable() {
+        const auto layer = metal_layer.lock();
+        if (layer && Metal::IsPresentationHostBound()) {
+            QtCommon::UpdateMetalDrawableSize(*windowHandle(), layer.get());
+        }
+    }
+
+    std::weak_ptr<void> metal_layer;
+};
+#endif
 
 struct NullRenderWidget : public RenderWidget {
     explicit NullRenderWidget(GRenderWindow* parent) : RenderWidget(parent) {}
@@ -181,6 +228,27 @@ void GRenderWindow::OnFrameDisplayed() {
         emit TasPlaybackStateChanged();
     }
 }
+
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+void GRenderWindow::OnMetalFramePresented(u64 ticket, double seconds) {
+    const std::weak_ptr<void> surface = window_info.metal_layer;
+    QMetaObject::invokeMethod(
+        this,
+        [this, surface, ticket, seconds] {
+            const auto& active = window_info.metal_layer;
+            if (!active || surface.owner_before(active) || active.owner_before(surface) ||
+                QtCommon::system->IsShuttingDown()) {
+                return;
+            }
+            if (!first_frame) {
+                LOG_INFO(Frontend, "Native Metal displayed first frame: ticket={} time={:.6f}",
+                         ticket, seconds);
+            }
+            OnFrameDisplayed();
+        },
+        Qt::QueuedConnection);
+}
+#endif
 
 bool GRenderWindow::IsShown() const {
     return !isMinimized();
@@ -761,6 +829,15 @@ bool GRenderWindow::InitRenderTarget() {
             return false;
         break;
     case Settings::RendererBackend::Vulkan:
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+        if (qgetenv("EDEN_NX2_NVN_METAL") == "1" &&
+            QtCommon::GetWindowSystemType() == Core::Frontend::WindowSystemType::Cocoa) {
+            if (InitializeMetal()) {
+                break;
+            }
+            LOG_WARNING(Frontend, "Native Metal surface unavailable; using the Vulkan surface");
+        }
+#endif
         if (!InitializeVulkan())
             return false;
         break;
@@ -770,7 +847,9 @@ bool GRenderWindow::InitRenderTarget() {
     }
 
     // Update the Window System information with the new render target
-    window_info = QtCommon::GetWindowSystemInfo(child_widget->windowHandle());
+    if (!window_info.metal_layer) {
+        window_info = QtCommon::GetWindowSystemInfo(child_widget->windowHandle());
+    }
 
     const auto target_width = Settings::IsDockedMode() ? Layout::ScreenDocked::Width : Layout::ScreenUndocked::Width;
     const auto target_height = Settings::IsDockedMode() ? Layout::ScreenDocked::Height : Layout::ScreenUndocked::Height;
@@ -794,6 +873,10 @@ bool GRenderWindow::InitRenderTarget() {
 }
 
 void GRenderWindow::ReleaseRenderTarget() {
+    if (window_info.metal_layer) {
+        window_info = {};
+        child_widget->hide();
+    }
     if (child_widget) {
         layout()->removeWidget(child_widget);
         child_widget->deleteLater();
@@ -883,6 +966,23 @@ bool GRenderWindow::InitializeVulkan() {
     main_context = std::make_unique<DummyContext>();
     return true;
 }
+
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+bool GRenderWindow::InitializeMetal() {
+    auto child = std::make_unique<MetalRenderWidget>(this);
+    child->winId();
+    auto info = QtCommon::GetWindowSystemInfo(child->windowHandle());
+    if (!info.metal_layer) {
+        return false;
+    }
+    child->SetLayer(info.metal_layer);
+    window_info = std::move(info);
+    child_widget = child.release();
+    main_context = std::make_unique<DummyContext>();
+    LOG_INFO(Frontend, "Qt MetalSurface is ready for native Metal presentation");
+    return true;
+}
+#endif
 
 void GRenderWindow::InitializeNull() {
     child_widget = new NullRenderWidget(this);

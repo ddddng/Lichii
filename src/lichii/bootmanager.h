@@ -68,6 +68,9 @@ public:
 
     // EmuWindow implementation.
     void OnFrameDisplayed() override;
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+    void OnMetalFramePresented(u64 ticket, double seconds) override;
+#endif
     bool IsShown() const override;
     std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override;
 
@@ -153,6 +156,9 @@ private:
 
     bool InitializeOpenGL();
     bool InitializeVulkan();
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+    bool InitializeMetal();
+#endif
     void InitializeNull();
     bool LoadOpenGL();
     QStringList GetUnsupportedGLExtensions() const;
