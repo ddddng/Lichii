@@ -59,8 +59,6 @@ public:
 
     std::pair<s32, Errno> Send(std::span<const u8> message, int flags) override;
 
-    bool SendPacket(ProxyPacket& packet);
-
     std::pair<s32, Errno> SendTo(u32 flags, std::span<const u8> message,
                                  const SockAddrIn* addr) override;
 

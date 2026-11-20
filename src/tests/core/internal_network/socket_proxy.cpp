@@ -81,6 +81,28 @@ TEST_CASE("Room proxy refuses bind while its member has no ready identity",
     CHECK(socket.Bind({Network::Domain::INET, {}, 0}) == Network::Errno::NOTCONN);
 }
 
+TEST_CASE("IPv6 addresses do not enter the IPv4 room proxy", "[core][sockets]") {
+    using namespace Network;
+    ProxySocket ipv6, ipv4;
+    CHECK(ipv6.Initialize(Domain::INET6, Type::DGRAM, Protocol::IP) == Errno::AFNOSUPPORT);
+    REQUIRE(ipv4.Initialize(Domain::INET, Type::DGRAM, Protocol::IP) == Errno::SUCCESS);
+    const SockAddrIn endpoint{.family = Domain::INET6, .ip = {}, .portno = 55000,
+                              .ip6 = {0x20, 0x01}};
+    CHECK(ipv4.Bind(endpoint) == Errno::INVAL);
+    CHECK(ipv4.Connect(endpoint) == Errno::AFNOSUPPORT);
+    REQUIRE(ipv4.Bind({.family = Domain::INET, .ip = {}, .portno = 0}) == Errno::SUCCESS);
+    const std::array<u8, 1> payload{7};
+    CHECK(ipv4.SendTo(0, payload, &endpoint) == std::pair<s32, Errno>{-1, Errno::AFNOSUPPORT});
+    auto packet = MakePacket(Protocol::IP);
+    packet.remote_endpoint.portno = ipv4.GetSockName().first.portno;
+    REQUIRE(ipv4.AcceptsProxyPacket(packet));
+    packet.local_endpoint.family = Domain::INET6;
+    CHECK_FALSE(ipv4.AcceptsProxyPacket(packet));
+    packet.local_endpoint.family = Domain::INET;
+    packet.remote_endpoint.family = Domain::INET6;
+    CHECK_FALSE(ipv4.AcceptsProxyPacket(packet));
+}
+
 TEST_CASE("ENet room source survives an unavailable selected interface",
           "[core][sockets][enet-source]") {
     using namespace std::chrono_literals;
@@ -314,6 +336,24 @@ TEST_CASE("Room wildcard conflicts fail while distinct addresses and transports 
     CHECK(tcp.Bind(endpoint) == Network::Errno::SUCCESS);
     CHECK(first.Bind({Network::Domain::INET, {192, 168, 1, 1}, 55001}) == Network::Errno::INVAL);
     CHECK(first.GetSockName().first.portno == 55000);
+}
+
+TEST_CASE("Guest protocol zero reserves the same room port as its transport",
+          "[core][sockets][ephemeral]") {
+    using namespace Network;
+    const auto type = GENERATE(Type::DGRAM, Type::STREAM);
+    const auto transport = type == Type::DGRAM ? Protocol::UDP : Protocol::TCP;
+    const auto guest_default = Service::Sockets::Translate(Service::Sockets::Protocol::IP);
+    ProxySocket implicit, explicit_transport;
+    REQUIRE(implicit.Initialize(Domain::INET, type, guest_default) == Errno::SUCCESS);
+    REQUIRE(explicit_transport.Initialize(Domain::INET, type, transport) == Errno::SUCCESS);
+    REQUIRE(implicit.Bind({.family = Domain::INET, .ip = {}, .portno = 0}) == Errno::SUCCESS);
+    const auto [endpoint, error] = implicit.GetSockName();
+    REQUIRE(error == Errno::SUCCESS);
+    REQUIRE(endpoint.portno != 0);
+    CHECK(explicit_transport.Bind(endpoint) == Errno::ADDRINUSE);
+    REQUIRE(implicit.Close() == Errno::SUCCESS);
+    CHECK(explicit_transport.Bind(endpoint) == Errno::SUCCESS);
 }
 
 TEST_CASE("Room endpoint reuse requires both sockets to opt in", "[core][sockets][ephemeral]") {
