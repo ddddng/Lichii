@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/host_memory.h"
+#include "common/logging.h"
 #include "core/device_memory.h"
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_page_group.h"
@@ -48,11 +49,14 @@ private:
             return 0;
         }
         Kernel::KPageGroup group{self.kernel, self.page_table.GetBlockInfoManager()};
-        if (R_FAILED(self.page_table.MakeAndOpenPageGroup(
+        if (const Result result = self.page_table.MakeAndOpenPageGroup(
                 &group, address, length / Kernel::PageSize, Kernel::KMemoryState::None,
                 Kernel::KMemoryState::None, Kernel::KMemoryPermission::None,
                 Kernel::KMemoryPermission::None, Kernel::KMemoryAttribute::None,
-                Kernel::KMemoryAttribute::None))) {
+                Kernel::KMemoryAttribute::None);
+            R_FAILED(result)) {
+            LOG_ERROR(Core, "NVN Metal pool {:#x}+{:#x}: no page group (result {:#x})", address,
+                      length, result.raw);
             return 0;
         }
         try {
@@ -69,6 +73,16 @@ private:
                 out->unpin = Unpin;
                 return 1;
             }
+            size_t unaligned = 0;
+            for (const auto& run : pin->runs) {
+                unaligned += (run.host_offset | run.length) % 0x4000 != 0;
+            }
+            LOG_ERROR(Core,
+                      "NVN Metal pool {:#x}+{:#x}: no backing view over {} physical runs, {} not "
+                      "on 16 KiB host pages (first at {:#x}+{:#x})",
+                      address, length, pin->runs.size(), unaligned,
+                      pin->runs.empty() ? 0 : pin->runs.front().host_offset,
+                      pin->runs.empty() ? 0 : pin->runs.front().length);
         } catch (const std::bad_alloc&) {
         }
         group.Close(self.kernel);
