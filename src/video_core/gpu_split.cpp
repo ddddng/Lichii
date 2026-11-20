@@ -22,7 +22,6 @@
 #endif
 #include <cstring>
 #include <string>
-#include <string_view>
 
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
@@ -175,11 +174,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                          std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
     ring = std::make_unique<u64[]>(RingWords);
     ++starts; // Before the back starts: its holds name entries with it (EntryTag)
-    const char* const render = std::getenv("EDEN_NX2_RENDER_FOLLOWER");
-    const bool render_requested = render != nullptr && std::string_view{render} == "1";
-    if (render_requested && !render_follower_supported) {
-        LOG_INFO(HW_GPU, "GPU render follower: unsupported on this renderer or driver");
-    } else if (render_requested) {
+    if (render_follower_supported) {
         render_overlap_entries = 0;
         render_joins = 0;
         render_follower.emplace();
