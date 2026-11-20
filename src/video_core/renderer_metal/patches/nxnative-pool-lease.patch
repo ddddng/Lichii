@@ -48,7 +48,7 @@ index cd2119c5..9387135d 100644
  void mtl_pool_del(const void *mem);
  void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 3261eb05..591d53d9 100644
+index 3261eb05..a5c12097 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -23,6 +23,9 @@
@@ -147,8 +147,8 @@ index 3261eb05..591d53d9 100644
  // have protected pages in it; a small pool's first or last page may be a neighbour's, protected by that pool's texture
  static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b) {
 +#ifdef LICHII_NVN_METAL_LIVE
-+    uint64_t off = 0;
-+    return lichii_metal_new_guest_pool_buffer(g_dev, (const void *)a, b - a, &off);
++    (void)a; (void)b;
++    return nil;   // pools are imported whole by pool_new_prep on the thread that initializes them
 +#else
      nvn_dirty_open((void *)a, b - a);
      id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
