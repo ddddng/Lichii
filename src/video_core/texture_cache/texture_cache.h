@@ -661,7 +661,7 @@ bool TextureCache<P>::GobViewBytesReady(DAddr cpu_addr, size_t size) {
     }
     ImageId source_id{};
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, ImageBase& image) {
-        if (!image.info.native_tiling || False(image.flags & ImageFlagBits::GpuModified) ||
+        if (!image.info.native_tiling || !image.IsSafeGpuCopy() ||
             True(image.flags & ImageFlagBits::Remapped)) {
             return false;
         }
