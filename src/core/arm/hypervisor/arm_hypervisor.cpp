@@ -60,6 +60,9 @@ public:
         hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_SP_EL0, &value);
         return value;
     }
+    void SetSP(u64 value) override {
+        hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_SP_EL0, value);
+    }
 
 private:
     hv_vcpu_t vcpu;

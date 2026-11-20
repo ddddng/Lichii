@@ -73,6 +73,9 @@ struct Slot {
     /// leaves the JIT first (it may block: HaltedCallSvc).
     s32 front = -1;
     bool halts{};
+    /// Metal mode: a command buffer call that may run short of the game's command memory, which
+    /// first runs the game's memory callback (CallMemoryCallback).
+    bool asks{};
 };
 
 /// The calls that may block. They run from the kernel (RunHaltedCall), not inside the JIT's
@@ -122,6 +125,8 @@ struct State {
     std::optional<MetalPoolPins> pool_pins; ///< from the first lookup (nvn_direct_init)
     std::atomic<bool> shader_failed{};
     std::atomic<bool> dispatch_failed{};
+    /// Where the game's command memory callback returns to (CallMemoryCallback).
+    u32 callback_return_slot{MaxSlots};
 #endif
 };
 
@@ -347,9 +352,24 @@ void InstallDirect(State& state) {
         if (state.slots[slot].halts && nvn_direct_float_args(front)) {
             LOG_CRITICAL(Core, "NVN direct: {} takes floats, which a halted call loses", name);
         }
+#ifdef LICHII_NVN_METAL
+        constexpr std::array NoAsk{std::string_view{"Get"}, std::string_view{"Add"},
+                                   std::string_view{"SetMemoryCallback"},
+                                   std::string_view{"Initialize"}, std::string_view{"Finalize"},
+                                   std::string_view{"IsRecording"}};
+        state.slots[slot].asks =
+            name.starts_with("nvnCommandBuffer") && !state.slots[slot].halts &&
+            std::ranges::none_of(NoAsk, [&](std::string_view part) {
+                return name.find(part) != std::string::npos;
+            });
+#endif
         state.slot_by_name.emplace(name, slot);
         state.slot_count.store(slot + 1, std::memory_order_release);
     }
+#ifdef LICHII_NVN_METAL
+    state.callback_return_slot = state.slot_count.load(std::memory_order_relaxed);
+    state.slot_count.store(state.callback_return_slot + 1, std::memory_order_release);
+#endif
     // NVN2 is compiled into the module that exports nvnBootstrapLoader.
     u32 constants = 0;
     if (state.process->IsSwitch2()) {
@@ -531,6 +551,77 @@ void ReadArguments(ThunkRegisters& registers, std::array<u64, 8>& x, std::array<
 thread_local u32 t_halted_slot = MaxSlots;
 thread_local u64 t_halted_lr = 0;
 
+bool RunCall(State& state, const Slot& target, ThunkRegisters& registers, u64 lr);
+
+#ifdef LICHII_NVN_METAL
+/// x0-x8, v0-v7, lr, the slot and the events served of a call waiting for the game's memory callback.
+constexpr u64 CallbackFrameSize = 20 * 8;
+
+/// Metal mode: the game's command memory callback is guest code. A command buffer call that may
+/// run short of command or control memory (nvn_cmd_memory_ask) runs it first in the guest, as NVN
+/// does inside the call; the callback returns to callback_return_slot, which runs the call. The
+/// call's registers wait on the guest stack, so the guest thread may block and move in between.
+/// served: a bit per event the callback already answered for this call, which is not asked again.
+bool CallMemoryCallback(State& state, u32 slot, u64 lr, ThunkRegisters& registers,
+                        Core::Memory::Memory& memory, u64 served = 0) {
+    const u64 command_buffer = registers.GetRegister(0);
+    const u64 host = nvn_direct_host_of(command_buffer);
+    u64 callback = 0;
+    u64 data = 0;
+    u32 event = 0;
+    u32 size = 0;
+    if (host == 0 || !nvn_cmd_memory_ask(reinterpret_cast<const void*>(host), &callback, &data,
+                                         &event, &size) ||
+        ((served >> event) & 1) != 0) {
+        return false;
+    }
+    const u64 sp = registers.GetSP() - CallbackFrameSize;
+    for (int i = 0; i < 9; ++i) {
+        memory.Write64(sp + 8 * i, registers.GetRegister(i));
+    }
+    for (int i = 0; i < 8; ++i) {
+        memory.Write64(sp + 8 * (9 + i), registers.GetVector(i));
+    }
+    memory.Write64(sp + 8 * 17, lr);
+    memory.Write64(sp + 8 * 18, slot);
+    memory.Write64(sp + 8 * 19, served | (u64{1} << event));
+    registers.SetSP(sp);
+    registers.SetRegister(1, event);
+    registers.SetRegister(2, size);
+    registers.SetRegister(3, data == 0 ? 0 : nvn_direct_guest_of(data));
+    registers.SetRegister(30, SyntheticAddress(state, state.callback_return_slot));
+    registers.SetRegister(16, callback);
+    return true;
+}
+
+/// The game's memory callback returned: the waiting call runs.
+bool ResumeAfterCallback(State& state, ThunkRegisters& registers, Core::Memory::Memory& memory) {
+    const u64 sp = registers.GetSP();
+    const u64 lr = memory.Read64(sp + 8 * 17);
+    const u64 slot = memory.Read64(sp + 8 * 18);
+    const u64 served = memory.Read64(sp + 8 * 19);
+    for (int i = 0; i < 9; ++i) {
+        registers.SetRegister(i, memory.Read64(sp + 8 * i));
+    }
+    for (int i = 0; i < 8; ++i) {
+        registers.SetVector(i, memory.Read64(sp + 8 * (9 + i)));
+    }
+    registers.SetSP(sp + CallbackFrameSize);
+    registers.SetRegister(30, lr);
+    registers.SetRegister(16, lr);
+    if (slot >= state.callback_return_slot || !state.slots[slot].asks) {
+        LOG_CRITICAL(Core, "NVN Metal: the game's memory callback returned to a lost call ({})",
+                     slot);
+        registers.SetRegister(0, 0);
+        return false;
+    }
+    if (CallMemoryCallback(state, static_cast<u32>(slot), lr, registers, memory, served)) {
+        return false;
+    }
+    return RunCall(state, state.slots[slot], registers, lr);
+}
+#endif
+
 /// Direct mode's block entries. Returns whether the JIT halts for the call (HaltedCallSvc).
 bool DirectEntry(State& state, u64 pc, ThunkRegisters& registers, Core::Memory::Memory& memory) {
     const u64 lr = registers.GetRegister(30);
@@ -597,6 +688,11 @@ bool DirectEntry(State& state, u64 pc, ThunkRegisters& registers, Core::Memory::
         registers.SetRegister(16, lr);
         return false;
     }
+#ifdef LICHII_NVN_METAL
+    if (slot == state.callback_return_slot) {
+        return ResumeAfterCallback(state, registers, memory);
+    }
+#endif
     const Slot& target = state.slots[slot];
     registers.SetRegister(16, lr);
     if (target.front < 0 || !nvn_direct_implemented(target.front)) {
@@ -616,6 +712,15 @@ bool DirectEntry(State& state, u64 pc, ThunkRegisters& registers, Core::Memory::
         t_halted_lr = lr;
         return true;
     }
+#ifdef LICHII_NVN_METAL
+    if (target.asks && CallMemoryCallback(state, slot, lr, registers, memory)) {
+        return false;
+    }
+#endif
+    return RunCall(state, target, registers, lr);
+}
+
+bool RunCall(State& state, const Slot& target, ThunkRegisters& registers, u64 lr) {
     std::array<u64, 8> x, v;
     ReadArguments(registers, x, v);
     u64 v0 = 0;

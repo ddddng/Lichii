@@ -25,7 +25,8 @@ set(patches
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-queue-stop.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-pool-lease.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-presented.patch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-write-tracking.patch")
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-write-tracking.patch"
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/nxnative-memory-callback.patch")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${patches} "${overlay}")
 set(stamp "${nxnative_pin}")
 foreach (input IN LISTS patches overlay)

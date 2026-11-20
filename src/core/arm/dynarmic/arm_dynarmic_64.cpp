@@ -170,6 +170,9 @@ void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::Instruc
             u64 GetSP() override {
                 return jit.GetSP();
             }
+            void SetSP(u64 value) override {
+                jit.SetSP(value);
+            }
         } registers{*m_parent.m_jit};
         if (Core::NvnHook::OnBlockEntry(value, registers, m_memory, m_process)) {
             // An NVN call that may block: it runs from the kernel, as an SVC.
