@@ -117,6 +117,19 @@ public:
     /// Takes down a view MapBackingView made, with its zero pages.
     void UnmapBackingView(u8* view, size_t length);
 
+    /// Fastmem whose host pages are larger than the guest's maps a host page of the virtual range
+    /// only while its guest pages are contiguous in the backing; the others stay inaccessible.
+    /// bits has one bit per host page, set while it is mapped read-write: the page holding
+    /// VirtualBasePointer() + offset is bit first + (offset >> shift). Readers load its words
+    /// atomically without a lock: a page leaves the set before it is unmapped or protected and
+    /// joins it after it is mapped. bits is nullptr when every guest page is mapped on its own.
+    struct ReadWritePages {
+        const u64* bits;
+        size_t first;
+        u32 shift;
+    };
+    [[nodiscard]] ReadWritePages ArenaReadWritePages() const noexcept;
+
 #ifdef _WIN32
     /// Windows: a host range of its own of `length` bytes for MapAlias, inaccessible until
     /// mapped (Linux maps the memfd into a range with mmap instead). nullptr (logged) without
@@ -170,6 +183,7 @@ private:
         bool fail_fallback;
         size_t fastmem_attempts{};
         size_t fallback_attempts{};
+        size_t host_page_size{}; ///< POSIX fastmem acts as if the host's pages were this size
     };
     static thread_local AllocationTestControl* allocation_test_control;
 

@@ -37,5 +37,6 @@ static NVNboolean nvn_native_program_initialize(NVNboolean (*fn)(NVNprogram*, co
     memcpy(&copy, builder, sizeof copy);
     if (copy.n < 0 || copy.n > 6 || copy.nrt || (copy.n && !copy.sd)) return 0;
     copy.sd = xl_shader_data(guest_addr((uint64_t)(uintptr_t)copy.sd), copy.n, 0);
+    if (XL_FAILED()) return 0;
     return fn(program, &copy);
 }

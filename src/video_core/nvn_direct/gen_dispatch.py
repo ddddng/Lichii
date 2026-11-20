@@ -85,6 +85,16 @@ NATIVE_ARRAY_LIMITS = {
 
 NATIVE_PRIVATE_POINTERS = {'shader_data_ext', 'dlss_builder_t', 'dlss_net_t', 'dlss_params_t'}
 
+# Native: the bytes behind pointer arguments that are not a struct of nvn.h or nxnative, by
+# (function, argument index). Native Metal on 16 KiB host pages checks that they are reachable as a
+# whole (nvn_guest_address.h). A void* followed by a size_t is sized by it, except pool storage
+# (nvnMemoryPoolInitialize checks it).
+NATIVE_POINTER_SIZES = {
+    ('nvnCommandBufferUpdateUniformBuffer', 5): 'x[4]',
+    ('nvnProgramInitializeFromBuilder', 1): 'sizeof(nvn_native_program_builder)',
+}
+NATIVE_UNSIZED_STORAGE = {'nvnMemoryPoolBuilderSetStorage'}
+
 NATIVE_SCALARS = {
     'void', 'char', 'float', 'double', 'int', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t',
     'size_t', 'ptrdiff_t', 'NVNboolean', 'NVNdebugDomainId', 'NVNstorageClass',
@@ -196,12 +206,23 @@ def main():
                     '*' in t and b in NATIVE_PRIVATE_POINTERS
                 ):
                     sys.exit(f'{name}: unaudited native type {t}')
+        regs = []
+        ints = floats = stack = 0
+        for a in args:
+            if a in FLOATS:
+                regs.append(f'v[{floats}]' if floats < 8 else f's[{stack}]')
+                stack += floats >= 8
+                floats += 1
+            else:
+                regs.append(f'x[{ints}]' if ints < 8 else f's[{stack}]')
+                stack += ints >= 8
+                ints += 1
         ints = floats = stack = 0
         exprs = []
         last_int = None
         scratch = 0
         flags = []
-        for a in args:
+        for n, a in enumerate(args):
             b = base(a)
             stars = a.count('*')
             if a in FLOATS:
@@ -239,11 +260,24 @@ def main():
                     sys.exit(f'{name}: array argument {i} without a count before it')
                 helper = ARRAYS.get(b, 'xl_pointers') if stars == 1 else 'xl_pointers'
                 expr = f'({a}){helper}({i}, (int){last_int}, {scratch})'
+                if native and helper == 'xl_pointers' and b in structs:
+                    expr = f'({a})xl_pointers_n({i}, (int){last_int}, {scratch}, sizeof({b}))'
                 scratch += 1
             else:
                 if b in structs and not structs[b] and b not in PLAIN_STRUCTS:
                     sys.exit(f'{name}: pointer to {b}, a struct with no rule for the addresses it may hold')
                 expr = f'({a})host_ptr({i})'
+                if native:
+                    size = NATIVE_POINTER_SIZES.get((name, n))
+                    if size is None and stars == 1 and (b in structs or b in NATIVE_PRIVATE_POINTERS):
+                        size = f'sizeof({b})'
+                    if (size is None and b == 'void' and n + 1 < len(args) and args[n + 1] == 'size_t'
+                            and name not in NATIVE_UNSIZED_STORAGE):
+                        size = regs[n + 1]
+                    if size is None and b == 'void' and name.startswith('nvnProgramBuilder') and n == 0:
+                        size = 'sizeof(nvn_native_program_builder)'
+                    if size is not None:
+                        expr = f'({a})host_ptr_n({i}, {size})'
             exprs.append(expr)
         if scratch > 2:
             sys.exit(f'{name}: more than two translated arrays')
@@ -251,6 +285,12 @@ def main():
         if ret not in FLOATS and '*' not in ret and rb in structs and rb not in WORD_STRUCTS:
             sys.exit(f'{name}: returns struct {rb} (x8)')
         sig = f'{ret} (*)({", ".join(args) if args else "void"})'
+        # Native: the arguments are translated first, and the call does not run when one failed.
+        prologue = ''
+        if native and args:
+            prologue = ' '.join(f'{a} a{n}_ = {e};' for n, (a, e) in enumerate(zip(args, exprs)))
+            prologue += ' if (XL_FAILED()) return 0; '
+            exprs = [f'a{n}_' for n in range(len(args))]
         call = f'(({sig})fn)({", ".join(exprs)})'
         if native and name == 'nvnProgramInitializeFromBuilder':
             call = f'nvn_native_program_initialize(({sig})fn, {", ".join(exprs)})'
@@ -267,8 +307,11 @@ def main():
             body = f'return guest_addr((uint64_t){call});'
         else:
             body = f'return (uint64_t){call};'
+        body = prologue + body
         if floats:
             flags.append('NVN_DISPATCH_FLOAT_ARGS')
+        if native and stack:
+            flags.append(f'({stack} << NVN_DISPATCH_STACK_SHIFT)')
         if native and name in NATIVE_ARRAY_LIMITS:
             limit = NATIVE_ARRAY_LIMITS[name]
             guard = f'(unsigned)(int)x[1] > {limit}'

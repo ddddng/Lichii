@@ -24,6 +24,10 @@ int nvn_direct_call_blocks(int slot, const uint64_t x[8]);
 /// An answer of NVN2's nvnDeviceGetInteger read from the game's driver (nvn_dispatch.c).
 void nvn_direct_set_device_integer(unsigned item, int value);
 
+/// Why the dispatch stopped running calls (a guest address it could not translate safely on 16 KiB
+/// host pages, nvn_guest_address.h), NULL while it runs them.
+const char* nvn_direct_failure(void);
+
 /// Permanent close, before the guest cores are suspended (never on a pause): waiters return.
 void nvn_mtl_request_stop(void);
 /// After every guest NVN call returned, before guest memory or the layer go: joins the replay

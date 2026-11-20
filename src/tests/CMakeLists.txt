@@ -360,6 +360,13 @@ if (TARGET nvn_direct AND NOT WIN32)
     add_test(NAME nvn_tracking_tests COMMAND nvn_tracking_tests)
 endif()
 
+if (NOT WIN32)
+    add_executable(nvn_guest_address_tests video_core/nvn_guest_address.c)
+    target_include_directories(nvn_guest_address_tests PRIVATE ..)
+    set_target_properties(nvn_guest_address_tests PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    add_test(NAME nvn_guest_address_tests COMMAND nvn_guest_address_tests)
+endif()
+
 if ((HAS_NCE AND LINUX) OR HAS_HYPERVISOR)
     enable_language(ASM)
     add_executable(arm_cpu_guest_tests core/arm_cpu_guest.cpp core/arm_cpu_guest.S)
