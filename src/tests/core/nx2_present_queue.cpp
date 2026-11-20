@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
@@ -74,6 +75,38 @@ TEST_CASE("Present releases stay in present order", "[nx2_present]") {
     // Values no pending release has are ignored.
     queue->Composited(7);
     REQUIRE(f.Released() == 2);
+}
+
+TEST_CASE("Present releases signal in order while another thread composites",
+          "[nx2_present]") {
+    Fixture f;
+    const auto queue = std::make_shared<Nx2PresentReleaseQueue>(f.timing, f.syncpoints, ReleaseId);
+    const auto now = f.timing.GetGlobalTimeNs();
+    REQUIRE(queue->Queue(now) == 1U);
+    REQUIRE(queue->Queue(now) == 2U);
+    // A guest action due at release 1 runs inside its increment. The GPU thread composites
+    // release 2 meanwhile: it must leave the signal to the thread already signalling 1.
+    u32 after_join = 0;
+    f.syncpoints.RegisterGuestAction(ReleaseId, 1, [&] {
+        std::thread gpu{[&] { queue->Composited(2); }};
+        gpu.join();
+        after_join = f.Released();
+    });
+    queue->Composited(1);
+    REQUIRE(after_join == 1U);
+    REQUIRE(f.Released() == 2U);
+}
+
+TEST_CASE("A guest action on the signalling thread may composite the next release",
+          "[nx2_present]") {
+    Fixture f;
+    const auto queue = std::make_shared<Nx2PresentReleaseQueue>(f.timing, f.syncpoints, ReleaseId);
+    const auto now = f.timing.GetGlobalTimeNs();
+    REQUIRE(queue->Queue(now) == 1U);
+    REQUIRE(queue->Queue(now) == 2U);
+    f.syncpoints.RegisterGuestAction(ReleaseId, 1, [&] { queue->Composited(2); });
+    queue->Composited(1);
+    REQUIRE(f.Released() == 2U);
 }
 
 TEST_CASE("Present releases hold no more presents than the queue has slots", "[nx2_present]") {

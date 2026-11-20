@@ -13,8 +13,6 @@
 #include <optional>
 #include <utility>
 
-#include <boost/container/static_vector.hpp>
-
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "core/core_timing.h"
@@ -37,13 +35,15 @@ public:
     Nx2PresentReleaseQueue(Core::Timing::CoreTiming& timing_,
                            Tegra::Host1x::SyncpointManager& syncpoints_, u32 release_id_)
         : timing{timing_}, syncpoints{syncpoints_}, release_id{release_id_},
-          next_value{syncpoints.GetGuestSyncpointValue(release_id)} {
+          next_value{syncpoints.GetGuestSyncpointValue(release_id)}, target{next_value},
+          drained{next_value} {
         timer = Core::Timing::CreateEvent(
             "nx2:vi2 buffer release",
             [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                 std::unique_lock lock{mutex};
                 timer_armed = false;
-                SignalReady(lock);
+                ReleaseReady();
+                Drain(lock);
                 return std::nullopt;
             });
     }
@@ -62,17 +62,16 @@ public:
             }
         }
         timing.UnscheduleEvent(timer);
-        Values outstanding;
-        {
-            std::unique_lock lock{mutex};
-            // Releases dequeued before the stop finish signalling first.
-            signalled.wait(lock, [this] { return signalling == 0; });
-            for (const auto& entry : pending) {
-                outstanding.push_back(entry.value);
-            }
+        std::unique_lock lock{mutex};
+        if (!pending.empty()) {
+            target = pending.back().value;
             pending.clear();
         }
-        Signal(outstanding);
+        if (draining) {
+            drain_done.wait(lock, [this] { return !draining; });
+        } else {
+            Drain(lock);
+        }
     }
 
     /// How long the newest pending release still waits for its deadline (zero when none does).
@@ -109,7 +108,8 @@ public:
             return;
         }
         entry->composited = true;
-        SignalReady(lock);
+        ReleaseReady();
+        Drain(lock);
     }
 
     /// For GPU::RequestComposite, which may run it on the GPU thread after this queue is gone.
@@ -128,40 +128,38 @@ private:
         bool composited;
     };
 
-    using Values = boost::container::static_vector<u32, Capacity>;
-
-    /// Advances once per release, without chasing a counter that has already passed it. Outside
-    /// the lock: an increment runs the syncpoint's due guest actions on this thread, and one may
-    /// composite and call Composited.
-    void Signal(const Values& values) {
-        for (const u32 value : values) {
-            if (static_cast<s32>(value - syncpoints.GetGuestSyncpointValue(release_id)) > 0) {
-                syncpoints.IncrementGuest(release_id);
-            }
-        }
-    }
-
-    /// Dequeues ready buffers under `lock` and signals them after releasing it.
-    void SignalReady(std::unique_lock<std::mutex>& lock) {
-        const auto ready = ReleaseReady();
-        if (ready.empty()) {
+    /**
+     * Signals dequeued releases up to `target`, in order, from a single thread at a time. The
+     * increments run outside the lock: each runs the syncpoint's due guest actions on this thread,
+     * and one may composite and call Composited. Any other caller, that re-entrant one included,
+     * only advances `target` and leaves the signal to the thread already draining.
+     */
+    void Drain(std::unique_lock<std::mutex>& lock) {
+        if (draining) {
             return;
         }
-        ++signalling;
-        lock.unlock();
-        Signal(ready);
-        lock.lock();
-        if (--signalling == 0) {
-            signalled.notify_all();
+        draining = true;
+        while (drained != target) {
+            const u32 last = target;
+            lock.unlock();
+            for (u32 value = drained + 1; static_cast<s32>(value - last) <= 0; ++value) {
+                // Without chasing a counter that has already passed the release.
+                if (static_cast<s32>(value - syncpoints.GetGuestSyncpointValue(release_id)) > 0) {
+                    syncpoints.IncrementGuest(release_id);
+                }
+            }
+            lock.lock();
+            drained = last;
         }
+        draining = false;
+        drain_done.notify_all();
     }
 
-    /// Under the lock: dequeues ready buffers from the front, arming the timer for a deadline.
-    /// Returns the values to Signal.
-    Values ReleaseReady() {
-        Values ready;
+    /// Under the lock: dequeues ready buffers from the front into `target`, arming the timer for a
+    /// deadline.
+    void ReleaseReady() {
         if (stopped) {
-            return ready;
+            return;
         }
         while (!pending.empty()) {
             const auto& entry = pending.front();
@@ -175,19 +173,20 @@ private:
                 }
                 break;
             }
-            ready.push_back(entry.value);
+            target = entry.value;
             pending.pop_front();
         }
-        return ready;
     }
 
     Core::Timing::CoreTiming& timing;
     Tegra::Host1x::SyncpointManager& syncpoints;
     const u32 release_id;
     u32 next_value;
+    u32 target;  ///< Newest dequeued release; releases are consecutive and dequeued in order
+    u32 drained; ///< Newest release Drain has signalled
     std::mutex mutex;
-    std::condition_variable signalled;
-    u32 signalling{}; ///< Threads signalling dequeued releases outside the lock
+    std::condition_variable drain_done;
+    bool draining{};
     bool stopped{};
     bool timer_armed{};
     std::deque<PendingRelease> pending;

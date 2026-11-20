@@ -2167,11 +2167,9 @@ private:
             (~w[22] >= 192 ||
              system.Host1x().GetSyncpointManager().IsReadyGuest(~w[22], w[24]));
         std::optional<Nx2PresentReleases::Release> release;
-        auto hold_until = waited;
+        std::chrono::steady_clock::time_point hold_until{};
         if (queueable) {
-            std::chrono::nanoseconds run_ahead{};
-            release = QueueRelease(pacing, run_ahead);
-            hold_until += run_ahead;
+            release = QueueRelease(pacing, hold_until);
         }
         if (!Composite(w[5], ~w[22], w[24], w[7], w[8],
                        release ? release->on_composited : std::function<void()>{}) &&
@@ -2278,12 +2276,13 @@ private:
     /**
      * Queues this present's release fence in place of holding it until its deadline: the buffer is
      * released once the deadline has passed and the renderer composited it. A present still holds
-     * until the previous release's deadline (`run_ahead`), so a game cycling any number of buffer
+     * until the previous release's deadline (`hold_until`), so a game cycling any number of buffer
      * slots stays at most one frame ahead of the pacing. Returns nothing to keep the blocking
      * path: under #2178's cap, which holds every present, or when no release can be queued.
      */
     std::optional<Nx2PresentReleases::Release> QueueRelease(
-        const std::optional<PresentPacing>& pacing, std::chrono::nanoseconds& run_ahead) {
+        const std::optional<PresentPacing>& pacing,
+        std::chrono::steady_clock::time_point& hold_until) {
         if (pacing && pacing->capped) {
             return std::nullopt;
         }
@@ -2304,7 +2303,7 @@ private:
                     m_release_module->GetContainer().GetSyncpointManager().FreeSyncpoint(id);
                 });
         }
-        run_ahead = m_releases->RunAhead();
+        hold_until = std::chrono::steady_clock::now() + m_releases->RunAhead();
         // Deadlines keep the pacer's interval and catch-up; CoreTiming has another epoch, so the
         // queue gets the time left.
         Nx2PresentPacer pacer{m_present_pacer};
