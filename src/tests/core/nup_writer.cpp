@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 #include <openssl/evp.h>
 
+#include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
@@ -25,8 +26,10 @@
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/nup.h"
 #include "tests/core/system_test_context.h"
@@ -72,6 +75,30 @@ std::string Npdm(u64 program_id) {
     for (int i = 0; i < 8; ++i) {
         npdm[0x90 + i] = static_cast<char>(program_id >> (8 * i));
     }
+    return npdm;
+}
+
+std::string EditionNpdm(u64 program_id, bool switch2) {
+    const size_t shift = switch2 ? 0x100 : 0;
+    std::string npdm(0x480 + shift, '\0');
+    const auto put = [&](size_t offset, u64 value, size_t size = sizeof(u32)) {
+        for (size_t i = 0; i < size; ++i) {
+            npdm[offset + i] = static_cast<char>(value >> (8 * i));
+        }
+    };
+    npdm.replace(0, 4, "META");
+    put(0x70, 0x400 + shift);
+    put(0x74, 0x40);
+    put(0x78, 0x100);
+    put(0x7C, 0x240 + shift);
+    npdm.replace(0x300 + shift, 4, "ACID");
+    put(0x320 + shift, 0x240 + shift);
+    put(0x324 + shift, 0x2C);
+    npdm.replace(0x400 + shift, 4, "ACI0");
+    put(0x410 + shift, program_id, sizeof(program_id));
+    put(0x420 + shift, 0x40);
+    put(0x424 + shift, 0x1C);
+    put(0x430 + shift, 0x60);
     return npdm;
 }
 
@@ -362,88 +389,100 @@ TEST_CASE("NUP loader registers a Switch 2 Edition's add-ons kept under the Swit
     CHECK(FileSys::GetAddOnApplicationID(ProgramId, {}) == TitleId);
 }
 
-/// Opens a packed dump and exposes its program RomFS the way the loader merges it.
-class NupRomFS {
-public:
-    explicit NupRomFS(const fs::path& archive)
-        : loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)} {
-        REQUIRE(loader.ReadRomFS(romfs_file) == Loader::ResultStatus::Success);
-        root = FileSys::ExtractRomFS(romfs_file);
-        REQUIRE(root != nullptr);
-    }
-
-    [[nodiscard]] std::optional<std::string> File(std::string_view name) const {
-        const auto file = root->GetFile(std::string{name});
-        return file != nullptr ? std::optional<std::string>(Read(file)) : std::nullopt;
-    }
-
-private:
-    FileSys::RealVfsFilesystem vfs;
-    Loader::AppLoader_NUP loader;
-    FileSys::VirtualFile romfs_file;
-    FileSys::VirtualDir root;
-};
-
-TEST_CASE("NUP layers a Switch 2 Edition's upgrade pack over the update", "[nup][nup-content]") {
-    // As Super Mario Bros. Wonder: program 040015100B514001 with add-on 010015100B515001 that
-    // ships patched game data instead of plain add-on content.
+TEST_CASE("NUP only layers an enabled upgrade pack onto the selected Edition program",
+          "[nup][nup-content][nup-upgrade]") {
     constexpr u64 ProgramId = TitleId + 1;
+    constexpr u64 LegacyId = 0x0100ABCD00010000ULL;
     TempDir tmp;
     const auto root = tmp.path / "dump";
-    Put(root / "base/exefs/main", "main");
-    Put(root / "base/exefs/main.npdm", Npdm(ProgramId));
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", EditionNpdm(ProgramId, true));
     Put(root / "base/romfs/title.bin", "base title");
+    Put(root / "base/romfs/base_only.bin", "base only");
     Put(root / "updates/65536/exefs/main", "update main");
-    Put(root / "updates/65536/exefs/main.npdm", Npdm(ProgramId));
+    Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(ProgramId, true));
     Put(root / "updates/65536/romfs/title.bin", "update title");
     Put(root / "updates/65536/romfs/update_only.bin", "update only");
-    Put(root / "dlc/0100ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
-    Put(root / "dlc/0100ABCD00011001/0/romfs/title.bin", "pack title");
-    Put(root / "dlc/0100ABCD00011001/0/romfs/pack_only.bin", "pack only");
-    const auto archive = tmp.path / "game.nup";
-    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    const auto pack = root / "dlc/0100ABCD00011001/0/romfs";
+    Put(pack / "title.bin", "pack title");
+    Put(pack / "pack_only.bin", "pack only");
+    Put(root / "dlc/0400ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+    Put(root / "dlc/0400ABCD00011001/0/romfs/own_aoc.bin", "ordinary add-on");
+    Put(root / "dlc/0100ABCD00021001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+    Put(root / "dlc/0100ABCD00021001/0/romfs/foreign.bin", "foreign add-on");
 
-    const NupRomFS romfs{archive};
-    // The pack wins over the update where both layers carry a path.
-    CHECK(romfs.File("title.bin") == "pack title");
-    CHECK(romfs.File("update_only.bin") == "update only");
-    CHECK(romfs.File("pack_only.bin") == "pack only");
-}
+    const auto previous_disabled = Settings::values.disabled_addons;
+    SCOPE_EXIT { Settings::values.disabled_addons = previous_disabled; };
+    Settings::values.disabled_addons.erase(ProgramId);
+    Settings::values.disabled_addons.erase(TitleId);
+    bool enabled = false;
+    bool apply_mod = false;
 
-TEST_CASE("NUP keeps add-on content out of the program RomFS", "[nup][nup-content]") {
-    SECTION("an add-on of the program itself") {
-        // As Donkey Kong Bananza: 040074A01BF12000 with add-on 040074A01BF13001. The marker is
-        // present so only the application id, not the marker check, can keep it out.
-        TempDir tmp;
-        const auto root = tmp.path / "own";
-        Put(root / "base/exefs/main", "main");
-        Put(root / "base/exefs/main.npdm", Npdm(TitleId));
-        Put(root / "base/romfs/title.bin", "base title");
-        Put(root / "dlc/0400ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
-        Put(root / "dlc/0400ABCD00011001/0/romfs/addon.bin", "addon data");
-        const auto archive = tmp.path / "own.nup";
-        REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
-
-        const NupRomFS romfs{archive};
-        CHECK(romfs.File("addon.bin") == std::nullopt);
+    SECTION("marked upgrade pack under a user mod") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        enabled = true;
+        apply_mod = true;
+    }
+    SECTION("nested Switch 2 resource table identifies the pack") {
+        Put(pack / "System/Product.120.Nin_Ounce_NVN2.byml", "table");
+        enabled = true;
+    }
+    SECTION("overlapping filenames and an unrelated version file are not an upgrade marker") {
+        Put(pack / "Other/AoCUpgradeVersion.txt", "120");
+    }
+    SECTION("the selected program's DLC setting disables the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Settings::values.disabled_addons[ProgramId] = {"DLC"};
+    }
+    SECTION("the application's DLC setting disables the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Settings::values.disabled_addons[TitleId] = {"DLC"};
+    }
+    SECTION("the selected update ExeFS is from Switch 1 despite Edition base metadata") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(LegacyId, false));
+    }
+    SECTION("an Edition title ID alone does not make the selected ExeFS Switch 2") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(ProgramId, false));
     }
 
-    SECTION("a Switch 1 add-on without the upgrade marker") {
-        TempDir tmp;
-        const auto root = tmp.path / "unmarked";
-        Put(root / "base/exefs/main", "main");
-        Put(root / "base/exefs/main.npdm", Npdm(TitleId + 1));
-        Put(root / "base/romfs/title.bin", "base title");
-        Put(root / "updates/65536/exefs/main", "update main");
-        Put(root / "updates/65536/exefs/main.npdm", Npdm(TitleId + 1));
-        Put(root / "updates/65536/romfs/title.bin", "update title");
-        Put(root / "dlc/0100ABCD00011001/0/romfs/addon.bin", "addon data");
-        const auto archive = tmp.path / "unmarked.nup";
-        REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    Loader::AppLoader_NUP loader{vfs->OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    FileSys::VirtualFile image;
+    REQUIRE(loader.ReadRomFS(image) == Loader::ResultStatus::Success);
+    const auto extracted = FileSys::ExtractRomFS(image);
+    REQUIRE(extracted);
+    const auto tree = PackedTree(extracted);
+    CHECK(tree.at("base_only.bin") == "base only");
+    CHECK(tree.at("update_only.bin") == "update only");
+    CHECK(tree.at("title.bin") == (enabled ? "pack title" : "update title"));
+    CHECK(tree.contains("pack_only.bin") == enabled);
+    CHECK_FALSE(tree.contains("own_aoc.bin"));
+    CHECK_FALSE(tree.contains("foreign.bin"));
 
-        const NupRomFS romfs{archive};
-        CHECK(romfs.File("addon.bin") == std::nullopt);
-        CHECK(romfs.File("title.bin") == "update title");
+    if (apply_mod) {
+        using Common::FS::EdenPath;
+        const auto old_load = Common::FS::GetEdenPath(EdenPath::LoadDir);
+        SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::LoadDir, old_load); };
+        const auto load_root = tmp.path / "load";
+        Put(load_root / fmt::format("{:016X}", ProgramId) / "Synthetic/romfs/title.bin", "mod");
+        Common::FS::SetEdenPath(EdenPath::LoadDir, load_root);
+        ScopedSystemTestContext context;
+        Core::System system;
+        system.SetFilesystem(vfs);
+        auto& controller = system.GetFileSystemController();
+        controller.CreateFactories(*vfs);
+        const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
+        const auto mounted_romfs = FileSys::ExtractRomFS(factory.OpenCurrentProcess(ProgramId));
+        REQUIRE(mounted_romfs);
+        const auto mounted = PackedTree(mounted_romfs);
+        CHECK(mounted.at("title.bin") == "mod");
+        CHECK(mounted.at("pack_only.bin") == "pack only");
+        CHECK(mounted.at("update_only.bin") == "update only");
+        CHECK(mounted.at("base_only.bin") == "base only");
     }
 }
 

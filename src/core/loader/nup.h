@@ -63,6 +63,7 @@ private:
     std::unique_ptr<FileSys::NACP> nacp_file;
     FileSys::VirtualFile icon_file;
     u64 base_title_id{};
+    u64 upgrade_program_id{};
     std::string display_title;
     std::string display_version;
     bool has_program{};
