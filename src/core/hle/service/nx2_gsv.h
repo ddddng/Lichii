@@ -2113,6 +2113,10 @@ private:
         } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
             frames_ahead = 1;
         }
+        constexpr u64 DuskbloodsNetworkTestProgramId = 0x0400D1D02399A000ULL;
+        if (frames_ahead == -1 && app_program_id == DuskbloodsNetworkTestProgramId) {
+            frames_ahead = 1;
+        }
         const auto entered = std::chrono::steady_clock::now();
         static const bool fence_trace = [] {
             const char* value = std::getenv("EDEN_NX2_PRESENT_FENCE_TRACE");
