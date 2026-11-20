@@ -118,19 +118,12 @@ FileSys::VirtualFile FindLooseRomFSFile(const FileSys::VirtualDir& exefs) {
     return nullptr;
 }
 
-FileSys::VirtualDir FindLooseBaseExeFS(const FileSys::VirtualDir& game,
-                                       const FileSys::VirtualDir& base) {
-    for (const auto& package : {game, base}) {
-        if (!package) {
-            continue;
-        }
-        if (package->GetFile("main")) {
-            return package;
-        }
-        if (auto exefs = FindLooseSubdirectory(package, "exefs");
-            exefs && exefs->GetFile("main")) {
-            return exefs;
-        }
+FileSys::VirtualDir FindLooseExeFS(const FileSys::VirtualDir& package) {
+    if (package && package->GetFile("main")) {
+        return package;
+    }
+    if (auto exefs = FindLooseSubdirectory(package, "exefs"); exefs && exefs->GetFile("main")) {
+        return exefs;
     }
     return nullptr;
 }
@@ -253,13 +246,17 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
             if (const auto edition_id = ReadLooseEditionProgramId(exefs_dir)) {
                 FileSys::VirtualDir base_romfs;
                 FileSys::VirtualFile base_image;
-                const auto base_exefs = FindLooseBaseExeFS(game, base);
+                const auto root_exefs = FindLooseExeFS(game);
+                const auto base_exefs = root_exefs ? root_exefs : FindLooseExeFS(base);
                 if (MatchesLooseEditionBase(base_exefs, *edition_id)) {
                     base_image = FindLooseRomFSFile(base_exefs);
                     if (!base_image) {
-                        base_romfs = FindLooseRomFSDirectory(base);
+                        base_romfs = FindLooseRomFSDirectory(root_exefs ? game : base);
                         if (!base_romfs) {
-                            base_romfs = FindLooseRomFSDirectory(game);
+                            const auto& other = root_exefs ? base : game;
+                            if (MatchesLooseEditionBase(FindLooseExeFS(other), *edition_id)) {
+                                base_romfs = FindLooseRomFSDirectory(other);
+                            }
                         }
                     }
                 }
@@ -419,7 +416,8 @@ FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
     FileSys::VirtualFile newest_edition;
     u64 newest_version{};
     const auto base = FindLooseSubdirectory(directory, "base");
-    const auto base_exefs = FindLooseBaseExeFS(directory, base);
+    const auto root_exefs = FindLooseExeFS(directory);
+    const auto base_exefs = root_exefs ? root_exefs : FindLooseExeFS(base);
     for (const auto storage_name : {"updates", "upgrade"}) {
         const auto storage = FindLooseSubdirectory(directory, storage_name);
         if (!storage) {

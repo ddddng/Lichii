@@ -1852,6 +1852,8 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool have_base = true;
     bool root_main = false;
     bool base_romfs_image = false;
+    bool have_base_data = true;
+    bool have_foreign_base = false;
     std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
     auto base = root / "base";
     auto base_romfs = fs::path{};
@@ -1888,6 +1890,17 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         base = root;
         root_main = true;
         base_romfs = root / "base/romfs";
+    }
+    SECTION("a root executable prefers its own RomFS over a foreign base's directory") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+    }
+    SECTION("a root executable without data does not borrow a foreign base's RomFS") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+        have_base_data = false;
     }
     SECTION("a matching native program layers over a file-backed base RomFS") {
         base = root;
@@ -1928,9 +1941,14 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
                 vfs->OpenDirectory(Common::FS::PathToUTF8String(data), FileSys::OpenMode::Read));
             REQUIRE(image != nullptr);
             Put(base_exefs / "data.romfs", Read(image));
-        } else {
+        } else if (have_base_data) {
             Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
         }
+    }
+    if (have_foreign_base) {
+        Put(root / "base/exefs/main", "foreign");
+        Put(root / "base/exefs/main.npdm", BootNpdm(legacy_program + 0x2000, false));
+        Put(root / "base/romfs/base.bin", "foreign data");
     }
     Put(version / "romfs/update.bin", "update data");
     Put(version / "romfs/shared.bin", "legacy data");
@@ -1967,7 +1985,11 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
     const auto tree = FileSys::ExtractRomFS(romfs);
     REQUIRE(tree != nullptr);
-    CHECK(static_cast<bool>(tree->GetFile("base.bin")) == have_base);
+    const auto base_member = tree->GetFile("base.bin");
+    CHECK(static_cast<bool>(base_member) == (have_base && have_base_data));
+    if (base_member) {
+        CHECK(Read(base_member) == "base data");
+    }
     if (boot_edition) {
         REQUIRE(tree->GetFile("update.bin") != nullptr);
         CHECK(Read(tree->GetFile("update.bin")) == "update data");
