@@ -549,9 +549,11 @@ void ConfigurePerGame::LoadConfiguration() {
         FileSys::NACP nacp;
         if (loader->ReadControlData(nacp) == Loader::ResultStatus::Success) {
             ui->display_developer->setText(QString::fromStdString(nacp.GetDeveloperName()));
-            const auto ver = nacp.GetVersionString();
-            ui->display_version->setText(ver.empty() ? QStringLiteral("1.0.0")
-                                                     : QString::fromStdString(ver));
+        }
+        std::string version;
+        if (loader->ReadDisplayVersion(version) == Loader::ResultStatus::Success &&
+            !version.empty()) {
+            ui->display_version->setText(QString::fromStdString(version));
         } else {
             ui->display_version->setText(QStringLiteral("1.0.0"));
         }

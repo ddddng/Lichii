@@ -53,6 +53,7 @@ public:
     ResultStatus ReadIcon(std::vector<u8>& buffer) override;
     ResultStatus ReadTitle(std::string& title) override;
     ResultStatus ReadControlData(FileSys::NACP& control) override;
+    ResultStatus ReadDisplayVersion(std::string& version) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
     ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
