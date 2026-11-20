@@ -641,10 +641,10 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                    launch->launch_hlaunch);
     const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
     const auto whats_new_action = WhatsNewDialog::OnStartup(
-        build, UISettings::values.last_seen_release.GetValue(), first_start, launching_content);
+        build, UISettings::values.last_seen_release.GetValue(), first_start, launching_content,
+        LICHII_USE_PENDING_RELEASE_NOTES);
     if (whats_new_action == WhatsNewDialog::StartupAction::Remember) {
-        UISettings::values.last_seen_release = build;
-        config->SaveAllValues();
+        config->SaveLastSeenRelease(build);
     }
     if (!launch_home) {
         game_list->PopulateAsync(UISettings::values.game_dirs);
@@ -4902,8 +4902,7 @@ void MainWindow::OnWhatsNew() {
     whats_new_dialog->show();
 
     if (build && build != UISettings::values.last_seen_release.GetValue()) {
-        UISettings::values.last_seen_release = build;
-        config->SaveAllValues();
+        config->SaveLastSeenRelease(build);
     }
 }
 
