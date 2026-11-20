@@ -27,6 +27,7 @@
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/nup.h"
 #include "tests/core/system_test_context.h"
@@ -1037,6 +1038,114 @@ TEST_CASE("NUP edit propagates display version to the newest update", "[nup]") {
 
     REQUIRE(FileSys::Nup::EditNupMetadata(archive, edit, &error) ==
             FileSys::Nup::EditResult::NoChange);
+}
+
+TEST_CASE("NUP preserves authored Edition control data separately from display metadata",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    constexpr u64 NativeProgram = TitleId + 1;
+    constexpr u64 SaveOwner = 0x0100ABCD00010000ULL;
+    constexpr u32 Languages =
+        u32(FileSys::SupportedLanguage::AmericanEnglish) | u32(FileSys::SupportedLanguage::Japanese);
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(NativeProgram));
+    Put(root / "base/romfs/base.bin", "base");
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = SaveOwner;
+    source.raw.dlc_base_title_id = SaveOwner + 0x1000;
+    source.raw.apparent_platform = FileSys::ApparentPlatform::Ounce;
+    source.raw.supported_languages = static_cast<FileSys::SupportedLanguage>(Languages);
+    source.raw.initial_program_index = 1;
+    source.raw.version_string = {'1', '.', '0', '.', '0'};
+    const auto bytes = source.GetRawBytes();
+    Put(root / "base/control.nacp",
+        {reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+
+    const auto archive = tmp.path / "Game.nup";
+    FileSys::Nup::PackOptions options;
+    options.metadata.title_name = "Synthetic Edition";
+    options.metadata.publisher = "Synthetic publisher override";
+    options.metadata.display_version = "9.8.7";
+    std::string error;
+    const auto packed = FileSys::Nup::PackDump(root, archive, options, {}, nullptr, &error);
+    INFO(error);
+    REQUIRE(packed == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem vfs;
+    Loader::AppLoader_NUP loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == bytes);
+    CHECK(control.GetTitleId() == SaveOwner);
+    CHECK(control.GetDLCBaseTitleId() == SaveOwner + 0x1000);
+    CHECK(control.raw.apparent_platform == FileSys::ApparentPlatform::Ounce);
+    CHECK(control.GetSupportedLanguages() == Languages);
+    u64 program_id{};
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    CHECK(program_id == NativeProgram);
+
+    Service::Glue::ARPManager arp;
+    REQUIRE(arp.Register(program_id, {.title_id = program_id}, control.GetRawBytes()).IsSuccess());
+    CHECK(arp.GetSupportedLanguages(program_id) == Languages);
+    CHECK_FALSE(arp.GetSupportedLanguages(SaveOwner));
+    CHECK_FALSE(arp.GetSupportedLanguages(TitleId));
+
+    std::string title, version, developer;
+    REQUIRE(loader.ReadTitle(title) == Loader::ResultStatus::Success);
+    CHECK(title == "Synthetic Edition");
+    REQUIRE(loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success);
+    CHECK(version == "9.8.7");
+    REQUIRE(loader.ReadDeveloper(developer) == Loader::ResultStatus::Success);
+    CHECK(developer == "Synthetic publisher override");
+}
+
+TEST_CASE("NUP ignores a legacy short control TLV and keeps the title",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    const auto metadata = LoaderTlv(2, "legacy icon") + LoaderTlv(5, "Legacy title");
+    auto file = LoaderMetadataFixture(tmp.path, {metadata});
+    NupContainer parsed{file};
+    REQUIRE(parsed.GetStatus() == Loader::ResultStatus::Success);
+    CHECK(parsed.GetPackages().front().nacp.empty());
+    Loader::AppLoader_NUP loader{file};
+    std::string title;
+    REQUIRE(loader.ReadTitle(title) == Loader::ResultStatus::Success);
+    CHECK(title == "Legacy title");
+}
+
+TEST_CASE("A booted NUP update's control takes precedence over legacy base control",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = 0x0100ABCD00010000ULL;
+    const auto legacy = source.GetRawBytes();
+    source.raw.apparent_platform = FileSys::ApparentPlatform::Ounce;
+    source.raw.initial_program_index = 1;
+    source.raw.supported_languages = FileSys::SupportedLanguage::Japanese;
+    const auto edition = source.GetRawBytes();
+    const auto base = LoaderTlv(2, {reinterpret_cast<const char*>(legacy.data()), legacy.size()});
+    const auto update =
+        LoaderTlv(2, {reinterpret_cast<const char*>(edition.data()), edition.size()});
+    Loader::AppLoader_NUP loader{LoaderMetadataFixture(tmp.path, {base, update})};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == edition);
+}
+
+TEST_CASE("A malformed compressed control title leaves the NUP identity readable",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = 0x0100ABCD00010000ULL;
+    source.raw.titles_data_format = FileSys::TitleDataFormat::Compressed;
+    source.raw.language_entries.compressed_data.buffer_size = 0xFFFF;
+    const auto bytes = source.GetRawBytes();
+    const auto metadata = LoaderTlv(2, {reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+    Loader::AppLoader_NUP loader{LoaderMetadataFixture(tmp.path, {metadata})};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == bytes);
+    CHECK(control.GetApplicationName().empty());
 }
 
 TEST_CASE("NUP loader exposes title and publisher through control data", "[nup]") {
