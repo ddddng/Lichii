@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
@@ -67,6 +68,13 @@ public:
         std::string display_version;
     };
 
+    struct ProgramSelection {
+        std::size_t package_index;
+        VirtualDir exefs;
+        u64 program_id;
+        std::optional<u64> embedded_program_id;
+    };
+
     /// Quick magic check without a full parse.
     static bool IsNupFile(const VirtualFile& file);
 
@@ -92,6 +100,7 @@ public:
     std::optional<std::size_t> FindBasePackage() const;
     /// Highest version among Update packages, if any.
     std::optional<std::size_t> FindBestUpdatePackage() const;
+    std::optional<ProgramSelection> SelectProgram();
     /// Highest version of the selected Switch 2 program's marked upgrade pack, if any.
     std::optional<std::size_t> FindUpgradePack(u64 program_id);
 
@@ -103,6 +112,7 @@ public:
     VirtualDir GetExeFSDir(std::size_t package_index);
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
+    VirtualDir GetPackageSubdirectory(std::size_t package_index, std::string_view path);
 
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(
