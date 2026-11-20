@@ -19,7 +19,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
-#include "common/game_presets.h"
 #include "common/page_table.h"
 #include "core/core.h"
 #include "core/device_memory.h"
@@ -804,9 +803,10 @@ TEST_CASE("Storage binding cache does not reuse a destroyed address space", "[bu
     REQUIRE(f.Bind(true).device_addr == 0x30000);
 }
 
-TEST_CASE("Raiders native fragment storage binding covers the lighting coefficients",
+TEST_CASE("Native NVN descriptor slots extend read-only bindings to their declared size",
           "[buffer_ports]") {
     Fixture f;
+    constexpr size_t vertex = 0;
     constexpr size_t fragment = VideoCommon::NUM_STAGES - 1;
     constexpr GPUVAddr base = 0x4000000;
     constexpr DAddr device_base = 0x10000000;
@@ -820,38 +820,43 @@ TEST_CASE("Raiders native fragment storage binding covers the lighting coefficie
         std::memcpy(f.bytes + offset, &base, sizeof(base));
         std::memcpy(f.bytes + offset + sizeof(base), &declared_size, sizeof(declared_size));
     };
-    write_descriptor(0x540, size);
-    write_descriptor(0x550, size);
-
-    Tegra::Control::ChannelState raiders{0};
-    Tegra::Control::ChannelState other{1};
-    raiders.program_id = Settings::SplatoonRaidersProgramId;
-    for (auto* state : {&raiders, &other}) {
-        state->memory_manager = &*f.memory;
-        state->payload.emplace(f.system, *f.memory, *state);
-        auto& engine = state->payload->maxwell_3d;
-        engine.SetNativeTuringMacroMode(true);
-        engine.state.shader_stages[fragment].const_buffers[0] = {
-            .address = 0x100000, .size = 0x10000, .enabled = true};
-        f.cache->CreateChannel(*state);
+    for (const u32 offset : {0x110U, 0x500U, 0x540U, 0x568U, 0x600U, 0x610U}) {
+        write_descriptor(offset, size);
     }
-    f.cache->BindToChannel(raiders.bind_id);
+
+    Tegra::Control::ChannelState state{0};
+    state.memory_manager = &*f.memory;
+    state.payload.emplace(f.system, *f.memory, state);
+    auto& engine = state.payload->maxwell_3d;
+    engine.SetNativeTuringMacroMode(true);
+    for (const size_t stage : {vertex, fragment}) {
+        engine.state.shader_stages[stage].const_buffers[0] = {
+            .address = 0x100000, .size = 0x10000, .enabled = true};
+    }
+    f.cache->CreateChannel(state);
+    f.cache->BindToChannel(state.bind_id);
+
     const auto coefficients = Access::BindGraphics(*f.cache, fragment, 0x540);
     REQUIRE(coefficients.device_addr == device_base);
     REQUIRE(coefficients.size == size);
-    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x550).size == bare_size);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x600).size == size);
+    REQUIRE(Access::BindGraphics(*f.cache, vertex, 0x110).size == size);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x500).size == bare_size);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x568).size == bare_size);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x610).size == bare_size);
+    REQUIRE(Access::BindGraphics(*f.cache, vertex, 0x540).size == bare_size);
     REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540, true).size == bare_size);
 
-    f.cache->BindToChannel(other.bind_id);
-    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540).size == bare_size);
-    f.cache->BindToChannel(raiders.bind_id);
-
-    auto& bank = raiders.payload->maxwell_3d.state.shader_stages[fragment].const_buffers[0];
+    auto& bank = engine.state.shader_stages[fragment].const_buffers[0];
     bank.size = 0x548;
     REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540).size == bare_size);
     bank.size = 0x10000;
 
+    write_descriptor(0x540, 1 << 20);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540).size == bare_size);
     write_descriptor(0x540, mapped_size + 0x1000);
+    REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540).size == bare_size);
+    write_descriptor(0x540, (1ULL << 32) | size);
     REQUIRE(Access::BindGraphics(*f.cache, fragment, 0x540).size == bare_size);
 
     write_descriptor(0x540, size);
