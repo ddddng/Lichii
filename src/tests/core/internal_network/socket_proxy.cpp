@@ -9,6 +9,7 @@
 #include <memory>
 #include <set>
 #include <thread>
+#include <utility>
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/internal_network/network.h"
@@ -227,6 +228,16 @@ TEST_CASE("ENet room source survives an unavailable selected interface",
     ProxySocket pending;
     REQUIRE(pending.Initialize(Domain::INET, Type::DGRAM, Protocol::UDP) == Errno::SUCCESS);
     CHECK(pending.Bind({Domain::INET, {203, 0, 113, 10}, 0}) == Errno::NOTCONN);
+    auto rejected = std::make_shared<std::promise<RoomMember::Error>>();
+    auto rejection = rejected->get_future();
+    const auto rejection_callback = member->BindOnError(
+        [rejected](RoomMember::Error error) { rejected->set_value(error); });
+    member->Join("Source", "127.0.0.1", reserved.portno, 0, IPv4Address{}, "fixture");
+    REQUIRE(rejection.wait_for(3s) == std::future_status::ready);
+    CHECK(rejection.get() == RoomMember::Error::IpCollision);
+    CHECK(member->GetState() == RoomMember::State::Idle);
+    CHECK_FALSE(member->GetENetIdentity());
+    member->Unbind(rejection_callback);
     const IPv4Address new_own{192, 168, 0, 3};
     member->Join("Source", "127.0.0.1", reserved.portno, 0, new_own, "fixture");
     for (unsigned i = 0; i < 400 && member->GetState() != RoomMember::State::Joined; ++i) {
@@ -239,27 +250,24 @@ TEST_CASE("ENet room source survives an unavailable selected interface",
                       .broadcast = false,
                       .data = {9, 8, 7},
                       .enet_generation = initial_identity->generation};
-    auto obsolete = std::make_shared<std::promise<ProxyPacket>>();
-    auto obsolete_result = obsolete->get_future();
-    const auto stale_callback = peer.BindOnProxyPacketReceived(
-        [obsolete](const ProxyPacket& p) { obsolete->set_value(p); });
-    const bool accepted_stale = member->SendProxyPacket(stale);
-    CHECK_FALSE(accepted_stale);
-    if (accepted_stale)
-        REQUIRE(obsolete_result.wait_for(3s) == std::future_status::ready);
-    peer.Unbind(stale_callback);
+    auto redelivered = std::make_shared<std::promise<ProxyPacket>>();
+    auto rejoined = redelivered->get_future();
+    const auto second_callback = peer.BindOnProxyPacketReceived(
+        [redelivered, received = false](const ProxyPacket& p) mutable {
+            if (!std::exchange(received, true))
+                redelivered->set_value(p);
+        });
+    CHECK_FALSE(member->SendProxyPacket(stale));
     ProxySocket rejoined_duplicate;
     REQUIRE(rejoined_duplicate.Initialize(Domain::INET, Type::DGRAM, Protocol::UDP) ==
             Errno::SUCCESS);
     CHECK(rejoined_duplicate.Bind({Domain::INET, new_own, bound_port}) == Errno::ADDRINUSE);
     REQUIRE(rejoined_duplicate.Close() == Errno::SUCCESS);
-    auto redelivered = std::make_shared<std::promise<ProxyPacket>>();
-    auto rejoined = redelivered->get_future();
-    const auto second_callback = peer.BindOnProxyPacketReceived(
-        [redelivered](const ProxyPacket& p) { redelivered->set_value(p); });
     REQUIRE(socket.SendTo(0, payload, &destination).second == Errno::SUCCESS);
     REQUIRE(rejoined.wait_for(3s) == std::future_status::ready);
-    CHECK(rejoined.get().local_endpoint.ip == new_own);
+    const auto fresh = rejoined.get();
+    CHECK(fresh.local_endpoint.ip == new_own);
+    CHECK(fresh.data == packet.data);
     peer.Unbind(second_callback);
     REQUIRE(socket.Close() == Errno::SUCCESS);
     CHECK(socket.SendTo(0, payload, &destination).second == Errno::BADF);
@@ -367,6 +375,34 @@ TEST_CASE("Room endpoint reuse requires both sockets to opt in", "[core][sockets
     REQUIRE(first.Bind(endpoint) == Network::Errno::SUCCESS);
     CHECK(second.Bind(endpoint) == Network::Errno::SUCCESS);
     CHECK(denied.Bind(endpoint) != Network::Errno::SUCCESS);
+}
+
+TEST_CASE("Room port reuse preserves automatic reservations and a shared option",
+          "[core][sockets][ephemeral][reuse-port]") {
+    using namespace Network;
+    ProxySocket first, second, third;
+    for (auto* socket : {&first, &second, &third}) {
+        REQUIRE(socket->Initialize(Domain::INET, Type::DGRAM, Protocol::UDP) == Errno::SUCCESS);
+        REQUIRE(socket->SetReuseAddr(true) == Errno::SUCCESS);
+        REQUIRE(socket->SetReusePort(true) == Errno::SUCCESS);
+    }
+    SECTION("an automatic reservation stays exclusive") {
+        REQUIRE(first.Bind({Domain::INET, {}, 0}) == Errno::SUCCESS);
+        const auto endpoint = first.GetSockName().first;
+        CHECK(second.Bind(endpoint) == Errno::ADDRINUSE);
+        REQUIRE(first.Close() == Errno::SUCCESS);
+        CHECK(second.Bind(endpoint) == Errno::SUCCESS);
+    }
+    SECTION("all overlapping binds must share the same reuse option") {
+        const SockAddrIn endpoint{Domain::INET, {}, 55001};
+        REQUIRE(first.Bind(endpoint) == Errno::SUCCESS);
+        REQUIRE(second.Bind(endpoint) == Errno::SUCCESS);
+        REQUIRE(first.SetReusePort(false) == Errno::SUCCESS);
+        REQUIRE(second.SetReuseAddr(false) == Errno::SUCCESS);
+        CHECK(third.Bind(endpoint) == Errno::ADDRINUSE);
+        REQUIRE(second.SetReuseAddr(true) == Errno::SUCCESS);
+        CHECK(third.Bind(endpoint) == Errno::SUCCESS);
+    }
 }
 
 TEST_CASE("Concurrent automatic room binds cannot claim the same endpoint",

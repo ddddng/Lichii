@@ -210,10 +210,6 @@ void RoomMember::RoomMemberImpl::StartLoop() {
                         break;
                     case IdJoinSuccess:
                     case IdJoinSuccessAsMod:
-                        // The join request was successful, we are now in the room.
-                        // If we joined successfully, there must be at least one client in the room: us.
-                        ASSERT_MSG(member_information.size() > 0,
-                                "We have not yet received member information.");
                         HandleJoinPacket(&event, generation,
                                          event.packet->data[0] == IdJoinSuccessAsMod
                                              ? State::Moderator
@@ -374,20 +370,26 @@ void RoomMember::RoomMemberImpl::HandleJoinPacket(const ENetEvent* event, u64 ge
     // Ignore the first byte, which is the message id.
     packet.IgnoreBytes(sizeof(u8)); // Ignore the message type
 
-    // Parse the MAC Address from the packet
     IPv4Address ip{};
-    if (!packet.Read(ip) || ip == IPv4Address{}) {
-        return;
-    }
+    packet.Read(ip.data(), ip.size());
+    const bool valid = packet && ip != IPv4Address{};
+    const State next = valid ? joined_state : State::Idle;
     {
         std::lock_guard lock{enet_identity_mutex};
         if (generation != enet_generation || state != State::Joining)
             return;
-        fake_ip = ip;
-        enet_ready = true;
-        state = joined_state;
+        if (valid) {
+            fake_ip = ip;
+            enet_ready = true;
+        } else {
+            ++enet_generation;
+            enet_ready = false;
+        }
+        state = next;
     }
-    Invoke<State>(joined_state);
+    Invoke<State>(next);
+    if (!valid)
+        SetError(Error::UnknownError);
 }
 
 void RoomMember::RoomMemberImpl::HandleProxyPackets(const ENetEvent* event) {

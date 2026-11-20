@@ -29,6 +29,7 @@ struct RoomBinding {
     bool reuse_addr;
     bool reuse_port;
     bool local_identity;
+    bool automatic;
 };
 // Always acquired after the owning socket's packets_mutex; never calls a socket.
 struct RoomBindings {
@@ -171,8 +172,9 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
     }
 
     bool local_bind = false;
-    if (const auto member = GetRoomMember().lock()) {
-        const auto identity = member->GetENetIdentity();
+    const auto member = GetRoomMember().lock();
+    const auto identity = member ? member->GetENetIdentity() : std::nullopt;
+    if (member) {
         if (IsDirectLanActive() || !identity) {
             return Errno::NOTCONN;
         }
@@ -180,17 +182,13 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
         if (local_addresses) {
             local = local_addresses();
         } else {
-            for (const auto& adapter : GetAvailableNetworkInterfaces()) {
+            for (const auto& adapter : GetAvailableNetworkInterfaces(true)) {
                 local.push_back(TranslateIPv4(adapter.ip_address));
             }
         }
         for (const auto& peer : member->GetMemberInformationSnapshot()) {
             if (peer.fake_ip != identity->ip)
                 peers.push_back(peer.fake_ip);
-        }
-        const auto current = member->GetENetIdentity();
-        if (!current || current->generation != identity->generation) {
-            return Errno::NOTCONN;
         }
         local_bind = IsRoomLocalBind(addr.ip, identity->ip, local, peers);
         if (!local_bind)
@@ -208,13 +206,19 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
     auto& registry = GetBindings();
     std::lock_guard registry_guard(registry.mutex);
     const auto occupied = [&](u16 port, bool automatic) {
-        return std::ranges::any_of(registry.entries, [&](const RoomBinding& binding) {
-            return binding.protocol == binding_protocol && binding.endpoint.portno == port &&
-                   ((local_bind && binding.local_identity) || Wildcard(addr.ip) ||
-                    Wildcard(binding.endpoint.ip) || addr.ip == binding.endpoint.ip) &&
-                   (automatic || !((reuse_addr && binding.reuse_addr) ||
-                                   (reuse_port && binding.reuse_port)));
-        });
+        bool shared_addr = reuse_addr, shared_port = reuse_port;
+        for (const auto& binding : registry.entries) {
+            if (binding.protocol != binding_protocol || binding.endpoint.portno != port ||
+                !((local_bind && binding.local_identity) || Wildcard(addr.ip) ||
+                  Wildcard(binding.endpoint.ip) || addr.ip == binding.endpoint.ip)) {
+                continue;
+            }
+            shared_addr &= binding.reuse_addr;
+            shared_port &= binding.reuse_port;
+            if (automatic || binding.automatic || (!shared_addr && !shared_port))
+                return true;
+        }
+        return false;
     };
     const u16 requested_port = addr.portno;
     if (requested_port == 0) {
@@ -234,7 +238,13 @@ Errno ProxySocket::Bind(SockAddrIn addr) {
     } else if (occupied(addr.portno, false)) {
         return Errno::ADDRINUSE;
     }
-    registry.entries.push_back({this, binding_protocol, addr, reuse_addr, reuse_port, local_bind});
+    if (member) {
+        const auto current = member->GetENetIdentity();
+        if (!current || current->generation != identity->generation)
+            return Errno::NOTCONN;
+    }
+    registry.entries.push_back(
+        {this, binding_protocol, addr, reuse_addr, reuse_port, local_bind, requested_port == 0});
     local_endpoint = addr;
     room_local_bind = local_bind;
     is_bound = true;
