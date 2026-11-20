@@ -9,7 +9,7 @@
     {
       "icon": "clock",
       "title": "Ocarina of Time above 60 FPS",
-      "body": "FPS Unlock fixes Epona's fence jump, the day/night clock and the Deku Tree webs. A frame-rate cap and physics changes address the R1 menu freeze; the fix hasn't been confirmed in-game."
+      "body": "FPS Unlock fixes Epona's fence jump, the day/night clock and the Deku Tree webs. The game no longer freezes after closing the R1 menu."
     },
     {
       "icon": "apps",
