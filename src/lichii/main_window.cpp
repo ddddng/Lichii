@@ -783,7 +783,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
 
     if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
-        QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
+#ifdef ENABLE_UPDATE_CHECKER
+        if (update_check_running) {
+            connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
+                    &MainWindow::MaybeShowStartupWhatsNew,
+                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+        } else
+#endif
+        {
+            QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
+        }
     }
 }
 
@@ -5703,7 +5712,7 @@ void MainWindow::CheckForUpdates(bool manual) {
 void MainWindow::OnEmulatorUpdateAvailable() {
     const bool manual = std::exchange(update_check_manual, false);
     update_check_running = false;
-    auto result = update_future.result();
+    const auto result = update_future.result();
     if (manual && result.failure != UpdateChecker::Failure::None) {
         const auto title = tr("Check for Updates");
         switch (result.failure) {
@@ -5755,37 +5764,25 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         return;
     }
 
-    auto prompt_update = [this, release = std::move(*result.update), manual] {
-        const auto now = static_cast<unsigned long long>(QDateTime::currentSecsSinceEpoch());
-        if (!manual && (UISettings::values.skipped_update_tag.GetValue() == release.tag ||
-                        UISettings::values.update_remind_at.GetValue() > now)) {
-            return;
-        }
-
-        UpdateDialog dialog(release, this);
-        switch (dialog.exec()) {
-        case UpdateDialog::SkipVersion:
-            UISettings::values.skipped_update_tag = release.tag;
-            break;
-        case QDialog::Rejected:
-            UISettings::values.update_remind_at = now + 24 * 60 * 60;
-            break;
-        default:
-            return;
-        }
-        OnSaveConfig();
-    };
-    if (!manual && whats_new_dialog && whats_new_dialog->isVisible()) {
-        connect(whats_new_dialog, &QDialog::finished, this,
-                [this, prompt_update = std::move(prompt_update)] {
-                    if (!boot_in_progress && !emulation_running && !close_pending) {
-                        prompt_update();
-                    }
-                },
-                Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+    const auto& release = *result.update;
+    const auto now = static_cast<unsigned long long>(QDateTime::currentSecsSinceEpoch());
+    if (!manual && (UISettings::values.skipped_update_tag.GetValue() == release.tag ||
+                    UISettings::values.update_remind_at.GetValue() > now)) {
         return;
     }
-    prompt_update();
+
+    UpdateDialog dialog(release, this);
+    switch (dialog.exec()) {
+    case UpdateDialog::SkipVersion:
+        UISettings::values.skipped_update_tag = release.tag;
+        break;
+    case QDialog::Rejected:
+        UISettings::values.update_remind_at = now + 24 * 60 * 60;
+        break;
+    default:
+        return;
+    }
+    OnSaveConfig();
 }
 #endif
 
