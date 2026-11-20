@@ -823,7 +823,7 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         const u32 argument = static_cast<u32>(head >> 32);
         auto* const engine = back_engine;
         if (render_follower && method == MAXWELL3D_REG_INDEX(draw.end) &&
-            engine->reports_fast_draw_breaks) [[unlikely]] {
+            engine->reports_fast_draw_breaks) {
             auto* const maxwell3d = static_cast<Maxwell3D*>(engine);
             maxwell3d->ConsumeSink(*system);
             if ((head & HasSegment) != 0) {

@@ -4379,7 +4379,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
 
 template <typename F>
 void RasterizerVulkan::RecordDynamic(F&& command, std::source_location location) {
-    if (dynamic_commands != nullptr) [[unlikely]] {
+    if (dynamic_commands != nullptr) {
         dynamic_commands->emplace_back(std::move(command));
     } else {
         scheduler.Record(std::forward<F>(command), location);
