@@ -44,9 +44,13 @@ PLAIN_STRUCTS = {'NVNcopyRegion', 'NVNdrawTextureRegion', 'NVNpackagedTextureLay
 # Calls Lichii's hook answers itself (name lookups).
 HOOK_OWN = {'nvnBootstrapLoader', 'nvnDeviceGetProcAddress'}
 
+# Setters that keep a guest function pointer the front end never calls: Lichii's hook runs the
+# command buffer's memory callback in the guest (nvn_cmd_memory_ask).
+NATIVE_GUEST_CODE = {'nvnCommandBufferSetMemoryCallback'}
+
 NATIVE_BLOCKED = {
-    # These setters persist a host-callable function pointer in an in-place NVN object.
-    'nvnCommandBufferSetMemoryCallback', 'nvnDeviceInstallDebugCallback',
+    # This setter persists a host-callable function pointer in an in-place NVN object.
+    'nvnDeviceInstallDebugCallback',
     # Inferred signature and an embedded GPU address, not a descriptor index.
     'nvnDeviceGetUniformBufferHandle',
     # The available guest and native declarations disagree about the argument count.
@@ -202,7 +206,8 @@ def main():
         if native:
             for t in (ret, *args):
                 b = base(t)
-                if ('PFN' in t or b not in scalars | structs.keys()) and not (
+                if (('PFN' in t and name not in NATIVE_GUEST_CODE)
+                        or ('PFN' not in t and b not in scalars | structs.keys())) and not (
                     '*' in t and b in NATIVE_PRIVATE_POINTERS
                 ):
                     sys.exit(f'{name}: unaudited native type {t}')

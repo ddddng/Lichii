@@ -1,0 +1,49 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 5f25c50..6a11087 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -1136,6 +1136,26 @@ static void ctl_set(cmd_t *o, uint8_t *m, size_t n) {
+ // Control memory the host lends when the game's callback gives none (or none is set): never reclaimed, as nothing tells when the game is done with the handles listed in it. On hardware
+ // recording stops there, so a game only gets here if the host needs more control memory than the driver would
+ #define CTLSEG_SZ (64u << 10)
++#ifdef LICHII_NVN_METAL_LIVE
++// Lichii: the game's memory callback is guest code, which the host cannot call. The dispatch runs it before a recording call
++// that may run short (nvn_cmd_memory_ask), control memory first; a record that still does not fit goes to a host-lent segment as
++// before, and while recording in host memory the game is asked for memory before each call, so recording moves back to the game's
++#define CB_HOST(o) ((PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC)NULL)
++#define CMD_LOW 512u
++#define CTL_LOW 256u
++uint64_t nvn_direct_guest_of(uint64_t host);
++int nvn_cmd_memory_ask(const void *c, uint64_t *cb, uint64_t *cb_data, uint32_t *event, uint32_t *size) {
++    const cmd_t *o = (const cmd_t *)c;
++    if (!o->cb || !o->recording) return 0;
++    if (!o->ctl_mem || o->ctl_size - o->ctl_used < CTL_LOW || nvn_direct_guest_of((uintptr_t)o->ctl_mem) == (uintptr_t)o->ctl_mem) { *event = NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY; *size = CTL_LOW; }
++    else if (!o->cur || (size_t)(o->end - o->cur) < CMD_LOW || nvn_direct_guest_of((uintptr_t)o->cur) == (uintptr_t)o->cur) { *event = NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY; *size = CMD_LOW; }
++    else return 0;
++    *cb = (uint64_t)(uintptr_t)o->cb; *cb_data = (uint64_t)(uintptr_t)o->cb_data;
++    return 1;
++}
++#else
++#define CB_HOST(o) ((o)->cb)
++#endif
+ static uint8_t *ctlseg_take(void) {
+     static uint64_t bytes; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+     pthread_mutex_lock(&mu); uint64_t b = bytes += CTLSEG_SZ; pthread_mutex_unlock(&mu);
+@@ -1147,7 +1167,7 @@ static uint8_t *ctlseg_take(void) {
+ static void ctl_put(cmd_t *o, uint64_t e) {
+     uint32_t need = e & CTL_LAST ? 8 : 16;
+     for (int tries = 0; !o->ctl_mem || o->ctl_size - o->ctl_used < need; tries++) {
+-        if (!o->cb || tries == 2) { ctl_set(o, ctlseg_take(), CTLSEG_SZ); break; }
++        if (!CB_HOST(o) || tries == 2) { ctl_set(o, ctlseg_take(), CTLSEG_SZ); break; }
+         o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, need, o->cb_data);
+     }
+     uint8_t *p = o->ctl_mem + o->ctl_used;
+@@ -1174,7 +1194,7 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
+         // The record goes here in the game's count, though it does not fit: a lent segment hanging off this position belongs to a dead list (see hostseg_take)
+         if (o->recording && o->cur && o->cur < o->end) { cmd_own_at(o, o->cur); hostseg_written(o, o->cur, 1); }
+         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
+-        if (!o->cb || tries == 2) {
++        if (!CB_HOST(o) || tries == 2) {
+             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size);
+             size_t sz = hostseg_size(o, 0, size); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
+         }

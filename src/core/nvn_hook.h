@@ -123,6 +123,7 @@ public:
     virtual u64 GetVector(int index) = 0;
     virtual void SetVector(int index, u64 value) = 0;
     virtual u64 GetSP() = 0;
+    virtual void SetSP(u64 value) = 0;
 
 protected:
     ~ThunkRegisters() = default;

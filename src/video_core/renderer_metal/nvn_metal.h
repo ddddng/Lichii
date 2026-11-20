@@ -31,6 +31,11 @@ const char* nvn_direct_failure(void);
 
 /// The arena address of guest address (nvn_dispatch.c).
 uint64_t nvn_direct_host_of(uint64_t guest);
+uint64_t nvn_direct_guest_of(uint64_t host);
+// Whether a recording call on the command buffer at c may run short of the game's memory: then the
+// game's callback, its data (a host address), the event and the bytes to ask for.
+int nvn_cmd_memory_ask(const void* c, uint64_t* cb, uint64_t* cb_data, uint32_t* event,
+                       uint32_t* size);
 /// A CPU write to tracked pool pages (TrackPages), at their arena address: the textures over them
 /// are uploaded again at their next use (nxnative's nvn_dirty.c).
 void nvn_dirty_cpu_written(void* addr, size_t len);
