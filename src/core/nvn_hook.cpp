@@ -789,8 +789,13 @@ bool InstallMetal(Core::System& system, Kernel::KProcess& process) {
     InstallDirect(*state);
     LOG_INFO(Core,
              "Renderer: native Metal NVN (nxnative): {} nvnBootstrapLoader exports (SDK {}), "
-             "synthetic addresses from {:#x}",
-             state->bootstrap_entries.size(), state->sdk_major, state->synthetic_base);
+             "synthetic addresses from {:#x}, fastmem arena {}",
+             state->bootstrap_entries.size(), state->sdk_major, state->synthetic_base,
+             fmt::ptr(process.GetPageTable().GetImpl().fastmem_arena));
+    for (const auto& [base, module] : state->modules) {
+        LOG_INFO(Core, "NVN Metal: module {} at {:#x}-{:#x}", module, base,
+                 GetInteger(Core::GetModuleEnd(&process, base)));
+    }
     g_state = std::move(state);
     return true;
 }

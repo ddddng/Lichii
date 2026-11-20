@@ -4,6 +4,7 @@
 #include "video_core/renderer_metal/guest_buffer.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -35,22 +36,28 @@ id<MTLBuffer> ImportGuestBuffer(id<MTLDevice> device, std::shared_ptr<void> mapp
         return nil;
     }
 
-    mach_vm_address_t region_start = start;
-    mach_vm_size_t region_size{};
-    vm_region_basic_info_data_64_t info{};
-    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t name = MACH_PORT_NULL;
-    const auto result = mach_vm_region(mach_task_self(), &region_start, &region_size,
-                                       VM_REGION_BASIC_INFO_64,
-                                       reinterpret_cast<vm_region_info_t>(&info), &info_count, &name);
-    if (name != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self(), name);
-    }
     constexpr auto read_write = VM_PROT_READ | VM_PROT_WRITE;
-    if (result != KERN_SUCCESS || (info.protection & read_write) != read_write ||
-        region_start > start || length > region_size ||
-        start - region_start > region_size - length) {
-        return nil;
+    for (std::uintptr_t address = start; address < start + length;) {
+        mach_vm_address_t region_start = address;
+        mach_vm_size_t region_size{};
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t name = MACH_PORT_NULL;
+        const auto result =
+            mach_vm_region(mach_task_self(), &region_start, &region_size, VM_REGION_BASIC_INFO_64,
+                           reinterpret_cast<vm_region_info_t>(&info), &info_count, &name);
+        if (name != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), name);
+        }
+        if (result != KERN_SUCCESS || region_start > address ||
+            (info.protection & read_write) != read_write) {
+            std::fprintf(stderr, "[lichii] Metal buffer %#llx+%#llx: no read-write memory at %#llx\n",
+                         static_cast<unsigned long long>(start),
+                         static_cast<unsigned long long>(length),
+                         static_cast<unsigned long long>(address));
+            return nil;
+        }
+        address = region_start + region_size;
     }
 
     auto* const bytes = mapping.get();
@@ -99,6 +106,14 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
         {
             std::scoped_lock lock{pool_mapper_mutex};
             if (!pool_mapper.map || start < pool_arena || start - pool_arena >= pool_guest_size) {
+                std::fprintf(stderr,
+                             "[lichii] Metal pool %#llx+%#llx: outside the guest arena %#llx+%#llx "
+                             "(mapper %s)\n",
+                             static_cast<unsigned long long>(start),
+                             static_cast<unsigned long long>(length),
+                             static_cast<unsigned long long>(pool_arena),
+                             static_cast<unsigned long long>(pool_guest_size),
+                             pool_mapper.map ? "set" : "unset");
                 return nil;
             }
             const uint64_t guest_start = start - pool_arena;
@@ -113,8 +128,14 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
                 return nil;
             }
             aligned_length += tail;
-            if (aligned_length > device.maxBufferLength ||
-                !pool_mapper.map(pool_mapper.context, aligned_start, aligned_length, &lease)) {
+            if (aligned_length > device.maxBufferLength) {
+                std::fprintf(stderr, "[lichii] Metal pool %#llx+%#llx: over maxBufferLength %#llx\n",
+                             static_cast<unsigned long long>(aligned_start),
+                             static_cast<unsigned long long>(aligned_length),
+                             static_cast<unsigned long long>(device.maxBufferLength));
+                return nil;
+            }
+            if (!pool_mapper.map(pool_mapper.context, aligned_start, aligned_length, &lease)) {
                 return nil;
             }
         }
@@ -136,9 +157,13 @@ id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const voi
                                       }
                                   }};
         id<MTLBuffer> buffer = Metal::ImportGuestBuffer(device, std::move(mapping), aligned_length);
-        if (buffer) {
-            *buffer_offset = bias;
+        if (!buffer) {
+            std::fprintf(stderr, "[lichii] Metal pool %#llx+%#llx: no zero-copy buffer\n",
+                         static_cast<unsigned long long>(start),
+                         static_cast<unsigned long long>(length));
+            return nil;
         }
+        *buffer_offset = bias;
         return buffer;
     } catch (const std::bad_alloc&) {
         return nil;
