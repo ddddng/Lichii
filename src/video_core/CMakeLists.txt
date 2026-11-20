@@ -9,6 +9,10 @@ if (ENABLE_NVN_DIRECT)
     add_subdirectory(nvn_direct)
 endif()
 
+if (APPLE AND ARCHITECTURE_arm64 AND ENABLE_EXPERIMENTAL_METAL_REPLAY)
+    add_subdirectory(renderer_metal)
+endif()
+
 if(LIBVA_FOUND)
     set_source_files_properties(host1x/ffmpeg.cpp
         PROPERTIES COMPILE_DEFINITIONS LIBVA_FOUND=1)

@@ -131,6 +131,12 @@ else()
 endif()
 option(ENABLE_NVN_DIRECT "Build the NVN direct renderer (NVN2 games' NVN calls replayed in Vulkan)" ${ENABLE_NVN_DIRECT_DEFAULT})
 
+cmake_dependent_option(ENABLE_EXPERIMENTAL_METAL_REPLAY "Build the experimental Metal replay library"
+                       OFF "APPLE AND ARCHITECTURE_arm64" OFF)
+if (ENABLE_EXPERIMENTAL_METAL_REPLAY)
+    enable_language(OBJCXX)
+endif()
+
 # non-linux bundled qt are static
 if (LICHII_USE_BUNDLED_QT AND (APPLE OR NOT UNIX))
     set(LICHII_STATIC_BUILD ON)
