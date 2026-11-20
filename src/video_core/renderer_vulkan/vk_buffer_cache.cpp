@@ -11,8 +11,6 @@
 #include <span>
 #include <vector>
 
-#include <vulkan/utility/vk_format_utils.h>
-
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -28,6 +26,8 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/texture_cache/util.h"
+
+#include <vulkan/utility/vk_format_utils.h>
 
 namespace Vulkan {
 namespace {
