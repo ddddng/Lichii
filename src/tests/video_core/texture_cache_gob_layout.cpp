@@ -139,11 +139,7 @@ struct TextureCacheTestAccess {
     template <class C>
     static ImageId Find(C& cache, const ImageInfo& info, GPUVAddr gpu_addr) {
         bool retry = false;
-        if constexpr (requires { cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry); }) {
-            return cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry);
-        } else {
-            return cache.FindImage(info, gpu_addr, RelaxedOptions{});
-        }
+        return cache.FindImage(info, gpu_addr, RelaxedOptions{}, &retry);
     }
     template <class C>
     static void WriteGpu(C& cache, ImageId id, std::vector<u8> bytes) {

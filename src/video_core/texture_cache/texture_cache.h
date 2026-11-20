@@ -642,6 +642,9 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
             if (!download.cancelled) {
                 SwizzleKeeping(*memory, download.gpu_addr, download.info, download.copies,
                                download.map.mapped_span, download.keep);
+                if (download.gob_view) {
+                    ClearStale(download.cpu_addr, download.size);
+                }
                 ReloadUnderLanded(download.cpu_addr, download.size, download.tick);
             }
             runtime.FreeDeferredStagingBuffer(download.map);
@@ -649,6 +652,92 @@ void TextureCache<P>::FinishAsyncOverlapDownloads(bool wait_all) {
             async_overlap_downloads.pop_front();
         }
     }
+}
+
+template <class P>
+bool TextureCache<P>::GobViewBytesReady(DAddr cpu_addr, size_t size) {
+    if (WritebackPendingOver(cpu_addr, size)) {
+        return false;
+    }
+    ImageId source_id{};
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId id, ImageBase& image) {
+        if (!image.info.native_tiling || False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & ImageFlagBits::Remapped)) {
+            return false;
+        }
+        KeepRanges landed;
+        KeepNewerLanded(image, image.modification_tick == 0 ? 0 : image.modification_tick - 1,
+                        landed);
+        const DAddr begin = (std::max)(cpu_addr, image.cpu_addr);
+        const DAddr end = (std::min)(cpu_addr + size, image.cpu_addr_end);
+        if (std::ranges::any_of(landed, [&](const auto& range) {
+                return range.first <= begin && end <= range.second;
+            })) {
+            return false;
+        }
+        if (!source_id || image.modification_tick < slot_images[source_id].modification_tick) {
+            source_id = id;
+        }
+        return false;
+    });
+    if (!source_id) {
+        return true;
+    }
+    Image& source = slot_images[source_id];
+    constexpr size_t MaxGobReadbackBytes = 64_MiB;
+    if (std::ranges::any_of(async_overlap_downloads, &AsyncOverlapDownload::gob_view) ||
+        source.unswizzled_size_bytes > MaxGobReadbackBytes ||
+        !IsDownloadable(source) || !HasGuestRange(source) ||
+        True(source.flags & (ImageFlagBits::IsDecoding | ImageFlagBits::Converted))) {
+        return false;
+    }
+    const auto memory = AddressSpaceMemory(source.address_space);
+    if (!memory || memory->GpuToCpuAddress(source.gpu_addr) != source.cpu_addr ||
+        !memory->IsContinuousRange(source.gpu_addr, source.guest_size_bytes)) {
+        return false;
+    }
+    runtime.FlushDeferredClear();
+    KeepRanges keep;
+    KeepNewerLanded(source, source.modification_tick, keep);
+    auto copies = FullDownloadCopies(source.info);
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        const u64 gpu_tick = runtime.CurrentTick();
+        auto map = runtime.DownloadStagingBuffer(source.unswizzled_size_bytes, true);
+        source.DownloadMemory(map, copies);
+        device_memory.UpdatePagesCachedCount(source.cpu_addr, source.guest_size_bytes, 1);
+        async_overlap_downloads.push_back(AsyncOverlapDownload{
+            .gpu_tick = gpu_tick,
+            .gpu_addr = source.gpu_addr,
+            .cpu_addr = source.cpu_addr,
+            .size = source.guest_size_bytes,
+            .info = source.info,
+            .copies = std::move(copies),
+            .map = std::move(map),
+            .cancelled = false,
+            .keep = std::move(keep),
+            .tick = source.modification_tick,
+            .address_space = source.address_space,
+            .gob_view = true,
+        });
+        NoteOverlapWriteback(source);
+        ++join_writebacks;
+        ++join_writeback_images;
+    } else {
+        auto map = runtime.DownloadStagingBuffer(source.unswizzled_size_bytes);
+        source.DownloadMemory(map, copies);
+        const auto start = std::chrono::steady_clock::now();
+        runtime.Finish();
+        join_writeback_wait_us += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count());
+        ++join_writebacks;
+        ++join_writeback_images;
+        if (WriteBackImage(source, copies, map.mapped_span, keep)) {
+            NoteOverlapWriteback(source);
+            ReloadUnderLanded(source.cpu_addr, source.guest_size_bytes, source.modification_tick);
+        }
+    }
+    return false;
 }
 
 template <class P>
@@ -1856,6 +1945,10 @@ void TextureCache<P>::MemoizeTextures(SampledTextureMemo& memo,
             !sampler_table.ContainsIndex(sampler_index)) {
             return;
         }
+        const ImageId image_id = slot_image_views[views[i].id].image_id;
+        if (native_tiling && image_id && slot_images[image_id].info.maxwell_gob_layout) {
+            return;
+        }
         SampledTextureMemo::Entry entry{
             .handle_address = reads[i].address,
             .handle_host = host_of(reads[i].address, sizeof(u32)),
@@ -2293,6 +2386,19 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         LOG_TRACE(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
+    const auto bytes_ready = [&](ImageViewId id) {
+        if (id == NULL_IMAGE_VIEW_ID) {
+            return true;
+        }
+        const ImageId image_id = slot_image_views[id].image_id;
+        if (!image_id || !gpu_memory->UsesNativeTiling()) {
+            return true;
+        }
+        const ImageBase& image = slot_images[image_id];
+        return !image.info.maxwell_gob_layout ||
+               (image.overlapping_images.empty() && async_overlap_downloads.empty()) ||
+               GobViewBytesReady(image.cpu_addr, image.guest_size_bytes);
+    };
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
@@ -2306,7 +2412,14 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                     }
                 };
                 const u32 failed_before = failed_images();
-                pair->second = CreateImageView(descriptor);
+                bool retry = false;
+                pair->second = CreateImageView(descriptor, retry);
+                if (retry) {
+                    channel_state->image_views.erase(pair);
+                    table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+                    table.Retry(index);
+                    return NULL_IMAGE_VIEW_ID;
+                }
                 if (pair->second == NULL_IMAGE_VIEW_ID && failed_images() != failed_before) {
                     // No memory for its image: TickFrame invalidates the table after collecting,
                     // and the descriptor's next read makes the image again.
@@ -2319,6 +2432,10 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                                                                       descriptor);
                 }
             }
+            if (!is_new_tc && !bytes_ready(pair->second)) {
+                table.bound_ids[index] = pair->second;
+                return NULL_IMAGE_VIEW_ID;
+            }
             PrepareImageView(pair->second, false, false);
             table.bound_ids[index] = pair->second;
             return pair->second;
@@ -2327,6 +2444,9 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         return NULL_IMAGE_VIEW_ID;
     }
     const auto id = table.bound_ids[index];
+    if (!bytes_ready(id)) {
+        return NULL_IMAGE_VIEW_ID;
+    }
     if (id != NULL_IMAGE_VIEW_ID)
         PrepareImageView(id, false, false);
     return id;
@@ -3914,7 +4034,7 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
 }
 
 template <class P>
-ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
+ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& retry) {
     const bool native = gpu_memory->UsesNativeTiling();
     if (native && raw_config.format.Value() == Tegra::Texture::TextureFormat{} &&
         RenderTrace::Enabled()) {
@@ -3946,7 +4066,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
     }
     const u32 layer_offset = config.BaseLayer() * info.layer_stride;
     const GPUVAddr image_gpu_addr = config.Address() - layer_offset;
-    const ImageId image_id = FindOrInsertImage(info, image_gpu_addr);
+    const ImageId image_id = FindOrInsertImage(info, image_gpu_addr, RelaxedOptions{}, &retry);
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
     }
@@ -3963,19 +4083,32 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
 
 template <class P>
 ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
-                                           RelaxedOptions options) {
-    if (const ImageId image_id = FindImage(info, gpu_addr, options); image_id) {
+                                           RelaxedOptions options, bool* retry) {
+    bool deferred = false;
+    if (const ImageId image_id = FindImage(info, gpu_addr, options, &deferred); image_id) {
         return image_id;
+    }
+    if (deferred) {
+        if (retry != nullptr) {
+            *retry = true;
+        }
+        return NULL_IMAGE_ID;
     }
     return InsertImage(info, gpu_addr, options);
 }
 
 template <class P>
 ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
-                                   RelaxedOptions options) {
-    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
+                                   RelaxedOptions options, bool* retry) {
+    const size_t size = CalculateGuestSizeInBytes(info);
+    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size);
     if (!cpu_addr) {
         return ImageId{};
+    }
+    if (retry && info.maxwell_gob_layout && gpu_memory->UsesNativeTiling() &&
+        !GobViewBytesReady(*cpu_addr, size)) {
+        *retry = true;
+        return NULL_IMAGE_ID;
     }
     const bool broken_views =
         runtime.HasBrokenTextureViewFormats() || True(options & RelaxedOptions::ForceBrokenViews);
@@ -4010,7 +4143,7 @@ ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
         }
         return false;
     };
-    ForEachImageInRegion(*cpu_addr, CalculateGuestSizeInBytes(info), lambda);
+    ForEachImageInRegion(*cpu_addr, size, lambda);
     if (image_ids.size() <= 1) [[likely]] {
         return image_id;
     }
