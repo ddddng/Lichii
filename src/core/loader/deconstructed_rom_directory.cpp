@@ -107,6 +107,13 @@ FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
     return FindLooseSubdirectory(parent, "romfs");
 }
 
+FileSys::VirtualDir FindLooseBasePackage(const FileSys::VirtualDir& game) {
+    if (auto base = FindLooseSubdirectory(game, "base")) {
+        return base;
+    }
+    return game;
+}
+
 std::optional<u64> LooseUpdateVersion(const FileSys::VirtualDir& directory) {
     const auto name = directory->GetName();
     u64 version{};
@@ -129,10 +136,14 @@ bool IsLooseEditionExeFS(const FileSys::VirtualDir& exefs,
     if ((id >> 56) != 0x04 || id != FileSys::GetBaseTitleIDWithProgramIndex(id, 1)) {
         return false;
     }
-    if (const auto base_exefs = FindLooseSubdirectory(base_package, "exefs")) {
+    auto base_exefs = FindLooseSubdirectory(base_package, "exefs");
+    if (!base_exefs) {
+        base_exefs = base_package;
+    }
+    if (base_exefs && FileSys::IsDirectoryExeFS(base_exefs)) {
         const auto npdm = base_exefs->GetFile("main.npdm");
         FileSys::ProgramMetadata base_metadata;
-        if (npdm && base_metadata.Load(npdm) == ResultStatus::Success) {
+        if (base_metadata.Load(npdm) == ResultStatus::Success) {
             return FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(id)) ==
                    FileSys::GetSwitch1ApplicationID(
                        FileSys::GetBaseTitleID(base_metadata.GetTitleID()));
@@ -208,7 +219,7 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
         if (const auto version = FindEditionVersion(parent)) {
             const auto storage = version->GetParentDirectory();
             const auto game = storage->GetParentDirectory();
-            const auto base = FindLooseSubdirectory(game, "base");
+            const auto base = FindLooseBasePackage(game);
             if (IsLooseEditionExeFS(exefs_dir, base)) {
                 std::vector<FileSys::VirtualDir> tiers;
                 for (const auto& package : {parent, version, base}) {
@@ -362,13 +373,9 @@ FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
     if (!directory) {
         return nullptr;
     }
-    if (auto main = directory->GetFile("main")) {
-        return main;
-    }
-
     FileSys::VirtualFile newest_edition;
     u64 newest_version{};
-    const auto base = FindLooseSubdirectory(directory, "base");
+    const auto base = FindLooseBasePackage(directory);
     for (const auto storage_name : {"updates", "upgrade"}) {
         const auto storage = FindLooseSubdirectory(directory, storage_name);
         if (!storage) {
@@ -394,6 +401,9 @@ FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
     }
     if (newest_edition) {
         return newest_edition;
+    }
+    if (auto main = directory->GetFile("main")) {
+        return main;
     }
     for (const auto& package : {directory, base}) {
         if (const auto exefs = FindLooseSubdirectory(package, "exefs");

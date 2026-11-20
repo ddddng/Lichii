@@ -497,11 +497,11 @@ struct System::Impl {
             fs_controller.InitTempStorage();
         }
 
-        const std::optional<u64> switch2_program_id =
-            virtual_filesystem != nullptr
-                ? FindSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath),
-                                     params.program_id, params.program_index)
-                : std::nullopt;
+        const auto file =
+            virtual_filesystem != nullptr ? GetGameFileFromPath(virtual_filesystem, filepath)
+                                          : nullptr;
+        const auto switch2_program_id =
+            FindSwitch2Program(file, params.program_id, params.program_index);
         const bool switch2_program = switch2_program_id.has_value();
         Kernel::KSystemControl::SetApplicationProgramId(switch2_program_id.value_or(0));
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
@@ -557,8 +557,6 @@ struct System::Impl {
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
         }
-
-        const auto file = GetGameFileFromPath(virtual_filesystem, filepath);
 
         // Create the application process
         Loader::ResultStatus load_result{};
@@ -640,7 +638,7 @@ struct System::Impl {
 
         if (Settings::values.gamecard_inserted) {
             if (Settings::values.gamecard_current_game) {
-                fs_controller.SetGameCard(GetGameFileFromPath(virtual_filesystem, filepath));
+                fs_controller.SetGameCard(file);
             } else if (!Settings::values.gamecard_path.GetValue().empty()) {
                 const auto& gamecard_path = Settings::values.gamecard_path.GetValue();
                 fs_controller.SetGameCard(GetGameFileFromPath(virtual_filesystem, gamecard_path));
