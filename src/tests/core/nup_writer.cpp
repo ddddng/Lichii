@@ -1851,6 +1851,7 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool native_npdm = true;
     bool have_base = true;
     bool root_main = false;
+    bool base_romfs_image = false;
     std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
     auto base = root / "base";
     auto base_romfs = fs::path{};
@@ -1888,6 +1889,17 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         root_main = true;
         base_romfs = root / "base/romfs";
     }
+    SECTION("a matching native program layers over a file-backed base RomFS") {
+        base = root;
+        root_main = true;
+        base_romfs_image = true;
+    }
+    SECTION("a native root main cannot be replaced by another program index") {
+        base = root;
+        root_main = true;
+        base_npdm = BootNpdm(TitleId + 2, true);
+        boot_edition = false;
+    }
     SECTION("a bare root main with no NPDM cannot be matched to an Edition") {
         base = root;
         root_main = true;
@@ -1901,13 +1913,24 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         boot_edition = false;
     }
 
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
     const auto base_exefs = root_main ? base : base / "exefs";
     if (have_base) {
         Put(base_exefs / "main", "legacy");
         if (base_npdm) {
             Put(base_exefs / "main.npdm", *base_npdm);
         }
-        Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
+        if (base_romfs_image) {
+            const auto data = t.path / "base-image";
+            Put(data / "base.bin", "base data");
+            Put(data / "shared.bin", "base override");
+            const auto image = FileSys::CreateRomFS(
+                vfs->OpenDirectory(Common::FS::PathToUTF8String(data), FileSys::OpenMode::Read));
+            REQUIRE(image != nullptr);
+            Put(base_exefs / "data.romfs", Read(image));
+        } else {
+            Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
+        }
     }
     Put(version / "romfs/update.bin", "update data");
     Put(version / "romfs/shared.bin", "legacy data");
@@ -1915,7 +1938,6 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     Put(edition / "exefs/main.npdm", BootNpdm(program_id, native_npdm));
     Put(edition / "romfs/shared.bin", "edition data");
 
-    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
     const auto native = Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(root));
     REQUIRE(native != nullptr);
     CHECK(Read(native) == (boot_edition ? "edition" : "legacy"));
@@ -1926,6 +1948,17 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         CHECK(Read(explicit_legacy) == "legacy");
     }
     if (root_main && !boot_edition) {
+        const auto explicit_edition = Core::GetGameFileFromPath(
+            vfs, Common::FS::PathToUTF8String(edition / "exefs/main"));
+        REQUIRE(explicit_edition != nullptr);
+        Loader::AppLoader_DeconstructedRomDirectory loader{explicit_edition};
+        FileSys::VirtualFile romfs;
+        REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+        const auto tree = FileSys::ExtractRomFS(romfs);
+        REQUIRE(tree != nullptr);
+        REQUIRE(tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(tree->GetFile("update.bin")) == "update data");
+        CHECK_FALSE(tree->GetFile("base.bin"));
         return;
     }
 
