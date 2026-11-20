@@ -2682,9 +2682,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (metadata.first != nullptr) {
         title_version = metadata.first->GetVersionString();
         title_name = metadata.first->GetApplicationName();
-    } else if (FileSys::NACP control; QtCommon::system->GetAppLoader().ReadControlData(control) ==
-                                      Loader::ResultStatus::Success) {
-        title_version = control.GetVersionString();
+    } else {
+        QtCommon::system->GetAppLoader().ReadDisplayVersion(title_version);
     }
     if (res != Loader::ResultStatus::Success || title_name.empty()) {
         title_name = Common::FS::PathToUTF8String(
