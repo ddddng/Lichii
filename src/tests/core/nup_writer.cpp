@@ -1650,6 +1650,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     bool base_switch2 = true;
     bool update_switch2 = false;
     bool foreign_update = false;
+    u64 native_update_id = edition_program;
     std::optional<u64> embedded_id;
     bool embedded_switch2 = true;
     bool have_embedded_romfs = true;
@@ -1670,6 +1671,17 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
         base_switch2 = false;
         update_switch2 = true;
         foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native base does not claim a foreign native update") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native update for a different program index cannot replace the base") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 1;
     }
     SECTION("legacy update supersedes its legacy base") {
         base_switch2 = false;
@@ -1720,8 +1732,7 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
                     base_switch2, 'B');
         Put(root / "base/romfs/base.bin", "base");
     }
-    const auto update_program_id =
-        update_switch2 ? edition_program + (foreign_update ? 0x2000 : 0) : legacy_program;
+    const auto update_program_id = update_switch2 ? native_update_id : legacy_program;
     write_exefs(root / "updates/65536/exefs", update_program_id, update_switch2, 'U');
     if (embedded_id) {
         write_exefs(root / "updates/65536/program1/exefs", *embedded_id, embedded_switch2, 'E');
@@ -1792,6 +1803,37 @@ TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boo
     }
 }
 
+TEST_CASE("The own-index fallback does not mount mods without a RomFS", "[boot-inputs]") {
+    TempDir t;
+    constexpr u64 program_id = TitleId + 1;
+    const auto exefs = t.path / "Game/exefs";
+    Put(exefs / "main", "main");
+    Put(exefs / "main.npdm", BootNpdm(program_id, true));
+
+    using Common::FS::EdenPath;
+    const auto old_load = Common::FS::GetEdenPath(EdenPath::LoadDir);
+    SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::LoadDir, old_load); };
+    const auto load_root = t.path / "load";
+    Put(load_root / fmt::format("{:016X}", program_id) / "Synthetic/romfs/mod.bin", "mod");
+    Common::FS::SetEdenPath(EdenPath::LoadDir, load_root);
+    ScopedSystemTestContext context;
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    Core::System system;
+    system.SetFilesystem(vfs);
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    auto& controller = system.GetFileSystemController();
+    controller.CreateFactories(*vfs);
+
+    Loader::AppLoader_DeconstructedRomDirectory loader{
+        Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(exefs / "main"))};
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::ErrorNoRomFS);
+    const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
+    constexpr auto type = FileSys::ContentRecordType::Program;
+    REQUIRE(factory.OpenCurrentProcess(program_id) != nullptr);
+    CHECK_FALSE(factory.OpenPatchedRomFSWithProgramIndex(program_id, 1, type));
+}
+
 TEST_CASE("Loose Edition folders read program, matching update and base data", "[boot-inputs]") {
     TempDir t;
     const auto root = t.path / "Game";
@@ -1802,6 +1844,8 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool boot_edition = true;
     bool native_npdm = true;
     bool have_base = true;
+    bool root_main = false;
+    auto base = root / "base";
     u64 program_id = edition_program;
 
     SECTION("direct program1") {}
@@ -1819,11 +1863,23 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     SECTION("a standalone native program does not require a base") {
         have_base = false;
     }
+    SECTION("a matching native program keeps the root base RomFS") {
+        base = root;
+    }
+    SECTION("a foreign program1 cannot replace the root ExeFS") {
+        base = root;
+        program_id += 0x2000;
+        boot_edition = false;
+    }
+    SECTION("a matching native program supersedes a bare root main") {
+        base = root;
+        root_main = true;
+    }
 
-    const auto base = root / "base";
+    const auto base_exefs = root_main ? base : base / "exefs";
     if (have_base) {
-        Put(base / "exefs/main", "legacy");
-        Put(base / "exefs/main.npdm", BootNpdm(legacy_program, false));
+        Put(base_exefs / "main", "legacy");
+        Put(base_exefs / "main.npdm", BootNpdm(legacy_program, false));
         Put(base / "romfs/base.bin", "base data");
     }
     Put(version / "romfs/update.bin", "update data");
@@ -1838,7 +1894,7 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     CHECK(Read(native) == (boot_edition ? "edition" : "legacy"));
     if (have_base) {
         const auto explicit_legacy =
-            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base / "exefs/main"));
+            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base_exefs / "main"));
         REQUIRE(explicit_legacy != nullptr);
         CHECK(Read(explicit_legacy) == "legacy");
     }
