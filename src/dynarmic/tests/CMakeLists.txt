@@ -17,6 +17,7 @@ add_executable(dynarmic_tests
     decoder_tests.cpp
     # A64
     A64/a64.cpp
+    A64/block_entry_hook.cpp
     A64/fibonacci.cpp
     A64/fp_min_max.cpp
     A64/host_call_return.cpp
