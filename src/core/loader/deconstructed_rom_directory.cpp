@@ -107,14 +107,21 @@ FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
     return FindLooseSubdirectory(parent, "romfs");
 }
 
-FileSys::VirtualDir FindLooseBasePackage(const FileSys::VirtualDir& game) {
-    if (game && game->GetFile("main")) {
-        return game;
+FileSys::VirtualDir FindLooseBaseExeFS(const FileSys::VirtualDir& game,
+                                       const FileSys::VirtualDir& base) {
+    for (const auto& package : {game, base}) {
+        if (!package) {
+            continue;
+        }
+        if (package->GetFile("main")) {
+            return package;
+        }
+        if (auto exefs = FindLooseSubdirectory(package, "exefs");
+            exefs && exefs->GetFile("main")) {
+            return exefs;
+        }
     }
-    if (auto base = FindLooseSubdirectory(game, "base")) {
-        return base;
-    }
-    return game;
+    return nullptr;
 }
 
 std::optional<u64> LooseUpdateVersion(const FileSys::VirtualDir& directory) {
@@ -128,7 +135,7 @@ std::optional<u64> LooseUpdateVersion(const FileSys::VirtualDir& directory) {
 }
 
 bool IsLooseEditionExeFS(const FileSys::VirtualDir& exefs,
-                         const FileSys::VirtualDir& base_package) {
+                         const FileSys::VirtualDir& base_exefs) {
     FileSys::ProgramMetadata metadata;
     if (!exefs || !FileSys::IsDirectoryExeFS(exefs) ||
         metadata.Load(exefs->GetFile("main.npdm")) != ResultStatus::Success ||
@@ -139,10 +146,7 @@ bool IsLooseEditionExeFS(const FileSys::VirtualDir& exefs,
     if ((id >> 56) != 0x04 || id != FileSys::GetBaseTitleIDWithProgramIndex(id, 1)) {
         return false;
     }
-    const auto base_exefs = base_package && base_package->GetFile("main")
-                                ? base_package
-                                : FindLooseSubdirectory(base_package, "exefs");
-    if (!base_exefs || !base_exefs->GetFile("main")) {
+    if (!base_exefs) {
         return true;
     }
     const auto npdm = base_exefs->GetFile("main.npdm");
@@ -219,12 +223,17 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
         if (const auto version = FindEditionVersion(parent)) {
             const auto storage = version->GetParentDirectory();
             const auto game = storage->GetParentDirectory();
-            const auto base = FindLooseBasePackage(game);
-            if (IsLooseEditionExeFS(exefs_dir, base)) {
+            const auto base = FindLooseSubdirectory(game, "base");
+            if (IsLooseEditionExeFS(exefs_dir, FindLooseBaseExeFS(game, base))) {
+                auto base_romfs = FindLooseRomFSDirectory(base);
+                if (!base_romfs) {
+                    base_romfs = FindLooseRomFSDirectory(game);
+                }
                 std::vector<FileSys::VirtualDir> tiers;
-                for (const auto& package : {parent, version, base}) {
-                    if (auto romfs = FindLooseRomFSDirectory(package)) {
-                        tiers.push_back(std::move(romfs));
+                for (const auto& romfs : {FindLooseRomFSDirectory(parent),
+                                          FindLooseRomFSDirectory(version), base_romfs}) {
+                    if (romfs) {
+                        tiers.push_back(romfs);
                     }
                 }
                 return build_from(std::move(tiers));
@@ -375,7 +384,8 @@ FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
     }
     FileSys::VirtualFile newest_edition;
     u64 newest_version{};
-    const auto base = FindLooseBasePackage(directory);
+    const auto base = FindLooseSubdirectory(directory, "base");
+    const auto base_exefs = FindLooseBaseExeFS(directory, base);
     for (const auto storage_name : {"updates", "upgrade"}) {
         const auto storage = FindLooseSubdirectory(directory, storage_name);
         if (!storage) {
@@ -391,7 +401,7 @@ FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
                  {FindLooseSubdirectory(version, "program1"), FindLooseSubdirectory(programs, "1"),
                   FindLooseSubdirectory(programs, "program1")}) {
                 const auto exefs = FindLooseSubdirectory(package, "exefs");
-                if (IsLooseEditionExeFS(exefs, base)) {
+                if (IsLooseEditionExeFS(exefs, base_exefs)) {
                     newest_edition = exefs->GetFile("main");
                     newest_version = *number;
                     break;
