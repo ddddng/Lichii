@@ -7,11 +7,14 @@
 #include <cstring>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
@@ -169,6 +172,13 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
         }
     }
     const auto exefs = selected->exefs;
+    if (nup->FindPackage(NupContainer::PackageKind::Addon)) {
+        FileSys::ProgramMetadata program_metadata;
+        if (program_metadata.Load(exefs->GetFile("main.npdm")) == ResultStatus::Success &&
+            program_metadata.IsSwitch2()) {
+            upgrade_program_id = program_metadata.GetTitleID();
+        }
+    }
     secondary_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true, false);
     has_program = true;
 
@@ -277,6 +287,20 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
     }
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
+    }
+    const auto dlc_disabled = [](u64 id) {
+        const auto& disabled = Settings::values.disabled_addons;
+        const auto it = disabled.find(id);
+        return it != disabled.end() && std::ranges::find(it->second, "DLC") != it->second.end();
+    };
+    if (upgrade_program_id != 0 && !dlc_disabled(base_title_id) &&
+        !dlc_disabled(upgrade_program_id) &&
+        !dlc_disabled(FileSys::GetBaseTitleID(upgrade_program_id))) {
+        if (const auto pack = nup->FindUpgradePack(upgrade_program_id)) {
+            merged = FileSys::NupContainer::MergeShadowDirs(merged, nup->GetRomFSDir(*pack));
+            LOG_INFO(Loader, "NUP upgrade pack {:016X} layered over the program RomFS",
+                     nup->GetPackages()[*pack].title_id);
+        }
     }
     out_file = FileSys::CreateRomFS(merged);
     if (out_file == nullptr) {
