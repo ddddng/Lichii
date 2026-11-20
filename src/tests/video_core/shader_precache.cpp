@@ -145,6 +145,25 @@ std::vector<u8> Frame(const std::vector<u8>& content, bool checksum = false) {
     return frame;
 }
 
+/// A frame that declares its content size, as a streaming writer flushing every byte leaves it:
+/// one raw block per byte, far larger than ZSTD_compressBound of the content.
+std::vector<u8> RawBlockFrame(const std::vector<u8>& content) {
+    REQUIRE(content.size() >= 256);
+    REQUIRE(content.size() < 256 + 65536);
+    std::vector<u8> frame{0x28, 0xb5, 0x2f, 0xfd, 0x60};
+    const u16 declared = static_cast<u16>(content.size() - 256);
+    frame.push_back(static_cast<u8>(declared));
+    frame.push_back(static_cast<u8>(declared >> 8));
+    for (size_t i = 0; i < content.size(); ++i) {
+        const u32 header = (1U << 3) | (i + 1 == content.size() ? 1U : 0U);
+        frame.push_back(static_cast<u8>(header));
+        frame.push_back(static_cast<u8>(header >> 8));
+        frame.push_back(static_cast<u8>(header >> 16));
+        frame.push_back(content[i]);
+    }
+    return frame;
+}
+
 /// Reads of an in-memory pack, counted
 struct MemoryPack {
     std::vector<u8> bytes;
@@ -324,7 +343,9 @@ TEST_CASE("ShaderPrecache: asset packs are told by their magic or size", "[video
     const std::array<u8, 4> pdat{'P', 'D', 'A', 'T'};
     const std::array<u8, 4> other{'P', 'A', 'R', 'C'};
     REQUIRE(ShaderWarm::IsFramePack(pdat, "Asset/assets_a000.dat", 20 << 20));
+    REQUIRE(ShaderWarm::IsFramePack(pdat, "Asset/assets_b000.dat", 4096));
     REQUIRE_FALSE(ShaderWarm::IsFramePack(other, "Asset/assets.cat", 20 << 20));
+    REQUIRE_FALSE(ShaderWarm::IsFramePack(other, "romfs/41", (u64{1} << 30) - 1));
     REQUIRE(ShaderWarm::IsFramePack(other, "romfs/42", u64{7} << 30));
     REQUIRE_FALSE(ShaderWarm::IsFramePack(other, "Movie/Opening.MP4", u64{2} << 30));
 }
@@ -359,6 +380,100 @@ TEST_CASE("ShaderPrecache: a pack's frames are found across window ends", "[vide
     REQUIRE_FALSE(result.stopped);
     REQUIRE(found.compute == 4);
     REQUIRE(found.vertex == 1);
+}
+
+TEST_CASE("ShaderPrecache: a small PDAT pack is read whole", "[video_core]") {
+    MemoryPack pack;
+    pack.Place(0, {'P', 'D', 'A', 'T'});
+    const auto first = Frame(Member({BareProgram(true, 10)}));
+    pack.Place(16, first);
+    pack.Place(16 + first.size() + 3, Frame(Member({BareProgram(true, 11)})));
+    REQUIRE(pack.bytes.size() < 4096);
+    REQUIRE(ShaderWarm::IsFramePack(std::span{pack.bytes}.first(4), "Asset/small.dat",
+                                    pack.bytes.size()));
+
+    Found found;
+    const auto result =
+        ShaderWarm::ScanFrames(pack.bytes.size(), pack.Reader(), nullptr, found.Counter(), {});
+    REQUIRE(result.frames == 2);
+    REQUIRE(found.compute == 2);
+    REQUIRE(pack.reads == 1);
+}
+
+TEST_CASE("ShaderPrecache: a frame of many small blocks is read past its compress bound",
+          "[video_core]") {
+    constexpr size_t window = 256;
+    const auto content = Member({BareProgram(true, 12)});
+    const auto frame = RawBlockFrame(content);
+    REQUIRE(ZSTD_getFrameContentSize(frame.data(), frame.size()) == content.size());
+    REQUIRE(ZSTD_findFrameCompressedSize(frame.data(), frame.size()) == frame.size());
+    REQUIRE(frame.size() > ZSTD_compressBound(content.size()) + 22);
+    REQUIRE(ZSTD_compressBound(content.size()) + 22 > window);
+    MemoryPack pack;
+    pack.Place(0, {'P', 'D', 'A', 'T'});
+    pack.Place(8, frame);
+    const auto tail = Frame(Member({BareProgram(true, 13)}));
+    pack.Place(8 + frame.size() + 5, tail);
+
+    Found found;
+    const auto result = ShaderWarm::ScanFrames(pack.bytes.size(), pack.Reader(), nullptr,
+                                               found.Counter(), {}, {.window = window});
+    REQUIRE(result.oversized == 0);
+    REQUIRE(result.failed == 0);
+    REQUIRE(result.frames == 2);
+    REQUIRE(found.compute == 2);
+    REQUIRE_FALSE(result.read_failed);
+}
+
+TEST_CASE("ShaderPrecache: a short read before the end of a pack fails the scan",
+          "[video_core]") {
+    constexpr size_t window = 256;
+    MemoryPack pack;
+    pack.Place(0, {'P', 'D', 'A', 'T'});
+    for (size_t i = 0; i < 4; ++i) {
+        pack.Place(i * window + 9, Frame(Member({BareProgram(true, static_cast<u8>(20 + i))})));
+    }
+    // Larger than a window, read on its own
+    const auto large = Frame(Member({BareProgram(true, 30)}, 4 * window));
+    REQUIRE(large.size() > window);
+    const size_t large_at = 6 * window;
+    pack.Place(large_at, large);
+    pack.Place(large_at + large.size() + 1, Frame(Member({BareProgram(true, 31)})));
+    auto reader = pack.Reader();
+
+    // Cuts the first read `cut` picks to `keep` bytes.
+    const auto scan = [&](const std::function<bool(u64, size_t)>& cut, size_t keep) {
+        bool done = false;
+        const ShaderWarm::ReadAt read = [&](u64 offset, size_t length) {
+            auto bytes = reader(offset, length);
+            if (!done && cut(offset, length)) {
+                done = true;
+                bytes.resize(std::min(bytes.size(), keep));
+            }
+            return bytes;
+        };
+        Found found;
+        const auto result = ShaderWarm::ScanFrames(pack.bytes.size(), read, nullptr,
+                                                   found.Counter(), {}, {.window = window});
+        REQUIRE_FALSE(result.stopped);
+        return std::make_pair(result, found);
+    };
+
+    const auto [whole, whole_found] = scan([](u64, size_t) { return false; }, 0);
+    REQUIRE_FALSE(whole.read_failed);
+    REQUIRE(whole.frames == 6);
+    REQUIRE(whole_found.compute == 6);
+
+    for (const size_t keep : {size_t{0}, size_t{2}, window / 2}) {
+        const auto [cut, found] = scan([](u64 offset, size_t) { return offset != 0; }, keep);
+        REQUIRE(cut.read_failed);
+        REQUIRE(found.compute == 1);
+    }
+    // The read of the large frame on its own comes back short.
+    const auto [cut, found] =
+        scan([](u64, size_t length) { return length > window; }, window);
+    REQUIRE(cut.read_failed);
+    REQUIRE(found.compute == 4);
 }
 
 TEST_CASE("ShaderPrecache: malformed and oversized frames are skipped, not fatal",

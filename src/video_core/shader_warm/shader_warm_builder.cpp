@@ -44,8 +44,6 @@ constexpr std::string_view StageExtracting = "Extracting shaders";
 constexpr std::string_view StageConverting = "Converting";
 constexpr std::string_view StageWriting = "Writing";
 constexpr std::string_view StagePacks = "Reading asset packs (MiB)";
-/// Smallest file whose first bytes are read to tell an asset pack (IsFramePack)
-constexpr u64 MinPackBytes = u64{16} << 20;
 /// Conversions in flight (each holds a copy of its program).
 constexpr size_t MaxPendingJobs = 2048;
 
@@ -600,8 +598,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                 dictionary_pack = file.file; // the newest package wins
                 break;
             case GameFileKind::Other:
-                if (file.file->GetSize() >= MinPackBytes &&
-                    IsFramePack(file.file->ReadBytes(4, 0), file.path, file.file->GetSize())) {
+                if (IsFramePack(file.file->ReadBytes(4, 0), file.path, file.file->GetSize())) {
                     packs.push_back(file);
                 }
                 break;
@@ -744,6 +741,10 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         if (scanned.stopped) {
             converter.reset();
             return fail("Stopped");
+        }
+        if (scanned.read_failed) {
+            converter.reset();
+            return fail(fmt::format("Reading {} failed", pack.path));
         }
     }
 
