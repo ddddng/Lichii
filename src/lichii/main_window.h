@@ -680,6 +680,7 @@ private:
     bool nup_running{};
     QPointer<ShaderWarmDialog> shader_warm_dialog;
     QPointer<WhatsNewDialog> whats_new_dialog;
+    bool startup_whats_new_pending{};
     NxTools* nx_tools = nullptr;
     bool nx_metadata_write_in_progress = false;
     std::string nup_source_path;

@@ -783,6 +783,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
 
     if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
+        startup_whats_new_pending = true;
 #ifdef ENABLE_UPDATE_CHECKER
         if (update_check_running) {
             connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
@@ -2398,6 +2399,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         if (!emulation_running && !close_pending) {
             game_list->SetScanEnabled(true);
             game_list->PopulateAsync(UISettings::values.game_dirs);
+            if (startup_whats_new_pending) {
+                QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
+            }
         }
         if (close_pending) {
             QTimer::singleShot(0, this, &QWidget::close);
@@ -3042,6 +3046,9 @@ void MainWindow::OnEmulationStopped() {
     } else if (!boot_in_progress) {
         game_list->SetScanEnabled(true);
         game_list->PopulateAsync(UISettings::values.game_dirs);
+        if (startup_whats_new_pending) {
+            QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
+        }
     }
 }
 
@@ -4863,17 +4870,20 @@ void MainWindow::OnInstallDecryptionKeys() {
 }
 
 void MainWindow::MaybeShowStartupWhatsNew() {
-    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
-    if (!isVisible() || boot_in_progress || emulation_running || close_pending ||
-        WhatsNewDialog::OnStartup(build, UISettings::values.last_seen_release.GetValue(),
-                                 UISettings::values.first_start.GetValue(),
-                                 false) != WhatsNewDialog::StartupAction::Show) {
+    if (!startup_whats_new_pending || !isVisible() || UISettings::values.first_start.GetValue() ||
+        boot_in_progress || emulation_running || close_pending) {
         return;
     }
+#ifdef ENABLE_UPDATE_CHECKER
+    if (update_check_running) {
+        return;
+    }
+#endif
     if (auto* const modal = QApplication::activeModalWidget()) {
         if (auto* const dialog = qobject_cast<QDialog*>(modal)) {
             connect(dialog, &QDialog::finished, this, &MainWindow::MaybeShowStartupWhatsNew,
-                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+                    Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection |
+                                       Qt::UniqueConnection));
         }
         return;
     }
@@ -4881,6 +4891,7 @@ void MainWindow::MaybeShowStartupWhatsNew() {
 }
 
 void MainWindow::OnWhatsNew() {
+    startup_whats_new_pending = false;
     if (whats_new_dialog && whats_new_dialog->isVisible()) {
         whats_new_dialog->raise();
         whats_new_dialog->activateWindow();
