@@ -1257,10 +1257,11 @@ bool Maxwell3D::WriteBoundConstantBuffer(u32 offset, const void* data, u32 bytes
     // Data memory already holds changes neither the texture handles nor the uniforms a delta draw
     // keeps from the draw before (Donkey Kong Bananza writes most of its handles again unchanged).
     // GPU-written pages can be newer than memory, and memory can be newer than what the last full
-    // resolve read (a guest CPU write or sync since): writes there count.
+    // resolve read (a guest CPU write, watch change or sync since, or a page CPU writes to don't
+    // notify): writes there count.
     if (Tegra::Nx2MayBeGpuWritten(device, bytes) ||
         !memory_manager.ConstantBufferDataMatches(device, data, bytes) ||
-        !FastDraw::HandleMemoryUnchanged()) {
+        !FastDraw::HandleMemoryUnchanged() || !memory_manager.IsDeviceRangeCached(device, bytes)) {
         FastDraw::NoteConstantData(begin, begin + bytes);
         FastDraw::NoteDeviceData(device, device + bytes);
     }
