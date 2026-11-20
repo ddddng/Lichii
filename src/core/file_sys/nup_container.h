@@ -91,8 +91,7 @@ public:
     std::optional<std::size_t> FindBasePackage() const;
     /// Highest version among Update packages, if any.
     std::optional<std::size_t> FindBestUpdatePackage() const;
-    /// Newest add-on package of a Switch 2 Edition program whose RomFS is an upgrade pack
-    /// rather than plain add-on content, if any.
+    /// Highest version of the selected Switch 2 program's marked upgrade pack, if any.
     std::optional<std::size_t> FindUpgradePack(u64 program_id);
 
     /// Opens a member file by node index; raw extents are zero-copy views into
