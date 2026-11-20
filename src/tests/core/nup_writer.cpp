@@ -1058,6 +1058,7 @@ TEST_CASE("NUP preserves authored Edition control data separately from display m
     const auto archive = tmp.path / "Game.nup";
     FileSys::Nup::PackOptions options;
     options.metadata.title_name = "Synthetic Edition";
+    options.metadata.publisher = "Synthetic publisher override";
     options.metadata.display_version = "9.8.7";
     REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
     FileSys::RealVfsFilesystem vfs;
@@ -1079,11 +1080,13 @@ TEST_CASE("NUP preserves authored Edition control data separately from display m
     CHECK_FALSE(arp.GetSupportedLanguages(SaveOwner));
     CHECK_FALSE(arp.GetSupportedLanguages(TitleId));
 
-    std::string title, version;
+    std::string title, version, developer;
     REQUIRE(loader.ReadTitle(title) == Loader::ResultStatus::Success);
     CHECK(title == "Synthetic Edition");
     REQUIRE(loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success);
     CHECK(version == "9.8.7");
+    REQUIRE(loader.ReadDeveloper(developer) == Loader::ResultStatus::Success);
+    CHECK(developer == "Synthetic publisher override");
 }
 
 TEST_CASE("NUP ignores a legacy short control TLV and keeps the title",

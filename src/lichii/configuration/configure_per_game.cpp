@@ -546,9 +546,9 @@ void ConfigurePerGame::LoadConfiguration() {
                 QFileInfo(QString::fromStdString(file->GetName())).completeBaseName());
         }
 
-        FileSys::NACP nacp;
-        if (loader->ReadControlData(nacp) == Loader::ResultStatus::Success) {
-            ui->display_developer->setText(QString::fromStdString(nacp.GetDeveloperName()));
+        std::string developer;
+        if (loader->ReadDeveloper(developer) == Loader::ResultStatus::Success) {
+            ui->display_developer->setText(QString::fromStdString(developer));
         }
         std::string version;
         if (loader->ReadDisplayVersion(version) == Loader::ResultStatus::Success &&

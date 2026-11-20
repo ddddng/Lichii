@@ -198,6 +198,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
                                                           : program.display_version;
     }
     nacp_file = BuildNacp(meta, display_version, *raw_control);
+    display_publisher = std::move(meta.publisher);
     if (!meta.icon.empty()) {
         icon_file = std::make_shared<FileSys::VectorVfsFile>(meta.icon, "icon.dat");
     } else {
@@ -344,6 +345,14 @@ ResultStatus AppLoader_NUP::ReadControlData(FileSys::NACP& control) {
     }
     control = *nacp_file;
     return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NUP::ReadDeveloper(std::string& developer) {
+    if (!display_publisher.empty()) {
+        developer = display_publisher;
+        return ResultStatus::Success;
+    }
+    return AppLoader::ReadDeveloper(developer);
 }
 
 ResultStatus AppLoader_NUP::ReadDisplayVersion(std::string& version) {
