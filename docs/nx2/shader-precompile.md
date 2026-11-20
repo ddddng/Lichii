@@ -16,13 +16,13 @@ The global setting keeps its meaning: Off, Ask and Always apply to every game, a
 Kirby Air Riders keeps no shader archives. Its programs sit bare in `Asset/assets_a*.dat` (magic `PDAT`, 16.6 GB): there are 194,537 zstd members, and each is a FlatBuffer holding one compute program or a vertex and pixel pair. The reader is a port of Zachary McKenney's #1117 (40dadda7d5, b57bfc0457), without its recipe stack:
 
 - `IsFramePack`: a RomFS file the archive readers don't take is a pack when it starts with `PDAT`, or when it is 1 GiB or larger and isn't media.
-- `ScanFrames` reads the pack through bounded VFS reads, 64 MiB at a time, never the whole file. A zstd frame must parse to its end (`ZSTD_findFrameCompressedSize`) before it is inflated, so a stray magic costs nothing. The stop token is checked before each window.
+- `ScanFrames` reads the pack through bounded VFS reads, 64 MiB at a time, never the whole file. A zstd frame must parse to its end (`ZSTD_findFrameCompressedSize`) before it is inflated, so a stray magic costs nothing. The stop token is checked before each window. A read that returns less than asked before the pack's end fails the build like a stop, and the previous precache file stays.
 - `FindBarePrograms` reads each inflated member. A member is a native control section (magic `0x98761234`, version `0xc9`), its own length at +0x30 and its code length at +0x44, followed by the code. The stage comes from the control's stage byte (+0x56: 5 compute, 6 task, 7 mesh) or from the graphics header at the code's start.
 
 Three things in the original scanner are fixed, each with a test:
 
 - A magic cut by a window's end was lost. Each window now starts 3 bytes before the last one ended, or after the last frame taken.
-- A frame larger than the window was skipped. It is now read on its own, bounded by what its header declares (`ZSTD_compressBound` of the content size), up to 256 MiB.
+- A frame larger than the window was skipped. It is now read on its own up to 256 MiB. A frame that declares its content size is first read to `ZSTD_compressBound` of it, and again up to 256 MiB when it is larger (a streaming writer's many small blocks).
 - A file was read past its first GiB only when that GiB held a frame. A pack is now read to its end.
 
 Frames that parse but don't inflate, and frames too large to read, are counted and skipped. Both the game-list action and the launch-time rebuild call `BuildWarmFiles`, so they share one reader. `WarmBuilderVersion` 4 makes the precache file of every precached game build again once, so Kirby's 12-byte file gets its programs.

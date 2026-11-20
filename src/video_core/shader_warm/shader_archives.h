@@ -111,6 +111,7 @@ struct FrameScanResult {
     u64 oversized{};  ///< Frames larger than max_frame, not read
     u64 bytes_read{}; ///< Bytes read through `read`, overlaps and oversized frames included
     bool stopped{};
+    bool read_failed{}; ///< A read returned less than asked before the end of the file
 };
 
 /// Bytes [offset, offset + length) of a file, shorter only at its end.
@@ -121,7 +122,7 @@ using ReadAt = std::function<std::vector<u8>(u64 offset, size_t length)>;
 /// shader archive when it starts with a container magic, else searched for bare programs. A
 /// magic cut by a window's end and a frame running past it are read in the next window; a frame
 /// larger than a window is read on its own, up to max_frame. Stops before the next window once
-/// `stop` is requested.
+/// `stop` is requested, and at the first read that returns less than asked (read_failed).
 FrameScanResult ScanFrames(u64 size, const ReadAt& read, const ZstdDictionaries* dictionaries,
                            const std::function<void(const ShaderRecord&)>& on_record,
                            std::stop_token stop, const FrameScanOptions& options = {});

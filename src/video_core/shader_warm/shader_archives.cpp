@@ -1092,12 +1092,16 @@ FrameScanResult ScanFrames(u64 size, const ReadAt& read, const ZstdDictionaries*
             result.stopped = true;
             break;
         }
-        const auto window =
-            read(offset, static_cast<size_t>(std::min<u64>(window_size, size - offset)));
+        const size_t asked = static_cast<size_t>(std::min<u64>(window_size, size - offset));
+        const auto window = read(offset, asked);
+        result.bytes_read += window.size();
+        if (window.size() < asked) {
+            result.read_failed = true;
+            break;
+        }
         if (window.size() < ZstdMagic.size()) {
             break;
         }
-        result.bytes_read += window.size();
         const bool last = offset + window.size() >= size;
         // Where the next window starts, relative to this one: past the last frame taken, and
         // ZstdMagic.size() - 1 bytes before the end so that a magic cut by it is found there.
@@ -1126,25 +1130,45 @@ FrameScanResult ScanFrames(u64 size, const ReadAt& read, const ZstdDictionaries*
                 next = base; // the frame runs past the window: the next one starts with it
                 break;
             }
-            // A frame larger than the window: read on its own, bounded by what its header
-            // declares when it does.
-            u64 bound = options.max_frame;
-            const unsigned long long content = ZSTD_getFrameContentSize(rest.data(), rest.size());
-            if (content != ZSTD_CONTENTSIZE_UNKNOWN && content != ZSTD_CONTENTSIZE_ERROR) {
-                bound = std::min<u64>(bound, ZSTD_compressBound(static_cast<size_t>(
-                                                 std::min<u64>(content, MaxAllocation))) +
-                                                 MaxFrameOverhead);
-            }
-            bound = std::min<u64>(bound, size - offset);
-            if (bound <= window.size()) {
+            // A frame larger than the window: read on its own, up to max_frame. One that declares
+            // its content size is first read to the size a single-pass compressor gives it at
+            // most, and again up to max_frame when it is larger (many small blocks).
+            const u64 limit = std::min<u64>(options.max_frame, size - offset);
+            if (limit <= window.size()) {
+                ++result.oversized;
                 ++base;
                 continue;
             }
-            const auto whole = read(offset, static_cast<size_t>(bound));
-            result.bytes_read += whole.size();
-            const size_t large = ZSTD_findFrameCompressedSize(whole.data(), whole.size());
+            u64 length = limit;
+            const unsigned long long content = ZSTD_getFrameContentSize(rest.data(), rest.size());
+            if (content != ZSTD_CONTENTSIZE_UNKNOWN && content != ZSTD_CONTENTSIZE_ERROR) {
+                const u64 estimate =
+                    ZSTD_compressBound(static_cast<size_t>(std::min<u64>(content, MaxAllocation))) +
+                    MaxFrameOverhead;
+                if (estimate > window.size() && estimate < limit) {
+                    length = estimate;
+                }
+            }
+            std::vector<u8> whole;
+            size_t large = 0;
+            for (;;) {
+                whole = read(offset, static_cast<size_t>(length));
+                result.bytes_read += whole.size();
+                if (whole.size() < length) {
+                    result.read_failed = true;
+                    return result;
+                }
+                large = ZSTD_findFrameCompressedSize(whole.data(), whole.size());
+                if (!ZSTD_isError(large) || ZSTD_getErrorCode(large) != ZSTD_error_srcSize_wrong ||
+                    length == limit) {
+                    break;
+                }
+                length = limit;
+            }
             if (ZSTD_isError(large)) {
-                ++result.oversized;
+                if (ZSTD_getErrorCode(large) == ZSTD_error_srcSize_wrong) {
+                    ++result.oversized;
+                }
                 ++base;
                 continue;
             }
