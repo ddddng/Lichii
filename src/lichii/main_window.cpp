@@ -457,6 +457,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     Common::FS::CreateEdenPaths();
     this->config = std::make_unique<QtConfig>();
+    const bool first_start = UISettings::values.first_start.GetValue();
 
     Common::Log::Filter filter;
     filter.ParseFilterString(Settings::values.log_filter.GetValue());
@@ -635,6 +636,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
     const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
                              launch->launch_qlaunch;
+    const bool launching_content =
+        launch && (!launch->filepath.empty() || launch->launch_setup || launch->launch_qlaunch ||
+                   launch->launch_hlaunch);
+    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
+    const auto whats_new_action = WhatsNewDialog::OnStartup(
+        build, UISettings::values.last_seen_release.GetValue(), first_start, launching_content);
+    if (whats_new_action == WhatsNewDialog::StartupAction::Remember) {
+        UISettings::values.last_seen_release = build;
+        config->SaveAllValues();
+    }
     if (!launch_home) {
         game_list->PopulateAsync(UISettings::values.game_dirs);
     }
@@ -771,26 +782,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
     }
 
-    const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
-    const bool launching_content =
-        launch && (!launch->filepath.empty() || launch->launch_setup || launch->launch_qlaunch ||
-                   launch->launch_hlaunch);
-    switch (WhatsNewDialog::OnStartup(build, UISettings::values.last_seen_release.GetValue(),
-                                     UISettings::values.first_start.GetValue(), launching_content)) {
-    case WhatsNewDialog::StartupAction::Remember:
-        UISettings::values.last_seen_release = build;
-        config->SaveAllValues();
-        break;
-    case WhatsNewDialog::StartupAction::Show:
+    if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
         QTimer::singleShot(0, this, [this] {
             if (isVisible() && !UISettings::values.first_start.GetValue() && !boot_in_progress &&
                 !emulation_running && !close_pending && !QApplication::activeModalWidget()) {
                 OnWhatsNew();
             }
         });
-        break;
-    case WhatsNewDialog::StartupAction::None:
-        break;
     }
 }
 
