@@ -3653,10 +3653,9 @@ void MainWindow::OnMenuLoadFolder() {
         return;
     }
 
-    const QDir dir{dir_path};
-    const QStringList matching_main = dir.entryList({QStringLiteral("main")}, QDir::Files);
-    if (matching_main.size() == 1) {
-        BootGame(dir.path() + QDir::separator() + matching_main[0], ApplicationAppletParameters());
+    const auto main = Core::GetGameFileFromPath(QtCommon::vfs, dir_path.toStdString());
+    if (main) {
+        BootGame(QString::fromStdString(main->GetFullPath()), ApplicationAppletParameters());
     } else {
         QMessageBox::warning(this, tr("Invalid Directory Selected"),
                              tr("The directory you have selected does not contain a 'main' file."));
