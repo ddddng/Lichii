@@ -184,13 +184,12 @@ Result IApplicationFunctions::GetDesiredLanguage(Out<u64> out_language_code) {
     LOG_DEBUG(Service_AM, "called");
 
     // Get supported languages from NACP, if possible
-    // Default to 0 (all languages supported)
-    u32 supported_languages = 0;
-
     const auto res = GetApplicationMetadata(system, m_applet->program_id);
-    if (res.first != nullptr) {
-        supported_languages = res.first->GetSupportedLanguages();
-    }
+    const u32 supported_languages = res.first != nullptr
+                                        ? res.first->GetSupportedLanguages()
+                                        : system.GetARPManager()
+                                              .GetSupportedLanguages(m_applet->program_id)
+                                              .value_or(0);
 
     // Call IApplicationManagerInterface implementation.
     auto& service_manager = system.ServiceManager();
