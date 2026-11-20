@@ -795,7 +795,8 @@ TEST_CASE("Built-in FPS Unlock leaves a solver store changed by a user mod alone
     REQUIRE(WordAt(patched, HudHookOffset) == HudHookInstruction);
     REQUIRE(WordAt(patched, site.offset) == SolverCutInstruction);
     REQUIRE(WordAt(patched, site.offset + sizeof(u32)) == NopInstruction);
-    REQUIRE(WordAt(patched, site.cave) == 0);
+    REQUIRE(std::equal(nso.begin() + site.cave, nso.begin() + site.cave + SolverRoutineSize,
+                       patched.begin() + site.cave));
     REQUIRE(WordAt(patched, SolverSites[1].offset) == SolverSites[1].to_cave);
 }
 
