@@ -71,10 +71,15 @@ public:
 
         // Scale of the render surface. For hidpi systems, this will be >1.
         float render_surface_scale = 1.0f;
+
+        // Retained CAMetalLayer for native presentation, only set by an opted-in frontend.
+        std::shared_ptr<void> metal_layer;
     };
 
     /// Called from GPU thread when a frame is displayed.
     virtual void OnFrameDisplayed() {}
+
+    virtual void OnMetalFramePresented(u64, double) {}
 
     /**
      * Returns a GraphicsContext that the frontend provides to be used for rendering.

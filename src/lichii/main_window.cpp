@@ -197,6 +197,9 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+#include "video_core/renderer_metal/presentation_host.h"
+#endif
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -230,6 +233,18 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #endif
 
 #include "qt_common/gamemode.h"
+
+namespace {
+
+bool IsNativeMetalPresentationActive() {
+#if defined(__APPLE__) && defined(LICHII_NVN_METAL)
+    return Metal::IsPresentationHostBound();
+#else
+    return false;
+#endif
+}
+
+} // namespace
 
 #ifdef _WIN32
 #include "common/windows/timer_resolution.h"
@@ -1118,7 +1133,7 @@ void MainWindow::WebBrowserOpenWebPage(const std::string& main_url,
 
     render_window->setFocus();
 
-    if (render_window->IsLoadingComplete()) {
+    if (render_window->IsLoadingComplete() || IsNativeMetalPresentationActive()) {
         render_window->show();
     }
 
@@ -2519,6 +2534,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     LOG_INFO(Frontend, "Core load completed: elapsed_ms={}", load_timer.elapsed());
 
+    const bool native_metal = IsNativeMetalPresentationActive();
+
     if (const auto choice = Core::NvnHook::Choice(); Core::NvnHook::IsFallback(choice)) {
         using Core::NvnHook::RendererChoice;
         const QString reason = [&] {
@@ -2624,7 +2641,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // Create and start the emulation thread
     QtCommon::emu_thread = std::make_unique<EmuThread>();
     emit EmulationStarting();
-    QtCommon::emu_thread->start();
+    if (!native_metal) {
+        QtCommon::emu_thread->start();
+    }
 
     // Register an ExecuteProgram callback such that Core can execute a sub-program
     QtCommon::system->RegisterExecuteProgramCallback(
@@ -2656,21 +2675,23 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     connect(QtCommon::emu_thread.get(), &EmuThread::LoadProgress, loading_screen,
             &LoadingScreen::OnLoadProgress, Qt::QueuedConnection);
 
-    connect(
-        QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadStarted, this,
-        [this] {
-            loading_screen->Prepare(QtCommon::system->GetAppLoader());
-            loading_screen->show();
-            render_window->hide();
-        },
-        Qt::QueuedConnection);
+    if (!native_metal) {
+        connect(
+            QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadStarted, this,
+            [this] {
+                loading_screen->Prepare(QtCommon::system->GetAppLoader());
+                loading_screen->show();
+                render_window->hide();
+            },
+            Qt::QueuedConnection);
 
-    connect(
-        QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadFinished, this,
-        [this] {
-            loading_screen->OnLoadComplete();
-        },
-        Qt::QueuedConnection);
+        connect(
+            QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadFinished, this,
+            [this] {
+                loading_screen->OnLoadComplete();
+            },
+            Qt::QueuedConnection);
+    }
 
     // Update the GUI
     UpdateStatusButtons();
@@ -2734,8 +2755,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
 
-    loading_screen->Prepare(QtCommon::system->GetAppLoader());
-    loading_screen->show();
+    if (!native_metal) {
+        loading_screen->Prepare(QtCommon::system->GetAppLoader());
+        loading_screen->show();
+    }
 
     current_game_start_type = type;
     emulation_running = true;
@@ -2753,6 +2776,11 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     CheckNextendoGameVersion(title_id, title_version);
     nextendo_social_timer.start(Common::Nextendo::FriendsRefreshInterval);
     UpdateNextendoSocial();
+    if (native_metal) {
+        render_window->show();
+        render_window->setFocus();
+        QtCommon::emu_thread->start();
+    }
     OnStartGame();
 }
 
@@ -4017,7 +4045,9 @@ bool MainWindow::ConfirmShutdownGame() {
 }
 
 void MainWindow::OnLoadComplete() {
-    loading_screen->OnLoadComplete();
+    if (!IsNativeMetalPresentationActive()) {
+        loading_screen->OnLoadComplete();
+    }
 
     perf_overlay = new PerformanceOverlay(this);
     perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());

@@ -36,6 +36,7 @@
 #if !defined(WIN32) && !defined(__APPLE__)
 #include <qpa/qplatformnativeinterface.h>
 #elif defined(__APPLE__)
+#include <CoreGraphics/CGGeometry.h>
 #include <objc/message.h>
 #endif
 
@@ -124,7 +125,29 @@ Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window)
             }
         }
     }
-    wsi.render_surface = reinterpret_cast<void*>(metal_layer ? metal_layer : layer);
+    if (window->surfaceType() == QWindow::MetalSurface) {
+        if (!metal_layer || wsi.type != Core::Frontend::WindowSystemType::Cocoa) {
+            return wsi;
+        }
+        const id device = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+            metal_layer, sel_registerName("defaultDevice"));
+        if (!device) {
+            return wsi;
+        }
+        reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(metal_layer,
+                                                             sel_registerName("setDevice:"), device);
+        reinterpret_cast<void (*)(id, SEL, BOOL)>(objc_msgSend)(
+            metal_layer, sel_registerName("setAllowsNextDrawableTimeout:"), YES);
+        wsi.metal_layer = std::shared_ptr<void>{
+            reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(metal_layer, sel_registerName("retain")),
+            [](void* retained) {
+                reinterpret_cast<void (*)(id, SEL)>(objc_msgSend)(
+                    static_cast<id>(retained), sel_registerName("release"));
+            }};
+        wsi.render_surface = wsi.metal_layer.get();
+    } else {
+        wsi.render_surface = reinterpret_cast<void*>(metal_layer ? metal_layer : layer);
+    }
 #else
     QPlatformNativeInterface* pni = QGuiApplication::platformNativeInterface();
     wsi.display_connection = pni->nativeResourceForWindow("display", window);
@@ -137,6 +160,17 @@ Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window)
 
     return wsi;
 }
+
+#ifdef __APPLE__
+void UpdateMetalDrawableSize(const QWindow& window, void* layer) {
+    const QSize size = window.size() * window.devicePixelRatio();
+    if (!size.isEmpty()) {
+        reinterpret_cast<void (*)(id, SEL, CGSize)>(objc_msgSend)(
+            static_cast<id>(layer), sel_registerName("setDrawableSize:"),
+            CGSizeMake(size.width(), size.height()));
+    }
+}
+#endif
 
 const QString tr(const char* str) {
     return rootObject->tr(str);

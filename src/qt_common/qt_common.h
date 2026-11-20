@@ -37,6 +37,10 @@ Core::Frontend::WindowSystemType GetWindowSystemType();
 
 Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window);
 
+#ifdef __APPLE__
+void UpdateMetalDrawableSize(const QWindow& window, void* layer);
+#endif
+
 void Init(QWidget* root);
 
 void SetupContentProviders();
