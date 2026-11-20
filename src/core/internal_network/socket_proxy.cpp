@@ -511,6 +511,15 @@ Errno ProxySocket::SetNonBlock(bool enable) {
     return Errno::SUCCESS;
 }
 
+Errno ProxySocket::SetIpv6Option(Ipv6Option option, s32 value) {
+    // Rooms carry IPv4 alone, so a room socket is never an INET6 one.
+    return Errno::INVAL;
+}
+
+std::pair<s32, Errno> ProxySocket::GetIpv6Option(Ipv6Option option) {
+    return {0, Errno::INVAL};
+}
+
 std::pair<Errno, Errno> ProxySocket::GetPendingError() {
     std::lock_guard guard(packets_mutex);
     if (closed) {
