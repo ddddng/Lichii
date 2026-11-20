@@ -1,0 +1,724 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 712acfa2..f0342259 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -881,5 +881,5 @@ NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f)
+ // A sync object that was never fenced has nothing pending: SyncWait answers ALREADY_SIGNALED (below); a fenced one is released only after the GPU has actually completed up to that fence value
+ // Queue dependencies capture the current logical receipt; later re-fencing or finalizing the sync cannot retarget work already queued.
+-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { nvn_queue_wait_sync((queue_t *)q,(const sync_t *)s); return 1; }
++NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { return nvn_queue_wait_sync((queue_t *)q,(const sync_t *)s); }
+ // ZCull data: the host does no ZCull, so there is nothing to save / restore
+ NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
+@@ -891,4 +891,5 @@ static _Atomic uint64_t g_sync_ns;
+ // A long wait that expires is what a game's GPU watchdog acts on (PRAGMATA aborts when its 15 s wait for the previous frame's sync does): said with the sync's state
+ static NVNsyncWaitResult sync_expired(const sync_t *o, uint64_t timeout, uint64_t waited) {
++    if (nvn_queue_stopping()) return NVN_SYNC_WAIT_RESULT_FAILED;
+     static _Atomic int n;
+     if (timeout >= 1000000000ull && atomic_fetch_add(&n, 1) < 8)
+@@ -898,4 +899,5 @@ static NVNsyncWaitResult sync_expired(const sync_t *o, uint64_t timeout, uint64_
+ }
+ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
++    if (nvn_queue_stopping()) return NVN_SYNC_WAIT_RESULT_FAILED;
+     const sync_t *o = (const sync_t *)s;
+     // Never fenced since its Initialize: no GPU work stands behind it, so it is signalled. PRAGMATA initializes its two frame syncs again at a screen change (the Initial Settings
+@@ -1825,7 +1827,13 @@ static pthread_cond_t g_susp_cv = PTHREAD_COND_INITIALIZER;
+ static int g_susp, g_inflight_api;
+ __thread _Atomic int dm_host_work;   // see dm.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
+-static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
++static int gfx_enter(int cancel) {
++    pthread_mutex_lock(&g_susp_mu);
++    while (g_susp && !(cancel && nvn_queue_stopping())) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
++    if (cancel && nvn_queue_stopping()) { pthread_mutex_unlock(&g_susp_mu); return 0; }
++    g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++;
++    return 1;
++}
+ static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
+-void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer's submits and presents (dm/gfx/vk)
++void dm_gfx_enter(void) { gfx_enter(0); }   // the same gate for the Vulkan layer's submits and presents (dm/gfx/vk)
+ void dm_gfx_leave(void) { gfx_leave(); }
+ __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
+@@ -1850,5 +1858,14 @@ _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the p
+ // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
+ #include "nvn_queue.inc"
++
++#ifdef LICHII_NVN_METAL_BRIDGE
++void nvn_mtl_request_stop(void) {
++    nvn_queue_request_stop();
++    pthread_mutex_lock(&g_susp_mu); pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu);
++    mtl_cancel_waits();
++}
++#endif
+ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
++    if (nvn_queue_stopping()) return;
+     ((queue_t *)q)->submits++;
+     nvn_queue_submit((queue_t *)q,n,(const uint64_t *)h);
+@@ -1968,4 +1985,5 @@ extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the
+ uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
+ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
++    if (nvn_queue_stopping()) return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR;
+     win_t *o = (win_t *)w;
+     int n = window_active(o);
+@@ -2000,4 +2018,5 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
+     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
+     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
++    if (nvn_queue_stopping()) return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR;
+     if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_drain += drain_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+@@ -2357,7 +2376,18 @@ static void rt_line(char *b, size_t n) {
+ }
+ static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
++#ifdef LICHII_NVN_METAL_BRIDGE
++    pthread_mutex_lock(&g_susp_mu);
++    while (!nvn_queue_stopping()) {
++        uint64_t now = now_ns(); if (dl <= now) break;
++        uint64_t left = dl - now;
++        struct timespec ts = {left / 1000000000ull, left % 1000000000ull};
++        pthread_cond_timedwait_relative_np(&g_susp_cv, &g_susp_mu, &ts);
++    }
++    pthread_mutex_unlock(&g_susp_mu);
++#else
+     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+     uint64_t now = now_ns(); if (dl <= now) return;
+     mach_wait_until(mach_absolute_time() + (dl - now) * tb.denom / tb.numer);
++#endif
+ }
+ // Present is fixed at 60 Hz: the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
+@@ -2669,4 +2699,5 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
+ }
+ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
++    if (nvn_queue_stopping()) return;
+     (void)q; win_t *o = (win_t *)w; o->presents++;
+     dm_ue_cvar_tick();
+@@ -2698,5 +2729,5 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+         if (lag) usleep((useconds_t)lag * 1000);
+     }
+-    gfx_enter();
++    if (!gfx_enter(1)) return;
+     uint64_t t0 = now_ns();
+     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
+diff --git a/dm/gfx/nvn/nvn_mtl.h b/dm/gfx/nvn/nvn_mtl.h
+index cd2119c5..8f4c228f 100644
+--- a/dm/gfx/nvn/nvn_mtl.h
++++ b/dm/gfx/nvn/nvn_mtl.h
+@@ -7,4 +7,8 @@
+ 
+ void mtl_init(void);
++#ifdef LICHII_NVN_METAL_BRIDGE
++void nvn_mtl_request_stop(void);
++void nvn_mtl_drain(void);
++#endif
+ void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes);
+ void mtl_set_depth_zero(int on);          // NVN depth mode: 1 = near is 0 (D3D / Metal), 0 = near is -w (GL, NVN's default); picks the vertex shaders' entry point (see shader_load in nvn_mtl.m)
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 3261eb05..71c4b928 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -367,8 +367,25 @@ static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the enc
+ - (NSError *)error { return err; }
+ @end
++#ifdef LICHII_NVN_METAL_BRIDGE
++static dispatch_group_t g_nvn_feedback;
++#endif
++static void add_feedback(MTL4CommitOptions *o, void (^handler)(id<MTL4CommitFeedback>)) {
++#ifdef LICHII_NVN_METAL_BRIDGE
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{ g_nvn_feedback = dispatch_group_create(); });
++    dispatch_group_t group = g_nvn_feedback;
++    dispatch_group_enter(group);
++    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++        @autoreleasepool { handler(f); }
++        dispatch_group_leave(group);
++    }];
++#else
++    [o addFeedbackHandler:handler];
++#endif
++}
+ static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
+     if (!fb) return nil;
+     MTL4CommitOptions *o = [MTL4CommitOptions new]; NSArray *bl = fb->blocks;
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { for (void (^b)(id<MTL4CommitFeedback>) in bl) b(f); }];
++    add_feedback(o, ^(id<MTL4CommitFeedback> f) { for (void (^b)(id<MTL4CommitFeedback>) in bl) b(f); });
+     return o;
+ }
+@@ -722,11 +739,23 @@ static int defer_drain(void) { int back = 0; @autoreleasepool {
+ // oe::PopNotificationMessage and submits nothing, while its streaming threads remade a run of about 10 MB of a virtual pool 70 times a second (vrun_set). Each old buffer waited for
+ // the next submission's fence, and GPU allocated went from 11 to 20 GB in 12 s, with 6.7 GB of swap in 20 s (PR #1392). Entries handed back while g_smu was busy are tried again 10 ms later
++#ifdef LICHII_NVN_METAL_BRIDGE
++static dispatch_queue_t defer_queue(void) {
++    static dispatch_once_t once;
++    static dispatch_queue_t q;
++    dispatch_once(&once, ^{ q = dispatch_queue_create("lichii.nvn.release", DISPATCH_QUEUE_SERIAL); });
++    return q;
++}
++#else
++static dispatch_queue_t defer_queue(void) { return dispatch_get_global_queue(QOS_CLASS_UTILITY, 0); }
++#endif
+ static void defer_kick(void) {
+     static _Atomic int queued;
++    if (nvn_queue_stopping()) return;
+     if (atomic_exchange(&queued, 1)) return;
+-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
++    dispatch_async(defer_queue(), ^{ @autoreleasepool {
+         atomic_store(&queued, 0);   // before the drain: an entry queued during it kicks again
++        if (nvn_queue_stopping()) return;
+         int back = defer_drain(); res_commit();
+-        if (back) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ defer_kick(); });
++        if (back) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC), defer_queue(), ^{ defer_kick(); });
+     } });
+ }
+@@ -1652,5 +1681,5 @@ static int g_pkg_kept;   // a texture written during this submission kept its te
+ // The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate
+ void mtl_prepare(void) {
+-    if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
++    if (!nvn_queue_stopping() && !g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
+ }
+ static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
+@@ -2840,5 +2869,9 @@ uint64_t mtl_last_fence(void) { return g_fence; }
+ int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
+ 
++#ifdef LICHII_NVN_METAL_BRIDGE
++static int fast_wake(void) { return 0; }
++#else
+ static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }
++#endif
+ // A SyncWait woken by the GPU's signal: the CPU-side writes of every submission up to the fence that no feedback handler has run yet, run here. The fence's last segment ended
+ // now (c1); it started at the later of its commit and the previous segment's end (c0), as near as the CPU can tell without its feedback
+@@ -2847,4 +2880,6 @@ static void post_early(uint64_t fence) {
+ }
+ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
++    int logical = site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ || site == WS_SYNC_POLL;
++    if (logical && nvn_queue_stopping()) return 0;
+     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+     uint64_t w0 = ws_t0();
+@@ -2869,5 +2904,5 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
+     // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
+     struct timespec said; clock_gettime(CLOCK_REALTIME, &said); said.tv_sec += 10; int told = timeout_ns != UINT64_MAX;
+-    while (g_done < fence) {
++    while (g_done < fence && !(logical && nvn_queue_stopping())) {
+         int late = !told && (dl.tv_sec > said.tv_sec || (dl.tv_sec == said.tv_sec && dl.tv_nsec > said.tv_nsec));
+         if (!(r = pthread_cond_timedwait(&g_cv, &g_mu, late ? &said : &dl))) continue;
+@@ -2881,5 +2916,5 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
+         }
+     }
+-    int ok = g_done >= fence;
++    int ok = g_done >= fence && !(logical && nvn_queue_stopping());
+     pthread_mutex_unlock(&g_mu);
+     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
+@@ -3501,5 +3536,5 @@ static void up_flush(void) {
+     MTL4CommitOptions *o = [MTL4CommitOptions new];
+     atomic_fetch_add(&g_up_pending, 1);
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++    add_feedback(o, ^(id<MTL4CommitFeedback> f) {
+         if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "upload"); }
+         if (f.error || fake_lost) {
+@@ -3520,5 +3555,5 @@ static void up_flush(void) {
+         atomic_fetch_sub(&g_up_pending, 1);
+         up_wake();
+-    }];
++    });
+     res_commit();
+     cb_end(cb, nil);
+@@ -11669,5 +11704,5 @@ static void prepare_prebuild(void) {
+     for (;;) {
+         pthread_mutex_lock(&g_fn_mu); int later = g_pre_later_n; pthread_mutex_unlock(&g_fn_mu);
+-        if (!atomic_load(&g_pre_running) || (atomic_load(&g_pre_next) >= n && !later)) break;
++        if (nvn_queue_stopping() || !atomic_load(&g_pre_running) || (atomic_load(&g_pre_next) >= n && !later)) break;
+         usleep(50000);
+         if (!shown && bp_now() - t0 >= 500000000ull) shown = 1;
+@@ -17951,5 +17986,11 @@ static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLT
+ // with the same encoding as the present into an offscreen texture of the view's size, and after the GPU finishes hands out a CGImage in the completion callback. Guarded by g_shotq_mu
+ static void (^g_grab_cb)(CGImageRef img);
+-void mtl_grab_next_present(void (^cb)(CGImageRef img)) { pthread_mutex_lock(&g_shotq_mu); g_grab_cb = [cb copy]; pthread_mutex_unlock(&g_shotq_mu); }
++void mtl_grab_next_present(void (^cb)(CGImageRef img)) {
++#ifdef LICHII_NVN_METAL_BRIDGE
++    (void)cb;
++#else
++    pthread_mutex_lock(&g_shotq_mu); g_grab_cb = [cb copy]; pthread_mutex_unlock(&g_shotq_mu);
++#endif
++}
+ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
+     pthread_mutex_lock(&g_shotq_mu); void (^cb)(CGImageRef) = g_grab_cb; g_grab_cb = nil; pthread_mutex_unlock(&g_shotq_mu);
+@@ -18256,4 +18297,7 @@ static void pres_seen(uint64_t pn, double tt) {
+     { uint64_t fr = g_pres_frm[pn % PRING], w = atomic_load(&g_seen_frame); while (fr > w && !atomic_compare_exchange_weak(&g_seen_frame, &w, fr)) {} }
+     pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
++#ifdef LICHII_NVN_METAL_BRIDGE
++    return;
++#endif
+     double lagms = tt > 0 ? (CACurrentMediaTime() - tt) * 1e3 : -1;   // how late the presented handler runs after the frame reached the screen
+     double tin = g_pres_tin[pn % PRING];
+@@ -18738,10 +18782,10 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
+     if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); return 0; }
+     MTL4CommitOptions *options = [MTL4CommitOptions new];
+-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++    add_feedback(options, ^(id<MTL4CommitFeedback> f) {
+         (void)al; (void)cb; (void)raw; (void)fx.sc;   // keep the Metal 4 commands, source view and scaler alive too
+         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out);
+         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
+         done(f.error ? PRESENT_FAILED : kind);
+-    }];
++    });
+     [g_q4 commit:&cb count:1 options:options];
+     return 1;
+@@ -18778,4 +18822,5 @@ static void present_shot(id<MTLTexture> src, const char *path, const int crop[4]
+ }
+ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], uint64_t ev_val, id<CAMetalDrawable> supplied, double target_ts) {
++    if (nvn_queue_stopping()) return 0;
+     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
+     g_present_n++;
+@@ -18845,11 +18890,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
+     if (!supplied) g_drawable_ns += now_ns() - dt0;
+-    if (!dr) return 0;
++    if (!dr || nvn_queue_stopping()) return 0;
+     int alloc_i = (int)(ticket % 3);
+     if (g_present_alloc_fence[alloc_i]) {
+         pthread_mutex_lock(&g_pq_mu);
+-        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i] && !nvn_queue_stopping()) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+         pthread_mutex_unlock(&g_pq_mu);
+     }
++    if (nvn_queue_stopping()) return 0;
+     [g_present_alloc4[alloc_i] reset];
+     [g_q4 waitForDrawable:dr];
+@@ -18862,5 +18908,5 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     cb_end(cb, drs);
+     MTL4CommitOptions *o = [MTL4CommitOptions new];
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++    add_feedback(o, ^(id<MTL4CommitFeedback> f) {
+         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
+         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
+@@ -18868,5 +18914,5 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+         if (retire) ext_retire(retire);
+-    }];
++    });
+     id<MTL4CommandBuffer> buffers[] = {cb};
+     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+@@ -18894,4 +18940,5 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
+     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
+     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
++        if (nvn_queue_stopping()) return;
+         CFTimeInterval tt = d.presentedTime;
+         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+@@ -19136,4 +19183,7 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
+ }
+ static void link_sync(void) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
++#ifdef LICHII_NVN_METAL_BRIDGE
++    return;
++#endif
+     static int applied;
+     pthread_mutex_lock(&g_pq_mu);
+@@ -19195,5 +19245,6 @@ static void *present_main(void *arg) {
+     for (;;) {
+         pthread_mutex_lock(&g_pq_mu);
+-        while (g_pq_read == g_pq_in || g_link_owns_layer) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
++        while (!nvn_queue_stopping() && (g_pq_read == g_pq_in || g_link_owns_layer)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
++        if (nvn_queue_stopping()) { pthread_mutex_unlock(&g_pq_mu); return NULL; }
+         pq_item it = g_pq[g_pq_read % PQ];
+         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
+@@ -19214,5 +19265,13 @@ static void *present_main(void *arg) {
+ }
+ uint32_t mtl_present_qos(void) { return atomic_load(&g_present_qos); }
+-static void present_start(void) { pthread_t th; if (pthread_create(&th, NULL, present_main, NULL)) MDIE("cannot start the present thread"); pthread_detach(th); }
++static pthread_t g_present_thread;
++static int g_present_started;
++static void present_start(void) {
++    if (pthread_create(&g_present_thread, NULL, present_main, NULL)) MDIE("cannot start the present thread");
++#ifndef LICHII_NVN_METAL_BRIDGE
++    pthread_detach(g_present_thread);
++#endif
++    g_present_started = 1;
++}
+ static _Atomic int g_present_discard;
+ void mtl_link_pause(int on);
+@@ -19277,4 +19336,7 @@ static _Atomic uint64_t g_snap_next, g_snap_cmt;   // g_snap_cmt: the last copy
+ static int g_snap_n = 2;
+ int mtl_snap_on(void) {
++#ifdef LICHII_NVN_METAL_BRIDGE
++    return 0;
++#endif
+     static int v = -1; if (v >= 0) return v;
+     const char *e = getenv("DM_PRESENT_SNAP");
+@@ -19366,5 +19428,5 @@ static uint64_t snap_take(const tex_t *t) {
+ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy) {
+     atomic_store(&dm_present_ns, now_ns()); if (copy) *copy = 0;
+-    if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
++    if (g_classic || atomic_load(&g_present_discard) || nvn_queue_stopping()) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
+     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
+     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
+@@ -19390,5 +19452,6 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
+     if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
+     pthread_mutex_lock(&g_pq_mu);
+-    while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
++    while (g_pq_in - g_pq_done >= PQ && !nvn_queue_stopping()) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++    if (nvn_queue_stopping()) { pthread_mutex_unlock(&g_pq_mu); mtl_tex_unpin(t->serial); return 0; }
+     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, !ss && !ev_val && on_sub_thread() ? g_fence : 0};
+     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
+@@ -19431,5 +19494,5 @@ uint64_t mtl_present_screen_wait(double period) {
+         MLOG("present: without the display link the acquire waits until at most %d present(s) queued are not yet on screen (DM_PRESENT_DEPTH; DM_PRESENT_SCREEN %s)", g_sdw_depth, mode == 1 ? "on" : mode ? "ab" : "off");
+     }
+-    if (!sw_on(mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
++    if (!sw_on(mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard) || nvn_queue_stopping()) return 0;
+     if (!(period > 0)) period = 1.0 / 60;
+     uint64_t t0 = now_ns(); int waited = 0, to = 0;
+@@ -19448,5 +19511,5 @@ uint64_t mtl_present_screen_wait(double period) {
+         if (byframe) { want = rf > (uint64_t)g_sdw_depth ? rf - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_seen_frame); }
+         else { want = g_pq_in > (uint64_t)g_sdw_depth ? g_pq_in - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_pres_seen); }
+-        if (have >= want || atomic_load(&g_present_discard)) break;
++        if (have >= want || atomic_load(&g_present_discard) || nvn_queue_stopping()) break;
+         waited = 1;
+         if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) { if ((byframe ? atomic_load(&g_seen_frame) : atomic_load(&g_pres_seen)) < want) { to = 1; silent = 1; silent_seen = atomic_load(&g_pres_seen); } break; }
+@@ -19465,5 +19528,5 @@ void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
+ void mtl_present_wait(uint64_t tk) {
+     pthread_mutex_lock(&g_pq_mu);
+-    while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
++    while (g_pq_done < tk && !atomic_load(&g_present_discard) && !nvn_queue_stopping()) {
+         if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
+         if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
+@@ -19495,4 +19558,41 @@ void mtl_present_wait(uint64_t tk) {
+     pthread_mutex_unlock(&g_pq_mu);
+ }
++#ifdef LICHII_NVN_METAL_BRIDGE
++void mtl_cancel_waits(void) {
++    pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
++    pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
++    mtl_warm_stop();
++}
++void nvn_mtl_drain(void) {
++    static int drained;
++    if (drained) return;
++    nvn_mtl_request_stop();
++    nvn_queue_join();
++    if (g_present_started && pthread_join(g_present_thread, NULL)) MDIE("cannot join the NVN present worker");
++    @autoreleasepool {
++        if (g_cb || g_up_cb) MDIE("NVN shutdown: an encoder still owns an open command buffer");
++        rec_stop();
++        if (g_q4) {
++            id<MTLSharedEvent> end = [g_dev newSharedEvent];
++            [g_q4 signalEvent:end value:1];
++            if (![end waitUntilSignaledValue:1 timeoutMS:10000]) MDIE("NVN shutdown: Metal 4 queue did not drain");
++        }
++        if (g_q) {
++            id<MTLCommandBuffer> end = cl_cb();
++            if (!end) MDIE("NVN shutdown: cannot create classic queue drain buffer");
++            [end commit]; [end waitUntilCompleted];
++            if (end.status != MTLCommandBufferStatusCompleted) MDIE("NVN shutdown: classic queue did not drain");
++        }
++        if (g_nvn_feedback && dispatch_group_wait(g_nvn_feedback, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)))
++            MDIE("NVN shutdown: Metal feedback did not drain");
++        dispatch_sync(defer_queue(), ^{});
++        for (; g_pq_read < g_pq_in; g_pq_read++) mtl_tex_unpin(g_pq[g_pq_read % PQ].t.serial);
++        nvn_queue_discard();
++        defer_drain(); res_commit();
++        for (int i = 0; i < 3; i++) { g_present_cb[i] = nil; g_present_alloc4[i] = nil; }
++    }
++    drained = 1;
++}
++#endif
+ // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
+ // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
+diff --git a/dm/gfx/nvn/nvn_queue.h b/dm/gfx/nvn/nvn_queue.h
+index 5925fa7e..e1d10289 100644
+--- a/dm/gfx/nvn/nvn_queue.h
++++ b/dm/gfx/nvn/nvn_queue.h
+@@ -9,5 +9,5 @@ void nvn_queue_present_release(uint64_t ticket);
+ void nvn_queue_test_hold(int on);
+ void nvn_queue_fence(queue_t *q, sync_t *s);
+-void nvn_queue_wait_sync(queue_t *q, const sync_t *s);
++int nvn_queue_wait_sync(queue_t *q, const sync_t *s);
+ void nvn_queue_finish(queue_t *q);
+ void nvn_queue_forget(queue_t *q);
+@@ -17,2 +17,11 @@ void nvn_event_publish(volatile uint32_t *word, unsigned mode, uint32_t value);
+ void nvn_event_publish_gpu(volatile uint32_t *word, unsigned mode, uint32_t value, uint64_t fence);
+ void nvn_queue_gpu_progress(void);
++#ifdef LICHII_NVN_METAL_BRIDGE
++int nvn_queue_stopping(void);
++void nvn_queue_request_stop(void);
++void nvn_queue_join(void);
++void nvn_queue_discard(void);
++void mtl_cancel_waits(void);
++#else
++static inline int nvn_queue_stopping(void) { return 0; }
++#endif
+diff --git a/dm/gfx/nvn/nvn_queue.inc b/dm/gfx/nvn/nvn_queue.inc
+index ef60b85a..6794c4f0 100644
+--- a/dm/gfx/nvn/nvn_queue.inc
++++ b/dm/gfx/nvn/nvn_queue.inc
+@@ -54,5 +54,10 @@ typedef struct nq_queue {
+ static pthread_mutex_t nq_mu = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t nq_cv = PTHREAD_COND_INITIALIZER;
+-static pthread_once_t nq_once = PTHREAD_ONCE_INIT;
++static pthread_t nq_thread;
++static int nq_started;
++#ifdef LICHII_NVN_METAL_BRIDGE
++static _Atomic int nq_stopping;
++int nvn_queue_stopping(void) { return atomic_load(&nq_stopping); }
++#endif
+ static nq_queue *nq_queues;
+ static int nq_test_held;   // nvn_queue_test_hold: replay takes no queued work while set (unit tests only)
+@@ -130,4 +135,5 @@ static void *nq_worker(void *unused) {
+         for(;;) {
+         scan_again:;
++            if(nvn_queue_stopping()) { pthread_mutex_unlock(&nq_mu); return NULL; }
+             if(nq_test_held) { pthread_cond_wait(&nq_cv,&nq_mu); continue; }
+             int mapped_event_wait=0;
+@@ -181,17 +187,21 @@ static void *nq_worker(void *unused) {
+             dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
+             dm_host_work++; mtl_prepare(); dm_host_work--;
+-            gfx_enter(); nq_cost cost=nq_cost_begin();
+-            if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
+-            mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
+-            if(n->kind==NQ_COMMANDS) {
+-                uint64_t handle=(uintptr_t)n->bytes;
+-                nvn_cap_submit(1,&handle);
+-                mtl_sub_begin(); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); nvn_ft_poll();
+-                mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
+-            } else {
+-                nvn_cap_present(&n->texture,n->crop);
+-                present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
++            if(gfx_enter(1)) {
++                nq_cost cost=nq_cost_begin();
++                if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
++                mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
++                if(n->kind==NQ_COMMANDS) {
++                    uint64_t handle=(uintptr_t)n->bytes;
++                    nvn_cap_submit(1,&handle);
++                    mtl_sub_begin(); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); nvn_ft_poll();
++                    mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
++                } else {
++                    nvn_cap_present(&n->texture,n->crop);
++                    present=mtl_present(&n->texture,n->period,n->crop,&copy);
++                }
++                nq_cost_end(cost); gfx_leave();
+             }
+-            nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
++            if(n->kind==NQ_PRESENT) mtl_tex_unpin(n->texture.serial);
++            objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+         }
+         pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+@@ -199,5 +209,16 @@ static void *nq_worker(void *unused) {
+     return NULL;
+ }
+-static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
++#ifdef LICHII_NVN_METAL_BRIDGE
++void nvn_queue_request_stop(void) {
++    pthread_mutex_lock(&nq_mu);
++    atomic_store(&nq_stopping,1);
++    pthread_cond_broadcast(&nq_cv);
++    pthread_mutex_unlock(&nq_mu);
++}
++void nvn_queue_join(void) {
++    if(nq_started && pthread_join(nq_thread,NULL)) die("cannot join the NVN queue worker");
++    nq_started=0;
++}
++#endif
+ static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
+ // Grow geometrically so flattening a large submission does not reallocate its command records at every page.
+@@ -265,7 +286,45 @@ static void nq_flatten(nq_job *j,const uint8_t *list) {
+     }
+ }
+-static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
++static void nq_enqueue(nq_queue *q,nq_job *j) {
++    if(!nq_started) {
++        if(pthread_create(&nq_thread,NULL,nq_worker,NULL)) die("NVN queue worker failed");
++#ifndef LICHII_NVN_METAL_BRIDGE
++        pthread_detach(nq_thread);
++#endif
++        nq_started=1;
++    }
++    if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv);
++}
++#ifdef LICHII_NVN_METAL_BRIDGE
++static void nq_free_job_nodes(nq_job *j) {
++    for(nq_node *n=j->first,*next;n;n=next) {
++        next=n->next;
++        nq_put(n->receipt);
++        free(n->signals); free(n->bytes); free(n);
++    }
++    nq_put(j->receipt);
++}
++void nvn_queue_discard(void) {
++    pthread_mutex_lock(&nq_mu);
++    nq_queue *queues=nq_queues; nq_queues=NULL;
++    while(nq_event_writes) { nq_event_write *w=nq_event_writes; nq_event_writes=w->next; free(w); }
++    pthread_mutex_unlock(&nq_mu);
++    pthread_mutex_lock(&g_sub_mu);
++    while(queues) {
++        nq_queue *q=queues; queues=q->next;
++        for(nq_job *j=q->first,*next;j;j=next) {
++            next=j->next;
++            for(nq_node *n=j->first;n;n=n->next) if(n->kind==NQ_PRESENT) mtl_tex_unpin(n->texture.serial);
++            nq_free_job_nodes(j);
++            nq_job_free(j);
++        }
++        nq_put(q->tail); mtl_queue_forget(q->serial); free(q);
++    }
++    pthread_mutex_unlock(&g_sub_mu);
++}
++#endif
+ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
+-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
++    if(nvn_queue_stopping()) return;
++    nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
+     j->objects.klen=16; j->frame=dm_nvn_frame_count(); j->submitted=guest_ns();
+     // No scheduler lock while copying descriptors or resolving shader libraries.
+@@ -276,4 +335,12 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
+     nvn_cap_queue(q->serial,waits);
+     pthread_mutex_lock(&nq_mu);
++#ifdef LICHII_NVN_METAL_BRIDGE
++    if(nvn_queue_stopping()) {
++        nq_free_job_nodes(j);
++        pthread_mutex_unlock(&nq_mu);
++        pthread_mutex_lock(&g_sub_mu); pool=objc_autoreleasePoolPush(); nq_job_free(j); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
++        return;
++    }
++#endif
+     for(nq_node *node=j->first;node;node=node->next) if(node->sync_source) {
+         if(node->kind==NQ_FENCE) nq_set_sync((sync_t *)node->sync_source,node->receipt); else nq_snapshot_sync(node,node->sync_source);
+@@ -285,10 +352,20 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
+ // Only replay turns it into a physical display ticket; present never waits on the guest thread.
+ uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]) {
++    if(nvn_queue_stopping()) return 0;
+     nvn_cap_queue(q->serial,0);
+-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue present allocation failed");
++    nq_job *j=calloc(1,sizeof *j); if(!j) die("queue present allocation failed");
+     j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); { void mtl_present_recorded(uint64_t); mtl_present_recorded(j->frame); }   // the game's own present count, for the screen wait (nvn_mtl.m)
+     nq_node *n=nq_append(j,NQ_PRESENT);
+     n->texture=*t; mtl_tex_pin(t->serial); n->period=period; if(crop) memcpy(n->crop,crop,sizeof n->crop);
+-    pthread_mutex_lock(&nq_mu); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
++    pthread_mutex_lock(&nq_mu);
++#ifdef LICHII_NVN_METAL_BRIDGE
++    if(nvn_queue_stopping()) {
++        nq_free_job_nodes(j);
++        pthread_mutex_unlock(&nq_mu);
++        mtl_tex_unpin(t->serial); nq_job_free(j);
++        return 0;
++    }
++#endif
++    j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
+     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;
+ }
+@@ -299,9 +376,13 @@ void nvn_queue_present_release(uint64_t ticket) {
+ void nvn_queue_present_wait(uint64_t ticket) {
+     if(!ticket) return; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket;
+-    pthread_mutex_lock(&nq_mu); while(!r->published) pthread_cond_wait(&nq_cv,&nq_mu); uint64_t physical=r->present, copy=r->copy; pthread_mutex_unlock(&nq_mu);
++    pthread_mutex_lock(&nq_mu);
++    while(!nvn_queue_stopping() && !r->published) pthread_cond_wait(&nq_cv,&nq_mu);
++    uint64_t physical=nvn_queue_stopping()?0:r->present, copy=r->copy; pthread_mutex_unlock(&nq_mu);
+     if(physical) mtl_present_wait_texture(physical,copy);   // the texture's next acquire: a snapshot's copy, else the present itself
+ }
+ void nvn_queue_fence(queue_t *q,sync_t *s) {
+-    pthread_mutex_lock(&nq_mu); nq_queue *p=nq_get(q);
++    pthread_mutex_lock(&nq_mu);
++    if(nvn_queue_stopping()) { pthread_mutex_unlock(&nq_mu); return; }
++    nq_queue *p=nq_get(q);
+     if(p->tail) nq_set_sync(s,p->tail); else { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=1; s->fence=p->physical; }
+     pthread_mutex_unlock(&nq_mu);
+@@ -309,20 +390,28 @@ void nvn_queue_fence(queue_t *q,sync_t *s) {
+ int nvn_sync_wait(const sync_t *s,uint64_t timeout) {
+     uint64_t start=now_ns(),fence=0; pthread_mutex_lock(&nq_mu);
+-    while(!nq_sync_encoded(s,&fence)) {
++    while(!nvn_queue_stopping() && !nq_sync_encoded(s,&fence)) {
+         uint64_t elapsed=now_ns()-start; if(timeout!=UINT64_MAX && elapsed>=timeout) { pthread_mutex_unlock(&nq_mu); return 0; }
+         if(timeout==UINT64_MAX) pthread_cond_wait(&nq_cv,&nq_mu);
+         else { uint64_t left=timeout-elapsed; struct timespec ts={(time_t)(left/1000000000ull),(long)(left%1000000000ull)}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts); }
+     }
+-    pthread_mutex_unlock(&nq_mu); uint64_t elapsed=now_ns()-start;
++    pthread_mutex_unlock(&nq_mu);
++    if(nvn_queue_stopping()) return 0;
++    uint64_t elapsed=now_ns()-start;
+     return mtl_wait(fence,timeout==UINT64_MAX?timeout:elapsed>=timeout?0:timeout-elapsed);
+ }
+-void nvn_queue_wait_sync(queue_t *q,const sync_t *s) {
++int nvn_queue_wait_sync(queue_t *q,const sync_t *s) {
++    if(nvn_queue_stopping()) return 0;
+     nvn_cap_queue(q->serial,1);
+-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
+-    pthread_mutex_lock(&nq_mu); nq_snapshot_sync(nq_append(j,NQ_SYNC),s); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
++    pthread_mutex_lock(&nq_mu);
++    if(nvn_queue_stopping()) { pthread_mutex_unlock(&nq_mu); return 0; }
++    nq_job *j=calloc(1,sizeof *j); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
++    nq_snapshot_sync(nq_append(j,NQ_SYNC),s); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
++    return 1;
+ }
+ void nvn_queue_finish(queue_t *q) { sync_t s={0}; nvn_queue_fence(q,&s); nvn_sync_wait(&s,UINT64_MAX); nvn_sync_release(&s);
+-    pthread_mutex_lock(&nq_mu); nq_queue *p=nq_get(q); uint64_t present=p->present, copy=p->copy; pthread_mutex_unlock(&nq_mu);
++    pthread_mutex_lock(&nq_mu);
++    if(nvn_queue_stopping()) { pthread_mutex_unlock(&nq_mu); return; }
++    nq_queue *p=nq_get(q); uint64_t present=p->present, copy=p->copy; pthread_mutex_unlock(&nq_mu);
+     if(present) mtl_present_wait_texture(present,copy);   // a snapshot present: its copy has run, not the screen (the display link would pace a game that finishes every frame)
+ }
+-void nvn_queue_forget(queue_t *q) { nvn_queue_finish(q); pthread_mutex_lock(&nq_mu); nq_queue **p=&nq_queues; while(*p && (*p)->serial!=q->serial) p=&(*p)->next; if(*p) { nq_queue *old=*p; *p=old->next; nq_put(old->tail); free(old); } pthread_mutex_unlock(&nq_mu); }
++void nvn_queue_forget(queue_t *q) { nvn_queue_finish(q); pthread_mutex_lock(&nq_mu); if(nvn_queue_stopping()) { pthread_mutex_unlock(&nq_mu); return; } nq_queue **p=&nq_queues; while(*p && (*p)->serial!=q->serial) p=&(*p)->next; if(*p) { nq_queue *old=*p; *p=old->next; nq_put(old->tail); free(old); } pthread_mutex_unlock(&nq_mu); }
+diff --git a/dm/gfx/nvn/nvn_rec.h b/dm/gfx/nvn/nvn_rec.h
+index cbf42b04..57199a5c 100644
+--- a/dm/gfx/nvn/nvn_rec.h
++++ b/dm/gfx/nvn/nvn_rec.h
+@@ -32,5 +32,9 @@ static _Atomic uint64_t g_ubc_wakes;   // wake calls made, both ways (t_ubc_wait
+ #define UBC_T_SLEEPING() ((void)0)
+ #endif
++#ifdef LICHII_NVN_METAL_BRIDGE
++static int ubc_on(void) { return 0; }
++#else
+ static int ubc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_COPY_THREAD"); v = !(e && !strcmp(e, "0")); } return v; }
++#endif
+ // Wake the copy thread if it sleeps; only ubc_push, after its store to g_ubc_head (pushes between the wake and the thread clearing its flag make a call each, harmless)
+ static inline void ubc_kick(void) {
+@@ -116,4 +120,8 @@ static pthread_mutex_t g_rb_mu = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t g_rb_work = PTHREAD_COND_INITIALIZER, g_rb_idle = PTHREAD_COND_INITIALIZER;
+ static rec_blk *g_rb_cur, *g_rb_head, *g_rb_tail, *g_rb_free;   // the submit thread's open block; blocks waiting for the encode thread; empty blocks
++#ifdef LICHII_NVN_METAL_BRIDGE
++static pthread_t g_rb_thread;
++static int g_rb_stop;   // under g_rb_mu, after rec_drain
++#endif
+ static int g_rb_busy, g_rb_started, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
+ 
+@@ -192,5 +200,5 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
+     MTL4CommitOptions *o = [MTL4CommitOptions new];
+     atomic_fetch_add(&g_rx_fly, 1);
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++    add_feedback(o, ^(id<MTL4CommitFeedback> f) {
+         atomic_fetch_sub(&g_rx_fly, 1);
+         if (cnt == 1) { if (fbs[0] != NSNull.null) for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[0])->blocks) b(f); return; }
+@@ -200,5 +208,5 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
+         for (int i = 0; i < cnt; i++) { if (fbs[(NSUInteger)i] == NSNull.null) continue; DmPartFB *part = [DmPartFB new]; part->t0 = t[i]; part->t1 = t[i + 1]; part->err = f.error;
+             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
+-    }];
++    });
+     pthread_mutex_lock(&g_res_commit_mu);
+     [g_q4 commit:buffers count:(NSUInteger)nb options:o]; rx_mark();
+@@ -321,4 +329,7 @@ static void *rec_thread(void *arg) {
+         pthread_mutex_lock(&g_rb_mu);
+         while (!g_rb_head) {
++#ifdef LICHII_NVN_METAL_BRIDGE
++            if (g_rb_stop) { pthread_mutex_unlock(&g_rb_mu); return NULL; }
++#endif
+             if (g_rx_npend) {   // held commits and nothing more to encode: a short wait for the next submission while the GPU still has work (looked at every 50 us), then they go
+                 for (int k = 0; k < 9 && !g_rb_head && !atomic_load(&g_rx_drain) && rx_busy(); k++) { struct timespec ts = {0, 50000}; g_rb_sleeping = 1; pthread_cond_timedwait_relative_np(&g_rb_work, &g_rb_mu, &ts); g_rb_sleeping = 0; }
+@@ -356,5 +367,9 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
+         pthread_mutex_lock(&g_rb_mu);
+         if (!g_rb_started) { pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 1 << 20);
+-            if (pthread_create(&th, &at, rec_thread, NULL)) MDIE("deferred encoding: cannot start the encode thread"); pthread_attr_destroy(&at); g_rb_started = 1; }
++            if (pthread_create(&th, &at, rec_thread, NULL)) MDIE("deferred encoding: cannot start the encode thread");
++#ifdef LICHII_NVN_METAL_BRIDGE
++            g_rb_thread = th;
++#endif
++            pthread_attr_destroy(&at); g_rb_started = 1; }
+         g_rb_cur = g_rb_free; if (g_rb_cur) g_rb_free = g_rb_cur->next;
+         pthread_mutex_unlock(&g_rb_mu);
+@@ -376,4 +391,15 @@ static void rec_drain(void) {
+     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);
+ }
++#ifdef LICHII_NVN_METAL_BRIDGE
++static void rec_stop(void) {
++    if (!g_rb_started) return;
++    rec_drain();
++    pthread_mutex_lock(&g_rb_mu);
++    g_rb_stop = 1; pthread_cond_broadcast(&g_rb_work);
++    pthread_mutex_unlock(&g_rb_mu);
++    if (pthread_join(g_rb_thread, NULL)) MDIE("cannot join the NVN encode worker");
++    g_rb_started = 0;
++}
++#endif
+ // A block of records from another thread than the submit thread (the present snapshot's copy): it goes in one piece behind every block published so far. Everything the game
+ // submitted before it presents is published by then (a submission publishes its records before it returns), so the block runs after the frame's work, and the presenting thread

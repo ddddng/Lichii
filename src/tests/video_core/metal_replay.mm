@@ -11,6 +11,7 @@
 
 #include "common/host_memory.h"
 #include "video_core/renderer_metal/guest_buffer.h"
+#include "video_core/renderer_metal/guest_pool_backing.h"
 
 namespace {
 
@@ -46,7 +47,8 @@ std::shared_ptr<void> Map(const std::shared_ptr<Common::HostMemory>& memory, siz
 }
 
 API_AVAILABLE(macos(26.0))
-void Draw(id<MTLDevice> device, id<MTL4CommandQueue> queue, id<MTLBuffer> vertices) {
+void Draw(id<MTLDevice> device, id<MTL4CommandQueue> queue, id<MTLBuffer> vertices,
+          uint64_t vertex_offset) {
     NSError* error = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:@(Shader) options:nil error:&error];
     Check(library != nil, "compile fixture MSL");
@@ -82,7 +84,7 @@ void Draw(id<MTLDevice> device, id<MTL4CommandQueue> queue, id<MTLBuffer> vertic
     [residency commit];
     [cmd beginCommandBufferWithAllocator:allocator];
     [cmd useResidencySet:residency];
-    [args setAddress:vertices.gpuAddress atIndex:0];
+    [args setAddress:vertices.gpuAddress + vertex_offset atIndex:0];
 
     auto* pass = [MTL4RenderPassDescriptor new];
     auto* color = pass.colorAttachments[0];
@@ -137,6 +139,65 @@ void Draw(id<MTLDevice> device, id<MTL4CommandQueue> queue, id<MTLBuffer> vertic
     std::printf("Native Metal 4 render + readback: %.3f GPU ms\n", gpu_ms);
 }
 
+API_AVAILABLE(macos(26.0))
+void DrawGuestPool(id<MTLDevice> device, id<MTL4CommandQueue> queue) {
+    constexpr uint64_t GuestPage = 4 * 1024;
+    auto backing = std::make_shared<Common::HostMemory>(4 * ViewSize, 8 * ViewSize);
+    auto* const arena = backing->VirtualBasePointer();
+    Check(arena != nullptr, "create pool fastmem arena");
+    struct Fixture {
+        std::shared_ptr<Common::HostMemory> backing;
+        size_t host_offset{ViewSize};
+        size_t coverage{ViewSize};
+        size_t calls{};
+    } fixture{backing};
+    const lichii_metal_pool_mapper mapper{&fixture, [](void* context, uint64_t address,
+                                                      uint64_t length,
+                                                      lichii_metal_pool_lease* out) -> int {
+        auto& f = *static_cast<Fixture*>(context);
+        ++f.calls;
+        Check(address == ViewSize && length == ViewSize, "request the enclosing 16 KiB view");
+        const Common::HostMemory::BackingRun run{0, f.host_offset, f.coverage};
+        return Metal::MapGuestPoolBacking(f.backing, length, std::span{&run, 1}, out);
+    }};
+    uint64_t offset = UINT64_MAX;
+    lichii_metal_set_pool_mapper(arena, 3 * ViewSize, &mapper);
+    auto* const guest_pool = arena + ViewSize + GuestPage;
+    Check(!lichii_metal_new_guest_pool_buffer(device, guest_pool, UINT64_MAX, &offset) &&
+              offset == UINT64_MAX && fixture.calls == 0,
+          "reject a range beyond the arena before mapping");
+    fixture.coverage = GuestPage;
+    Check(!lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset),
+          "reject incomplete host-page backing");
+    fixture.coverage = ViewSize;
+    fixture.host_offset += GuestPage;
+    Check(!lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset),
+          "reject incongruent backing on the 16 KiB host");
+    fixture.host_offset = ViewSize;
+    const std::weak_ptr<Common::HostMemory> lifetime = backing;
+    @autoreleasepool {
+        id<MTLBuffer> vertices =
+            lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset);
+        Check(vertices && offset == GuestPage && vertices.length == ViewSize,
+              "import a 4 KiB guest pool with its Metal buffer offset");
+        constexpr std::array<float, 6> points{-0.8f, -0.8f, 0.8f, -0.8f, 0.0f, 0.8f};
+        auto* const bytes = backing->BackingBasePointer() + ViewSize + GuestPage;
+        std::memcpy(bytes, points.data(), sizeof(points));
+        Check(std::memcmp(static_cast<u8*>(vertices.contents) + offset, points.data(),
+                          sizeof(points)) == 0,
+              "Metal sees writes to the original backing");
+        lichii_metal_set_pool_mapper(nullptr, 0, nullptr);
+        Check(!lichii_metal_new_guest_pool_buffer(device, guest_pool, GuestPage, &offset),
+              "no fastmem pointer fallback after mapper teardown");
+        backing.reset();
+        fixture.backing.reset();
+        Check(!lifetime.expired(), "the Metal buffer owns the backing after mapper teardown");
+        Draw(device, queue, vertices, offset);
+        vertices = nil;
+    }
+    Check(lifetime.expired(), "release the backing after the finished Metal buffer is released");
+}
+
 } // namespace
 
 int main() {
@@ -163,18 +224,7 @@ int main() {
             const std::shared_ptr<void> unowned{std::shared_ptr<void>{}, mapping.get()};
             Check(Metal::ImportGuestBuffer(device, unowned, ViewSize) == nil,
                   "reject a pointer without a lifetime owner");
-            std::weak_ptr<void> lifetime = mapping;
-            @autoreleasepool {
-                id<MTLBuffer> vertices = Metal::ImportGuestBuffer(device, mapping, ViewSize);
-                Check(vertices && vertices.contents == mapping.get(), "import without copying");
-                constexpr std::array<float, 6> points{-0.8f, -0.8f, 0.8f, -0.8f, 0.0f, 0.8f};
-                std::memcpy(backing->BackingBasePointer() + ViewSize, points.data(), sizeof(points));
-                mapping.reset();
-                Check(!lifetime.expired(), "Metal retains the backing view");
-                Draw(device, queue, vertices);
-                vertices = nil;
-            }
-            Check(lifetime.expired(), "retire the view when the finished Metal buffer is released");
+            DrawGuestPool(device, queue);
             return 0;
         }
         return 77;

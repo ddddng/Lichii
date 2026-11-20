@@ -4,10 +4,24 @@
 #include "video_core/renderer_metal/guest_buffer.h"
 
 #include <cstdint>
+#include <limits>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mutex>
+#include <new>
 #include <unistd.h>
 #include <utility>
+
+#include "video_core/renderer_metal/nvn_pool_bridge.h"
+
+namespace {
+
+std::mutex pool_mapper_mutex;
+lichii_metal_pool_mapper pool_mapper{};
+uintptr_t pool_arena{};
+uint64_t pool_guest_size{};
+
+} // namespace
 
 namespace Metal {
 
@@ -49,3 +63,68 @@ id<MTLBuffer> ImportGuestBuffer(id<MTLDevice> device, std::shared_ptr<void> mapp
 }
 
 } // namespace Metal
+
+void lichii_metal_set_pool_mapper(const void* arena, uint64_t guest_size,
+                                const lichii_metal_pool_mapper* mapper) {
+    const auto base = reinterpret_cast<uintptr_t>(arena);
+    const auto page = static_cast<uintptr_t>(getpagesize());
+    std::scoped_lock lock{pool_mapper_mutex};
+    pool_mapper = {};
+    pool_arena = 0;
+    pool_guest_size = 0;
+    if (mapper && mapper->map && base && base % page == 0 && guest_size &&
+        guest_size <= std::numeric_limits<uintptr_t>::max() - base) {
+        pool_mapper = *mapper;
+        pool_arena = base;
+        pool_guest_size = guest_size;
+    }
+}
+
+id<MTLBuffer> lichii_metal_new_guest_pool_buffer(id<MTLDevice> device, const void* address,
+                                               uint64_t length, uint64_t* buffer_offset) {
+    if (!device.hasUnifiedMemory || !length || !buffer_offset) {
+        return nil;
+    }
+    const auto page = static_cast<uint64_t>(getpagesize());
+    const auto start = reinterpret_cast<uintptr_t>(address);
+    uint64_t bias{};
+    uint64_t aligned_length{};
+    lichii_metal_pool_lease lease{};
+    try {
+        {
+            std::scoped_lock lock{pool_mapper_mutex};
+            if (!pool_mapper.map || start < pool_arena || start - pool_arena >= pool_guest_size) {
+                return nil;
+            }
+            const uint64_t guest_start = start - pool_arena;
+            if (length > pool_guest_size - guest_start) {
+                return nil;
+            }
+            bias = guest_start % page;
+            const uint64_t aligned_start = guest_start - bias;
+            aligned_length = bias + length;
+            const uint64_t tail = (page - aligned_length % page) % page;
+            if (tail > pool_guest_size - aligned_start - aligned_length) {
+                return nil;
+            }
+            aligned_length += tail;
+            if (aligned_length > device.maxBufferLength ||
+                !pool_mapper.map(pool_mapper.context, aligned_start, aligned_length, &lease)) {
+                return nil;
+            }
+        }
+        if (!lease.release) {
+            return nil;
+        }
+        auto mapping = std::shared_ptr<void>{lease.bytes, [lease, aligned_length](void* bytes) {
+                                                 lease.release(lease.context, bytes, aligned_length);
+                                             }};
+        id<MTLBuffer> buffer = Metal::ImportGuestBuffer(device, std::move(mapping), aligned_length);
+        if (buffer) {
+            *buffer_offset = bias;
+        }
+        return buffer;
+    } catch (const std::bad_alloc&) {
+        return nil;
+    }
+}

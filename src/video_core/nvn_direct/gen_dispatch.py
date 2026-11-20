@@ -8,6 +8,8 @@ addresses turned into host pointers (fastmem arena + address) on the way in and 
 Signatures: Banana Native's prototypes (bananative/dm/gfx/nvn/nvn_protos.h, MIT) and the NVN_NOPROTO
 ones of hle_nvn.c and nvn_window.c, which win (nvn_protos.h has a few wrong). Run after updating bananative/:
     python3 gen_dispatch.py
+With --native (or an external --nvn-dir), generate from the pinned nxnative implementation
+declarations and slot names. Prototypes, empty stubs and unbridged implementations are not entries.
 Arguments past x7 / v7 come from the guest's stack (s[], one 8-byte slot each, in order).
 It fails on what the dispatch cannot pass: structs returned through x8,
 structs passed by value other than the separate handles, pointers to structs holding addresses
@@ -41,6 +43,77 @@ PLAIN_STRUCTS = {'NVNcopyRegion', 'NVNdrawTextureRegion', 'NVNpackagedTextureLay
                  'NVNsubroutineLinkageMapPtr', 'NVNseparateTextureHandle', 'NVNseparateSamplerHandle'}
 # Calls Lichii's hook answers itself (name lookups).
 HOOK_OWN = {'nvnBootstrapLoader', 'nvnDeviceGetProcAddress'}
+
+NATIVE_BLOCKED = {
+    # These setters persist a host-callable function pointer in an in-place NVN object.
+    'nvnCommandBufferSetMemoryCallback', 'nvnDeviceInstallDebugCallback',
+    # Inferred signature and an embedded GPU address, not a descriptor index.
+    'nvnDeviceGetUniformBufferHandle',
+    # The available guest and native declarations disagree about the argument count.
+    'nvnCommandBufferSetComputeWorkloadPriority',
+    'nvnDlssNetworkBuilderSetTextureIDs', 'nvnDlssNetworkBuilderGetOptimalSettings',
+    # RT needs compound guest descriptors and addresses that live through submit.
+    'nvnCommandBufferDispatchRays', 'nvnCommandBufferDispatchRaysIndirect',
+    'nvnProgramGetShaderGroupHandle', 'nvnProgramBuilderSetRayTracingModules',
+    'nvnDeviceCalculateAccelerationStructureMemoryRequirements',
+    'nvnCommandBufferBuildAccelerationStructures', 'nvnCommandBufferCopyAccelerationStructure',
+    'nvnCommandBufferCompactAccelerationStructure', 'nvnCommandBufferBindAccelerationStructure',
+    'nvnCommandBufferBindAccelerationStructures',
+}
+
+NATIVE_ARRAY_COUNTS = {
+    'nvnWindowBuilderSetTextures': 1,
+    'nvnCommandBufferSetRenderTargets': 1,
+    'nvnMemoryPoolMapVirtual': 1,
+    'nvnQueueSubmitCommands': 1,
+    'nvnCommandBufferCallCommands': 1,
+    'nvnCommandBufferCopyCommands': 1,
+    'nvnProgramSetShaders': 1,
+    'nvnProgramSetShadersExt': 1,
+    'nvnCommandBufferBindUniformBuffers': 3,
+    'nvnCommandBufferBindStorageBuffers': 3,
+    'nvnCommandBufferBindVertexBuffers': 2,
+    'nvnCommandBufferBindTransformFeedbackBuffers': 2,
+}
+
+NATIVE_ARRAY_LIMITS = {
+    'nvnWindowBuilderSetTextures': 4,
+    'nvnCommandBufferSetRenderTargets': 8,
+    'nvnProgramSetShaders': 6,
+    'nvnProgramSetShadersExt': 6,
+}
+
+NATIVE_PRIVATE_POINTERS = {'shader_data_ext', 'dlss_builder_t', 'dlss_net_t', 'dlss_params_t'}
+
+NATIVE_SCALARS = {
+    'void', 'char', 'float', 'double', 'int', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t',
+    'size_t', 'ptrdiff_t', 'NVNboolean', 'NVNdebugDomainId', 'NVNstorageClass',
+    'NVNtextureHandle', 'NVNimageHandle', 'NVNnativeWindow',
+} | ADDRESSES
+
+
+def native_protos(nvn):
+    src = open(os.path.join(nvn, 'hle_nvn.c')).read()
+    for fragment in re.findall(r'^#include "(nvn_\w+\.inc)"', src, re.M):
+        src += '\n' + open(os.path.join(nvn, fragment)).read()
+    names = open(os.path.join(nvn, 'names.txt')).read().split()
+    slots = set(names)
+    count = open(os.path.join(nvn, 'nvn_count.h')).read()
+    if len(slots) != len(names) or not re.search(rf'^#define NVN_NFUNC {len(names)}$', count, re.M):
+        sys.exit('native slot names do not match NVN_NFUNC')
+    out = {}
+    for m in re.finditer(r'^\s*NVN(?:_NOPROTO)?\((\w+),\s*([^,]+),\s*([^)]*)\)\s*\{', src, re.M):
+        name, ret, params = m.groups()
+        if name not in slots or name in out:
+            sys.exit(f'{name}: native implementation outside the slot table or defined twice')
+        args = [a.strip() for a in params.split(',') if a.strip() not in ('', 'void')]
+        if any(not re.search(r'\b\w+$', a) for a in args):
+            sys.exit(f'{name}: unsupported native parameter declaration')
+        out[name] = (ret.strip(), [re.sub(r'\s*\*', '*', re.sub(r'\w+$', '', a)).strip()
+                                   for a in args])
+    if missing := NATIVE_BLOCKED - out.keys():
+        sys.exit(f'changed native ABI exclusions: {", ".join(sorted(missing))}')
+    return {name: sig for name, sig in out.items() if name not in NATIVE_BLOCKED}
 
 
 def protos(nvn, include_lichii_overrides):
@@ -89,19 +162,40 @@ def main():
     parser.add_argument('--nvn-dir', default=NVN)
     parser.add_argument('--output', default=OUT)
     parser.add_argument('--only', nargs='+')
+    parser.add_argument('--native', action='store_true')
     options = parser.parse_args()
+    native = options.native or os.path.realpath(options.nvn_dir) != NVN
     structs = struct_types(options.nvn_dir)
-    signatures = protos(options.nvn_dir, options.nvn_dir == NVN)
+    if native:
+        if os.path.realpath(options.output) == OUT:
+            sys.exit('native output must not overwrite the legacy dispatcher; specify --output')
+        signatures = native_protos(options.nvn_dir)
+        header = open(os.path.join(options.nvn_dir, 'include', 'nvn.h')).read()
+        scalars = NATIVE_SCALARS | set(re.findall(r'typedef enum\s*\w*\s*\{[^}]*\}\s*(\w+)\s*;', header))
+    else:
+        signatures = protos(options.nvn_dir, True)
     if options.only:
         selected = set(options.only)
         if missing := selected - (signatures.keys() - HOOK_OWN):
-            sys.exit(f'missing NVN prototypes: {", ".join(sorted(missing))}')
+            label = 'not in the native NVN allowlist' if native else 'missing NVN prototypes'
+            sys.exit(f'{label}: {", ".join(sorted(missing))}')
         signatures = {name: signatures[name] for name in selected}
-    lines = ['// Generated by gen_dispatch.py from Banana Native\'s NVN prototypes (MIT). Do not edit.',
+    source = "nxnative's NVN implementations" if native else "Banana Native's NVN prototypes"
+    lines = [f'// Generated by gen_dispatch.py from {source} (MIT). Do not edit.',
              '// D(name, flags, body): flags NVN_DISPATCH_*; body calls fn with x[] / v[] / the stack s[] and returns x0 (v0 through *v0).']
+    if native:
+        lines.append('#include "nvn_native_dispatch_abi.h"')
+    start = len(lines)
     for name, (ret, args) in sorted(signatures.items()):
         if name in HOOK_OWN:
             continue
+        if native:
+            for t in (ret, *args):
+                b = base(t)
+                if ('PFN' in t or b not in scalars | structs.keys()) and not (
+                    '*' in t and b in NATIVE_PRIVATE_POINTERS
+                ):
+                    sys.exit(f'{name}: unaudited native type {t}')
         ints = floats = stack = 0
         exprs = []
         last_int = None
@@ -136,7 +230,11 @@ def main():
                 expr = f'({a}){i}'
                 if b in ('int', 'int32_t', 'uint32_t', 'size_t', 'uint64_t', 'int64_t', 'ptrdiff_t'):
                     last_int = i
+            elif native and name == 'nvnProgramBuilderSetShaders' and b == 'NVNshaderData':
+                expr = f'({a})host_ptr({i})'
             elif b in ARRAYS and stars == 1 or (stars == 2 and b != 'char'):
+                if native and last_int != f'x[{NATIVE_ARRAY_COUNTS.get(name)}]':
+                    sys.exit(f'{name}: unaudited native array/count pair')
                 if last_int is None:
                     sys.exit(f'{name}: array argument {i} without a count before it')
                 helper = ARRAYS.get(b, 'xl_pointers') if stars == 1 else 'xl_pointers'
@@ -154,6 +252,8 @@ def main():
             sys.exit(f'{name}: returns struct {rb} (x8)')
         sig = f'{ret} (*)({", ".join(args) if args else "void"})'
         call = f'(({sig})fn)({", ".join(exprs)})'
+        if native and name == 'nvnProgramInitializeFromBuilder':
+            call = f'nvn_native_program_initialize(({sig})fn, {", ".join(exprs)})'
         if ret == 'void':
             body = f'{call}; return 0;'
         elif ret in FLOATS:
@@ -169,10 +269,16 @@ def main():
             body = f'return (uint64_t){call};'
         if floats:
             flags.append('NVN_DISPATCH_FLOAT_ARGS')
+        if native and name in NATIVE_ARRAY_LIMITS:
+            limit = NATIVE_ARRAY_LIMITS[name]
+            guard = f'(unsigned)(int)x[1] > {limit}'
+            if name != 'nvnCommandBufferSetRenderTargets':
+                guard += ' || ((int)x[1] && !x[2])'
+            body = f'if ({guard}) return 0; {body}'
         lines.append(f'D({name}, {" | ".join(flags) if flags else "0"}, {{ {body} }})')
     os.makedirs(os.path.dirname(os.path.abspath(options.output)), exist_ok=True)
     open(options.output, 'w').write('\n'.join(lines) + '\n')
-    print(f'{len(lines) - 2} functions -> {options.output}')
+    print(f'{len(lines) - start} functions -> {options.output}')
 
 
 main()

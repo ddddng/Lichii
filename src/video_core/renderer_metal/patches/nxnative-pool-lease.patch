@@ -1,0 +1,160 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 712acfa2..edf14171 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -285,8 +285,17 @@ static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);
+ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
+     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
+     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
++#ifdef LICHII_NVN_METAL_LIVE
++    if (!o->mem || (o->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || !mtl_pool_add(o->mem, o->size)) {
++        LOG("[RED] MemoryPoolInitialize: no leased Metal backing mem=%p size=%#llx flags=%#x",
++            (void *)o->mem, (unsigned long long)o->size, o->flags);
++        memset(o, 0, sizeof *o);
++        return 0;
++    }
++#else
+     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
+     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
++#endif
+     if (o->mem && !(o->flags & 0x200)) dm_device_share(o->mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
+     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
+     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
+diff --git a/dm/gfx/nvn/nvn_dirty.c b/dm/gfx/nvn/nvn_dirty.c
+index d671dd70..803cd27e 100644
+--- a/dm/gfx/nvn/nvn_dirty.c
++++ b/dm/gfx/nvn/nvn_dirty.c
+@@ -280,7 +280,9 @@ static void prep_write(void *addr, size_t len) {
+ // hook table while it grew (PR #2225). With no pool registered the hooks scan an empty table, so a game that never makes one pays nothing for them
+ __attribute__((constructor)) static void dirty_init(void) {
+     g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb);
++#ifndef LICHII_NVN_METAL_LIVE
+     dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write);
++#endif
+ }
+ 
+ void nvn_dirty_add_range(const void *mem, size_t size) {
+diff --git a/dm/gfx/nvn/nvn_mtl.h b/dm/gfx/nvn/nvn_mtl.h
+index cd2119c5..9387135d 100644
+--- a/dm/gfx/nvn/nvn_mtl.h
++++ b/dm/gfx/nvn/nvn_mtl.h
+@@ -13,7 +13,7 @@ void mtl_set_queue_origin_lower_left(int on); // Raster flip captured at NVN que
+ void bf_want_note(const char *key);
+ 
+ // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
+-void mtl_pool_add(const void *mem, uint64_t size);
++int mtl_pool_add(const void *mem, uint64_t size);
+ void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
+ void mtl_pool_del(const void *mem);
+ void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 3261eb05..591d53d9 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -23,6 +23,9 @@
+ #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
+ #endif
+ #include "nvn_mtl.h"
++#ifdef LICHII_NVN_METAL_LIVE
++#include "video_core/renderer_metal/nvn_pool_bridge.h"
++#endif
+ #include "nvn_queue.h"
+ #include <mach/mach.h>
+ #include "nvn_obj.h"
+@@ -1041,11 +1044,20 @@ static id<MTLBuffer> pool_buf_made(const void *mem, uint64_t size, uintptr_t a,
+     }
+     return buf;
+ }
+-static void pool_new_prep(pool_new *n, const void *mem, uint64_t size) {
++static int pool_new_prep(pool_new *n, const void *mem, uint64_t size) {
++#ifdef LICHII_NVN_METAL_LIVE
++    uint64_t off = 0;
++    id<MTLBuffer> buf = lichii_metal_new_guest_pool_buffer(g_dev, mem, size, &off);
++    if (!buf) return 0;
++    uintptr_t lo = (uintptr_t)mem, base = lo - off;
++    *n = (pool_new){mem, size, lo, lo + size, base, base + buf.length, buf};
++#else
+     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
+     *n = (pool_new){mem, size, lo, hi, lo & ~(pg - 1), (hi + pg - 1) & ~(pg - 1), nil};
+-    if (size >= BIG_MIN && pool_chunks()) { pthread_mutex_lock(&g_mu); int room = g_nbig < BIG_MAX; pthread_mutex_unlock(&g_mu); if (room) return; }
++    if (size >= BIG_MIN && pool_chunks()) { pthread_mutex_lock(&g_mu); int room = g_nbig < BIG_MAX; pthread_mutex_unlock(&g_mu); if (room) return 1; }
+     n->buf = pool_buf_made(mem, size, n->a, n->b);
++#endif
++    return 1;
+ }
+ static void pool_new_put(pool_new *n) {   // caller holds g_mu
+     if (!n->buf && g_nbig == BIG_MAX) n->buf = pool_buf_made(n->mem, n->size, n->a, n->b);   // the chunk table filled since pool_new_prep looked
+@@ -1062,11 +1074,12 @@ static void pool_new_put(pool_new *n) {   // caller holds g_mu
+     g_pool_adds++;
+     [g_keep addObject:n->buf];
+ }
+-void mtl_pool_add(const void *mem, uint64_t size) {
++int mtl_pool_add(const void *mem, uint64_t size) {
+     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
+-    pool_new n; pool_new_prep(&n, mem, size);
++    pool_new n; if (!pool_new_prep(&n, mem, size)) return 0;
+     pthread_mutex_lock(&g_mu); pool_new_put(&n); pthread_mutex_unlock(&g_mu);
+     reg_bump(-1, REG_POOL);
++    return 1;
+ }
+ 
+ static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
+@@ -1122,7 +1135,13 @@ void mtl_pool_del(const void *mem) {
+ void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd) {
+     mtl_init();
+     pool_new *n = nadd ? (pool_new *)calloc((size_t)nadd, sizeof *n) : NULL; if (nadd && !n) MDIE("pool replacement");
+-    for (int i = 0; i < nadd; i++) pool_new_prep(&n[i], add[i], size[i]);
++    for (int i = 0; i < nadd; i++) {
++        if (pool_new_prep(&n[i], add[i], size[i])) continue;
++        for (int j = 0; j < i; j++) n[j].buf = nil;
++        free(n);
++        MLOG("[RED] memory pool %p+%#llx: replacement has no leased backing", add[i], (unsigned long long)size[i]);
++        return;
++    }
+     reg_bump(-1, REG_POOL);
+     @autoreleasepool {
+     NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
+@@ -1673,6 +1692,9 @@ void mtl_sub_begin(void) {
+     if (g_cb) MDIE("submit re-entered");
+     if (!atomic_load(&g_sub_thread_set) || !pthread_equal(g_sub_thread, pthread_self())) nvn_dirty_own_thread();
+     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
++#ifdef LICHII_NVN_METAL_LIVE
++    nvn_dirty_touch();
++#endif
+     up_idle_release();
+     atomic_store(&g_last_commit_error, 0);
+     g_sub_pool = objc_autoreleasePoolPush();
+@@ -3843,6 +3865,9 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
+ // which would make them writable again and the texture count as written at once
+ static uint64_t g_up_src_made;   // source buffers made (t_upload_src)
+ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int may_split) {
++#ifdef LICHII_NVN_METAL_LIVE
++    return nil;
++#else
+     // Not once the raw memory table holds the whole pool (big_full): the lookup finds that buffer. Ocarina of Time's first scene made 4,664 of these in one batch, 2.1 GB counted against the working set for pages already wired
+     pthread_mutex_lock(&g_mu); int k = big_of(addr), in = k >= 0 && !g_big[k].full;
+     if (k < 0 && len) { int i = pool_find(addr, len); in = i >= 0 && !g_pools[i].res && !addr_meets(g_pools[i].lo, g_pools[i].hi); }
+@@ -3858,6 +3883,7 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int
+     if (budget) g_up_src_bytes += b - a;
+     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
+     return buf;
++#endif
+ }
+ // A re-upload read every layer and level of a texture from guest memory when one page of it was written. Ocarina of Time fills a 1800x1380x8 RGBA8 array (38.5 MB) layer by layer
+ // from its CPU while it draws with it: 13 whole uploads in 6 frames, six of them in one frame, for 3 to 936 of its 2,466 pages each (docs/reference/frame-rate.md). A layer's level
+@@ -4752,10 +4778,15 @@ static void gws_take(uintptr_t lo, uintptr_t hi) {   // a texture over [lo, hi)
+ // opened (nvn_dirty_open: writable, not counted as written, protected again once it is made; issue #1591). A chunk of a large pool is made long after the pool, by when uploads and GPU writes
+ // have protected pages in it; a small pool's first or last page may be a neighbour's, protected by that pool's texture
+ static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b) {
++#ifdef LICHII_NVN_METAL_LIVE
++    uint64_t off = 0;
++    return lichii_metal_new_guest_pool_buffer(g_dev, (const void *)a, b - a, &off);
++#else
+     nvn_dirty_open((void *)a, b - a);
+     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+     nvn_dirty_close();
+     return buf;
++#endif
+ }
+ static void gws_drop_pool(const pool_t *p) {   // the pool goes: its spans with it
+     if (!p->mem || (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) {
