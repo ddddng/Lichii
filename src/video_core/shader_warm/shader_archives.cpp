@@ -1117,7 +1117,11 @@ FrameScanResult ScanFrames(u64 size, const ReadAt& read, const ZstdDictionaries*
             const Bytes rest{window.data() + base, window.size() - base};
             const size_t frame = ZSTD_findFrameCompressedSize(rest.data(), rest.size());
             if (!ZSTD_isError(frame)) {
-                take(rest.first(frame));
+                if (frame > options.max_frame) {
+                    ++result.oversized;
+                } else {
+                    take(rest.first(frame));
+                }
                 base += frame;
                 next = std::max<u64>(next, base);
                 continue;
