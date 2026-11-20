@@ -13,6 +13,7 @@ add_library(nvn_direct STATIC
     gen/nvn_dispatch.inc
     gen_dispatch.py
     nvn_direct.h
+    nvn_direct_dispatch.h
     nvn_dispatch.c
     nvn_direct_front.h
     nvn_direct_host.c
