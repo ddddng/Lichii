@@ -1044,6 +1044,7 @@ TEST_CASE("NUP preserves authored Edition control data separately from display m
         u32(FileSys::SupportedLanguage::AmericanEnglish) | u32(FileSys::SupportedLanguage::Japanese);
     Put(root / "base/exefs/main", "main");
     Put(root / "base/exefs/main.npdm", Npdm(NativeProgram));
+    Put(root / "base/romfs/base.bin", "base");
     FileSys::NACP source;
     source.raw.save_data_owner_id = SaveOwner;
     source.raw.dlc_base_title_id = SaveOwner + 0x1000;
@@ -1060,7 +1061,10 @@ TEST_CASE("NUP preserves authored Edition control data separately from display m
     options.metadata.title_name = "Synthetic Edition";
     options.metadata.publisher = "Synthetic publisher override";
     options.metadata.display_version = "9.8.7";
-    REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
+    std::string error;
+    const auto packed = FileSys::Nup::PackDump(root, archive, options, {}, nullptr, &error);
+    INFO(error);
+    REQUIRE(packed == FileSys::Nup::PackResult::Success);
     FileSys::RealVfsFilesystem vfs;
     Loader::AppLoader_NUP loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     FileSys::NACP control;
