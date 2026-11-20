@@ -342,7 +342,14 @@ TEST_CASE("Hinted BC7 lookup waits for GPU-written native overlap bytes",
         CHECK(f.runtime.downloads == 1);
     }
 
-    SECTION("The guest replaces the overlap before a writeback is staged") {
+    SECTION("Only a full guest overwrite releases the view before staging") {
+        f.bytes[0x41] = 0x73;
+        f.cache->WriteMemory(cpu_addr + 0x41, 1);
+        CHECK(Access::Find(*f.cache, gob, gpu_addr) == NULL_IMAGE_ID);
+        CHECK(f.runtime.downloads == 0);
+        CHECK(f.bytes[0x40] == 0);
+        CHECK(f.bytes[0x41] == 0x73);
+
         const auto guest_size = CalculateGuestSizeInBytes(native);
         const std::vector<u8> replacement(guest_size, 0x73);
         f.memory->WriteBlockUnsafe(gpu_addr, replacement.data(), replacement.size());

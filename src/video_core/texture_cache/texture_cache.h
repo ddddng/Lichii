@@ -661,8 +661,8 @@ bool TextureCache<P>::GobViewBytesReady(DAddr cpu_addr, size_t size) {
     }
     ImageId source_id{};
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, ImageBase& image) {
-        if (!image.info.native_tiling || !image.IsSafeGpuCopy() ||
-            True(image.flags & ImageFlagBits::Remapped)) {
+        if (!image.info.native_tiling || False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & (ImageFlagBits::Remapped | ImageFlagBits::GuestReplacedContents))) {
             return false;
         }
         KeepRanges landed;
@@ -2484,6 +2484,11 @@ template <class P>
 void TextureCache<P>::MarkImageWritten(ImageId image_id, Image& image, DAddr cpu_addr,
                                        size_t size) {
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+    if (image.info.native_tiling && True(image.flags & ImageFlagBits::GpuModified) &&
+        HasGuestRange(image) && False(image.flags & ImageFlagBits::NonContiguous) &&
+        cpu_addr <= image.cpu_addr && image.cpu_addr_end - cpu_addr <= size) {
+        image.flags |= ImageFlagBits::GuestReplacedContents;
+    }
     if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
         // Written at last: a backed image replaces it where it is used next.
         image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
