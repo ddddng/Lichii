@@ -1250,12 +1250,12 @@ public:
         munmap(view, length);
     }
 
-    HostMemory::ReadWritePages ArenaReadWritePages(size_t virtual_base_offset) const noexcept {
+    HostMemory::ReadWritePages ArenaReadWritePages(size_t base_offset) const noexcept {
         if (read_write_pages == nullptr) {
             return {};
         }
         const u32 shift = static_cast<u32>(std::countr_zero(host_page_size));
-        return {read_write_pages, virtual_base_offset >> shift, shift};
+        return {read_write_pages, base_offset >> shift, shift};
     }
 
 #ifdef HAS_NCE
