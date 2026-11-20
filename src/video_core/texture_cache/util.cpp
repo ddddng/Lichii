@@ -28,7 +28,6 @@
 #include "common/settings.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/surface.h"
@@ -535,7 +534,8 @@ void SwizzlePitchLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
 
 void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr,
                              const ImageInfo& info, const BufferImageCopy& copy,
-                             std::span<const u8> input, Common::ScratchBuffer<u8>& tmp_buffer) {
+                             std::span<const u8> input, u8* direct,
+                             Common::ScratchBuffer<u8>& tmp_buffer) {
     const Extent3D size = info.size;
     const LevelInfo level_info = MakeLevelInfo(info);
     const Extent2D tile_size = DefaultBlockSize(info.format);
@@ -567,13 +567,18 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
 
     for (s32 layer = 0; layer < info.resources.layers; ++layer) {
         const std::span<const u8> src = input.subspan(host_offset);
-        {
-            Tegra::Memory::GpuGuestMemoryScoped<u8,
-                                                Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
-                dst(gpu_memory, gpu_addr + guest_offset, subresource_size, &tmp_buffer);
-
-            SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
-                           num_tiles.depth, block.height, block.depth, 1, gpu_memory.UsesNativeTiling());
+        u8* dst = direct ? direct + guest_offset
+                         : gpu_memory.GetSpan(gpu_addr + guest_offset, subresource_size);
+        const bool copied = dst == nullptr;
+        if (copied) {
+            dst = tmp_buffer.data();
+            gpu_memory.ReadBlockUnsafe(gpu_addr + guest_offset, dst, subresource_size);
+        }
+        SwizzleTexture(std::span{dst, subresource_size}, src, bytes_per_block, num_tiles.width,
+                       num_tiles.height, num_tiles.depth, block.height, block.depth, 1,
+                       gpu_memory.UsesNativeTiling());
+        if (copied) {
+            gpu_memory.WriteBlockUnsafe(gpu_addr + guest_offset, dst, subresource_size);
         }
 
         host_offset += host_bytes_per_layer;
@@ -1590,12 +1595,29 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
                   std::span<const BufferImageCopy> copies, std::span<const u8> memory,
                   Common::ScratchBuffer<u8>& tmp_buffer) {
     const bool is_pitch_linear = info.type == ImageType::Linear;
+    const u32 levels = info.num_samples > 1
+                           ? 1
+                           : HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
+                                               static_cast<u32>(info.resources.levels));
+    u8* direct{};
+    if (!is_pitch_linear && !copies.empty() && info.resources.layers > 0) {
+        const size_t mapped_size =
+            static_cast<size_t>(info.resources.layers - 1) * CalculateLayerStride(info) +
+            CalculateLayerSize(info);
+        direct = gpu_memory.GetSpan(gpu_addr, mapped_size);
+        if (direct == nullptr) {
+            const auto level_info = MakeLevelInfo(info);
+            u32 scratch_size = 0;
+            for (const BufferImageCopy& copy : copies) {
+                const s32 level = copy.image_subresource.base_level;
+                if (IsHostMipLevel(level, levels)) {
+                    scratch_size = std::max(scratch_size, CalculateLevelSize(level_info, level));
+                }
+            }
+            tmp_buffer.resize_destructive(scratch_size);
+        }
+    }
     for (const BufferImageCopy& copy : copies) {
-        const u32 levels =
-            info.num_samples > 1
-                ? 1
-                : HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
-                                    static_cast<u32>(info.resources.levels));
         if (!IsHostMipLevel(copy.image_subresource.base_level, levels)) {
             // The host did not download this tail level. Preserve the guest bytes.
             continue;
@@ -1604,7 +1626,7 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
         if (is_pitch_linear) {
             SwizzlePitchLinearImage(gpu_memory, gpu_addr, info, copy, memory);
         } else {
-            SwizzleBlockLinearImage(gpu_memory, gpu_addr, info, copy, memory, tmp_buffer);
+            SwizzleBlockLinearImage(gpu_memory, gpu_addr, info, copy, memory, direct, tmp_buffer);
         }
     }
 }
