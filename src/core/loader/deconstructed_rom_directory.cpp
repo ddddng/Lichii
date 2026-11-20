@@ -108,6 +108,9 @@ FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
 }
 
 FileSys::VirtualDir FindLooseBasePackage(const FileSys::VirtualDir& game) {
+    if (game && game->GetFile("main")) {
+        return game;
+    }
     if (auto base = FindLooseSubdirectory(game, "base")) {
         return base;
     }
@@ -136,20 +139,17 @@ bool IsLooseEditionExeFS(const FileSys::VirtualDir& exefs,
     if ((id >> 56) != 0x04 || id != FileSys::GetBaseTitleIDWithProgramIndex(id, 1)) {
         return false;
     }
-    auto base_exefs = FindLooseSubdirectory(base_package, "exefs");
-    if (!base_exefs) {
-        base_exefs = base_package;
+    const auto base_exefs = base_package && base_package->GetFile("main")
+                                ? base_package
+                                : FindLooseSubdirectory(base_package, "exefs");
+    if (!base_exefs || !base_exefs->GetFile("main")) {
+        return true;
     }
-    if (base_exefs && FileSys::IsDirectoryExeFS(base_exefs)) {
-        const auto npdm = base_exefs->GetFile("main.npdm");
-        FileSys::ProgramMetadata base_metadata;
-        if (base_metadata.Load(npdm) == ResultStatus::Success) {
-            return FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(id)) ==
-                   FileSys::GetSwitch1ApplicationID(
-                       FileSys::GetBaseTitleID(base_metadata.GetTitleID()));
-        }
-    }
-    return true;
+    const auto npdm = base_exefs->GetFile("main.npdm");
+    FileSys::ProgramMetadata base_metadata;
+    return npdm && base_metadata.Load(npdm) == ResultStatus::Success &&
+           FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(id)) ==
+               FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(base_metadata.GetTitleID()));
 }
 
 FileSys::VirtualDir FindEditionVersion(const FileSys::VirtualDir& package) {
