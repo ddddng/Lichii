@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 #include <openssl/evp.h>
 
+#include "common/cpu_features.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/file_sys/common_funcs.h"
@@ -29,12 +30,17 @@
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/frontend/emu_window.h"
+#include "core/frontend/graphics_context.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/deconstructed_rom_directory.h"
 #include "core/loader/nup.h"
+#include "tests/common/host_memory_test_access.h"
 #include "tests/core/system_test_context.h"
 
 namespace {
@@ -1845,6 +1851,7 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
     bool native_npdm = true;
     bool have_base = true;
     bool root_main = false;
+    std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
     auto base = root / "base";
     u64 program_id = edition_program;
 
@@ -1875,11 +1882,25 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         base = root;
         root_main = true;
     }
+    SECTION("a bare root main with no NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm.reset();
+        boot_edition = false;
+    }
+    SECTION("a bare root main with an empty NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm = "";
+        boot_edition = false;
+    }
 
     const auto base_exefs = root_main ? base : base / "exefs";
     if (have_base) {
         Put(base_exefs / "main", "legacy");
-        Put(base_exefs / "main.npdm", BootNpdm(legacy_program, false));
+        if (base_npdm) {
+            Put(base_exefs / "main.npdm", *base_npdm);
+        }
         Put(base / "romfs/base.bin", "base data");
     }
     Put(version / "romfs/update.bin", "update data");
@@ -1898,6 +1919,9 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         REQUIRE(explicit_legacy != nullptr);
         CHECK(Read(explicit_legacy) == "legacy");
     }
+    if (root_main && !boot_edition) {
+        return;
+    }
 
     Loader::AppLoader_DeconstructedRomDirectory loader{native};
     FileSys::VirtualFile romfs;
@@ -1914,4 +1938,37 @@ TEST_CASE("Loose Edition folders read program, matching update and base data", "
         CHECK_FALSE(tree->GetFile("update.bin"));
         CHECK_FALSE(tree->GetFile("shared.bin"));
     }
+}
+
+TEST_CASE("A fresh System resolves its boot file before kernel allocation", "[boot-inputs]") {
+    struct TestWindow final : Core::Frontend::EmuWindow {
+        std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override {
+            FAIL("Allocation failure must not initialize the renderer");
+            return {};
+        }
+        bool IsShown() const override {
+            return false;
+        }
+    } window;
+    const bool previous_switch2 = Settings::CurrentProgramIsSwitch2();
+    const auto previous_frequency = Common::g_wall_clock.GetGuestCNTFRQ();
+    const auto previous_global = Settings::values.memory_layout_mode.UsingGlobal();
+    SCOPE_EXIT {
+        Settings::SetCurrentProgramIsSwitch2(previous_switch2);
+        Common::g_wall_clock.SetGuestCNTFRQ(previous_frequency);
+        Settings::values.memory_layout_mode.SetGlobal(previous_global);
+        Kernel::KSystemControl::SetApplicationProgramId(0);
+    };
+    Settings::values.memory_layout_mode.SetGlobal(false);
+    ScopedSystemTestContext context;
+    TempDir t;
+    Put(t.path / "main", "main");
+    Put(t.path / "main.npdm", BootNpdm(TitleId + 1, true));
+    Common::HostMemoryTestAccess allocations;
+    Core::System system;
+    Service::AM::FrontendAppletParameters params{};
+    params.launch_type = Service::AM::LaunchType::ApplicationInitiated;
+    CHECK(system.Load(window, Common::FS::PathToUTF8String(t.path / "main"), params) ==
+          Core::SystemResultStatus::ErrorMemoryAllocation);
+    CHECK(Settings::CurrentProgramIsSwitch2());
 }
