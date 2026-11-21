@@ -330,6 +330,15 @@ public:
     /// INVAL_E, f5afca4c9's GATHER_E).
     /// EDEN_NX2_RENDER_QUERY_FLUSH_E (needs EDEN_NX2_RENDER_UNLEND=1): any thread. The query
     /// cache tracks the reports still to land, and the back flushes only a range with one.
+    /// EDEN_NX2_RENDER_UNLEND_MESH (needs EDEN_NX2_RENDER_UNLEND=1): native task/mesh draws go
+    /// unlent.
+    [[nodiscard]] static bool UnlendsMesh() {
+        return on_back_thread && instance.unlend_mesh;
+    }
+    /// GPURender: an unlent draw on an emulated mesh pipeline, skipped (must be 0).
+    void NoteUnlentEmulatedMesh() {
+        unlent_emulated_mesh.fetch_add(1, std::memory_order_relaxed);
+    }
     [[nodiscard]] static bool TracksPendingReports() {
         return instance.query_flush_e;
     }
@@ -1233,6 +1242,8 @@ private:
     std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
     u64 query_flushes_skipped{};
     bool query_flush_e{};
+    bool unlend_mesh{};
+    std::atomic<u64> unlent_emulated_mesh{};
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};
     std::atomic<u64> posted_waits_synced{};

@@ -300,9 +300,10 @@ public:
     [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstBuffers() const noexcept {
         return handle_cbufs;
     }
-    /// Whether the pipeline's draws can go unlent: built, no texture or image buffers, no mesh.
+    /// Whether the pipeline's draws can go unlent: built, no texture or image buffers. Task and
+    /// mesh pipelines need EDEN_NX2_RENDER_UNLEND_MESH and native mesh shaders (the rasterizer).
     [[nodiscard]] bool CanUnlend() const noexcept {
-        return !unlend_texel_buffers && !IsMeshPipeline() && IsBuilt() && !Failed();
+        return !unlend_texel_buffers && IsBuilt() && !Failed();
     }
     /// The back: the buffer bindings and the handle values, from the engine set by SetEngine.
     void ConfigureBack(bool is_indexed, BackHalf& half, GuestDescriptorQueue& capture);

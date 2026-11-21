@@ -1839,7 +1839,11 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         !device.IsExtIndexTypeUint8Supported()) {
         return lend(Reason::Uint8Index);
     }
-    if (regs.IsMeshEnabled()) {
+    // EDEN_NX2_RENDER_UNLEND_MESH: native task/mesh pipelines take the unlent draw (Fritchii
+    // c1bf9ddf94); the compute emulation stays lent.
+    const bool unlend_mesh =
+        VideoCommon::GpuSplit::UnlendsMesh() && device.IsExtMeshShaderSupported();
+    if (regs.IsMeshEnabled() && !unlend_mesh) {
         return lend(Reason::Mesh);
     }
     if (!is_indexed && instance_count == 1 &&
@@ -1858,7 +1862,9 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
             }
             return true;
         }
-        return lend(Reason::Mesh);
+        if (params.num_vertices == 0 || !unlend_mesh) {
+            return lend(Reason::Mesh);
+        }
     }
     if (const u64 verify_every = RenderVerifyEvery();
         verify_every != 0 && ++unlend_candidates % verify_every == 0) {
@@ -1878,7 +1884,8 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
         return pipeline_cache.CurrentGraphicsPipeline();
     }();
-    if (pipeline == nullptr || !pipeline->CanUnlend()) {
+    if (pipeline == nullptr || !pipeline->CanUnlend() ||
+        (pipeline->IsMeshPipeline() && (!unlend_mesh || pipeline->IsEmulatedMesh()))) {
         return lend(pipeline != nullptr && pipeline->IsMeshPipeline() ? Reason::Mesh
                                                                       : Reason::NotBuilt);
     }
@@ -2023,7 +2030,21 @@ void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
         const auto& hashes = pipeline.ShaderHashes();
         scheduler.TraceGraphicsPipeline(hashes);
         trace_draw_hashes = {hashes[1], hashes[5]};
-        RecordDirectDraw(scheduler, draw.params, trace_draw_hashes);
+        if (pipeline.IsMeshPipeline()) {
+            if (pipeline.IsEmulatedMesh()) [[unlikely]] {
+                VideoCommon::GpuSplit::Get().NoteUnlentEmulatedMesh();
+            } else {
+                scheduler.Record(
+                    [this, groups = draw.params.num_vertices](vk::CommandBuffer cmdbuf) {
+                        if (scheduler.GraphicsPipelineMissing()) {
+                            return;
+                        }
+                        cmdbuf.DrawMeshTasksEXT(groups, 1, 1);
+                    });
+            }
+        } else {
+            RecordDirectDraw(scheduler, draw.params, trace_draw_hashes);
+        }
     }
     NoteOcarinaDraw(pipeline);
 }
