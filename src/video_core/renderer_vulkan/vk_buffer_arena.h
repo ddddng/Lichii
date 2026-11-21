@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <source_location>
 #include <span>
 
@@ -61,6 +62,8 @@ public:
     /// The stamp of what is recorded now (buffer usage, the buffer staging pool).
     [[nodiscard]] u64 Now() const noexcept;
     [[nodiscard]] bool IsFree(u64 stamp) const noexcept;
+    /// The tick a stamp went in, or a later one; nullopt while it is not mapped.
+    [[nodiscard]] std::optional<u64> TickOf(u64 stamp) const noexcept;
     /// With the arena on, the buffer staging pool's clock; null otherwise.
     [[nodiscard]] const VideoCommon::ArenaClock* Clock() const noexcept {
         return enabled ? &clock : nullptr;

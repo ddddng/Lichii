@@ -236,7 +236,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                           "EDEN_NX2_RENDER_POST_INVAL",       "EDEN_NX2_RENDER_POST_INLINE",
                           "EDEN_NX2_RENDER_POST_CONDITIONAL", "EDEN_NX2_RENDER_POST_QUERY",
                           "EDEN_NX2_RENDER_POST_QUERY",       "EDEN_NX2_RENDER_POST_SIGNAL_FENCE",
-                          "EDEN_NX2_RENDER_POST_WFI",         "EDEN_NX2_RENDER_POST_FENCE_REPORT"};
+                          "EDEN_NX2_RENDER_POST_WFI",         "EDEN_NX2_RENDER_POST_FENCE_REPORT",
+                          "EDEN_NX2_RENDER_LIST_WORDS_E"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -248,6 +249,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                             post_switches[op]);
             }
         }
+        list_words.snapshots = list_words.owed = list_words.lent = list_words.moved = 0;
+        list_words.unmapped.store(0, std::memory_order_relaxed);
         const char* const inval_switch = std::getenv("EDEN_NX2_RENDER_INVAL_E");
         const bool inval_wanted = inval_switch != nullptr && inval_switch[0] == '1';
         inval_e = inval_wanted && render_unlend;
@@ -1431,6 +1434,14 @@ void GpuSplit::RenderLoop() {
                  count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
                  count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
                  count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
+    if (posts[static_cast<size_t>(PostedOp::ListWords)]) {
+        LOG_INFO(HW_GPU,
+                 "GPU render list words on the back: {} snapshots, {} owed word copies posted, {} "
+                 "lent (slot buffers not made yet, or the list indirect check); must be 0: {} owed "
+                 "word stamps moved before the post, {} owed words waited for unmapped",
+                 list_words.snapshots, list_words.owed, list_words.lent, list_words.moved,
+                 list_words.unmapped.load(std::memory_order_relaxed));
     }
     if (gather_e) {
         LOG_INFO(HW_GPU,

@@ -442,7 +442,7 @@ private:
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
 
-    Nx2ListSlots nx2_list_slots{memory_allocator, scheduler};
+    Nx2ListSlots nx2_list_slots{memory_allocator, scheduler, arena};
 };
 
 struct BufferCacheParams {

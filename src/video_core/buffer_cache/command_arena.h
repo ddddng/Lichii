@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -148,15 +149,21 @@ public:
     /// Whether the host GPU completed a stamp; tick_done(tick) answers for a tick.
     template <typename TickDone>
     [[nodiscard]] bool IsFree(u64 stamp, TickDone&& tick_done) const {
+        const std::optional<u64> tick = TickOf(stamp);
+        return tick && tick_done(*tick);
+    }
+
+    /// The tick a stamp went in, or a later one; nullopt while it is not mapped.
+    [[nodiscard]] std::optional<u64> TickOf(u64 stamp) const {
         const u64 last = mapped.load(std::memory_order_acquire);
         if (stamp > last) {
-            return false;
+            return std::nullopt;
         }
         if (last - stamp > Window - 2) {
             // Older than the window: its tick is at most the oldest one kept.
             stamp = last - (Window - 2);
         }
-        return tick_done(ticks[stamp % Window].load(std::memory_order_relaxed));
+        return ticks[stamp % Window].load(std::memory_order_relaxed);
     }
 
 private:

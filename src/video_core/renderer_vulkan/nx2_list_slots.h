@@ -19,6 +19,7 @@
 #include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_list_indirect_stats.h"
 #include "video_core/nx2_owed_words.h"
+#include "video_core/renderer_vulkan/vk_buffer_arena.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -40,14 +41,23 @@ class Scheduler;
 /// slot word lands in guest memory once the host GPU ran the work before the upload (LandDone),
 /// or at once for a reader that flushes or a guest CPU read (LandRange). No page is marked
 /// GPU-modified for them, so uniform binds of their pages keep streaming guest memory.
+///
+/// Inside a BufferArena::Collect (EDEN_NX2_RENDER_LIST_WORDS_E) the copies go to the back's
+/// arena, and an owed word waits for the arena stamp GPURender maps them to instead of a tick.
 class Nx2ListSlots {
   public:
     static constexpr u32 SlotCount = Tegra::Nx2ListIndirect::SlotCount;
     static constexpr u32 SlotBytes = 32;
     static constexpr u32 DispatchOffset = 16;
 
-    explicit Nx2ListSlots(MemoryAllocator& memory_allocator_, Scheduler& scheduler_)
-        : memory_allocator{memory_allocator_}, scheduler{scheduler_} {}
+    explicit Nx2ListSlots(MemoryAllocator& memory_allocator_, Scheduler& scheduler_,
+                          BufferArena& arena_)
+        : memory_allocator{memory_allocator_}, scheduler{scheduler_}, arena{arena_} {}
+
+    /// Whether the slots' buffers exist: their first fill records on the scheduler.
+    [[nodiscard]] bool Ready() const {
+        return buffer && landing;
+    }
 
     /// Any thread (the front's): a slot nobody holds, held for the caller.
     [[nodiscard]] std::optional<u32> Acquire() {
@@ -210,6 +220,8 @@ class Nx2ListSlots {
 
 private:
     static constexpr u32 NoEntry = ~0U;
+    /// In an owed word's tick: an arena stamp.
+    static constexpr u64 StampBit = u64{1} << 63;
     static constexpr u32 SlotWordBytes = Tegra::Nx2ListIndirect::SlotWords * sizeof(u32);
     static constexpr u32 ReadbackSlots = 256;
 
@@ -286,6 +298,7 @@ private:
 
     MemoryAllocator& memory_allocator;
     Scheduler& scheduler;
+    BufferArena& arena;
     vk::Buffer buffer;
     vk::Buffer readback; ///< Read's, host-visible
     vk::Buffer landing;  ///< The owed slot words, host-visible: SlotWordBytes a slot

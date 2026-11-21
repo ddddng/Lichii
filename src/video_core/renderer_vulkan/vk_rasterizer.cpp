@@ -3895,29 +3895,93 @@ void RasterizerVulkan::Nx2ReleaseListSlot(u32 slot) {
     buffer_cache_runtime.Nx2Slots().Release(slot);
 }
 
+bool RasterizerVulkan::ListWordsOnBack() {
+    // Lent until the slots' buffers exist (their fill records on the scheduler), and with the
+    // list indirect check, which reads them back.
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Posts(VideoCommon::GpuSplit::PostedOp::ListWords) || maxwell3d == nullptr ||
+        BufferArena::Collecting()) {
+        return false;
+    }
+    if (!buffer_cache_runtime.Nx2Slots().Ready() || Tegra::Nx2ListIndirect::Stats::g_check) {
+        split.NoteListWordsLent();
+        return false;
+    }
+    return true;
+}
+
+void RasterizerVulkan::PostListWords(bool snapshot, u64 noted) {
+    if (list_word_commands.Empty()) {
+        return;
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    VideoCommon::CommandArena commands;
+    commands.Swap(list_word_commands);
+    const u64 stamp = buffer_cache_runtime.Arena().CloseCollected();
+    if (noted != 0 && noted != stamp) {
+        split.NoteOwedStampMoved();
+    }
+    split.NoteListWords(snapshot);
+    PostRenderOp(VideoCommon::GpuSplit::PostedOp::ListWords,
+                 [this, commands = std::move(commands), stamp] {
+                     buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
+                 });
+}
+
 void RasterizerVulkan::Nx2SnapshotListWords(DAddr device_addr, u32 count, u32 slot) {
-    RENDER_LEND(Nx2SnapshotListWords(device_addr, count, slot))
+    // EDEN_NX2_RENDER_LIST_WORDS_E: the copy goes in a posted op, played at this place.
+    const bool on_back = ListWordsOnBack();
+    if (!on_back) {
+        RENDER_LEND(Nx2SnapshotListWords(device_addr, count, slot))
+    }
     // The words as GPU work sent before the list left them: the buffer cache's, its CPU writes
     // applied (as a dispatch reading them finds them).
     gpu_memory->FlushCaching();
-    std::scoped_lock lock{buffer_cache.mutex};
-    const u32 bytes = count * static_cast<u32>(sizeof(u32));
-    const auto [buffer, offset] =
-        buffer_cache.ObtainCPUBuffer(device_addr, bytes,
-                                     VideoCommon::ObtainBufferSynchronize::FullSynchronize,
-                                     VideoCommon::ObtainBufferOperation::DoNothing);
-    // As ObtainIndirectBuffer: a later upload of the words must not be reordered ahead of the copy.
-    buffer->MarkUsage(offset, bytes);
-    buffer_cache_runtime.Nx2Slots().Snapshot(buffer->Handle(), offset, count, slot);
+    {
+        std::optional<BufferArena::Collect> collect;
+        if (on_back) {
+            collect.emplace(list_word_commands);
+        }
+        std::scoped_lock lock{buffer_cache.mutex};
+        const u32 bytes = count * static_cast<u32>(sizeof(u32));
+        const auto [buffer, offset] = buffer_cache.ObtainCPUBuffer(
+            device_addr, bytes, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+            VideoCommon::ObtainBufferOperation::DoNothing);
+        // As ObtainIndirectBuffer: a later upload of the words must not be reordered ahead of the
+        // copy.
+        buffer->MarkUsage(offset, bytes);
+        buffer_cache_runtime.Nx2Slots().Snapshot(buffer->Handle(), offset, count, slot);
+    }
+    if (on_back) {
+        PostListWords(true, 0);
+    }
 }
 
 void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
-    RENDER_LEND(Nx2NoteOwedListWord(device_addr, value))
+    // EDEN_NX2_RENDER_LIST_WORDS_E: the slot word's copy to its host copy goes in a posted op,
+    // and the word stays owed until the tick GPURender plays the op in completes.
+    const bool on_back = ListWordsOnBack();
+    if (!on_back) {
+        RENDER_LEND(Nx2NoteOwedListWord(device_addr, value))
+    }
     auto& slots = buffer_cache_runtime.Nx2Slots();
     slots.LandDone(std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
-    if (slots.NoteOwed(device_addr, value, device_memory.Read<u32>(device_addr))) {
+    bool owed;
+    u64 noted = 0;
+    {
+        std::optional<BufferArena::Collect> collect;
+        if (on_back) {
+            collect.emplace(list_word_commands);
+            noted = buffer_cache_runtime.Arena().Now();
+        }
+        owed = slots.NoteOwed(device_addr, value, device_memory.Read<u32>(device_addr));
+    }
+    if (owed) {
         // A guest CPU read of the word before it lands takes the trap, and GetFlushArea lands it.
         device_memory.ArmReadTraps(device_addr, sizeof(u32));
+    }
+    if (on_back) {
+        PostListWords(false, noted);
     }
 }
 
@@ -3926,9 +3990,11 @@ bool RasterizerVulkan::Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real) {
     if (!Tegra::Nx2ListIndirect::LandOwedWord(device_memory, device_addr, value, real)) {
         return false;
     }
-    // The caches learn of it as of the inline upload that wrote the placeholder.
+    // The caches learn of it as of the inline upload that wrote the placeholder. On the back
+    // (EDEN_NX2_RENDER_LIST_WORDS_E) as a draw's cached writes: the buffer half there, the rest
+    // lent or posted.
     const std::array<std::pair<DAddr, std::size_t>, 1> written{{{device_addr, sizeof(u32)}}};
-    InvalidateCachedWrites(written, false, false);
+    InnerInvalidation(written);
     return true;
 }
 

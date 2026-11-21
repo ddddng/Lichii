@@ -647,6 +647,12 @@ private:
                                bool gpu_written = false);
     /// The back (EDEN_NX2_RENDER_GATHER_E): a gather's uploads into GPU-written buffer data.
     VideoCommon::CommandArena gather_commands;
+    /// The back (EDEN_NX2_RENDER_LIST_WORDS_E): whether it records a list word snapshot or owed
+    /// word itself, collected into list_word_commands.
+    bool ListWordsOnBack();
+    /// Posts list_word_commands; noted is an owed word's arena stamp (0: none).
+    void PostListWords(bool snapshot, u64 noted);
+    VideoCommon::CommandArena list_word_commands;
     /// Whether the draw TakeReusableDraw took still holds once the caches are locked (serial and
     /// map_serial as read then), and the images it samples need no preparing.
     bool DeltaStillHolds(u64 serial, u64 map_serial);

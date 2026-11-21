@@ -293,6 +293,7 @@ public:
         SignalFence,    ///< EDEN_NX2_RENDER_POST_SIGNAL_FENCE: a fence with a callback
         WaitForIdle,    ///< EDEN_NX2_RENDER_POST_WFI: a wait for idle with no query sync owed
         FenceReport,    ///< EDEN_NX2_RENDER_POST_FENCE_REPORT: a fence-flagged payload report
+        ListWords,      ///< EDEN_NX2_RENDER_LIST_WORDS_E: a list word snapshot or owed word copy
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).
@@ -393,6 +394,23 @@ public:
     /// or a collected upload: the GPU's bytes elsewhere on the page are dropped (must be 0).
     void NoteGpuPageOffOwner() {
         gathers.off_owner.fetch_add(1, std::memory_order_relaxed);
+    }
+    /// EDEN_NX2_RENDER_LIST_WORDS_E: the back records GPU-written list word snapshots and owed
+    /// word copies through the buffer arena and posts them (PostedOp::ListWords).
+    void NoteListWords(bool snapshot) {
+        ++(snapshot ? list_words.snapshots : list_words.owed);
+    }
+    void NoteListWordsLent() {
+        ++list_words.lent;
+    }
+    /// An owed word's copies were posted with another arena stamp than it was noted with
+    /// (must be 0).
+    void NoteOwedStampMoved() {
+        ++list_words.moved;
+    }
+    /// A landing waited for an owed word whose arena stamp GPURender had not mapped (must be 0).
+    void NoteOwedStampUnmapped() {
+        list_words.unmapped.fetch_add(1, std::memory_order_relaxed);
     }
     /// EDEN_NX2_RENDER_UNLEND_CLEAR (needs EDEN_NX2_RENDER_UNLEND=1): clears go unlent, GPURender
     /// recording them from its view.
@@ -1405,6 +1423,14 @@ private:
         std::atomic<u64> off_owner{};
     };
     GatherCounts gathers;
+    struct ListWordCounts {
+        u64 snapshots{};
+        u64 owed{};
+        u64 lent{};
+        u64 moved{};
+        std::atomic<u64> unmapped{};
+    };
+    ListWordCounts list_words;
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};
     std::atomic<u64> posted_waits_synced{};

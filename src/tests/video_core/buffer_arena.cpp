@@ -100,6 +100,20 @@ TEST_CASE("Arena clock frees a stamp only once its mapped tick is done", "[buffe
     REQUIRE(clock.IsFree(clock.Now() - 1, done));
 }
 
+TEST_CASE("Arena clock names the tick of a closed stamp once its player maps it",
+          "[buffer_arena]") {
+    // EDEN_NX2_RENDER_LIST_WORDS_E: an owed word noted with Now() waits for the tick its posted
+    // copies were played in.
+    VideoCommon::ArenaClock clock;
+    const u64 noted = clock.Now();
+    const u64 closed = clock.Close();
+    REQUIRE(closed == noted);
+    REQUIRE_FALSE(clock.TickOf(closed).has_value());
+    clock.Map(closed, 7);
+    REQUIRE(clock.TickOf(closed) == 7);
+    REQUIRE_FALSE(clock.TickOf(clock.Now()).has_value());
+}
+
 TEST_CASE("Arena clock stamps map from another thread", "[buffer_arena]") {
     VideoCommon::ArenaClock clock;
     constexpr u64 Maps = 100000;

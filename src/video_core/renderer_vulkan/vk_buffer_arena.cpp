@@ -147,6 +147,13 @@ bool BufferArena::IsFree(u64 stamp) const noexcept {
     return clock.IsFree(stamp, [this](u64 tick) { return scheduler.IsFree(tick); });
 }
 
+std::optional<u64> BufferArena::TickOf(u64 stamp) const noexcept {
+    if (!enabled) {
+        return stamp;
+    }
+    return clock.TickOf(stamp);
+}
+
 void BufferArena::Play() {
     if (pending == this) {
         pending = nullptr;
