@@ -1684,8 +1684,14 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 template <typename Op>
 bool RasterizerVulkan::PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
     auto& split = VideoCommon::GpuSplit::Get();
-    if (!split.Posts(kind) || maxwell3d == nullptr || !maxwell3d->render_view_writes) {
+    if (!split.Posts(kind) || maxwell3d == nullptr) {
         return false;
+    }
+    // GPURender records the op on the view's flags: an engine that has unlent no draw yet gets
+    // its view here, seeded by its first unlent draw.
+    if (!maxwell3d->render_view_writes) {
+        maxwell3d->render_view_writes =
+            std::make_unique<VideoCommon::Nx2RenderView::Writes>(*maxwell3d);
     }
     split.PostOp(kind, [this, engine = maxwell3d, op = std::forward<Op>(op)]() mutable {
         auto* const flags =
@@ -1726,7 +1732,7 @@ bool RasterizerVulkan::PostFence(Op&& op) {
             return false;
         }
     }
-    if (maxwell3d == nullptr || !maxwell3d->render_view_writes) {
+    if (maxwell3d == nullptr) {
         split.NoteFenceLent(GpuSplit::FenceLent::NoView);
         return false;
     }
@@ -3554,8 +3560,8 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
         return lend(Site::Shader);
     }
     // EDEN_NX2_RENDER_POST_INVAL: GPURender's half (images, queries) is posted at this place.
-    const bool posts = split.Posts(VideoCommon::GpuSplit::PostedOp::Invalidation) &&
-                       maxwell3d != nullptr && maxwell3d->render_view_writes;
+    const bool posts =
+        split.Posts(VideoCommon::GpuSplit::PostedOp::Invalidation) && maxwell3d != nullptr;
     auto first = hit();
     if (first && !posts) {
         return lend(*first);

@@ -293,7 +293,7 @@ public:
         Delayed,    ///< delayed fences (accuracy): their wait is the fencing thread's
         QueryOwed,  ///< a report since the last lent fence owes the query sync
         BufferHalf, ///< the buffer cache has flushes to commit (the back's cache)
-        NoView,     ///< no register view yet on the channel
+        NoView,     ///< no 3D engine bound yet
         Count,
     };
     void NoteFenceLent(FenceLent reason) {

@@ -1294,7 +1294,7 @@ void GpuSplit::RenderLoop() {
         if (posts[static_cast<size_t>(PostedOp::Fence)]) {
             LOG_INFO(HW_GPU,
                      "GPU render posted fences: {} posted, lent: {} delayed, {} query sync owed, "
-                     "{} buffer flushes to commit, {} without a view",
+                     "{} buffer flushes to commit, {} without a 3D engine",
                      posted[static_cast<size_t>(PostedOp::Fence)],
                      fences_lent[static_cast<size_t>(FenceLent::Delayed)],
                      fences_lent[static_cast<size_t>(FenceLent::QueryOwed)],
