@@ -140,6 +140,10 @@ public:
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
+    [[nodiscard]] const DynamicFeatures& Features() const noexcept {
+        return dynamic_features;
+    }
+
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);

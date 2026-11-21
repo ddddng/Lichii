@@ -151,6 +151,8 @@ add_library(video_core STATIC
     nx2_list_indirect_stats.h
     nx2_owed_words.h
     nx2_profile.h
+    nx2_render_view.cpp
+    nx2_render_view.h
     nx2_stutter_trace.cpp
     nx2_stutter_trace.h
     nx2_perf.h
@@ -286,6 +288,8 @@ add_library(video_core STATIC
     renderer_vulkan/upload_batch.h
     renderer_vulkan/vk_render_pass_cache.cpp
     renderer_vulkan/vk_render_pass_cache.h
+    renderer_vulkan/vk_render_view.cpp
+    renderer_vulkan/vk_render_view.h
     renderer_vulkan/vk_resource_pool.cpp
     renderer_vulkan/vk_resource_pool.h
     renderer_vulkan/frame_pacer.h
