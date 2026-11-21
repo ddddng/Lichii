@@ -129,6 +129,28 @@
           "68c6c9baa2b53f9146b06cb6eaad8a5d"
         ]
       }
+    },
+    {
+      "id": "draws-render-unlend",
+      "source": "generated",
+      "generator": "--gpu-trace-sample-draws",
+      "environment": {
+        "EDEN_NX2_RENDER_FOLLOWER": "1",
+        "EDEN_NX2_RENDER_RING": "1",
+        "EDEN_NX2_RENDER_PLAYED": "1",
+        "EDEN_NX2_BUFFER_ARENA": "1",
+        "EDEN_NX2_RENDER_OWNS": "1",
+        "EDEN_NX2_RENDER_UNLEND": "1"
+      },
+      "description": "The draws trace with GPURender recording warm direct draws from its register view while the back goes on (EDEN_NX2_RENDER_UNLEND=1): the same frames as without it",
+      "expected": {
+        "lavapipe": [
+          "469b24e54713a0d4fd14cce985dd58a0",
+          "7f9381d13e5a66125a504cd061155bef",
+          "c2ad0e067b62ebe6fceffac8444c32f3",
+          "ee2f3d785bab823201f8486fc967af61"
+        ]
+      }
     }
   ]
 }
