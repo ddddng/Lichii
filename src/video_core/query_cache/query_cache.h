@@ -238,7 +238,8 @@ void QueryCacheBase<Traits>::BindToChannel(s32 id) {
 
 template <typename Traits>
 void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type,
-                                           QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+                                           QueryPropertiesFlags flags, u32 payload, u32 subreport,
+                                           const PostedReport* posted) {
     VideoCommon::GpuSplit::RenderOwned("QueryCache::CounterReport");
     const bool has_timestamp = True(flags & QueryPropertiesFlags::HasTimeout);
     const bool is_fence = True(flags & QueryPropertiesFlags::IsAFence);
@@ -263,6 +264,12 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         streamer = impl->streamers[streamer_id];
     }
     auto cpu_addr_opt = gpu_memory->GpuToCpuAddress(addr);
+    if (posted) {
+        if (cpu_addr_opt != posted->device) [[unlikely]] {
+            VideoCommon::GpuSplit::Get().NotePostedReportMoved();
+        }
+        cpu_addr_opt = posted->device;
+    }
     if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Request)) {
         LOG_INFO(HW_GPU,
                  "DKB_QUERY request n={} as={} gpu={:#x} device={:#x} mapped={} type={} "
@@ -294,7 +301,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
     const bool report_noted =
-        !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
+        posted ? posted->noted
+               : !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
     // What the operation needs, small enough for MSVC's std::function to hold without allocating:
     // a report per draw (Ocarina of Time's occlusion counts) allocated one each. Host pointers are
     // looked up when it runs.

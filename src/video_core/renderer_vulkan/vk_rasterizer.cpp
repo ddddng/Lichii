@@ -3144,6 +3144,14 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    // EDEN_NX2_RENDER_POST_QUERY: a Z-pass reset only changes GPURender's samples streamer and
+    // queues its accumulator reset behind it. The streaming counters read live registers.
+    if (type == VideoCommon::QueryType::ZPassPixelCount64 &&
+        PostRenderOp(VideoCommon::GpuSplit::PostedOp::QueryReset, [this] {
+            query_cache.CounterReset(VideoCommon::QueryType::ZPassPixelCount64);
+        })) {
+        return;
+    }
     RENDER_LEND(ResetCounter(type))
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
@@ -3162,6 +3170,33 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
     if (VideoCommon::GpuSplit::LendsToRender()) {
         fence_query_owed = true;
+    }
+    using VideoCommon::GpuSplit;
+    if (type == VideoCommon::QueryType::ZPassPixelCount64 &&
+        False(flags & VideoCommon::QueryPropertiesFlags::IsAFence) &&
+        GpuSplit::Get().Posts(GpuSplit::PostedOp::QueryReport)) {
+        // EDEN_NX2_RENDER_POST_QUERY: the back takes the report's buffer cache note and marks
+        // its page at the report's place in the stream, so its later invalidations and flushes
+        // there reach GPURender behind it. GPURender records and registers the report.
+        if (const auto device = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+            const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
+            const QueryCache::PostedReport posted{
+                .device = *device,
+                .noted = NoteReportPending(*device, wide ? 16 : 4),
+            };
+            query_cache.page_filter.Mark(*device, 16);
+            VideoCommon::Nx2FastDraw::NoteSync();
+            if (PostRenderOp(GpuSplit::PostedOp::QueryReport, [this, gpu_addr, type, flags, payload,
+                                                               subreport, posted] {
+                    query_cache.CounterReport(gpu_addr, type, flags, payload, subreport, &posted);
+                })) {
+                GpuSplit::Get().MarkGuestWrite();
+                return;
+            }
+            if (posted.noted) {
+                FinishReport(posted.device, wide ? 16 : 4);
+            }
+        }
     }
     RENDER_LEND(Query(gpu_addr, type, flags, payload, subreport))
     // Reports and semaphore releases reach guest memory the CPU may wait on.
@@ -3916,6 +3951,15 @@ void RasterizerVulkan::ReleaseFences(bool force) {
 }
 
 void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
+    using VideoCommon::GpuSplit;
+    // EDEN_NX2_RENDER_POST_QUERY: SemiFlushRegion does nothing on pages no report was registered
+    // on, and the back sees every mark: lent reports mark them with the back parked, posted ones
+    // are marked by the back before they are posted. The filter is never cleared.
+    if (GpuSplit::Get().Posts(GpuSplit::PostedOp::QueryReport) &&
+        (addr == 0 || size == 0 || !query_cache.page_filter.Any(addr, size))) {
+        GpuSplit::Get().NoteQueryFlushSkipped();
+        return;
+    }
     RENDER_LEND(FlushQueryResults(addr, size))
     if (addr == 0 || size == 0 || !query_cache.SemiFlushRegion(addr, size)) {
         return;

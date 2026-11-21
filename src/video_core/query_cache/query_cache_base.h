@@ -148,8 +148,14 @@ public:
 
     void CounterClose(QueryType counter_type);
 
+    /// A report the back posted (EDEN_NX2_RENDER_POST_QUERY): the device address it translated
+    /// and its NoteReportPending result, both taken at the report's place in the stream.
+    struct PostedReport {
+        DAddr device;
+        bool noted;
+    };
     void CounterReport(GPUVAddr addr, QueryType counter_type, QueryPropertiesFlags flags,
-                       u32 payload, u32 subreport);
+                       u32 payload, u32 subreport, const PostedReport* posted = nullptr);
 
     void NotifyWFI();
 

@@ -288,6 +288,8 @@ public:
         Invalidation,   ///< EDEN_NX2_RENDER_POST_INVAL: an invalidation's image and query half
         Inline,         ///< EDEN_NX2_RENDER_POST_INLINE: an inline upload's GPURender half
         ConditionalEnd, ///< EDEN_NX2_RENDER_POST_CONDITIONAL: a static render enable's end
+        QueryReset,     ///< EDEN_NX2_RENDER_POST_QUERY: a Z-pass counter reset
+        QueryReport,    ///< EDEN_NX2_RENDER_POST_QUERY: a Z-pass report that is not a fence
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).
@@ -300,6 +302,14 @@ public:
     };
     void NoteFenceLent(FenceLent reason) {
         ++fences_lent[static_cast<size_t>(reason)];
+    }
+    /// EDEN_NX2_RENDER_POST_QUERY: a query flush the back answered from the report page filter.
+    void NoteQueryFlushSkipped() {
+        ++query_flushes_skipped;
+    }
+    /// GPURender: a posted report's address translated differently than on the back (must be 0).
+    void NotePostedReportMoved() {
+        posted_reports_moved.fetch_add(1, std::memory_order_relaxed);
     }
     /// EDEN_NX2_RENDER_INVAL_E: where the back's invalidations of guest writes went.
     enum class InvalSite : u8 {
@@ -1186,6 +1196,8 @@ private:
     std::array<bool, static_cast<size_t>(PostedOp::Count)> posts{};
     std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
     std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
+    u64 query_flushes_skipped{};
+    std::atomic<u64> posted_reports_moved{};
     bool inval_e{};
     std::array<std::atomic<u64>, static_cast<size_t>(Unparked::Count)> unparked{};
     std::array<u64, static_cast<size_t>(InvalSite::Count)> invalidations{};

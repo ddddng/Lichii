@@ -231,10 +231,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         guest_write_op.store(0, std::memory_order_relaxed);
         // Render follower port, step 8: posted render ops, one switch each.
         static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
-            post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK",  "EDEN_NX2_RENDER_POST_FLUSH",
-                          "EDEN_NX2_RENDER_POST_FLUSH",      "EDEN_NX2_RENDER_POST_FENCE",
-                          "EDEN_NX2_RENDER_POST_INVAL",      "EDEN_NX2_RENDER_POST_INLINE",
-                          "EDEN_NX2_RENDER_POST_CONDITIONAL"};
+            post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK",   "EDEN_NX2_RENDER_POST_FLUSH",
+                          "EDEN_NX2_RENDER_POST_FLUSH",       "EDEN_NX2_RENDER_POST_FENCE",
+                          "EDEN_NX2_RENDER_POST_INVAL",       "EDEN_NX2_RENDER_POST_INLINE",
+                          "EDEN_NX2_RENDER_POST_CONDITIONAL", "EDEN_NX2_RENDER_POST_QUERY",
+                          "EDEN_NX2_RENDER_POST_QUERY"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -1296,6 +1297,14 @@ void GpuSplit::RenderLoop() {
             posted[static_cast<size_t>(PostedOp::ConditionalEnd)],
             unparked[static_cast<size_t>(Unparked::FrameTick)].load(std::memory_order_relaxed),
             unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed));
+        if (posts[static_cast<size_t>(PostedOp::QueryReport)]) {
+            LOG_INFO(HW_GPU,
+                     "GPU render posted queries: {} Z-pass resets, {} Z-pass reports, {} query "
+                     "flushes skipped; must be 0: {} reports translated differently on GPURender",
+                     posted[static_cast<size_t>(PostedOp::QueryReset)],
+                     posted[static_cast<size_t>(PostedOp::QueryReport)], query_flushes_skipped,
+                     posted_reports_moved.load(std::memory_order_relaxed));
+        }
         if (posts[static_cast<size_t>(PostedOp::Fence)]) {
             LOG_INFO(HW_GPU,
                      "GPU render posted fences: {} posted, lent: {} delayed, {} query sync owed, "
