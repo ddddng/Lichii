@@ -59,8 +59,8 @@ public:
 
     /// Every entry point: waits for the draw packet GPURender records, then plays the buffer
     /// commands this thread queued (BufferArena), so both keep their place before what follows.
-    void JoinRecorders() const {
-        VideoCommon::GpuSplit::JoinRender();
+    void JoinRecorders(std::source_location site = std::source_location::current()) const {
+        VideoCommon::GpuSplit::JoinRender(site);
         BufferArena::PlayPending();
     }
 
