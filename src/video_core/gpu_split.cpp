@@ -236,7 +236,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                           "EDEN_NX2_RENDER_POST_INVAL",       "EDEN_NX2_RENDER_POST_INLINE",
                           "EDEN_NX2_RENDER_POST_CONDITIONAL", "EDEN_NX2_RENDER_POST_QUERY",
                           "EDEN_NX2_RENDER_POST_QUERY",       "EDEN_NX2_RENDER_POST_SIGNAL_FENCE",
-                          "EDEN_NX2_RENDER_POST_WFI"};
+                          "EDEN_NX2_RENDER_POST_WFI",         "EDEN_NX2_RENDER_POST_FENCE_REPORT"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -310,6 +310,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         query_flushes_nothing_pending = 0;
         reports_landed_untracked.store(0, std::memory_order_relaxed);
         posted_waits_synced.store(0, std::memory_order_relaxed);
+        guest_syncs_unlent.store(0, std::memory_order_relaxed);
         if (query_flush_wanted && !query_flush_e) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_QUERY_FLUSH_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
@@ -1381,17 +1382,21 @@ void GpuSplit::RenderLoop() {
                      posted_reports_moved.load(std::memory_order_relaxed));
         }
         if (posts[static_cast<size_t>(PostedOp::Fence)] ||
-            posts[static_cast<size_t>(PostedOp::SignalFence)]) {
+            posts[static_cast<size_t>(PostedOp::SignalFence)] ||
+            posts[static_cast<size_t>(PostedOp::FenceReport)]) {
             LOG_INFO(
                 HW_GPU,
-                "GPU render posted fences: {} posted, {} SignalFence posted, lent: {} delayed, "
-                "{} query sync owed, {} buffer flushes to commit, {} without a 3D engine",
+                "GPU render posted fences: {} posted, {} SignalFence posted, {} fence reports "
+                "posted, lent: {} delayed, {} query sync owed, {} buffer flushes to commit, {} "
+                "without a 3D engine; must be 0: {} payload syncs on GPURender outside a lent call",
                 posted[static_cast<size_t>(PostedOp::Fence)],
                 posted[static_cast<size_t>(PostedOp::SignalFence)],
+                posted[static_cast<size_t>(PostedOp::FenceReport)],
                 fences_lent[static_cast<size_t>(FenceLent::Delayed)],
                 fences_lent[static_cast<size_t>(FenceLent::QueryOwed)],
                 fences_lent[static_cast<size_t>(FenceLent::BufferHalf)],
-                fences_lent[static_cast<size_t>(FenceLent::NoView)]);
+                fences_lent[static_cast<size_t>(FenceLent::NoView)],
+                guest_syncs_unlent.load(std::memory_order_relaxed));
         }
     }
     if (inval_e) {

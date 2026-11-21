@@ -263,6 +263,14 @@ private:
         u64 size;
     };
     std::vector<PayloadSync> back_payload_sync;
+    /// The back: what QueryCacheRuntime::SyncValues records for the values, at the back's place
+    /// (the buffers' own uploads, then the copies), collected into commands.
+    void CollectPayloadSyncs(std::span<const PayloadSync> syncs,
+                             VideoCommon::CommandArena& commands);
+    /// EDEN_NX2_RENDER_POST_FENCE_REPORT: posts a fence-flagged payload report as a fence, its
+    /// value's host sync before it. False when it has to be lent.
+    bool PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryPropertiesFlags flags, u32 payload,
+                         u32 subreport);
     /// GPURender, playing a posted fence: the back ran its closing gather.
     bool posted_fence_playing{};
     /// GPURender: records an unlent draw from its view of the channel's registers.

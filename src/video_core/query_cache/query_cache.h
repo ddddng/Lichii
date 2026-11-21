@@ -64,6 +64,12 @@ public:
         pending_sync.push_back({.id = NoQuery, .value{address, value, size}});
     }
 
+    void ForgetPendingSync(size_t query_id) override {
+        if (!pending_sync.empty() && pending_sync.back().id == query_id) {
+            pending_sync.pop_back();
+        }
+    }
+
     bool HasPendingSync() const override {
         return !pending_sync.empty();
     }
@@ -71,6 +77,9 @@ public:
     void SyncWrites() override {
         if (pending_sync.empty()) {
             return;
+        }
+        if (VideoCommon::GpuSplit::PlayingUnlent()) [[unlikely]] {
+            VideoCommon::GpuSplit::Get().NoteGuestSyncUnlent();
         }
         std::vector<SyncValuesStruct> sync_values;
         sync_values.reserve(pending_sync.size());
@@ -303,6 +312,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return;
     }
     const size_t new_query_id = streamer->WriteCounter(cpu_addr, has_timestamp, payload, subreport);
+    if (posted && posted->by_value) {
+        streamer->ForgetPendingSync(new_query_id);
+    }
     auto* query = streamer->GetQuery(new_query_id);
     if (is_fence) {
         query->flags |= QueryFlagBits::IsFence;

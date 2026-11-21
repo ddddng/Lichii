@@ -3583,8 +3583,97 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
     }
 }
 
+void RasterizerVulkan::CollectPayloadSyncs(std::span<const PayloadSync> syncs,
+                                           VideoCommon::CommandArena& commands) {
+    boost::container::small_vector<std::pair<Buffer*, u32>, 4> targets;
+    std::scoped_lock lock{buffer_cache.mutex};
+    const BufferArena::Collect collect{commands};
+    buffer_cache.BufferOperations([&] {
+        targets.clear();
+        for (const PayloadSync& sync : syncs) {
+            targets.push_back(
+                buffer_cache.ObtainCPUBuffer(sync.address, static_cast<u32>(sync.size),
+                                             VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                                             VideoCommon::ObtainBufferOperation::DoNothing));
+        }
+    });
+    u64 total_size = 0;
+    for (const PayloadSync& sync : syncs) {
+        total_size += sync.size;
+    }
+    const auto staging = buffer_cache_runtime.UploadStagingBuffer(total_size);
+    buffer_cache_runtime.PreCopyBarrier();
+    u64 staged = 0;
+    for (size_t i = 0; i < syncs.size(); ++i) {
+        const auto [buffer, offset] = targets[i];
+        if (buffer == nullptr) {
+            continue;
+        }
+        std::memcpy(staging.mapped_span.data() + staged, &syncs[i].value, syncs[i].size);
+        const std::array copies{VideoCommon::BufferCopy{
+            .src_offset = staging.offset + staged,
+            .dst_offset = offset,
+            .size = syncs[i].size,
+        }};
+        buffer_cache_runtime.CopyBuffer(buffer->Handle(), staging.buffer, copies, false, false);
+        staged += syncs[i].size;
+    }
+    buffer_cache_runtime.PostCopyBarrier();
+    // The copies are GPU writes the buffer cache doesn't record (as SyncValues).
+    for (const PayloadSync& sync : syncs) {
+        buffer_cache.OutdateReadDownloads(sync.address, sync.size);
+    }
+}
+
+bool RasterizerVulkan::PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryPropertiesFlags flags,
+                                       u32 payload, u32 subreport) {
+    using VideoCommon::GpuSplit;
+    if (!GpuSplit::Get().Posts(GpuSplit::PostedOp::FenceReport)) {
+        return false;
+    }
+    const auto device = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (!device || !FencePostable(GpuSplit::PostedOp::FenceReport)) {
+        return false;
+    }
+    // As the posted Z-pass reports: the buffer note, page mark and pending count at the report's
+    // place. Later writes to the page see the mark and invalidate the query behind it on
+    // GPURender, and query flushes wait for it to land.
+    const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
+    const QueryCache::PostedReport posted{
+        .device = *device,
+        .noted = NoteReportPending(*device, wide ? 16 : 4),
+        .by_value = true,
+    };
+    query_cache.page_filter.Mark(*device, 16);
+    if (GpuSplit::TracksPendingReports()) {
+        query_cache.NotePendingReport(*device);
+    }
+    VideoCommon::Nx2FastDraw::NoteSync();
+    // Its own fence's NotifyWFI synced the value to the host: the back records that sync and
+    // GPURender plays it before the fence, so nothing is owed after it.
+    VideoCommon::CommandArena commands;
+    const PayloadSync sync{*device, payload, wide ? u64{8} : u64{4}};
+    CollectPayloadSyncs({&sync, 1}, commands);
+    const u64 stamp = commands.Empty() ? 0 : buffer_cache_runtime.Arena().CloseCollected();
+    PostCheckedFence(
+        GpuSplit::PostedOp::FenceReport,
+        [this, commands = std::move(commands), stamp, gpu_addr, flags, payload, subreport, posted] {
+            if (!commands.Empty()) {
+                buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
+            }
+            query_cache.CounterReport(gpu_addr, VideoCommon::QueryType::Payload, flags, payload,
+                                      subreport, &posted);
+        });
+    return true;
+}
+
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    if (type == VideoCommon::QueryType::Payload &&
+        True(flags & VideoCommon::QueryPropertiesFlags::IsAFence) &&
+        PostFenceReport(gpu_addr, flags, payload, subreport)) {
+        return;
+    }
     if (VideoCommon::GpuSplit::LendsToRender()) {
         fence_query_owed = true;
     }

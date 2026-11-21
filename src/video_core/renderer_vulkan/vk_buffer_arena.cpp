@@ -28,6 +28,13 @@ constexpr VkMemoryBarrier COPY_WRITE_BARRIER{
     .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
     .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
 };
+constexpr VkMemoryBarrier POST_COPY_BARRIER{
+    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+    .pNext = nullptr,
+    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+    .dstAccessMask =
+        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT,
+};
 using VertexArray = boost::container::static_vector<VkDeviceSize, VideoCommon::NUM_VERTEX_BUFFERS>;
 using HandleArray = boost::container::static_vector<VkBuffer, VideoCommon::NUM_VERTEX_BUFFERS>;
 } // Anonymous namespace
@@ -276,10 +283,11 @@ void BufferArena::Exec(const BarrierBody& body, std::span<const u8>) {
         return;
     case Barrier::PostCopy:
         scheduler.Record([](vk::CommandBuffer cmdbuf) {
-            // Copies bracketed explicitly need the same ordering as CopyBuffer(barrier = true).
+            // Copies bracketed explicitly need the same ordering as CopyBuffer(barrier = true),
+            // and host reads as well, as the query cache's value syncs had (Barriers).
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0,
-                                   COPY_WRITE_BARRIER);
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER_HOST, 0,
+                                   POST_COPY_BARRIER);
         });
         return;
     case Barrier::HostRead:

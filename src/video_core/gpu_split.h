@@ -292,6 +292,7 @@ public:
         QueryReport,    ///< EDEN_NX2_RENDER_POST_QUERY: a Z-pass report that is not a fence
         SignalFence,    ///< EDEN_NX2_RENDER_POST_SIGNAL_FENCE: a fence with a callback
         WaitForIdle,    ///< EDEN_NX2_RENDER_POST_WFI: a wait for idle with no query sync owed
+        FenceReport,    ///< EDEN_NX2_RENDER_POST_FENCE_REPORT: a fence-flagged payload report
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).
@@ -422,6 +423,11 @@ public:
     /// A report operation that found no pending entry for its address (must be 0).
     void NoteReportLandedUntracked() {
         reports_landed_untracked.fetch_add(1, std::memory_order_relaxed);
+    }
+    /// GPURender: the payload streamer synced values outside a lent call (must be 0): that
+    /// enters the back's buffer cache.
+    void NoteGuestSyncUnlent() {
+        guest_syncs_unlent.fetch_add(1, std::memory_order_relaxed);
     }
     /// GPURender: a posted wait for idle found a query sync pending (must be 0).
     void NotePostedWaitSynced() {
@@ -1348,6 +1354,7 @@ private:
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};
     std::atomic<u64> posted_waits_synced{};
+    std::atomic<u64> guest_syncs_unlent{};
     std::atomic<u64> posted_reports_moved{};
     bool inval_e{};
     bool flush_e{};

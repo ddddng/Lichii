@@ -179,9 +179,11 @@ public:
 
     /// A report the back posted (EDEN_NX2_RENDER_POST_QUERY): the device address it translated
     /// and its NoteReportPending result, both taken at the report's place in the stream.
+    /// by_value: the back synced the value to the host (EDEN_NX2_RENDER_POST_FENCE_REPORT).
     struct PostedReport {
         DAddr device;
         bool noted;
+        bool by_value{};
     };
     void CounterReport(GPUVAddr addr, QueryType counter_type, QueryPropertiesFlags flags,
                        u32 payload, u32 subreport, const PostedReport* posted = nullptr);

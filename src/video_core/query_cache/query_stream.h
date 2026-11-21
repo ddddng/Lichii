@@ -57,6 +57,9 @@ public:
     virtual void AddSyncValue([[maybe_unused]] VAddr address, [[maybe_unused]] u64 value,
                               [[maybe_unused]] u64 size) {}
 
+    /// The query WriteCounter just built is synced by its caller.
+    virtual void ForgetPendingSync([[maybe_unused]] size_t query_id) {}
+
     virtual size_t WriteCounter(VAddr address, bool has_timestamp, u32 value,
                                 std::optional<u32> subreport = std::nullopt) = 0;
 
