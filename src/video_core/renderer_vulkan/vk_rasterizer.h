@@ -355,6 +355,8 @@ private:
     void UpdateColorWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
+    [[nodiscard]] VideoCommon::VertexInputKey VertexInputKeyOf(
+        const Tegra::Engines::Maxwell3D::Regs& regs, u32 max_attributes, u32 max_bindings) const;
 
     /// A dynamic vertex input state: what vkCmdSetVertexInputEXT is given.
     struct VertexInputState {
@@ -710,6 +712,16 @@ private:
     /// The back forced this lent draw to compare its view (EDEN_NX2_RENDER_VERIFY_EVERY).
     bool unlend_verify_draw{};
     u64 unlend_candidates{};
+    /// EDEN_NX2_RENDER_UNLEND_FAST_DELTA: the pipeline lookup of the back's last unlent draw.
+    struct UnlentLookup {
+        const Tegra::Engines::Maxwell3D* engine{};
+        u64 lookups{};
+        Maxwell::PrimitiveTopology topology{};
+    };
+    UnlentLookup unlent_lookup;
+    /// With EDEN_NX2_RENDER_VERIFY_EVERY: the vertex input recorded last and its tick.
+    VideoCommon::VertexInputKey recorded_input_key;
+    u64 recorded_input_tick{};
     /// The back forced this lent clear to compare its view (EDEN_NX2_RENDER_VERIFY_EVERY).
     bool unlend_verify_clear{};
     u64 unlend_clear_candidates{};

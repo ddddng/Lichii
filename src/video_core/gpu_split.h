@@ -467,6 +467,29 @@ public:
     void NoteUnlentEmulatedMesh() {
         unlent_emulated_mesh.fetch_add(1, std::memory_order_relaxed);
     }
+    /// EDEN_NX2_RENDER_UNLEND_FAST_DELTA (needs EDEN_NX2_RENDER_UNLEND=1): an unlent draw whose
+    /// engine wrote only draw parameters since its last unlent draw keeps that draw's pipeline
+    /// without refreshing the key, and GPURender consumes VertexBuffers on its view, so it records
+    /// the vertex input again only when a flag asks for it.
+    [[nodiscard]] static bool UnlendsFastDelta() {
+        return on_back_thread && instance.unlend_fast_delta;
+    }
+    void NoteFastDelta(bool kept) {
+        ++(kept ? fast_delta.kept : fast_delta.looked_up);
+    }
+    /// A verify lookup found another pipeline than the one kept (must be 0).
+    void NoteFastDeltaDiffers() {
+        ++fast_delta.differs;
+    }
+    /// GPURender: an unlent draw kept the vertex input recorded before it.
+    void NoteVertexInputKept() {
+        fast_delta.inputs_kept.fetch_add(1, std::memory_order_relaxed);
+    }
+    /// GPURender: a verify draw kept a vertex input its registers don't give, or none was
+    /// recorded in its command buffer (must be 0).
+    void NoteVertexInputDiffers() {
+        fast_delta.inputs_differ.fetch_add(1, std::memory_order_relaxed);
+    }
     [[nodiscard]] static bool TracksPendingReports() {
         return instance.query_flush_e;
     }
@@ -1397,6 +1420,15 @@ private:
         std::atomic<u64> slots_unheld{};
     };
     DispatchCounts dispatches;
+    bool unlend_fast_delta{};
+    struct FastDeltaCounts {
+        u64 kept{};
+        u64 looked_up{};
+        u64 differs{};
+        std::atomic<u64> inputs_kept{};
+        std::atomic<u64> inputs_differ{};
+    };
+    FastDeltaCounts fast_delta;
     bool soft_release_e{};
     u64 soft_releases{};
     bool payload_e{};

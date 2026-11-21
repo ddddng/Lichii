@@ -219,6 +219,30 @@ TEST_CASE("Render view packets seed once, then carry what changed", "[nx2_render
     CHECK(!View::Watched(MAXWELL3D_REG_INDEX(const_buffer.buffer)));
 }
 
+TEST_CASE("Render view keeps the pipeline key while only draw parameters change",
+          "[nx2_render_view]") {
+    ViewFixture f;
+    View::Writes writes{f.maxwell3d};
+    CHECK(writes.KeyWordsWritten(f.maxwell3d));
+    (void)writes.Pack(f.maxwell3d, true);
+    CHECK(writes.KeyWordsWritten(f.maxwell3d));
+    writes.KeyWordsSeen();
+    CHECK(!writes.KeyWordsWritten(f.maxwell3d));
+    writes.Note(MAXWELL3D_REG_INDEX(index_buffer.count));
+    writes.Note(MAXWELL3D_REG_INDEX(vertex_buffer.first));
+    CHECK(!writes.KeyWordsWritten(f.maxwell3d));
+    (void)writes.Pack(f.maxwell3d, true);
+    CHECK(!writes.KeyWordsWritten(f.maxwell3d));
+    writes.Note(ViewportScaleX);
+    CHECK(writes.KeyWordsWritten(f.maxwell3d));
+    (void)writes.Pack(f.maxwell3d, true);
+    CHECK(writes.KeyWordsWritten(f.maxwell3d));
+    writes.KeyWordsSeen();
+    CHECK(!writes.KeyWordsWritten(f.maxwell3d));
+    ++f.maxwell3d.regs.reg_array[MAXWELL3D_REG_INDEX(draw_auto_stride)];
+    CHECK(writes.KeyWordsWritten(f.maxwell3d));
+}
+
 TEST_CASE("Render view packets carry each noted word once, at its final value",
           "[nx2_render_view]") {
     ViewFixture f;

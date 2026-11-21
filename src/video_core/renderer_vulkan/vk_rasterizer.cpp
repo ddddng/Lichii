@@ -1856,6 +1856,7 @@ struct RasterizerVulkan::UnlentDraw {
     VideoCommon::Nx2RenderView::Packet view;
     GraphicsPipeline::BackHalf half;
     DrawParams params;
+    bool fast_delta{};
     u64 position{};
     std::unique_ptr<OcarinaDrawFacts> ocarina;
 
@@ -1956,10 +1957,29 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
     }
     const View::Flags& forwarded = View::Forwarded();
     const View::Flags start_flags = maxwell3d->dirty.flags & forwarded;
-    GraphicsPipeline* const pipeline = [&] {
+    // EDEN_NX2_RENDER_UNLEND_FAST_DELTA: only draw parameters written since the last unlent draw,
+    // whose lookup was the cache's last, keep its pipeline.
+    const bool fast_delta = VideoCommon::GpuSplit::UnlendsFastDelta();
+    const bool key_unchanged = fast_delta && maxwell3d->render_view_writes &&
+                               unlent_lookup.engine == maxwell3d &&
+                               unlent_lookup.lookups == pipeline_cache.GraphicsLookups() &&
+                               unlent_lookup.topology == draw_state.topology &&
+                               !maxwell3d->render_view_writes->KeyWordsWritten(*maxwell3d);
+    GraphicsPipeline* pipeline = [&] {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
-        return pipeline_cache.CurrentGraphicsPipeline();
+        return pipeline_cache.CurrentGraphicsPipeline(key_unchanged);
     }();
+    if (fast_delta) {
+        const bool kept = pipeline_cache.LastLookupKept();
+        split.NoteFastDelta(kept);
+        if (kept && RenderVerifyEvery() != 0) {
+            GraphicsPipeline* const looked_up = pipeline_cache.CurrentGraphicsPipeline();
+            if (looked_up != pipeline) {
+                split.NoteFastDeltaDiffers();
+                pipeline = looked_up;
+            }
+        }
+    }
     if (pipeline == nullptr || !pipeline->CanUnlend() ||
         (pipeline->IsMeshPipeline() && (!unlend_mesh || pipeline->IsEmulatedMesh()))) {
         return lend(pipeline != nullptr && pipeline->IsMeshPipeline() ? Reason::Mesh
@@ -2033,7 +2053,12 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         .view = maxwell3d->render_view_writes->Pack(*maxwell3d, true),
         .half = {},
         .params = params,
+        .fast_delta = fast_delta,
     };
+    if (fast_delta) {
+        maxwell3d->render_view_writes->KeyWordsSeen();
+        unlent_lookup = {maxwell3d, pipeline_cache.GraphicsLookups(), draw_state.topology};
+    }
     buffer_cache.BeginGraphicsUniforms(nullptr);
     uniform_writes_lost = taken_delta_unconsumed = false;
     {
@@ -2096,7 +2121,27 @@ void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
             ApplyOcarinaFacts(*draw.ocarina);
         }
         UpdateOcarinaJitter();
+        auto& view_flags = view.dirty.flags;
+        const bool input_kept = draw.fast_delta && pipeline.HasDynamicVertexInput() &&
+                                !view_flags[Dirty::VertexInput] &&
+                                !view_flags[VideoCommon::Dirty::VertexBuffers];
         UpdateDynamicStates(&pipeline);
+        if (draw.fast_delta) {
+            // On the view only the vertex input reads VertexBuffers (the back's buffer cache binds
+            // the vertex buffers): recorded, it is consumed.
+            view_flags[VideoCommon::Dirty::VertexBuffers] = false;
+        }
+        if (input_kept) {
+            auto& split = VideoCommon::GpuSplit::Get();
+            split.NoteVertexInputKept();
+            if (RenderVerifyEvery() != 0 &&
+                (recorded_input_tick != scheduler.CurrentTick() ||
+                 recorded_input_key != VertexInputKeyOf(view.regs,
+                                                        recorded_input_key.num_attributes,
+                                                        recorded_input_key.num_bindings))) {
+                split.NoteVertexInputDiffers();
+            }
+        }
     }
     query_cache.NotifySegment(true);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
@@ -6932,20 +6977,10 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
     // The state these registers built before, recorded by reference instead of built and copied
     // into the command again (jpkto/Lichii e7581fa9f6): converting every attribute's format and
     // copying both arrays into the command was ~0.5 ms a frame of Mario Kart World's back.
-    VideoCommon::VertexInputKey key{
-        .num_attributes = max_attributes,
-        .num_bindings = max_bindings,
-    };
-    for (u32 index = 0; index < max_attributes; ++index) {
-        key.attributes[index] = regs.vertex_attrib_format[index].hex;
-    }
-    for (u32 binding = 0; binding < max_bindings; ++binding) {
-        const auto& stream{regs.vertex_streams[binding]};
-        key.strides[binding] = stream.stride.Value();
-        key.divisors[binding] = stream.frequency;
-        key.instanced |= (regs.vertex_stream_instances.IsInstancingEnabled(binding) ? 1U : 0U)
-                         << binding;
-        key.repacked |= (buffer_cache_runtime.IsVertexRepacked(binding) ? 1U : 0U) << binding;
+    const VideoCommon::VertexInputKey key = VertexInputKeyOf(regs, max_attributes, max_bindings);
+    if (RenderVerifyEvery() != 0) {
+        recorded_input_key = key;
+        recorded_input_tick = scheduler.CurrentTick();
     }
     const u64 hash = key.Hash();
     std::shared_ptr<const VertexInputState> state = vertex_input_cache.Find(key, hash);
@@ -6970,6 +7005,26 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
     RecordDynamic([input = std::move(state)](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetVertexInputEXT(input->bindings, input->attributes);
     });
+}
+
+VideoCommon::VertexInputKey RasterizerVulkan::VertexInputKeyOf(
+    const Tegra::Engines::Maxwell3D::Regs& regs, u32 max_attributes, u32 max_bindings) const {
+    VideoCommon::VertexInputKey key{
+        .num_attributes = max_attributes,
+        .num_bindings = max_bindings,
+    };
+    for (u32 index = 0; index < max_attributes; ++index) {
+        key.attributes[index] = regs.vertex_attrib_format[index].hex;
+    }
+    for (u32 binding = 0; binding < max_bindings; ++binding) {
+        const auto& stream{regs.vertex_streams[binding]};
+        key.strides[binding] = stream.stride.Value();
+        key.divisors[binding] = stream.frequency;
+        key.instanced |= (regs.vertex_stream_instances.IsInstancingEnabled(binding) ? 1U : 0U)
+                         << binding;
+        key.repacked |= (buffer_cache_runtime.IsVertexRepacked(binding) ? 1U : 0U) << binding;
+    }
+    return key;
 }
 
 void RasterizerVulkan::BuildVertexInput(const Tegra::Engines::Maxwell3D::Regs& regs,

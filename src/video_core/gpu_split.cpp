@@ -325,6 +325,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_DISPATCH needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const fast_delta_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_FAST_DELTA");
+        const bool fast_delta_wanted = fast_delta_switch != nullptr && fast_delta_switch[0] == '1';
+        unlend_fast_delta = fast_delta_wanted && render_unlend;
+        fast_delta.kept = fast_delta.looked_up = fast_delta.differs = 0;
+        fast_delta.inputs_kept.store(0, std::memory_order_relaxed);
+        fast_delta.inputs_differ.store(0, std::memory_order_relaxed);
+        if (fast_delta_wanted && !unlend_fast_delta) {
+            LOG_WARNING(
+                HW_GPU,
+                "EDEN_NX2_RENDER_UNLEND_FAST_DELTA needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const query_flush_switch = std::getenv("EDEN_NX2_RENDER_QUERY_FLUSH_E");
         const bool query_flush_wanted =
             query_flush_switch != nullptr && query_flush_switch[0] == '1';
@@ -426,6 +437,7 @@ void GpuSplit::Stop() {
         unlend_mesh = false;
         unlend_clear = false;
         unlend_dispatch = false;
+        unlend_fast_delta = false;
         soft_release_e = false;
         payload_e = false;
         query_sync_e = false;
@@ -1481,6 +1493,15 @@ void GpuSplit::RenderLoop() {
                  clears.unlent, lent(ClearLent::Diagnostics), lent(ClearLent::Verify),
                  lent(ClearLent::Volume), lent(ClearLent::Gather),
                  clears.view_differences.load(std::memory_order_relaxed));
+    }
+    if (unlend_fast_delta) {
+        LOG_INFO(HW_GPU,
+                 "GPU render unlent fast draws: {} kept the pipeline, {} looked it up; GPURender "
+                 "kept the vertex input {} times; must be 0: {} kept pipelines a lookup changed, "
+                 "{} kept vertex inputs that differ",
+                 fast_delta.kept, fast_delta.looked_up,
+                 fast_delta.inputs_kept.load(std::memory_order_relaxed), fast_delta.differs,
+                 fast_delta.inputs_differ.load(std::memory_order_relaxed));
     }
     if (unlend_dispatch) {
         const auto lent = [this](DispatchLent reason) {

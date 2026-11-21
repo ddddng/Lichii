@@ -247,6 +247,8 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
         packet.raised = now;
         packet.values = values;
         packet.has_values = true;
+        key_words_written = true;
+        key_dirty = 0;
         dirty = {};
         binds = {};
         consumed.reset();
@@ -261,6 +263,8 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
             Note(HleWords[i]);
         }
     }
+    key_words_written |= key_dirty != 0;
+    key_dirty = 0;
     for (u32 word = 0; word < dirty.size(); ++word) {
         for (u64 bits = std::exchange(dirty[word], 0); bits != 0; bits &= bits - 1) {
             const u32 index = word * 64 + static_cast<u32>(std::countr_zero(bits));
@@ -283,6 +287,7 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
         packet.values = values;
         packet.has_values = true;
         sent = values;
+        key_words_written = true;
     }
     if (events) {
         packet.raised = now;
@@ -304,6 +309,20 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
     g_raised += packet.raised.count();
     g_consumed += packet.consumed.count();
     return packet;
+}
+
+bool Writes::KeyWordsWritten(Maxwell3D& engine) const {
+    if (key_words_written || key_dirty != 0 || !seeded || ValuesOf(engine) != sent) {
+        return true;
+    }
+    for (size_t i = 0; i < HleWords.size(); ++i) {
+        const u32 index = HleWords[i];
+        if (((KeyMask[index / 64] >> (index % 64)) & 1) != 0 &&
+            engine.regs.reg_array[index] != hle_sent[i]) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Writes::DrawDone(const Maxwell3D& engine) {

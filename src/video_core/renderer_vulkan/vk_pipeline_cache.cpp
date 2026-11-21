@@ -1015,15 +1015,26 @@ void PipelineCache::SaveUsedPipelines() {
                               VideoCommon::ShaderCacheV2::EncodeUsed(record));
 }
 
-GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline(bool key_unchanged) {
     VideoCommon::GpuSplit::BackOwned("PipelineCache::CurrentGraphicsPipeline");
 
+    ++graphics_lookups;
+    last_lookup_kept = false;
+    const std::array<u64, 6> hashes = graphics_key.unique_hashes;
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
         return nullptr;
     }
     const bool mesh_draw =
         maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled();
+    // Refresh would rebuild the key current_pipeline was found with: same registers, programs and
+    // topology (its parts kept behind dirty flags come from the same registers).
+    if (key_unchanged && current_pipeline != nullptr && !mesh_draw && !vertex_input_lent &&
+        hashes == graphics_key.unique_hashes) {
+        last_lookup_kept = true;
+        current_pipeline->MarkUsed(frame_count);
+        return BuiltPipeline(current_pipeline);
+    }
     if (vertex_input_lent && !mesh_draw) {
         // Refresh keeps the key's vertex input until the registers change it.
         vertex_input_lent = false;

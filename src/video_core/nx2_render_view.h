@@ -130,6 +130,26 @@ inline constexpr std::array<u64, NumRegs / 64> WatchMask = [] {
     return mask;
 }();
 
+/// The watched words a pipeline key can read: all but those that only parameterize a draw (its
+/// range, base vertex and instance, index buffer) or the next constant buffer bind. The draw
+/// method's words carry the topology, which the lookup's caller compares itself.
+inline constexpr std::array<u64, NumRegs / 64> KeyMask = [] {
+    std::array<u64, NumRegs / 64> mask = WatchMask;
+    const auto unset = [&mask](u32 first, u32 count) {
+        for (u32 i = first; i < first + count; ++i) {
+            mask[i / 64] &= ~(u64{1} << (i % 64));
+        }
+    };
+    unset(MAXWELL3D_REG_INDEX(draw), sizeof(Maxwell3D::Regs::Draw) / sizeof(u32));
+    unset(MAXWELL3D_REG_INDEX(vertex_buffer), sizeof(Maxwell3D::Regs::VertexBuffer) / sizeof(u32));
+    unset(MAXWELL3D_REG_INDEX(index_buffer), sizeof(Maxwell3D::Regs::IndexBuffer) / sizeof(u32));
+    unset(MAXWELL3D_REG_INDEX(vertex_id_base), 1);
+    unset(MAXWELL3D_REG_INDEX(global_base_vertex_index), 1);
+    unset(MAXWELL3D_REG_INDEX(global_base_instance_index), 1);
+    unset(MAXWELL3D_REG_INDEX(const_buffer.size), 3);
+    return mask;
+}();
+
 /// The back's side for one 3D engine (Maxwell3D::render_view_writes).
 class Writes {
 public:
@@ -138,7 +158,9 @@ public:
 
     void Note(u32 index) noexcept {
         if (index < NumRegs) {
-            dirty[index / 64] |= WatchMask[index / 64] & (u64{1} << (index % 64));
+            const u64 bit = u64{1} << (index % 64);
+            dirty[index / 64] |= WatchMask[index / 64] & bit;
+            key_dirty |= KeyMask[index / 64] & bit;
         }
     }
     void NoteBind(size_t stage, u32 slot) noexcept;
@@ -149,6 +171,14 @@ public:
     /// After the draw: the forwarded flags it cleared go in the next packet.
     void DrawDone(const Maxwell3D& engine);
 
+    /// EDEN_NX2_RENDER_UNLEND_FAST_DELTA: whether a register other than the draw parameters, or
+    /// the engine hint or macro mode, changed since KeyWordsSeen.
+    [[nodiscard]] bool KeyWordsWritten(Maxwell3D& engine) const;
+    /// A pipeline lookup saw the registers as they are after this Pack.
+    void KeyWordsSeen() noexcept {
+        key_words_written = false;
+    }
+
     /// Written only by Apply, on GPURender (inline without it).
     [[nodiscard]] Maxwell3D& View() {
         return *view;
@@ -157,12 +187,14 @@ public:
 private:
     std::unique_ptr<Maxwell3D> view;
     std::array<u64, NumRegs / 64> dirty{};
+    u64 key_dirty{}; ///< KeyMask words noted since the last Pack (any bits)
     std::array<u64, 2> binds{};
     Flags after;
     Flags consumed;
     EngineValues sent;
     std::vector<u32> hle_sent;
     bool seeded{};
+    bool key_words_written{true};
 };
 
 void NoteWrite(Writes& writes, u32 index) noexcept;
