@@ -4456,7 +4456,8 @@ std::unique_ptr<RasterizerVulkan::OcarinaDrawFacts> RasterizerVulkan::CaptureOca
     std::unique_ptr<OcarinaDrawFacts> facts;
     const auto take = [&]() -> OcarinaDrawFacts& {
         if (!facts) {
-            facts = std::make_unique<OcarinaDrawFacts>();
+            // Default-initialized: the actor pose's bones (13 KiB) are written only when present.
+            facts.reset(new OcarinaDrawFacts);
             facts->channel = gpu_memory;
         }
         return *facts;

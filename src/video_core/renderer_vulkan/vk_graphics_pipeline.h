@@ -286,6 +286,9 @@ public:
 
     /// EDEN_NX2_RENDER_UNLEND: the back's half of an unlent draw, by value.
     struct BackHalf {
+        /// Not value-initialized: the small vectors' inline storage stays untouched.
+        BackHalf() {}
+
         /// Texture and image handles as read from memory, in descriptor order.
         boost::container::small_vector<u32, 32> handles;
         /// Buffer descriptor entries, stage by stage.
