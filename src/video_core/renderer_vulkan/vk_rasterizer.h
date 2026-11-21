@@ -263,10 +263,26 @@ private:
         u64 size;
     };
     std::vector<PayloadSync> back_payload_sync;
-    /// The back: what QueryCacheRuntime::SyncValues records for the values, at the back's place
-    /// (the buffers' own uploads, then the copies), collected into commands.
-    void CollectPayloadSyncs(std::span<const PayloadSync> syncs,
-                             VideoCommon::CommandArena& commands);
+    /// What QueryCacheRuntime::SyncValues records for the values (the buffers' own uploads, then
+    /// the copies), through the buffer arena: the back collects it, GPURender in a lent call
+    /// records it.
+    void RecordPayloadSyncs(std::span<const PayloadSync> syncs);
+    /// EDEN_NX2_RENDER_QUERY_SYNC_E (the back): a report since the last lent sync whose value
+    /// GPURender syncs where the back named no buffer for it (a lent report).
+    bool query_sync_lent_only{};
+    /// The back: the device addresses of the Z-pass reports it posted since the last sync.
+    std::vector<DAddr> samples_slots;
+    /// The value syncs of a posted fence or wait for idle, collected by the back at its place.
+    struct QuerySyncPacket {
+        VideoCommon::CommandArena commands;
+        u64 stamp{};
+        std::vector<QuerySyncTarget> targets;
+    };
+    void CollectQuerySync(QuerySyncPacket& packet);
+    /// The back: whether a sync made now has to be lent for its query values.
+    [[nodiscard]] bool QuerySyncOwed() const;
+    /// The back, lending a fence: GPURender syncs everything pending there.
+    void NoteSyncLent();
     /// EDEN_NX2_RENDER_POST_FENCE_REPORT: posts a fence-flagged payload report as a fence, its
     /// value's host sync before it. False when it has to be lent.
     bool PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryPropertiesFlags flags, u32 payload,

@@ -274,6 +274,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_PAYLOAD_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const query_sync_switch = std::getenv("EDEN_NX2_RENDER_QUERY_SYNC_E");
+        const bool query_sync_wanted = query_sync_switch != nullptr && query_sync_switch[0] == '1';
+        query_sync_e = query_sync_wanted && render_unlend;
+        query_sync.collected = query_sync.targets = query_sync.payload_values = 0;
+        query_sync.missing.store(0, std::memory_order_relaxed);
+        query_sync.stopped.store(false, std::memory_order_relaxed);
+        if (query_sync_wanted && !query_sync_e) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_QUERY_SYNC_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const mesh_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_MESH");
         const bool mesh_wanted = mesh_switch != nullptr && mesh_switch[0] == '1';
         unlend_mesh = mesh_wanted && render_unlend;
@@ -405,6 +415,7 @@ void GpuSplit::Stop() {
         unlend_dispatch = false;
         soft_release_e = false;
         payload_e = false;
+        query_sync_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1420,6 +1431,13 @@ void GpuSplit::RenderLoop() {
                  "GPU render payload releases on the back: {} written, {} lent for a read "
                  "download; must be 0: {} posted syncs with payload host syncs left on the back",
                  payloads.written, payloads.lent, payloads.syncs_left);
+    }
+    if (query_sync_e) {
+        LOG_INFO(HW_GPU,
+                 "GPU render query syncs on the back: {} posted syncs collected ({} buffer "
+                 "targets, {} payload values); must be 0: {} query syncs without a target",
+                 query_sync.collected, query_sync.targets, query_sync.payload_values,
+                 query_sync.missing.load(std::memory_order_relaxed));
     }
     if (unlend_mesh) {
         LOG_INFO(HW_GPU, "GPU render unlent mesh draws: must be 0: {} on an emulated mesh pipeline",

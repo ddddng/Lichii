@@ -353,6 +353,29 @@ public:
     void NotePayloadSyncsLeft() {
         ++payloads.syncs_left;
     }
+    /// EDEN_NX2_RENDER_QUERY_SYNC_E (needs EDEN_NX2_RENDER_UNLEND=1): the back collects the
+    /// query value syncs of a posted fence or wait for idle (payload uploads, buffers for the
+    /// Z-pass values), and only reports it cannot cover make them lent.
+    [[nodiscard]] static bool QuerySyncOnBack() {
+        return on_back_thread && instance.query_sync_e;
+    }
+    [[nodiscard]] static bool QuerySyncEnabled() {
+        return instance.query_sync_e;
+    }
+    void NoteQuerySync(size_t targets, size_t payload_values) {
+        ++query_sync.collected;
+        query_sync.targets += targets;
+        query_sync.payload_values += payload_values;
+    }
+    /// GPURender: a value sync outside a lent call found no buffer the back obtained for it
+    /// (must be 0). Nothing is copied, and syncs are lent from then on.
+    void NoteQuerySyncMissing() {
+        query_sync.missing.fetch_add(1, std::memory_order_relaxed);
+        query_sync.stopped.store(true, std::memory_order_release);
+    }
+    [[nodiscard]] bool QuerySyncStopped() const {
+        return query_sync.stopped.load(std::memory_order_acquire);
+    }
     [[nodiscard]] static bool UnlendsMesh() {
         return on_back_thread && instance.unlend_mesh;
     }
@@ -1350,6 +1373,15 @@ private:
         u64 syncs_left{};
     };
     PayloadCounts payloads;
+    bool query_sync_e{};
+    struct QuerySyncCounts {
+        u64 collected{};
+        u64 targets{};
+        u64 payload_values{};
+        std::atomic<u64> missing{};
+        std::atomic<bool> stopped{};
+    };
+    QuerySyncCounts query_sync;
     std::atomic<u64> unlent_emulated_mesh{};
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};

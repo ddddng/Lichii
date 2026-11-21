@@ -1730,7 +1730,7 @@ bool RasterizerVulkan::FencePostable(VideoCommon::GpuSplit::PostedOp kind) {
         split.NoteFenceLent(GpuSplit::FenceLent::Delayed);
         return false;
     }
-    if (fence_query_owed) {
+    if (QuerySyncOwed()) {
         split.NoteFenceLent(GpuSplit::FenceLent::QueryOwed);
         return false;
     }
@@ -1748,16 +1748,89 @@ bool RasterizerVulkan::FencePostable(VideoCommon::GpuSplit::PostedOp kind) {
     return true;
 }
 
+void RasterizerVulkan::CollectQuerySync(QuerySyncPacket& packet) {
+    if (back_payload_sync.empty() && samples_slots.empty()) {
+        return;
+    }
+    std::vector<DAddr> pages;
+    pages.reserve(samples_slots.size() * 2);
+    for (const DAddr slot : samples_slots) {
+        pages.push_back(Common::AlignDown(slot, Core::DEVICE_PAGESIZE));
+        pages.push_back(Common::AlignDown(slot + 15, Core::DEVICE_PAGESIZE));
+    }
+    std::ranges::sort(pages);
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        const BufferArena::Collect collect{packet.commands};
+        // Maximal runs of contiguous pages over a superset of the reports GPURender syncs: each
+        // run SyncValues groups there lies within one of them.
+        buffer_cache.BufferOperations([&] {
+            packet.targets.clear();
+            for (size_t i = 0; i < pages.size();) {
+                const DAddr begin = pages[i];
+                DAddr end = begin + Core::DEVICE_PAGESIZE;
+                for (++i; i < pages.size() && pages[i] == end; ++i) {
+                    end += Core::DEVICE_PAGESIZE;
+                }
+                const auto [buffer, offset] = buffer_cache.ObtainCPUBuffer(
+                    begin, static_cast<u32>(end - begin),
+                    VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                    VideoCommon::ObtainBufferOperation::DoNothing);
+                if (buffer != nullptr) {
+                    packet.targets.push_back({begin, end - begin, buffer->Handle(), offset});
+                }
+            }
+        });
+        // As SyncValues does before its copies.
+        for (const DAddr slot : samples_slots) {
+            buffer_cache.OutdateReadDownloads(slot, 16);
+        }
+        if (!back_payload_sync.empty()) {
+            RecordPayloadSyncs(back_payload_sync);
+        }
+    }
+    packet.stamp = packet.commands.Empty() ? 0 : buffer_cache_runtime.Arena().CloseCollected();
+    VideoCommon::GpuSplit::Get().NoteQuerySync(packet.targets.size(), back_payload_sync.size());
+    back_payload_sync.clear();
+    samples_slots.clear();
+}
+
+bool RasterizerVulkan::QuerySyncOwed() const {
+    using VideoCommon::GpuSplit;
+    if (!GpuSplit::QuerySyncOnBack()) {
+        return fence_query_owed;
+    }
+    return query_sync_lent_only || GpuSplit::Get().QuerySyncStopped();
+}
+
+void RasterizerVulkan::NoteSyncLent() {
+    fence_query_owed = false;
+    query_sync_lent_only = false;
+    samples_slots.clear();
+}
+
 template <typename Op>
 void RasterizerVulkan::PostCheckedFence(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
-    if (!back_payload_sync.empty()) [[unlikely]] {
-        VideoCommon::GpuSplit::Get().NotePayloadSyncsLeft();
-    }
+    using VideoCommon::GpuSplit;
     InvalidateGPUCache();
-    PostRenderOp(kind, [this, op = std::forward<Op>(op)]() mutable {
+    // The value syncs its commit runs, after the closing gather as there (collected with
+    // EDEN_NX2_RENDER_QUERY_SYNC_E; without it only a fence report's own value is listed).
+    QuerySyncPacket sync;
+    if (GpuSplit::QuerySyncOnBack() || kind == GpuSplit::PostedOp::FenceReport) {
+        CollectQuerySync(sync);
+    } else if (!back_payload_sync.empty()) [[unlikely]] {
+        GpuSplit::Get().NotePayloadSyncsLeft();
+    }
+    PostRenderOp(kind, [this, sync = std::move(sync), op = std::forward<Op>(op)]() mutable {
+        if (!sync.commands.Empty()) {
+            buffer_cache_runtime.Arena().PlayCollected(sync.commands, sync.stamp);
+        }
+        t_query_sync_targets = &sync.targets;
         posted_fence_playing = true;
         fence_manager.skip_buffer_half = true;
         SCOPE_EXIT {
+            t_query_sync_targets = nullptr;
             posted_fence_playing = false;
             fence_manager.skip_buffer_half = false;
         };
@@ -2055,11 +2128,18 @@ void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
 void* RasterizerVulkan::LendEnter(void* argument) {
     auto& self = *static_cast<RasterizerVulkan*>(argument);
     // EDEN_NX2_RENDER_PAYLOAD_E: before anything the call syncs. A report sets fence_query_owed,
-    // so no sync is posted until a lent fence clears it after this.
-    for (const PayloadSync& sync : self.back_payload_sync) {
-        self.query_cache.AddPayloadSync(sync.address, sync.value, sync.size);
+    // so no sync is posted until a lent fence clears it after this. With
+    // EDEN_NX2_RENDER_QUERY_SYNC_E the uploads are recorded here instead, so nothing is owed.
+    if (!self.back_payload_sync.empty()) {
+        if (VideoCommon::GpuSplit::QuerySyncEnabled()) {
+            self.RecordPayloadSyncs(self.back_payload_sync);
+        } else {
+            for (const PayloadSync& sync : self.back_payload_sync) {
+                self.query_cache.AddPayloadSync(sync.address, sync.value, sync.size);
+            }
+        }
+        self.back_payload_sync.clear();
     }
-    self.back_payload_sync.clear();
     Tegra::Engines::Maxwell3D* const engine = self.maxwell3d;
     if (engine == nullptr || !engine->render_view_writes) {
         return nullptr;
@@ -3583,11 +3663,9 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
     }
 }
 
-void RasterizerVulkan::CollectPayloadSyncs(std::span<const PayloadSync> syncs,
-                                           VideoCommon::CommandArena& commands) {
+void RasterizerVulkan::RecordPayloadSyncs(std::span<const PayloadSync> syncs) {
     boost::container::small_vector<std::pair<Buffer*, u32>, 4> targets;
     std::scoped_lock lock{buffer_cache.mutex};
-    const BufferArena::Collect collect{commands};
     buffer_cache.BufferOperations([&] {
         targets.clear();
         for (const PayloadSync& sync : syncs) {
@@ -3649,21 +3727,14 @@ bool RasterizerVulkan::PostFenceReport(GPUVAddr gpu_addr, VideoCommon::QueryProp
         query_cache.NotePendingReport(*device);
     }
     VideoCommon::Nx2FastDraw::NoteSync();
-    // Its own fence's NotifyWFI synced the value to the host: the back records that sync and
-    // GPURender plays it before the fence, so nothing is owed after it.
-    VideoCommon::CommandArena commands;
-    const PayloadSync sync{*device, payload, wide ? u64{8} : u64{4}};
-    CollectPayloadSyncs({&sync, 1}, commands);
-    const u64 stamp = commands.Empty() ? 0 : buffer_cache_runtime.Arena().CloseCollected();
-    PostCheckedFence(
-        GpuSplit::PostedOp::FenceReport,
-        [this, commands = std::move(commands), stamp, gpu_addr, flags, payload, subreport, posted] {
-            if (!commands.Empty()) {
-                buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
-            }
-            query_cache.CounterReport(gpu_addr, VideoCommon::QueryType::Payload, flags, payload,
-                                      subreport, &posted);
-        });
+    // Its own fence's NotifyWFI synced the value to the host: PostCheckedFence collects that
+    // sync and GPURender plays it before the fence, so nothing is owed after it.
+    back_payload_sync.push_back({*device, payload, wide ? u64{8} : u64{4}});
+    PostCheckedFence(GpuSplit::PostedOp::FenceReport,
+                     [this, gpu_addr, flags, payload, subreport, posted] {
+                         query_cache.CounterReport(gpu_addr, VideoCommon::QueryType::Payload, flags,
+                                                   payload, subreport, &posted);
+                     });
     return true;
 }
 
@@ -3730,12 +3801,18 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport, &posted);
                 })) {
                 GpuSplit::Get().MarkGuestWrite();
+                if (GpuSplit::QuerySyncOnBack()) {
+                    samples_slots.push_back(*device);
+                }
                 return;
             }
             if (posted.noted) {
                 FinishReport(posted.device, wide ? 16 : 4);
             }
         }
+    }
+    if (GpuSplit::QuerySyncOnBack()) {
+        query_sync_lent_only = true;
     }
     RENDER_LEND(Query(gpu_addr, type, flags, payload, subreport))
     // Reports and semaphore releases reach guest memory the CPU may wait on.
@@ -4526,7 +4603,7 @@ void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
         return;
     }
     if (VideoCommon::GpuSplit::LendsToRender()) {
-        fence_query_owed = false;
+        NoteSyncLent();
     }
     RENDER_LEND(SignalFence(std::move(func)))
     VideoCommon::Nx2FastDraw::NoteSync();
@@ -4547,7 +4624,7 @@ void RasterizerVulkan::SignalSyncPoint(u32 value) {
         return;
     }
     if (VideoCommon::GpuSplit::LendsToRender()) {
-        fence_query_owed = false;
+        NoteSyncLent();
     }
     RENDER_LEND(SignalSyncPoint(value))
     VideoCommon::Nx2FastDraw::NoteSync();
@@ -4562,7 +4639,7 @@ void RasterizerVulkan::SignalReference() {
         return;
     }
     if (VideoCommon::GpuSplit::LendsToRender()) {
-        fence_query_owed = false;
+        NoteSyncLent();
     }
     RENDER_LEND(SignalReference())
     VideoCommon::Nx2FastDraw::NoteSync();
@@ -4582,7 +4659,7 @@ void RasterizerVulkan::ReleaseFences(bool force) {
         return;
     }
     if (VideoCommon::GpuSplit::LendsToRender() && force) {
-        fence_query_owed = false;
+        NoteSyncLent();
     }
     RENDER_LEND(ReleaseFences(force))
     fence_manager.WaitPendingFences(force);
@@ -4640,16 +4717,35 @@ void RasterizerVulkan::WaitForIdle() {
     // EDEN_NX2_RENDER_POST_WFI: with no report since the last lent fence (whose commit synced
     // the queries), no streamer has a sync pending and NotifyWFI leaves the back's buffer cache
     // alone: the rest is GPURender's recording.
-    if (!fence_query_owed && !back_payload_sync.empty()) [[unlikely]] {
-        VideoCommon::GpuSplit::Get().NotePayloadSyncsLeft();
-    }
-    if (!fence_query_owed && PostRenderOp(VideoCommon::GpuSplit::PostedOp::WaitForIdle, [this] {
-            if (query_cache.HasPendingSync()) [[unlikely]] {
-                VideoCommon::GpuSplit::Get().NotePostedWaitSynced();
+    // EDEN_NX2_RENDER_QUERY_SYNC_E: also with reports whose value syncs the back collects here.
+    using VideoCommon::GpuSplit;
+    if (GpuSplit::Get().Posts(GpuSplit::PostedOp::WaitForIdle) && maxwell3d != nullptr &&
+        !QuerySyncOwed()) {
+        QuerySyncPacket sync;
+        if (GpuSplit::QuerySyncOnBack()) {
+            CollectQuerySync(sync);
+        } else if (!back_payload_sync.empty()) [[unlikely]] {
+            GpuSplit::Get().NotePayloadSyncsLeft();
+        }
+        PostRenderOp(GpuSplit::PostedOp::WaitForIdle, [this, sync = std::move(sync)]() mutable {
+            if (!sync.commands.Empty()) {
+                buffer_cache_runtime.Arena().PlayCollected(sync.commands, sync.stamp);
             }
+            if (!GpuSplit::QuerySyncEnabled() && query_cache.HasPendingSync()) [[unlikely]] {
+                GpuSplit::Get().NotePostedWaitSynced();
+            }
+            t_query_sync_targets = &sync.targets;
+            SCOPE_EXIT {
+                t_query_sync_targets = nullptr;
+            };
             WaitForIdle();
-        })) {
+        });
         return;
+    }
+    if (GpuSplit::QuerySyncOnBack()) {
+        // Lent: NotifyWFI syncs everything pending, the back parked.
+        query_sync_lent_only = false;
+        samples_slots.clear();
     }
     RENDER_LEND(WaitForIdle())
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
