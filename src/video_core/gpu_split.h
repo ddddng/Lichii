@@ -454,7 +454,7 @@ public:
             return;
         }
         if (hook_requested.load(std::memory_order_relaxed) || BackQuiet() ||
-            consumed.load(std::memory_order_acquire) != write_position) {
+            FrontPosition(std::memory_order_acquire) != write_position) {
             return;
         }
         Count(g_acquire_stats.settles);
@@ -483,7 +483,7 @@ public:
     /// Whether the back executed everything sent before `position`. It may tell so a little
     /// late: the back stores its position every few thousand words and when it runs out of work.
     [[nodiscard]] bool Ran(u64 position) const {
-        return consumed.load(std::memory_order_acquire) >= position;
+        return FrontPosition(std::memory_order_acquire) >= position;
     }
 
     /// Compute or copy work was just sent: what can write GPU-written command lists.
@@ -822,6 +822,15 @@ private:
         }
     }
 
+    /// What the front's waits read. With EDEN_NX2_RENDER_PLAYED=1 that is "played": the back's
+    /// position clamped to GPURender's oldest unplayed packet, so a position the front waited for
+    /// has every packet before it recorded too (Fritchii's two positions, ead877857).
+    [[nodiscard]] u64 FrontPosition(std::memory_order order) const {
+        return two_positions ? played.load(order) : consumed.load(order);
+    }
+    /// The back after storing "consumed", GPURender after each packet: raises "played".
+    void RaisePlayed();
+
     void BackLoop(std::stop_token stop_token);
     void RenderLoop();
     [[nodiscard]] bool RenderPending() const {
@@ -900,7 +909,7 @@ private:
     /// Whether the word holds `write`, as far as no other write changed it since: the back ran
     /// it, and a fenced one landed.
     [[nodiscard]] bool InMemory(const SemaphoreWrite& write) const {
-        return write.position <= consumed.load(std::memory_order_acquire) &&
+        return write.position <= FrontPosition(std::memory_order_acquire) &&
                (!write.fenced || fenced_landed.load(std::memory_order_acquire) > write.entry);
     }
     struct HeldEntry {
@@ -940,6 +949,7 @@ private:
     std::array<const Common::SpinRecursiveMutex*, 2> render_locks{};
     /// Must be 0: lends and waits for ring room the back made holding a watched lock.
     u64 render_lock_parks{};
+    bool two_positions{};
     void CheckRenderLocks();
     void LendRenderCall(void (*call)(void*), void* argument);
     /// Where the back joined GPURender (the shutdown line's histogram, as Fritchii's lend trace
@@ -966,6 +976,7 @@ private:
     // always touched together by both threads, so they share a block.
     alignas(128) std::atomic<u64> published{};
     alignas(128) std::atomic<u64> consumed{};
+    alignas(128) std::atomic<u64> played{};
     /// Entries before this EntryTag ran every fence operation they queued, and the back published
     /// them as consumed: written under fenced_mutex, read by the front.
     alignas(128) std::atomic<u64> fenced_landed{};

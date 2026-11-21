@@ -106,12 +106,12 @@ public:
         return parked;
     }
 
-    /// The last packet: PlayNext returns Kind::Stop for it.
+    /// The last packet: PlayNext returns Kind::Stop for it. It holds no position (Floor).
     void Stop() {
         constexpr u32 bytes = static_cast<u32>(sizeof(Header));
         std::byte* at;
         Reserve(bytes, at);
-        Commit(at, bytes, Kind::Stop, nullptr, 0);
+        Commit(at, bytes, Kind::Stop, nullptr, ~u64{0});
     }
 
     // R's side.

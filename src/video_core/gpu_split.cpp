@@ -197,11 +197,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         const char* const ring_ahead = std::getenv("EDEN_NX2_RENDER_RING");
         const bool ahead = ring_ahead != nullptr && ring_ahead[0] == '1';
         render_lock_parks = 0;
+        // EDEN_NX2_RENDER_PLAYED=1: the front's waits read GPURender's position (FrontPosition).
+        const char* const played_switch = std::getenv("EDEN_NX2_RENDER_PLAYED");
+        two_positions = played_switch != nullptr && played_switch[0] == '1';
         render_follower.emplace(spin_time, ahead);
         render_thread = std::jthread([this] { RenderLoop(); });
-        LOG_INFO(HW_GPU, "GPU render follower: enabled, polls {} us before parking, {}",
+        LOG_INFO(HW_GPU,
+                 "GPU render follower: enabled, polls {} us before parking, {}, front waits "
+                 "for {}",
                  spin_time.count(),
-                 ahead ? "posts ahead of unplayed packets" : "one packet at a time");
+                 ahead ? "posts ahead of unplayed packets" : "one packet at a time",
+                 two_positions ? "GPURender's position" : "the back's position");
     }
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -223,6 +229,7 @@ void GpuSplit::Stop() {
         render_follower->Stop();
         render_thread.join();
         render_follower.reset();
+        two_positions = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -266,6 +273,7 @@ void GpuSplit::Stop() {
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
+    played.store(0, std::memory_order_relaxed);
     back_idle_at.store(~u64{0}, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
@@ -295,7 +303,7 @@ void GpuSplit::WaitForSpace(size_t words) {
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
     const u64 target = write_position + words - RingWords;
     for (u32 spins = 0;; ++spins) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
+        consumed_cache = FrontPosition(std::memory_order_acquire);
         if (consumed_cache >= target) {
             Nx2Profile::AddDrain(DrainSite::RingFull, start);
             return;
@@ -324,7 +332,7 @@ void GpuSplit::Publish() {
 
 void GpuSplit::Drain(DrainSite site) {
     FlushState();
-    consumed_cache = consumed.load(std::memory_order_acquire);
+    consumed_cache = FrontPosition(std::memory_order_acquire);
     if (consumed_cache == write_position && BackQuiet()) {
         return;
     }
@@ -337,7 +345,7 @@ void GpuSplit::Drain(DrainSite site) {
     // from its idle hook afterwards, and the caller may use the scheduler once this returns.
     bool hook_asked = false;
     for (u32 spins = 0;; ++spins) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
+        consumed_cache = FrontPosition(std::memory_order_acquire);
         if (consumed_cache == write_position) {
             if (BackQuiet()) {
                 publish_every = 8;
@@ -687,7 +695,7 @@ bool GpuSplit::WaitForSyncedWriters() {
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     FlushState();
-    consumed_cache = consumed.load(std::memory_order_acquire);
+    consumed_cache = FrontPosition(std::memory_order_acquire);
     if (consumed_cache >= target) {
         return false;
     }
@@ -709,7 +717,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
     for (u32 spins = 0;; ++spins) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
+        consumed_cache = FrontPosition(std::memory_order_acquire);
         if (past_release && !release_ran) {
             if (consumed_cache < release) {
                 Backoff(spins, release);
@@ -758,7 +766,7 @@ void GpuSplit::SleepForBack(u64 target, bool wait_for_idle) {
     front_waiting.store(true, std::memory_order_seq_cst);
     const u32 seen = front_wake.load(std::memory_order_seq_cst);
     if (back_running.load(std::memory_order_seq_cst) &&
-        (consumed.load(std::memory_order_seq_cst) < target ||
+        (FrontPosition(std::memory_order_seq_cst) < target ||
          (wait_for_idle && !back_quiet.load(std::memory_order_seq_cst)))) {
         front_wake.wait(seen, std::memory_order_seq_cst);
     }
@@ -966,6 +974,26 @@ void GpuSplit::LendRenderCall(void (*call)(void*), void* argument) {
     CheckRenderLocks();
     const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
     render_parks += render_follower->Lend(back_entry_start, call, argument) ? 1 : 0;
+    // GPURender's raise after the lent packet may have read the back's position from before it
+    // (Fritchii 3ee8856d2): the front waited for a raise nobody made.
+    if (two_positions) {
+        RaisePlayed();
+    }
+}
+
+void GpuSplit::RaisePlayed() {
+    // A Dekker pair (Fritchii 5fc615545): the back stores "consumed" and then reads GPURender's
+    // count, GPURender stores its count and then reads "consumed". Without the fence both could
+    // read the other's old value and raise "played" short, and the front waits for good.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    const u64 target = std::min(consumed.load(std::memory_order_acquire), render_follower->Floor());
+    u64 current = played.load(std::memory_order_relaxed);
+    while (current < target &&
+           !played.compare_exchange_weak(current, target, std::memory_order_seq_cst)) {
+    }
+    if (current < target) {
+        NotifyFront();
+    }
 }
 
 void GpuSplit::CheckRenderLocks() {
@@ -1055,6 +1083,9 @@ void GpuSplit::RenderLoop() {
         if (kind == Nx2RenderFollower::Kind::Stop) {
             break;
         }
+        if (two_positions) {
+            RaisePlayed();
+        }
         ++packets;
         Nx2Profile::Report("GPU render thread");
     }
@@ -1063,13 +1094,15 @@ void GpuSplit::RenderLoop() {
                                        : 0.0;
     const auto cpu_end = profile ? Common::CurrentThreadCpuTimeNs() : std::nullopt;
     const auto& follower = *render_follower;
+    const bool played_short = two_positions && played.load(std::memory_order_acquire) !=
+                                                   consumed.load(std::memory_order_acquire);
     LOG_INFO(HW_GPU,
              "GPU render follower: {} packets ({} lent), {} overlapping entries, {} joins ({:.1f}% "
              "of packets), {} parked, ring depth up to {}, {} room waits, {} wraps; must be 0: {} "
-             "out of order, {} parks holding a cache lock{}",
+             "out of order, {} parks holding a cache lock, {} played short at stop{}",
              packets, follower.Lent(), render_overlap_entries, render_joins, joined, render_parks,
              follower.MaxDepth(), follower.RoomWaits(), follower.Wraps(), follower.OutOfOrder(),
-             render_lock_parks,
+             render_lock_parks, played_short ? 1 : 0,
              cpu_start && cpu_end ? fmt::format(", {:.3f} ms thread CPU",
                                                 static_cast<double>(*cpu_end - *cpu_start) / 1e6)
                                   : std::string{});
@@ -1177,17 +1210,26 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 read_position != available) {
                 SealFencedEntries(read_position);
                 consumed.store(read_position, std::memory_order_seq_cst);
+                if (two_positions) {
+                    RaisePlayed();
+                }
                 last_store = read_position;
                 NotifyFront();
             }
         }
-        // No join: a packet only records, and nothing the front reads from a consumed position
-        // depends on it. The front takes the scheduler only once the back is quiet (below).
+        // No join: the front's waits read "played" with EDEN_NX2_RENDER_PLAYED=1 (FrontPosition),
+        // and it takes the scheduler only once the back is quiet (above, after its join).
         SealFencedEntries(read_position);
         consumed.store(read_position, std::memory_order_seq_cst);
+        if (two_positions) {
+            RaisePlayed();
+        }
         NotifyFront();
     }
     WaitRender();
+    if (two_positions) {
+        RaisePlayed();
+    }
     back_running.store(false, std::memory_order_seq_cst);
     front_wake.fetch_add(1, std::memory_order_seq_cst);
     front_wake.notify_all();
