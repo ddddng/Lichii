@@ -2139,16 +2139,13 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
     if (compute) {
         const bool linked_tsc = kepler_compute->launch_description.linked_tsc;
         const u32 tic_limit = kepler_compute->regs.tic.limit;
-        const u32 tsc_limit = linked_tsc ? tic_limit : kepler_compute->regs.tsc.limit;
-        bool bindings_changed = false;
-        if (channel_state->compute_sampler_table.Synchronize(kepler_compute->regs.tsc.Address(), tsc_limit))
-            bindings_changed = true;
-        if (channel_state->compute_image_table.Synchronize(kepler_compute->regs.tic.Address(), tic_limit))
-            bindings_changed = true;
-        if (bindings_changed) {
-            ++texture_bindings_serial;
-            ++churn.refreshes;
-        }
+        SynchronizeComputeDescriptors({
+            .tic = kepler_compute->regs.tic.Address(),
+            .tic_limit = tic_limit,
+            .tsc = kepler_compute->regs.tsc.Address(),
+            .tsc_limit = linked_tsc ? tic_limit : kepler_compute->regs.tsc.limit,
+            .linked_tsc = linked_tsc,
+        });
     } else {
         const bool linked_tsc = maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
         const u32 tic_limit = maxwell3d->regs.tex_header.limit;
@@ -2162,6 +2159,20 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
             ++texture_bindings_serial;
             ++churn.refreshes;
         }
+    }
+}
+
+template <class P>
+void TextureCache<P>::SynchronizeComputeDescriptors(const ComputePools& pools) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::SynchronizeComputeDescriptors");
+    bool bindings_changed = false;
+    if (channel_state->compute_sampler_table.Synchronize(pools.tsc, pools.tsc_limit))
+        bindings_changed = true;
+    if (channel_state->compute_image_table.Synchronize(pools.tic, pools.tic_limit))
+        bindings_changed = true;
+    if (bindings_changed) {
+        ++texture_bindings_serial;
+        ++churn.refreshes;
     }
 }
 

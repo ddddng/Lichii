@@ -3031,8 +3031,272 @@ void RasterizerVulkan::ClearImpl(Maxwell& regs, u32 layer_count) {
     }
 }
 
+struct RasterizerVulkan::UnlentDispatch {
+    RasterizerVulkan* rasterizer;
+    Tegra::Engines::Maxwell3D* engine;
+    ComputePipeline* pipeline;
+    ComputePipeline::BackHalf half;
+    VideoCommon::ComputePools pools;
+    std::array<u32, 3> grid;
+    bool indirect{};
+    VkBuffer indirect_buffer{};
+    VkDeviceSize indirect_offset{};
+    std::optional<u32> list_slot;
+    u64 position{};
+
+    void operator()() {
+        rasterizer->PlayUnlentDispatch(*this);
+    }
+};
+
+bool RasterizerVulkan::TryUnlendDispatch() {
+    using Lent = VideoCommon::GpuSplit::DispatchLent;
+    namespace Profile = VideoCommon::Nx2Profile;
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto lend = [&split](Lent reason) {
+        split.NoteDispatchLent(reason);
+        return false;
+    };
+    static const bool pending_write_trace = std::getenv("EDEN_NX2_PENDING_WRITE_TRACE") != nullptr;
+    if (pending_write_trace || !split.RenderPosting() || frame_dump.Capturing() ||
+        Tegra::Nx2ListIndirect::Stats::g_check || Common::DkbFrameTrace::Enabled() ||
+        VideoCommon::RenderTrace::Enabled() || GPU::Logging::IsActive() ||
+        VideoCommon::HandleTableNotes::Wanted()) {
+        return lend(Lent::Diagnostics);
+    }
+    if (maxwell3d == nullptr) {
+        return lend(Lent::NoView);
+    }
+    const auto& qmd = kepler_compute->launch_description;
+    const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+    const auto list_slot = kepler_compute->GetIndirectListSlot();
+    const std::array<u32, 3> grid{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
+    if (!indirect_address && !list_slot) {
+        const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
+        if (grid[0] > max_dim[0] || grid[1] > max_dim[1] || grid[2] > max_dim[2]) {
+            return lend(Lent::Grid);
+        }
+    }
+    auto& slots = buffer_cache_runtime.Nx2Slots();
+    if (list_slot && !slots.Held(*list_slot)) {
+        return lend(Lent::SlotUnheld);
+    }
+    unlend_gather_hit = false;
+    gpu_memory->FlushCaching();
+    if (unlend_gather_hit) {
+        return lend(Lent::Gather);
+    }
+    u64 native_key{};
+    ComputePipeline* const pipeline = [&] {
+        Profile::Scope scope{Profile::Zone::PipelineLookup};
+        return pipeline_cache.UnlentComputePipeline(native_key);
+    }();
+    if (pipeline == nullptr) {
+        return lend(Lent::Lookup);
+    }
+    if (!pipeline->CanUnlend()) {
+        return lend(Lent::NotBuilt);
+    }
+    // Ocarina of Time's hooks read the dispatch's registers and GPURender's state together.
+    if (native_key == VideoCommon::OcarinaDepthReaderKey || native_key == 0x6e0ae200ee9aa220ULL ||
+        VideoCommon::FindOcarinaUpscalePass(native_key, pipeline->ShaderHash()) !=
+            VideoCommon::OcarinaUpscalePass::None) {
+        return lend(Lent::Hook);
+    }
+    // As for draws: the back reads handles and storage buffer descriptors from these constant
+    // buffers itself, and an owed list word there would read its placeholder.
+    if (slots.HasOwed()) {
+        const auto& cbufs = qmd.const_buffer_config;
+        for (u32 bits = pipeline->HandleConstBuffers() & qmd.const_buffer_enable_mask; bits != 0;
+             bits &= bits - 1) {
+            const u32 index = static_cast<u32>(std::countr_zero(bits));
+            if (index >= cbufs.size()) {
+                break;
+            }
+            const GPUVAddr address = cbufs[index].Address();
+            const u32 size = cbufs[index].size;
+            if (address == 0 || size == 0) {
+                continue;
+            }
+            for (const auto& [device_addr, bytes] :
+                 gpu_memory->GetSubmappedDeviceRange(address, size)) {
+                if (slots.Owes(device_addr, bytes)) {
+                    return lend(Lent::ListOwed);
+                }
+            }
+        }
+    }
+    if (!maxwell3d->render_view_writes) {
+        maxwell3d->render_view_writes =
+            std::make_unique<VideoCommon::Nx2RenderView::Writes>(*maxwell3d);
+    }
+    const bool linked_tsc = qmd.linked_tsc != 0;
+    const auto& compute_regs = kepler_compute->regs;
+    UnlentDispatch dispatch{
+        .rasterizer = this,
+        .engine = maxwell3d,
+        .pipeline = pipeline,
+        .half = {},
+        .pools =
+            {
+                .tic = compute_regs.tic.Address(),
+                .tic_limit = compute_regs.tic.limit,
+                .tsc = compute_regs.tsc.Address(),
+                .tsc_limit = linked_tsc ? compute_regs.tic.limit : compute_regs.tsc.limit,
+                .linked_tsc = linked_tsc,
+            },
+        .grid = grid,
+        .indirect = indirect_address.has_value(),
+        .list_slot = list_slot,
+    };
+    std::unique_lock lock{buffer_cache.mutex};
+    buffer_cache.Nx2CollectListCopies(true);
+    {
+        Profile::Scope scope{Profile::Zone::Configure};
+        const BufferArena::Collect collect{dispatch.half.commands};
+        pipeline->ConfigureBack(*kepler_compute, *gpu_memory, buffer_cache, dispatch.half,
+                                unlend_capture);
+        if (indirect_address) {
+            const auto [buffer, offset] =
+                VideoCommon::ObtainIndirectBuffer(buffer_cache, *indirect_address);
+            dispatch.indirect_buffer = buffer->Handle();
+            dispatch.indirect_offset = offset;
+        }
+    }
+    // Early downloads and list copies are recorded behind the dispatch: lent after it.
+    const bool early_downloads = buffer_cache.HasEarlyDownloads();
+    const bool list_copies = buffer_cache.Nx2HasListCopyRequests();
+    if (!early_downloads) {
+        Profile::Scope scope{Profile::Zone::ComputeDownloads};
+        buffer_cache.NoteWorkRecorded(true);
+    }
+    if (!list_copies) {
+        buffer_cache.Nx2CollectListCopies(false);
+    }
+    lock.unlock();
+    dispatch.half.stamp = buffer_cache_runtime.Arena().CloseCollected();
+    const auto& pools = dispatch.pools;
+    split.NotePools(pools.tic, (u64{pools.tic_limit} + 1) * 32, pools.tsc,
+                    (u64{pools.tsc_limit} + 1) * 32);
+    split.PostUnlent(std::move(dispatch), VideoCommon::GpuSplit::UnlentKind::Dispatch);
+    split.NoteUnlentDispatch(indirect_address.has_value(), list_slot.has_value());
+    if (early_downloads || list_copies) {
+        split.NoteDispatchTail();
+        split.LendRender([this, early_downloads] {
+            std::scoped_lock tail_lock{buffer_cache.mutex};
+            Profile::Scope scope{Profile::Zone::ComputeDownloads};
+            if (early_downloads) {
+                buffer_cache.NoteWorkRecorded(true);
+            }
+            SubmitNx2ListCopies();
+            buffer_cache.Nx2CollectListCopies(false);
+        });
+    }
+    if (gpu.HasSyncRequests()) {
+        split.LendRender([this] { gpu.TickWork(); });
+    }
+    return true;
+}
+
+void RasterizerVulkan::PlayUnlentDispatch(UnlentDispatch& dispatch) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    auto& split = VideoCommon::GpuSplit::Get();
+    VideoCommon::GpuSplit::SetPlayingPosition(dispatch.position);
+    // Its submits invalidate the view's flags, not the back's engine's.
+    auto* const flags =
+        state_tracker.SwapFlags(&dispatch.engine->render_view_writes->View().dirty.flags);
+    SCOPE_EXIT {
+        state_tracker.SwapFlags(flags);
+        VideoCommon::GpuSplit::SetPlayingPosition(~u64{0});
+    };
+    Profile::Scope profile_scope{Profile::Zone::Compute};
+    FlushWork();
+    auto& slots = buffer_cache_runtime.Nx2Slots();
+    if (dispatch.list_slot && !slots.Held(*dispatch.list_slot)) {
+        split.NoteUnlentSlotUnheld();
+        return;
+    }
+    std::scoped_lock lock{texture_cache.mutex};
+    ComputePipeline* const pipeline = dispatch.pipeline;
+    const bool direct = !dispatch.indirect && !dispatch.list_slot;
+    // Until a dispatch overwrites the scene, each direct one binds only after the effects are
+    // marked.
+    const bool marking_effects =
+        direct && oot_effects_frame == render_trace_frame && OcarinaTemporalEnabled();
+    ComputePipeline::BindCommand deferred_bind;
+    bool configured;
+    {
+        Profile::Scope scope{Profile::Zone::Configure};
+        configured = pipeline->ConfigureRender(dispatch.half, dispatch.pools, scheduler,
+                                               texture_cache, buffer_cache_runtime,
+                                               marking_effects ? &deferred_bind : nullptr);
+    }
+    if (!configured) {
+        split.NoteUnlentDispatchFailed();
+        return;
+    }
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.NoteComputeWrites();
+    if (!direct) {
+        VkBuffer buffer = dispatch.indirect_buffer;
+        VkDeviceSize offset = dispatch.indirect_offset;
+        if (dispatch.list_slot) {
+            std::tie(buffer, offset) = slots.DispatchArguments(*dispatch.list_slot);
+            Tegra::Nx2ListIndirect::Stats::Count(
+                Tegra::Nx2ListIndirect::Stats::Get().slot_dispatches);
+        } else if (buffer == VK_NULL_HANDLE) [[unlikely]] {
+            // An unmapped argument address on a nullDescriptor device (Fritchii 763871b779).
+            return;
+        }
+        scheduler.TraceComputePipeline(pipeline->ShaderHash());
+        scheduler.Record([this, pipeline, buffer, offset](vk::CommandBuffer cmdbuf) {
+            RecordDispatchBarrier(cmdbuf);
+            if (!pipeline->IsBound()) {
+                return;
+            }
+            scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, {},
+                                   [&] { cmdbuf.DispatchIndirect(buffer, offset); });
+        });
+        return;
+    }
+    if (marking_effects) {
+        scheduler.Record([](vk::CommandBuffer cmdbuf) { RecordDispatchBarrier(cmdbuf); });
+        if (std::ranges::any_of(pipeline->WrittenImages(), [this](VideoCommon::ImageViewId id) {
+                return id && texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
+            })) {
+            oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
+            oot_effects_frame.reset();
+        }
+    }
+    scheduler.TraceComputePipeline(pipeline->ShaderHash());
+    scheduler.Record([this, pipeline, grid = dispatch.grid, bind = std::move(deferred_bind),
+                      marking_effects](vk::CommandBuffer cmdbuf) {
+        if (!marking_effects) {
+            RecordDispatchBarrier(cmdbuf);
+        }
+        if (bind) {
+            bind(cmdbuf);
+        }
+        if (!pipeline->IsBound()) {
+            return;
+        }
+        scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, grid,
+                               [&] { cmdbuf.Dispatch(grid[0], grid[1], grid[2]); });
+    });
+    if (marking_effects) {
+        // The deferred native binding may follow DLSS's command buffer bindings.
+        scheduler.InvalidateState();
+    }
+}
+
 void RasterizerVulkan::DispatchCompute() {
-    RENDER_LEND(DispatchCompute())
+    if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {
+        if (VideoCommon::GpuSplit::UnlendsDispatch() && TryUnlendDispatch()) {
+            return;
+        }
+        VideoCommon::GpuSplit::Get().LendRender([&] { DispatchCompute(); });
+        return;
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();

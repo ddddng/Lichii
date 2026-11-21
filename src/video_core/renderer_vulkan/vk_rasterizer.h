@@ -104,6 +104,8 @@ public:
     struct UnlentDraw;
     /// EDEN_NX2_RENDER_UNLEND_CLEAR: a clear the back posts unlent, which GPURender records.
     struct UnlentClear;
+    /// EDEN_NX2_RENDER_UNLEND_DISPATCH: a dispatch the back posts unlent, which GPURender records.
+    struct UnlentDispatch;
     void DrawIndirect() override;
     void DrawTexture() override;
     void Clear(u32 layer_count) override;
@@ -232,6 +234,11 @@ private:
     bool TryUnlendClear(u32 layer_count);
     /// GPURender: records an unlent clear from its view of the channel's registers.
     void PlayUnlentClear(UnlentClear& clear);
+    /// EDEN_NX2_RENDER_UNLEND_DISPATCH, on the back: resolves a dispatch's pipeline and buffer
+    /// half and posts the rest to GPURender. False when it has to be lent instead.
+    bool TryUnlendDispatch();
+    /// GPURender: records an unlent dispatch.
+    void PlayUnlentDispatch(UnlentDispatch& dispatch);
     /// The clear itself, from the engine's registers or GPURender's view of them.
     void ClearImpl(Tegra::Engines::Maxwell3D::Regs& regs, u32 layer_count);
     /// The back: posts `op` to GPURender with the state tracker on the view's flags (its submits

@@ -353,6 +353,43 @@ public:
     void NoteClearLent(ClearLent reason) {
         ++clears.lent[static_cast<size_t>(reason)];
     }
+    /// EDEN_NX2_RENDER_UNLEND_DISPATCH (needs EDEN_NX2_RENDER_UNLEND=1): compute dispatches go
+    /// unlent, GPURender recording their images, descriptors and the dispatch.
+    [[nodiscard]] static bool UnlendsDispatch() {
+        return on_back_thread && instance.unlend_dispatch;
+    }
+    /// Why the back lent a dispatch with EDEN_NX2_RENDER_UNLEND_DISPATCH on.
+    enum class DispatchLent : u8 {
+        Diagnostics,
+        Lookup,     ///< not a plain pipeline hit, or a game hook acts on the shader
+        NotBuilt,   ///< unbuilt or failed pipeline, texel buffers, byte-addressed images
+        Hook,       ///< Ocarina of Time's upscale passes, depth reader and collision map
+        Grid,       ///< a direct grid over the device's limits
+        SlotUnheld, ///< a list slot grid with no hold
+        ListOwed,   ///< owed list words in the constant buffers handles are read from
+        Gather,
+        NoView,
+        Count,
+    };
+    void NoteDispatchLent(DispatchLent reason) {
+        ++dispatches.lent[static_cast<size_t>(reason)];
+    }
+    void NoteUnlentDispatch(bool indirect, bool list_slot) {
+        dispatches.indirect += indirect ? 1 : 0;
+        dispatches.list_slots += list_slot ? 1 : 0;
+    }
+    /// A posted dispatch's list copies or early downloads, lent after it.
+    void NoteDispatchTail() {
+        ++dispatches.tails;
+    }
+    /// GPURender: an unlent dispatch it could not configure (must be 0).
+    void NoteUnlentDispatchFailed() {
+        dispatches.failed.fetch_add(1, std::memory_order_relaxed);
+    }
+    /// GPURender: an unlent dispatch's list slot no longer held (must be 0).
+    void NoteUnlentSlotUnheld() {
+        dispatches.slots_unheld.fetch_add(1, std::memory_order_relaxed);
+    }
     /// A verify clear whose view differed from the engine (must be 0).
     void NoteUnlentClearView() {
         clears.view_differences.fetch_add(1, std::memory_order_relaxed);
@@ -425,11 +462,13 @@ public:
             CheckRenderLocks();
         }
     }
-    enum class UnlentKind : u8 { Draw, Clear };
-    /// The back: posts an unlent draw or clear to GPURender.
+    enum class UnlentKind : u8 { Draw, Clear, Dispatch };
+    /// The back: posts an unlent draw, clear or dispatch to GPURender.
     template <typename Packet>
     void PostUnlent(Packet&& packet, UnlentKind kind = UnlentKind::Draw) {
-        ++(kind == UnlentKind::Draw ? unlend.unlent : clears.unlent);
+        ++(kind == UnlentKind::Draw    ? unlend.unlent
+           : kind == UnlentKind::Clear ? clears.unlent
+                                       : dispatches.unlent);
         packet.position = back_entry_start;
         if (render_follower->Post(back_entry_start, std::forward<Packet>(packet))) {
             CheckRenderLocks();
@@ -1273,6 +1312,17 @@ private:
         std::atomic<u64> view_differences{};
     };
     ClearCounts clears;
+    bool unlend_dispatch{};
+    struct DispatchCounts {
+        u64 unlent{};
+        u64 indirect{};
+        u64 list_slots{};
+        u64 tails{};
+        std::array<u64, static_cast<size_t>(DispatchLent::Count)> lent{};
+        std::atomic<u64> failed{};
+        std::atomic<u64> slots_unheld{};
+    };
+    DispatchCounts dispatches;
     bool soft_release_e{};
     u64 soft_releases{};
     std::atomic<u64> unlent_emulated_mesh{};

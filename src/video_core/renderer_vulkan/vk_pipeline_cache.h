@@ -147,6 +147,11 @@ public:
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
+    /// EDEN_NX2_RENDER_UNLEND_DISPATCH, on the back: CurrentComputePipeline when it is a plain
+    /// hit (the shader known, its entry built, no rebuild pending or due, no game hook acting);
+    /// nullptr, having created or retired nothing, otherwise. A retire stamps GPURender's tick,
+    /// which posted dispatches it has not recorded yet would outlive.
+    [[nodiscard]] ComputePipeline* UnlentComputePipeline(u64& native_key);
 
     /// Whether a Switch 2 dispatch whose compute pipeline is still building is skipped instead
     /// of waiting for the build, as native_async_draws decides for draws. Skipping leaves the

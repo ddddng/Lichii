@@ -458,6 +458,13 @@ public:
             nx2_list_copy_requests.clear();
         }
     }
+    [[nodiscard]] bool Nx2HasListCopyRequests() const {
+        return !nx2_list_copy_requests.empty();
+    }
+    /// Pages a dispatch's NoteWorkRecorded records early downloads of.
+    [[nodiscard]] bool HasEarlyDownloads() const {
+        return !early_pages.empty();
+    }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
     enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };

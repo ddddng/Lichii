@@ -284,6 +284,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_CLEAR needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const dispatch_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_DISPATCH");
+        const bool dispatch_wanted = dispatch_switch != nullptr && dispatch_switch[0] == '1';
+        unlend_dispatch = dispatch_wanted && render_unlend;
+        dispatches.unlent = dispatches.indirect = dispatches.list_slots = dispatches.tails = 0;
+        dispatches.lent = {};
+        dispatches.failed.store(0, std::memory_order_relaxed);
+        dispatches.slots_unheld.store(0, std::memory_order_relaxed);
+        if (dispatch_wanted && !unlend_dispatch) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_UNLEND_DISPATCH needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const query_flush_switch = std::getenv("EDEN_NX2_RENDER_QUERY_FLUSH_E");
         const bool query_flush_wanted =
             query_flush_switch != nullptr && query_flush_switch[0] == '1';
@@ -382,6 +393,7 @@ void GpuSplit::Stop() {
         query_flush_e = false;
         unlend_mesh = false;
         unlend_clear = false;
+        unlend_dispatch = false;
         soft_release_e = false;
     }
     active = false;
@@ -1403,6 +1415,24 @@ void GpuSplit::RenderLoop() {
                  clears.unlent, lent(ClearLent::Diagnostics), lent(ClearLent::Verify),
                  lent(ClearLent::Volume), lent(ClearLent::Gather),
                  clears.view_differences.load(std::memory_order_relaxed));
+    }
+    if (unlend_dispatch) {
+        const auto lent = [this](DispatchLent reason) {
+            return dispatches.lent[static_cast<size_t>(reason)];
+        };
+        LOG_INFO(HW_GPU,
+                 "GPU render unlent dispatches: {} unlent ({} indirect, {} list slot), {} lent "
+                 "tails (list copies, early downloads); lent: {} diagnostics, {} lookup not a "
+                 "plain hit, {} not built or unsupported bindings, {} Ocarina hooks, {} grid over "
+                 "the limit, {} list slot not held, {} list owes, {} gathers, {} no 3D engine; "
+                 "must be 0: {} GPURender could not configure, {} list slots not held at play",
+                 dispatches.unlent, dispatches.indirect, dispatches.list_slots, dispatches.tails,
+                 lent(DispatchLent::Diagnostics), lent(DispatchLent::Lookup),
+                 lent(DispatchLent::NotBuilt), lent(DispatchLent::Hook), lent(DispatchLent::Grid),
+                 lent(DispatchLent::SlotUnheld), lent(DispatchLent::ListOwed),
+                 lent(DispatchLent::Gather), lent(DispatchLent::NoView),
+                 dispatches.failed.load(std::memory_order_relaxed),
+                 dispatches.slots_unheld.load(std::memory_order_relaxed));
     }
     if (query_flush_e) {
         LOG_INFO(HW_GPU,
