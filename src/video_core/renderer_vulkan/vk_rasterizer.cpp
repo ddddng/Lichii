@@ -152,6 +152,35 @@ void RecordDirectDraw(Scheduler& scheduler, DrawParams params, std::pair<u64, u6
     }, location);
 }
 
+/// A warm direct draw's recording, which GPURender plays (GpuSplit::PostRender).
+struct RenderDraw {
+    Scheduler* scheduler;
+    GraphicsPipeline* pipeline;
+    GraphicsPipeline::PreparedBinding binding;
+    std::vector<Common::UniqueFunction<void, const vk::CommandBuffer&>> dynamic;
+    DrawParams params;
+
+    void operator()() {
+        namespace Profile = VideoCommon::Nx2Profile;
+        {
+            const Profile::Scope scope{Profile::Zone::ConfigureDraw};
+            pipeline->RecordPreparedBinding(binding);
+        }
+        if (!dynamic.empty()) {
+            const Profile::Scope scope{Profile::Zone::DynamicState};
+            scheduler->Record([commands = std::move(dynamic)](vk::CommandBuffer cmdbuf) {
+                for (const auto& command : commands) {
+                    command(cmdbuf);
+                }
+            });
+        }
+        const Profile::Scope scope{Profile::Zone::DrawRecord};
+        const auto& hashes = pipeline->ShaderHashes();
+        scheduler->TraceGraphicsPipeline(hashes);
+        RecordDirectDraw(*scheduler, params, {hashes[1], hashes[5]});
+    }
+};
+
 VkViewport GetViewportState(const Device& device, const Maxwell& regs, size_t index, float scale) {
     const auto& src = regs.viewport_transform[index];
     const auto conv = [scale](float value) {
@@ -552,12 +581,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
         device.IsHostQueryResetSupported());
+    VideoCommon::GpuSplit::Get().WatchRenderLocks({&buffer_cache.mutex, &texture_cache.mutex});
     oot_performance_scale =
         Settings::AppliedOcarinaRenderScale() == Settings::NvidiaDlssQuality::Performance;
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(false);
+    VideoCommon::GpuSplit::Get().WatchRenderLocks({});
     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
     // The channels are gone by now, and submitting invalidates the state tracker's flags.
     state_tracker.ClearChannel();
@@ -1037,10 +1068,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                       render_trace_frame, vs, ps);
         }
     };
-    Common::UniqueFunction<void> pending_render;
+    std::optional<RenderDraw> pending_render;
     SCOPE_EXIT {
         if (pending_render) {
-            split.PostRender(std::move(pending_render));
+            split.PostRender(std::move(*pending_render));
         }
     };
     SCOPE_EXIT {
@@ -1418,26 +1449,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         // The query cache stays on the back: its begin lands before the packet's bindings.
         query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
                                   maxwell3d->regs.zpass_pixel_count_enable);
-        pending_render = Common::UniqueFunction<void>{
-            [this, pipeline, binding = std::move(*prepared), dynamic = std::move(dynamic),
-             params]() mutable {
-                {
-                    const Profile::Scope scope{Profile::Zone::ConfigureDraw};
-                    pipeline->RecordPreparedBinding(binding);
-                }
-                if (!dynamic.empty()) {
-                    const Profile::Scope scope{Profile::Zone::DynamicState};
-                    scheduler.Record([commands = std::move(dynamic)](vk::CommandBuffer cmdbuf) {
-                        for (const auto& command : commands) {
-                            command(cmdbuf);
-                        }
-                    });
-                }
-                const Profile::Scope scope{Profile::Zone::DrawRecord};
-                const auto& hashes = pipeline->ShaderHashes();
-                scheduler.TraceGraphicsPipeline(hashes);
-                RecordDirectDraw(scheduler, params, {hashes[1], hashes[5]});
-            }};
+        pending_render.emplace(
+            RenderDraw{&scheduler, pipeline, std::move(*prepared), std::move(dynamic), params});
     } else {
         {
             Profile::Scope scope{Profile::Zone::DynamicState};

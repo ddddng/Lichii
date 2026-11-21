@@ -21,6 +21,7 @@
 
 #include "common/common_types.h"
 #include "common/container/unordered_map.h"
+#include "common/spin_recursive_mutex.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_render_follower.h"
 
@@ -266,7 +267,31 @@ public:
     [[nodiscard]] bool RenderFollowerRunning() const {
         return render_thread.joinable();
     }
-    void PostRender(Nx2RenderFollower::Work work);
+    /// The back, at a terminal draw: posts the draw's recording to GPURender.
+    template <typename Packet>
+    void PostRender(Packet&& packet) {
+        ASSERT(CanPostRender());
+        if (render_follower->Post(back_entry_start, std::forward<Packet>(packet))) {
+            CheckRenderLocks();
+        }
+    }
+    /// The back: runs "call" on GPURender once it played every earlier packet, the back parked
+    /// meanwhile (Fritchii's lend). The back must hold no lock GPURender's packets can take.
+    template <typename Call>
+    void LendRender(Call&& call) {
+        if (!on_back_thread || !render_follower) {
+            call();
+            return;
+        }
+        LendRenderCall(
+            [](void* argument) { (*static_cast<std::remove_reference_t<Call>*>(argument))(); },
+            &call);
+    }
+    /// The back never waits for GPURender holding one of these (the caches' locks), but at the
+    /// scheduler's joins: GPURender's packets take none.
+    void WatchRenderLocks(std::array<const Common::SpinRecursiveMutex*, 2> locks) {
+        render_locks = locks;
+    }
     void WaitRender(std::source_location site = std::source_location::current());
 
     /// What the sender of an entry tells about the guest memory the back writes running it, for
@@ -912,6 +937,11 @@ private:
     u64 render_overlap_entries{};
     u64 render_joins{};
     u64 render_parks{};
+    std::array<const Common::SpinRecursiveMutex*, 2> render_locks{};
+    /// Must be 0: lends and waits for ring room the back made holding a watched lock.
+    u64 render_lock_parks{};
+    void CheckRenderLocks();
+    void LendRenderCall(void (*call)(void*), void* argument);
     /// Where the back joined GPURender (the shutdown line's histogram, as Fritchii's lend trace
     /// by site, 5659ace40).
     struct JoinSite {

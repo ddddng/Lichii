@@ -192,10 +192,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         render_parks = 0;
         join_site_count = 0;
         join_sites_other = 0;
-        render_follower.emplace(spin_time);
+        // EDEN_NX2_RENDER_RING=1: the back posts while earlier packets are unplayed (a ring of
+        // packets); without it a post waits for the packet before it, as the single slot did.
+        const char* const ring_ahead = std::getenv("EDEN_NX2_RENDER_RING");
+        const bool ahead = ring_ahead != nullptr && ring_ahead[0] == '1';
+        render_lock_parks = 0;
+        render_follower.emplace(spin_time, ahead);
         render_thread = std::jthread([this] { RenderLoop(); });
-        LOG_INFO(HW_GPU, "GPU render follower: enabled, polls {} us before parking",
-                 spin_time.count());
+        LOG_INFO(HW_GPU, "GPU render follower: enabled, polls {} us before parking, {}",
+                 spin_time.count(),
+                 ahead ? "posts ahead of unplayed packets" : "one packet at a time");
     }
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -214,7 +220,7 @@ void GpuSplit::Stop() {
     wake.notify_one();
     back_thread.join();
     if (render_follower) {
-        render_follower->Publish({});
+        render_follower->Stop();
         render_thread.join();
         render_follower.reset();
     }
@@ -956,9 +962,22 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
     return 1;
 }
 
-void GpuSplit::PostRender(Nx2RenderFollower::Work work) {
-    ASSERT(CanPostRender());
-    render_follower->Publish(std::move(work));
+void GpuSplit::LendRenderCall(void (*call)(void*), void* argument) {
+    CheckRenderLocks();
+    const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+    render_parks += render_follower->Lend(back_entry_start, call, argument) ? 1 : 0;
+}
+
+void GpuSplit::CheckRenderLocks() {
+    for (const auto* const lock : render_locks) {
+        if (lock != nullptr && lock->HeldByCurrentThread()) {
+            if (render_lock_parks++ == 0) {
+                LOG_ERROR(HW_GPU, "GPU render follower: the back waited for GPURender holding a "
+                                  "cache lock its packets may take");
+            }
+            return;
+        }
+    }
 }
 
 void GpuSplit::WaitRender(std::source_location site) {
@@ -1029,16 +1048,13 @@ void GpuSplit::RenderLoop() {
     u64 packets{};
     Nx2Profile::Report("GPU render thread");
     for (;;) {
-        auto work = [&] {
+        const auto kind = [&] {
             const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-            return render_follower->Take();
+            return render_follower->PlayNext();
         }();
-        if (!work) {
+        if (kind == Nx2RenderFollower::Kind::Stop) {
             break;
         }
-        work();
-        work = {};
-        render_follower->Retire();
         ++packets;
         Nx2Profile::Report("GPU render thread");
     }
@@ -1046,14 +1062,17 @@ void GpuSplit::RenderLoop() {
                                              static_cast<double>(packets)
                                        : 0.0;
     const auto cpu_end = profile ? Common::CurrentThreadCpuTimeNs() : std::nullopt;
+    const auto& follower = *render_follower;
     LOG_INFO(HW_GPU,
-             "GPU render follower: {} packets, {} overlapping entries, {} joins ({:.1f}% of "
-             "packets), {} parked{}",
-             packets, render_overlap_entries, render_joins, joined, render_parks,
-             cpu_start && cpu_end
-                 ? fmt::format(", {:.3f} ms thread CPU",
-                               static_cast<double>(*cpu_end - *cpu_start) / 1e6)
-                 : std::string{});
+             "GPU render follower: {} packets ({} lent), {} overlapping entries, {} joins ({:.1f}% "
+             "of packets), {} parked, ring depth up to {}, {} room waits, {} wraps; must be 0: {} "
+             "out of order, {} parks holding a cache lock{}",
+             packets, follower.Lent(), render_overlap_entries, render_joins, joined, render_parks,
+             follower.MaxDepth(), follower.RoomWaits(), follower.Wraps(), follower.OutOfOrder(),
+             render_lock_parks,
+             cpu_start && cpu_end ? fmt::format(", {:.3f} ms thread CPU",
+                                                static_cast<double>(*cpu_end - *cpu_start) / 1e6)
+                                  : std::string{});
     LogJoinSites();
 }
 
