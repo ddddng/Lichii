@@ -703,11 +703,10 @@ public:
             site,
             [](void* argument) {
                 render_lent = true;
-                void* const token = instance.render_unlend && instance.lend_enter != nullptr
-                                        ? instance.lend_enter(instance.lend_argument)
-                                        : nullptr;
+                const bool hooks = instance.render_unlend && instance.lend_enter != nullptr;
+                void* const token = hooks ? instance.lend_enter(instance.lend_argument) : nullptr;
                 SCOPE_EXIT {
-                    if (token != nullptr) {
+                    if (hooks) {
                         instance.lend_leave(instance.lend_argument, token);
                     }
                     render_lent = false;
@@ -717,7 +716,8 @@ public:
             &call);
     }
     /// EDEN_NX2_RENDER_UNLEND: around each lent call, the renderer evens out the dirty flags of
-    /// its engine and GPURender's view (enter returns what leave takes, null for nothing).
+    /// its engine and GPURender's view (enter returns what leave takes, null for nothing) and
+    /// plays what the call left queued, still lent.
     void SetLendHooks(void* (*enter)(void*), void (*leave)(void*, void*), void* argument) {
         lend_enter = enter;
         lend_leave = leave;

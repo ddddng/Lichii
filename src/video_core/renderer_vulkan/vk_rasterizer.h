@@ -292,7 +292,8 @@ private:
     /// GPURender: records an unlent draw from its view of the channel's registers.
     void PlayUnlentDraw(UnlentDraw& draw);
     /// Around each lent call (GpuSplit::SetLendHooks): the engine takes the flags GPURender's
-    /// view holds, and the view takes the engine's after the call.
+    /// view holds, and the view takes the engine's after the call; the buffer commands the call
+    /// queued play before it returns.
     static void* LendEnter(void* rasterizer);
     static void LendLeave(void* rasterizer, void* engine);
     /// The registers GPURender's dynamic state reads: its view while it plays an unlent draw.

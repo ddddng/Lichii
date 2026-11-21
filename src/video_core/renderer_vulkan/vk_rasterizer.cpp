@@ -2198,6 +2198,13 @@ void* RasterizerVulkan::LendEnter(void* argument) {
 }
 
 void RasterizerVulkan::LendLeave(void*, void* token) {
+    // Buffer commands the call queued with no scheduler use after them (an inline write into
+    // GPU-written buffer memory, InlineMemoryImplementation) take their arena stamp here, the
+    // back parked: played at GPURender's next scheduler use, they took it while the back stamps.
+    BufferArena::PlayPending();
+    if (token == nullptr) {
+        return;
+    }
     auto* const engine = static_cast<Tegra::Engines::Maxwell3D*>(token);
     auto& view_flags = engine->render_view_writes->View().dirty.flags;
     const auto& forwarded = VideoCommon::Nx2RenderView::Forwarded();
