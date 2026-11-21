@@ -533,7 +533,7 @@ Result IHardwareAudioCodecManagerSession::InitializeInstance(
     p.live[id] = 1;
     ++p.batch.State().live_instances;
     if (!p.trace.empty()) {
-        p.trace[id] = {};
+        p.trace[id].total_tasks = 0;
         LOG_INFO(Service_Audio,
                  "hwacod tag={} instance {} initialized: kind {}, {} Hz, {} channels, {} samples per "
                  "frame, {} streams ({} coupled)",
