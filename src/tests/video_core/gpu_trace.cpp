@@ -140,6 +140,53 @@ TEST_CASE("The sample GPU trace has a snapshot, submits and presents", "[video_c
     }
 }
 
+TEST_CASE("The draw sample GPU trace writes its programs and data, then draws",
+          "[video_core][gpu_trace]") {
+    const Tests::TempDir directory{"lichii-gpu-trace-draw-sample"};
+    const auto path = directory / "trace.lxtrace";
+    REQUIRE(WriteDrawSampleTrace(path));
+    {
+        Reader reader{path};
+        REQUIRE(reader.Error().empty());
+        size_t writes = 0;
+        size_t submits = 0;
+        size_t presents = 0;
+        bool snapshot_end = false;
+        bool end = false;
+        while (const auto record = reader.Next()) {
+            switch (record->type) {
+            case RecordType::SnapshotEnd:
+                snapshot_end = true;
+                break;
+            case RecordType::Memory:
+                CHECK(snapshot_end);
+                ++writes;
+                break;
+            case RecordType::Submit:
+                CHECK(snapshot_end);
+                ++submits;
+                break;
+            case RecordType::Present:
+                CHECK(snapshot_end);
+                CHECK(submits == presents + 1);
+                ++presents;
+                break;
+            case RecordType::End:
+                end = true;
+                break;
+            default:
+                break;
+            }
+        }
+        CHECK(reader.Error().empty());
+        CHECK(end);
+        // Two programs, the vertices and the indices, then each frame's commands.
+        CHECK(writes == 4 + 4);
+        CHECK(submits == 4);
+        CHECK(presents == 4);
+    }
+}
+
 TEST_CASE("GPU trace reader reads format 1 traces, not newer ones than its own",
           "[video_core][gpu_trace]") {
     const Tests::TempDir directory{"lichii-gpu-trace-version"};

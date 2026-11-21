@@ -12,4 +12,9 @@ namespace VideoCommon::GpuTrace {
 /// Returns false if the file can't be written.
 bool WriteSampleTrace(const std::filesystem::path& path);
 
+/// Writes a synthetic trace of 3D draws on the same channel: four frames of a few hundred
+/// overlapping quads (indexed and not) from Switch 2 programs, with constant buffer updates,
+/// scissor, blend, color mask and viewport changes and clears between them, each presented.
+bool WriteDrawSampleTrace(const std::filesystem::path& path);
+
 } // namespace VideoCommon::GpuTrace

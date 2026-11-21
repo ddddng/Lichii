@@ -14,6 +14,37 @@
           "25534de13047d44ee06567c1d33ab1a0"
         ]
       }
+    },
+    {
+      "id": "draws",
+      "source": "generated",
+      "generator": "--gpu-trace-sample-draws",
+      "description": "eden-cli --gpu-trace-sample-draws: 300 direct draws a frame with constant buffer updates, blending, scissors, colour masks, viewports and clears between them",
+      "expected": {
+        "lavapipe": [
+          "469b24e54713a0d4fd14cce985dd58a0",
+          "7f9381d13e5a66125a504cd061155bef",
+          "c2ad0e067b62ebe6fceffac8444c32f3",
+          "ee2f3d785bab823201f8486fc967af61"
+        ]
+      }
+    },
+    {
+      "id": "draws-render-follower",
+      "source": "generated",
+      "generator": "--gpu-trace-sample-draws",
+      "environment": {
+        "EDEN_NX2_RENDER_FOLLOWER": "1"
+      },
+      "description": "The draws trace with the GPU render follower recording warm direct draws (EDEN_NX2_RENDER_FOLLOWER=1): the same frames as without it",
+      "expected": {
+        "lavapipe": [
+          "469b24e54713a0d4fd14cce985dd58a0",
+          "7f9381d13e5a66125a504cd061155bef",
+          "c2ad0e067b62ebe6fceffac8444c32f3",
+          "ee2f3d785bab823201f8486fc967af61"
+        ]
+      }
     }
   ]
 }

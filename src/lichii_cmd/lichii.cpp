@@ -491,14 +491,18 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 ///   eden-cli --replay <trace> --out <dir> [--frames N] [--device N]
 ///                     [--record <trace> --record-from <present> --record-presents N]
 ///   eden-cli --gpu-trace-sample <trace>: writes the synthetic trace.
+///   eden-cli --gpu-trace-sample-draws <trace>: writes the synthetic trace of 3D draws.
 static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
     namespace GpuTrace = VideoCommon::GpuTrace;
-    if (std::string_view{argv[1]} == "--gpu-trace-sample") {
+    const std::string_view command{argv[1]};
+    if (command == "--gpu-trace-sample" || command == "--gpu-trace-sample-draws") {
         if (argc < 3) {
-            fmt::print(stderr, "usage: --gpu-trace-sample <trace>\n");
+            fmt::print(stderr, "usage: {} <trace>\n", command);
             return false;
         }
-        return GpuTrace::WriteSampleTrace(Common::FS::ToU8String(argv[2]));
+        const auto path = Common::FS::ToU8String(argv[2]);
+        return command == "--gpu-trace-sample" ? GpuTrace::WriteSampleTrace(path)
+                                               : GpuTrace::WriteDrawSampleTrace(path);
     }
     GpuTrace::ReplayOptions options;
     for (int i = 2; i < argc; ++i) {
@@ -581,7 +585,8 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         return BuildWarm(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
     if (argc > 1 && (std::string_view{argv[1]} == "--replay" ||
-                     std::string_view{argv[1]} == "--gpu-trace-sample")) {
+                     std::string_view{argv[1]} == "--gpu-trace-sample" ||
+                     std::string_view{argv[1]} == "--gpu-trace-sample-draws")) {
         return ReplayGpuTrace(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 
