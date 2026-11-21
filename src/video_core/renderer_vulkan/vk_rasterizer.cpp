@@ -1314,7 +1314,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (direct_instances && split.CanPostRender() && !mesh_draw && !fast_draw_verify &&
         !frame_dump.Capturing() && !Common::DkbFrameTrace::Enabled() &&
         !VideoCommon::RenderTrace::Enabled() && !GPU::Logging::IsActive() &&
-        !native_draw_capture && !OcarinaTemporalEnabled() &&
+        !native_draw_capture &&
         maxwell3d->regs.transform_feedback_enabled == 0 &&
         maxwell3d->draw_manager.draw_state.inline_index_draw_indexes.empty()) {
         const auto topology = maxwell3d->draw_manager.draw_state.topology;
