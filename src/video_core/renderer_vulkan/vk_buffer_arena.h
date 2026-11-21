@@ -77,6 +77,7 @@ public:
     struct Collect {
         explicit Collect(VideoCommon::CommandArena& into) noexcept {
             collecting = &into;
+            collect_stamp = 0;
         }
         ~Collect() {
             collecting = nullptr;
@@ -87,7 +88,10 @@ public:
     }
     /// The back, posting what it collected: the stamp GPURender maps when it plays it.
     [[nodiscard]] u64 CloseCollected() noexcept {
-        return clock.Close();
+        const u64 stamp = clock.Close();
+        moved_collects += collect_stamp != 0 && collect_stamp != stamp ? 1 : 0;
+        collect_stamp = 0;
+        return stamp;
     }
     /// GPURender: plays what the back collected for a draw, stamped `stamp`.
     void PlayCollected(const VideoCommon::CommandArena& commands, u64 stamp);
@@ -208,6 +212,8 @@ private:
 
     static inline thread_local BufferArena* pending{};
     static inline thread_local VideoCommon::CommandArena* collecting{};
+    /// The stamp of the open collect's first record (Now()), 0 before it.
+    static inline thread_local u64 collect_stamp{};
     static inline thread_local u32 side_depth{};
     static inline thread_local u32 immediate_depth{};
     static inline thread_local bool playing{};
@@ -233,6 +239,9 @@ private:
     /// EDEN_NX2_RENDER_UNLEND: the back takes stamps while GPURender plays, so GPURender takes
     /// them only inside a lent call, the back parked (must be 0 outside).
     u64 unowned_stamps{};
+    /// Collected batches whose records were stamped other than CloseCollected returns: another
+    /// thread took a stamp while the back collected (must be 0).
+    u64 moved_collects{};
     bool unlend_seen{};
     void NoteStamp() noexcept {
         if (VideoCommon::GpuSplit::UnlendEnabled()) {

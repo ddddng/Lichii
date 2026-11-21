@@ -60,8 +60,9 @@ BufferArena::~BufferArena() {
              outside_records.load(std::memory_order_relaxed));
     if (unlend_seen) {
         LOG_INFO(Render_Vulkan,
-                 "Buffer arena clock: must be 0: {} stamps taken on GPURender outside a lent call",
-                 unowned_stamps);
+                 "Buffer arena clock: must be 0: {} stamps taken on GPURender outside a lent call, "
+                 "{} collected batches whose stamp moved before the post",
+                 unowned_stamps, moved_collects);
     }
 }
 
@@ -76,6 +77,9 @@ bool BufferArena::Enabled() {
 template <typename Body, typename E>
 void BufferArena::Submit(Op op, const Body& body, std::span<const E> array) {
     if (collecting != nullptr) {
+        if (collecting->Empty()) {
+            collect_stamp = clock.Now();
+        }
         collecting->Push(static_cast<u16>(op), body, array);
         return;
     }
