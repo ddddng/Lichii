@@ -17,4 +17,8 @@ bool WriteSampleTrace(const std::filesystem::path& path);
 /// scissor, blend, color mask and viewport changes and clears between them, each presented.
 bool WriteDrawSampleTrace(const std::filesystem::path& path);
 
+/// The draw trace with new vertex and index data written before every eighth of a frame, so the
+/// buffer cache uploads between draws.
+bool WriteUploadSampleTrace(const std::filesystem::path& path);
+
 } // namespace VideoCommon::GpuTrace

@@ -1168,6 +1168,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
 
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        const BufferArena::SideScope side;
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
@@ -1185,6 +1186,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
+            const BufferArena::SideScope side;
             buffer_cache.BindHostStageBuffers(stage);
         }
         {
@@ -1333,6 +1335,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
     }
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        const BufferArena::SideScope side;
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
@@ -1368,6 +1371,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
         }
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
+            const BufferArena::SideScope side;
             buffer_cache.BindHostStageBuffers(stage);
         }
         if (stage == 4) {

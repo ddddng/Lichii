@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/nx2_list_slots.h"
+#include "video_core/renderer_vulkan/vk_buffer_arena.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
@@ -92,7 +93,7 @@ private:
     };
 
     const Device* device{};
-    Scheduler* scheduler{};
+    const BufferArena* arena{};
     vk::Buffer buffer;
     std::vector<BufferView> views;
     VideoCommon::UsageTracker tracker;
@@ -226,7 +227,7 @@ public:
     std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
                                           [[maybe_unused]] u32 binding_index,
                                           u32 size) {
-        const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
+        const StagingBufferRef ref = UploadPool().Request(size, MemoryUsage::Upload);
         last_stream_uniform = StreamUniformRef{
             .buffer = ref.buffer,
             .device_address = ref.device_address,
@@ -247,8 +248,11 @@ public:
     template <typename Read>
     bool Nx2PatchOwed(DAddr device_addr, u32 size, VkBuffer buffer, u64 offset, Read&& read,
                       Tegra::Nx2ListIndirect::OwedReader reader) {
-        return nx2_list_slots.HasOwed() &&
-               nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
+        if (!nx2_list_slots.HasOwed()) {
+            return false;
+        }
+        const BufferArena::ImmediateScope immediate{arena};
+        return nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
     }
 
     /// Whether [device_addr, +size) holds owed list words (Nx2ListIndirect).
@@ -269,6 +273,7 @@ public:
     void Nx2LandOwed(DAddr device_addr, u64 size, Tegra::Nx2ListIndirect::OwedReader reader,
                      Land&& land) {
         if (nx2_list_slots.HasOwed()) {
+            const BufferArena::ImmediateScope immediate{arena};
             nx2_list_slots.LandRange(device_addr, size, reader, land);
         }
     }
@@ -364,6 +369,11 @@ private:
         }
     }
 
+    /// Buffer uploads and the uniform stream: the buffer side's own pool with the arena on.
+    [[nodiscard]] StagingBufferPool& UploadPool() noexcept {
+        return upload_pool ? *upload_pool : staging_pool;
+    }
+
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
     VkDeviceSize NullBufferSize() const;
@@ -374,6 +384,8 @@ private:
     const MasterSemaphore& master_semaphore; ///< The scheduler's, for CurrentTick
     StagingBufferPool& staging_pool;
     GuestDescriptorQueue& guest_descriptor_queue;
+    BufferArena arena;
+    std::unique_ptr<StagingBufferPool> upload_pool;
 
     std::shared_ptr<QuadArrayIndexBuffer> quad_array_index_buffer;
     std::shared_ptr<QuadStripIndexBuffer> quad_strip_index_buffer;
@@ -394,13 +406,6 @@ private:
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
-
-    /// The index buffer BindIndexBuffer recorded last, at scheduler recording epoch bound_index_epoch.
-    VkBuffer bound_index_buffer = VK_NULL_HANDLE;
-    VkDeviceSize bound_index_offset = 0;
-    VkIndexType bound_index_type = VK_INDEX_TYPE_UINT32;
-    u64 bound_index_epoch = 0;
-    bool bound_index_valid = false;
 
     Nx2ListSlots nx2_list_slots{memory_allocator, scheduler};
 };

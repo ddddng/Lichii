@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <initializer_list>
@@ -307,12 +309,14 @@ void Quad(Commands& commands, u32 x, u32 y, u32 width, u32 height, std::array<f3
     commands.Method(MAXWELL3D_REG_INDEX(draw.end), {0});
 }
 
-/// One frame of overlapping quads with state changes and clears between them.
-Commands DrawFrame(u32 frame) {
-    Commands commands = frame == 0 ? DrawSetup() : Commands{};
-    commands.Method(MAXWELL3D_REG_INDEX(depth_test_enable), {0});
-    commands.Clear({0.1f * static_cast<f32>(frame), 0.1f, 0.2f, 1.0f}, nullptr);
-    u32 seed = 0x9e3779b9u * (frame + 1);
+/// Draws [first, last) of one frame's overlapping quads with state changes and clears between
+/// them. The seed carries the frame's quads from one part to the next.
+Commands DrawFrame(u32 frame, u32 first, u32 last, u32& seed) {
+    Commands commands = frame == 0 && first == 0 ? DrawSetup() : Commands{};
+    if (first == 0) {
+        commands.Method(MAXWELL3D_REG_INDEX(depth_test_enable), {0});
+        commands.Clear({0.1f * static_cast<f32>(frame), 0.1f, 0.2f, 1.0f}, nullptr);
+    }
     const auto next = [&seed] {
         seed ^= seed << 13;
         seed ^= seed >> 17;
@@ -322,7 +326,7 @@ Commands DrawFrame(u32 frame) {
     const Rect scissor{32 + frame * 8, 24, 200, 120};
     const Rect dark{184, 88, 248, 136};
     const Rect light{8, 8, 72, 56};
-    for (u32 draw = 0; draw < DrawsPerFrame; ++draw) {
+    for (u32 draw = first; draw < last; ++draw) {
         switch (draw) {
         case 80:
             commands.Clear({0.0f, 0.0f, 0.0f, 1.0f}, &dark);
@@ -362,6 +366,11 @@ Commands DrawFrame(u32 frame) {
         Quad(commands, x, y, width, height, color, indexed, indexed ? (draw % 2) * 6 : 0);
     }
     return commands;
+}
+
+Commands DrawFrame(u32 frame) {
+    u32 seed = 0x9e3779b9u * (frame + 1);
+    return DrawFrame(frame, 0, DrawsPerFrame, seed);
 }
 } // Anonymous namespace
 
@@ -410,6 +419,40 @@ bool WriteDrawSampleTrace(const std::filesystem::path& path) {
     constexpr u64 Frame = 16'666'667;
     for (u32 frame = 0; frame < DrawFrames; ++frame) {
         Submit(writer, PushOffset + frame * FramePushSize, DrawFrame(frame));
+        Present(writer, TargetOffset, Frame * (frame + 1));
+    }
+    return writer.Finish();
+}
+
+bool WriteUploadSampleTrace(const std::filesystem::path& path) {
+    Writer writer{path};
+    if (!writer.IsOpen()) {
+        return false;
+    }
+    WriteSampleSnapshot(writer);
+    writer.WriteMemory(PhysicalBase + VertexProgramOffset, Program(VertexProgram, false));
+    writer.WriteMemory(PhysicalBase + PixelProgramOffset, Program(PixelProgram, true));
+    constexpr u32 Parts = 8;
+    constexpr u64 PartPushSize = FramePushSize / Parts;
+    constexpr u64 Frame = 16'666'667;
+    for (u32 frame = 0; frame < DrawFrames; ++frame) {
+        u32 seed = 0x9e3779b9u * (frame + 1);
+        for (u32 part = 0; part < Parts; ++part) {
+            // New vertex and index data before every part: uploads between the draws.
+            const u32 step = frame * Parts + part;
+            std::array<f32, Vertices.size()> vertices = Vertices;
+            for (f32& coordinate : vertices) {
+                coordinate *= 1.0f - 0.03f * static_cast<f32>(step % 9);
+            }
+            std::array<u16, Indices.size()> indices = Indices;
+            std::rotate(indices.begin(), indices.begin() + 3 * (step % 4), indices.end());
+            writer.WriteMemory(PhysicalBase + VertexOffset, AsBytes(vertices));
+            writer.WriteMemory(PhysicalBase + IndexOffset, AsBytes(indices));
+            const u32 first = DrawsPerFrame * part / Parts;
+            const u32 last = DrawsPerFrame * (part + 1) / Parts;
+            Submit(writer, PushOffset + frame * FramePushSize + part * PartPushSize,
+                   DrawFrame(frame, first, last, seed));
+        }
         Present(writer, TargetOffset, Frame * (frame + 1));
     }
     return writer.Finish();
