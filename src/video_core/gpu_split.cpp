@@ -232,12 +232,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         // Render follower port, step 8: posted render ops, one switch each.
         static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
             post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK", "EDEN_NX2_RENDER_POST_FLUSH",
-                          "EDEN_NX2_RENDER_POST_FLUSH"};
+                          "EDEN_NX2_RENDER_POST_FLUSH", "EDEN_NX2_RENDER_POST_FENCE"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
             posts[op] = wanted && render_unlend;
             posted[op] = 0;
+            fences_lent = {};
             if (wanted && !render_unlend) {
                 LOG_WARNING(HW_GPU, "{} needs EDEN_NX2_RENDER_UNLEND=1: ignored",
                             post_switches[op]);
@@ -1265,6 +1266,16 @@ void GpuSplit::RenderLoop() {
                  posted[static_cast<size_t>(PostedOp::IdleHook)],
                  posted[static_cast<size_t>(PostedOp::FlushCommands)],
                  posted[static_cast<size_t>(PostedOp::FragmentBarrier)]);
+        if (posts[static_cast<size_t>(PostedOp::Fence)]) {
+            LOG_INFO(HW_GPU,
+                     "GPU render posted fences: {} posted, lent: {} delayed, {} query sync owed, "
+                     "{} buffer flushes to commit, {} without a view",
+                     posted[static_cast<size_t>(PostedOp::Fence)],
+                     fences_lent[static_cast<size_t>(FenceLent::Delayed)],
+                     fences_lent[static_cast<size_t>(FenceLent::QueryOwed)],
+                     fences_lent[static_cast<size_t>(FenceLent::BufferHalf)],
+                     fences_lent[static_cast<size_t>(FenceLent::NoView)]);
+        }
     }
 }
 

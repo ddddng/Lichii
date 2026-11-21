@@ -1696,6 +1696,53 @@ bool RasterizerVulkan::PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& o
     return true;
 }
 
+template <typename Op>
+bool RasterizerVulkan::PostFence(Op&& op) {
+    using VideoCommon::GpuSplit;
+    auto& split = GpuSplit::Get();
+    if (!split.Posts(GpuSplit::PostedOp::Fence)) {
+        return false;
+    }
+    // Fritchii 440c984e7: GPURender's fence must not enter the back's buffer cache: nothing to
+    // commit there, no query sync owed, and the closing gather runs here.
+    const bool delayed =
+        Settings::IsGPUFenceBehaviorDefault()
+            ? Settings::IsGPULevelHigh()
+            : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+    if (delayed) {
+        split.NoteFenceLent(GpuSplit::FenceLent::Delayed);
+        return false;
+    }
+    if (fence_query_owed) {
+        split.NoteFenceLent(GpuSplit::FenceLent::QueryOwed);
+        return false;
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (buffer_cache.HasUncommittedFlushes()) {
+            split.NoteFenceLent(GpuSplit::FenceLent::BufferHalf);
+            return false;
+        }
+    }
+    if (maxwell3d == nullptr || !maxwell3d->render_view_writes) {
+        split.NoteFenceLent(GpuSplit::FenceLent::NoView);
+        return false;
+    }
+    InvalidateGPUCache();
+    PostRenderOp(GpuSplit::PostedOp::Fence, [this, op = std::forward<Op>(op)]() mutable {
+        posted_fence_playing = true;
+        fence_manager.skip_buffer_half = true;
+        SCOPE_EXIT {
+            posted_fence_playing = false;
+            fence_manager.skip_buffer_half = false;
+        };
+        op();
+    });
+    // Its texture downloads and the guest increment land on GPURender without a lend.
+    split.MarkGuestWrite();
+    return true;
+}
+
 struct RasterizerVulkan::UnlentDraw {
     RasterizerVulkan* rasterizer;
     Tegra::Engines::Maxwell3D* engine;
@@ -3083,6 +3130,9 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    if (VideoCommon::GpuSplit::LendsToRender()) {
+        fence_query_owed = true;
+    }
     RENDER_LEND(Query(gpu_addr, type, flags, payload, subreport))
     // Reports and semaphore releases reach guest memory the CPU may wait on.
     VideoCommon::Nx2FastDraw::NoteSync();
@@ -3619,6 +3669,9 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::InvalidateGPUCache() {
+    if (posted_fence_playing) {
+        return;
+    }
     gpu.InvalidateGPUCache();
 }
 
@@ -3645,6 +3698,9 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    if (VideoCommon::GpuSplit::LendsToRender()) {
+        fence_query_owed = false;
+    }
     RENDER_LEND(SignalFence(std::move(func)))
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalFence(std::move(func));
@@ -3657,18 +3713,43 @@ void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
+    if (PostFence([this, value] {
+            VideoCommon::Nx2FastDraw::NoteSync();
+            fence_manager.SignalSyncPoint(value);
+        })) {
+        return;
+    }
+    if (VideoCommon::GpuSplit::LendsToRender()) {
+        fence_query_owed = false;
+    }
     RENDER_LEND(SignalSyncPoint(value))
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
+    if (PostFence([this] {
+            VideoCommon::Nx2FastDraw::NoteSync();
+            fence_manager.SignalReference();
+        })) {
+        return;
+    }
+    if (VideoCommon::GpuSplit::LendsToRender()) {
+        fence_query_owed = false;
+    }
     RENDER_LEND(SignalReference())
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalReference();
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    // With immediate fences the forced release's wait ends inside SignalFence (Fritchii 440c984e7).
+    if (force && PostFence([this] { fence_manager.WaitPendingFences(true); })) {
+        return;
+    }
+    if (VideoCommon::GpuSplit::LendsToRender() && force) {
+        fence_query_owed = false;
+    }
     RENDER_LEND(ReleaseFences(force))
     fence_manager.WaitPendingFences(force);
 }

@@ -228,6 +228,14 @@ private:
     /// invalidate those, LendEnter hands them to the engine). False when `kind` is not posted.
     template <typename Op>
     bool PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& op);
+    /// EDEN_NX2_RENDER_POST_FENCE: posts a clean immediate fence (`op` makes it on GPURender),
+    /// the closing gather run here first. False when it has to be lent.
+    template <typename Op>
+    bool PostFence(Op&& op);
+    /// The back: a report since the last lent fence owes the query sync (PostFence).
+    bool fence_query_owed{};
+    /// GPURender, playing a posted fence: the back ran its closing gather.
+    bool posted_fence_playing{};
     /// GPURender: records an unlent draw from its view of the channel's registers.
     void PlayUnlentDraw(UnlentDraw& draw);
     /// Around each lent call (GpuSplit::SetLendHooks): the engine takes the flags GPURender's

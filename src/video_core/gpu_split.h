@@ -285,8 +285,20 @@ public:
         IdleHook,        ///< EDEN_NX2_RENDER_POST_IDLE_HOOK: the back's idle hook (FlushDeferred)
         FlushCommands,   ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FlushCommands
         FragmentBarrier, ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FragmentBarrier
+        Fence, ///< EDEN_NX2_RENDER_POST_FENCE: clean sync points, references and forced releases
         Count,
     };
+    /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).
+    enum class FenceLent : u8 {
+        Delayed,    ///< delayed fences (accuracy): their wait is the fencing thread's
+        QueryOwed,  ///< a report since the last lent fence owes the query sync
+        BufferHalf, ///< the buffer cache has flushes to commit (the back's cache)
+        NoView,     ///< no register view yet on the channel
+        Count,
+    };
+    void NoteFenceLent(FenceLent reason) {
+        ++fences_lent[static_cast<size_t>(reason)];
+    }
     [[nodiscard]] bool Posts(PostedOp op) const {
         return on_back_thread && posts[static_cast<size_t>(op)];
     }
@@ -1134,6 +1146,7 @@ private:
     bool fast_draw_restore{};
     std::array<bool, static_cast<size_t>(PostedOp::Count)> posts{};
     std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
+    std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
     struct UnlendCounts {
         u64 unlent{};
         std::array<u64, static_cast<size_t>(UnlendReason::Count)> lent{};
