@@ -492,17 +492,22 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 ///                     [--record <trace> --record-from <present> --record-presents N]
 ///   eden-cli --gpu-trace-sample <trace>: writes the synthetic trace.
 ///   eden-cli --gpu-trace-sample-draws <trace>: writes the synthetic trace of 3D draws.
+///   eden-cli --gpu-trace-sample-uploads <trace>: the draws with buffer uploads between them.
 static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
     namespace GpuTrace = VideoCommon::GpuTrace;
     const std::string_view command{argv[1]};
-    if (command == "--gpu-trace-sample" || command == "--gpu-trace-sample-draws") {
+    if (command == "--gpu-trace-sample" || command == "--gpu-trace-sample-draws" ||
+        command == "--gpu-trace-sample-uploads") {
         if (argc < 3) {
             fmt::print(stderr, "usage: {} <trace>\n", command);
             return false;
         }
         const auto path = Common::FS::ToU8String(argv[2]);
-        return command == "--gpu-trace-sample" ? GpuTrace::WriteSampleTrace(path)
-                                               : GpuTrace::WriteDrawSampleTrace(path);
+        if (command == "--gpu-trace-sample") {
+            return GpuTrace::WriteSampleTrace(path);
+        }
+        return command == "--gpu-trace-sample-draws" ? GpuTrace::WriteDrawSampleTrace(path)
+                                                     : GpuTrace::WriteUploadSampleTrace(path);
     }
     GpuTrace::ReplayOptions options;
     for (int i = 2; i < argc; ++i) {
@@ -586,7 +591,8 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     }
     if (argc > 1 && (std::string_view{argv[1]} == "--replay" ||
                      std::string_view{argv[1]} == "--gpu-trace-sample" ||
-                     std::string_view{argv[1]} == "--gpu-trace-sample-draws")) {
+                     std::string_view{argv[1]} == "--gpu-trace-sample-draws" ||
+                     std::string_view{argv[1]} == "--gpu-trace-sample-uploads")) {
         return ReplayGpuTrace(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 

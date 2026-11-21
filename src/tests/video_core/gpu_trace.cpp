@@ -187,6 +187,36 @@ TEST_CASE("The draw sample GPU trace writes its programs and data, then draws",
     }
 }
 
+TEST_CASE("The upload sample GPU trace writes new buffer data before every part of a frame",
+          "[video_core][gpu_trace]") {
+    const Tests::TempDir directory{"lichii-gpu-trace-upload-sample"};
+    const auto path = directory / "trace.lxtrace";
+    REQUIRE(WriteUploadSampleTrace(path));
+    Reader reader{path};
+    REQUIRE(reader.Error().empty());
+    size_t writes = 0;
+    size_t submits = 0;
+    size_t presents = 0;
+    bool snapshot_end = false;
+    while (const auto record = reader.Next()) {
+        if (record->type == RecordType::SnapshotEnd) {
+            snapshot_end = true;
+        } else if (record->type == RecordType::Memory && snapshot_end) {
+            ++writes;
+        } else if (record->type == RecordType::Submit) {
+            ++submits;
+        } else if (record->type == RecordType::Present) {
+            CHECK(submits == (presents + 1) * 8);
+            ++presents;
+        }
+    }
+    CHECK(reader.Error().empty());
+    // Two programs, then vertices, indices and the commands of each of the 8 parts of 4 frames.
+    CHECK(writes == 2 + 4 * 8 * 3);
+    CHECK(submits == 4 * 8);
+    CHECK(presents == 4);
+}
+
 TEST_CASE("GPU trace reader reads format 1 traces, not newer ones than its own",
           "[video_core][gpu_trace]") {
     const Tests::TempDir directory{"lichii-gpu-trace-version"};
