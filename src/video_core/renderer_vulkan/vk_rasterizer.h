@@ -21,18 +21,19 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
-#include "video_core/oot_network.h"
+#include "video_core/ocarina_camera.h"
 #include "video_core/ocarina_upscale.h"
+#include "video_core/oot_network.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_fence_manager.h"
+#include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
-#include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -321,13 +322,11 @@ private:
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
     bool OcarinaTemporalEnabled() const;
-    void TrackOcarinaCamera();
     /// Offsets the viewport of Ocarina's scene draws (depth-tested, into the scene depth) by a
     /// sub-pixel amount that changes every frame while FSR replaces the game's upscale, so FSR
     /// gets new sample positions each frame (the game renders without jitter). The offset goes to
     /// FSR with the frame.
     void UpdateOcarinaJitter();
-    void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
     bool TryOcarinaUpscale(const ComputePipeline& pipeline, u64 native_key, bool replace);
     void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
@@ -422,6 +421,19 @@ private:
         std::array<f32, 4> origin{};
         std::array<f32, 280 * 12> bones{};
     } oot_actor, oot_previous_actor;
+    /// What Ocarina's temporal trackers read from guest memory and the buffer cache at a draw,
+    /// taken at the draw's place in the stream (by the back for an unlent draw). GPURender applies
+    /// it with its render targets to the Ocarina state, which only it changes.
+    struct OcarinaDrawFacts {
+        Tegra::MemoryManager* channel{};
+        std::optional<VideoCommon::OcarinaCameraBuffer> camera;
+        bool camera_gpu_written{};
+        std::optional<OcarinaActorPose> actor;
+    };
+    [[nodiscard]] std::unique_ptr<OcarinaDrawFacts> CaptureOcarinaFacts(u64 shader_hash,
+                                                                        bool is_indexed,
+                                                                        bool is_indirect);
+    void ApplyOcarinaFacts(const OcarinaDrawFacts& facts);
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;
     u32 render_trace_clears = 0;

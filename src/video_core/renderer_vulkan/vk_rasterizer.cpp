@@ -1427,8 +1427,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         reuse_probe_ns = VideoCommon::Nx2Profile::Now() - probe_start;
     }
 
-    TrackOcarinaCamera();
-    TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
+    if (const auto facts =
+            CaptureOcarinaFacts(pipeline->ShaderHashes()[1], is_indexed, is_indirect)) {
+        ApplyOcarinaFacts(*facts);
+    }
     TracePendingCpuWrites(false, pipeline->ShaderHashes());
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
     if (frame_dump.Capturing()) {
@@ -1751,6 +1753,7 @@ struct RasterizerVulkan::UnlentDraw {
     GraphicsPipeline::BackHalf half;
     DrawParams params;
     u64 position{};
+    std::unique_ptr<OcarinaDrawFacts> ocarina;
 
     void operator()() {
         rasterizer->PlayUnlentDraw(*this);
@@ -1793,13 +1796,6 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
     }
     if (VideoCommon::Nx2FastDraw::Enabled() || fast_draw_on) {
         return lend(Reason::FastDraw);
-    }
-    // Ocarina of Time's upscaler hooks read GPURender's state at every draw.
-    constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
-    if ((program_id == ocarina_program &&
-         (!oot_backend || *oot_backend != VideoCommon::OcarinaUpscaleBackend::Native)) ||
-        VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
-        return lend(Reason::Ocarina);
     }
     if (regs.transform_feedback_enabled != 0) {
         return lend(Reason::Feedback);
@@ -1864,6 +1860,10 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         return lend(pipeline != nullptr && pipeline->IsMeshPipeline() ? Reason::Mesh
                                                                       : Reason::NotBuilt);
     }
+    // Ocarina of Time's No Sharpening bypass: the back's next dispatches read the tracked target.
+    if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
+        TrackOotTonemappedImage();
+    }
     std::unique_lock lock{buffer_cache.mutex};
     pipeline->SetEngine(maxwell3d, gpu_memory);
     const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
@@ -1905,6 +1905,7 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         const BufferArena::Collect collect{draw.half.commands};
         pipeline->ConfigureBack(is_indexed, draw.half, unlend_capture);
     }
+    draw.ocarina = CaptureOcarinaFacts(pipeline->ShaderHashes()[1], is_indexed, false);
     buffer_cache.NoteWorkRecorded(false);
     lock.unlock();
     draw.half.stamp = buffer_cache_runtime.Arena().CloseCollected();
@@ -1955,6 +1956,9 @@ void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
     }
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
+        if (draw.ocarina) {
+            ApplyOcarinaFacts(*draw.ocarina);
+        }
         UpdateOcarinaJitter();
         UpdateDynamicStates(&pipeline);
     }
@@ -4071,8 +4075,16 @@ bool RasterizerVulkan::OcarinaTemporalEnabled() const {
 /// Capture the two camera matrices from a draw targeting the scene color and depth. Terrain and
 /// materials draw with several vertex shaders, so any draw into a scene-sized target qualifies;
 /// the camera buffer's contents are checked below.
-void RasterizerVulkan::TrackOcarinaCamera() {
+void RasterizerVulkan::ApplyOcarinaFacts(const OcarinaDrawFacts& facts) {
     if (!OcarinaTemporalEnabled()) {
+        return;
+    }
+    if (facts.actor && oot_actor.frame != render_trace_frame) {
+        oot_previous_actor = oot_actor;
+        oot_actor = *facts.actor;
+        oot_actor.frame = render_trace_frame;
+    }
+    if (!facts.camera && !facts.camera_gpu_written) {
         return;
     }
 
@@ -4092,14 +4104,6 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         return;
     }
 
-    // The shader-visible view omits unused slots and truncates ranges to shader usage.
-    // Camera tracking needs the guest binding, even when this draw reads fewer camera fields.
-    const auto& binding = maxwell3d->state.shader_stages[0].const_buffers[3];
-    if (!binding.enabled || binding.address == 0 || binding.size < VideoCommon::OcarinaCameraBytes ||
-        !gpu_memory->IsFullyMappedRange(binding.address, VideoCommon::OcarinaCameraBytes) ||
-        !gpu_memory->IsContinuousRange(binding.address, VideoCommon::OcarinaCameraBytes)) {
-        return;
-    }
     const auto refuse = [&](const char* reason, f32 width, f32 height) {
         if (oot_camera_refusal && oot_camera_refusal->frame == render_trace_frame &&
             u64{color.size.width} * color.size.height <
@@ -4109,14 +4113,11 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         oot_camera_refusal = OcarinaCameraRefusal{render_trace_frame, reason, width, height,
                                                   color.size.width, color.size.height};
     };
-    const auto device_address = gpu_memory->GpuToCpuAddress(binding.address);
-    if (!device_address ||
-        buffer_cache.IsRegionGpuModified(*device_address, VideoCommon::OcarinaCameraBytes)) {
+    if (facts.camera_gpu_written) {
         refuse("no scene camera: its buffer is GPU-written", 0.0f, 0.0f);
         return;
     }
-    VideoCommon::OcarinaCameraBuffer values;
-    device_memory.ReadBlockUnsafe(*device_address, values.data(), sizeof(values));
+    const VideoCommon::OcarinaCameraBuffer& values = *facts.camera;
     const auto camera = VideoCommon::DecodeOcarinaCamera(
         values, color.size.width, color.size.height,
         oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss);
@@ -4128,7 +4129,7 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         return;
     }
     oot_camera_sample_frame = render_trace_frame;
-    oot_motion.camera_channel = gpu_memory;
+    oot_motion.camera_channel = facts.channel;
     oot_motion.extent = {camera.width, camera.height};
     oot_motion.image_extent = {color.size.width, color.size.height};
     oot_motion.current = camera.current;
@@ -4166,18 +4167,50 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
     }
 }
 
-/// Capture the skinning pose of the recognized Link draw for frame-to-frame motion.
-void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect) {
-    if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect ||
-        !OcarinaTemporalEnabled() || oot_actor.frame == render_trace_frame) {
-        return;
+std::unique_ptr<RasterizerVulkan::OcarinaDrawFacts> RasterizerVulkan::CaptureOcarinaFacts(
+    u64 shader_hash, bool is_indexed, bool is_indirect) {
+    constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
+    if (program_id != ocarina_program) {
+        return nullptr;
+    }
+    std::unique_ptr<OcarinaDrawFacts> facts;
+    const auto take = [&]() -> OcarinaDrawFacts& {
+        if (!facts) {
+            facts = std::make_unique<OcarinaDrawFacts>();
+            facts->channel = gpu_memory;
+        }
+        return *facts;
+    };
+    const auto& regs = maxwell3d->regs;
+    // The scene camera of draws into a scene-format target, where the upscale reads it (the
+    // target itself is checked on GPURender). Tracking needs the guest binding: the
+    // shader-visible view omits unused slots and truncates ranges to shader usage.
+    const auto& binding = maxwell3d->state.shader_stages[0].const_buffers[3];
+    if (regs.rt[0].format == Tegra::RenderTargetFormat::B10G11R11_FLOAT && regs.zeta_enable != 0 &&
+        binding.enabled && binding.address != 0 &&
+        binding.size >= VideoCommon::OcarinaCameraBytes &&
+        gpu_memory->IsFullyMappedRange(binding.address, VideoCommon::OcarinaCameraBytes) &&
+        gpu_memory->IsContinuousRange(binding.address, VideoCommon::OcarinaCameraBytes)) {
+        OcarinaDrawFacts& taken = take();
+        const auto device_address = gpu_memory->GpuToCpuAddress(binding.address);
+        if (!device_address ||
+            buffer_cache.IsRegionGpuModified(*device_address, VideoCommon::OcarinaCameraBytes)) {
+            taken.camera_gpu_written = true;
+        } else {
+            taken.camera.emplace();
+            device_memory.ReadBlockUnsafe(*device_address, taken.camera->data(),
+                                          VideoCommon::OcarinaCameraBytes);
+        }
+    }
+    // The skinning pose of the recognized Link draw, for frame-to-frame motion.
+    if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect) {
+        return facts;
     }
     const auto& draw = maxwell3d->draw_manager.draw_state;
-    const auto& regs = maxwell3d->regs;
     const auto& stream = regs.vertex_streams[0];
     if (draw.index_buffer.count != 9702 || draw.index_buffer.FormatSizeInBytes() != 2 ||
         !stream.IsEnabled() || stream.stride != 48 || regs.vertex_stream_instances.IsInstancingEnabled(0)) {
-        return;
+        return facts;
     }
     const auto attribute = [&](u32 location, VkFormat format, u32 offset) {
         const auto& attrib = regs.vertex_attrib_format[location];
@@ -4187,11 +4220,10 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     if (!attribute(0, VK_FORMAT_R32G32B32_SFLOAT, 0) ||
         !attribute(4, VK_FORMAT_R8G8B8A8_UNORM, 40) || !attribute(5, VK_FORMAT_R8G8B8A8_UNORM, 44) ||
         !attribute(6, VK_FORMAT_R16G16B16A16_UINT, 12) || !attribute(7, VK_FORMAT_R16G16B16A16_UINT, 20)) {
-        return;
+        return facts;
     }
 
     OcarinaActorPose pose{
-        .frame = render_trace_frame,
         .channel = gpu_memory,
         .vertex = stream.Address(),
         .indices = draw.index_buffer.IndexStart(),
@@ -4214,9 +4246,9 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         }
     });
     if (origin_found && bones_found) {
-        oot_previous_actor = oot_actor;
-        oot_actor = pose;
+        take().actor = pose;
     }
+    return facts;
 }
 
 /// Read the shared mesh only when both poses refer to the same vertex and index buffers.

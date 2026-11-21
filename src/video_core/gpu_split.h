@@ -256,7 +256,6 @@ public:
         Texture,
         Diagnostics,
         FastDraw,
-        Ocarina,
         Feedback,
         InlineIndex,
         Quads,

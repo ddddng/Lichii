@@ -1378,10 +1378,10 @@ void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
 
 void GpuSplit::LogUnlend() const {
     static constexpr std::array<const char*, static_cast<size_t>(UnlendReason::Count)> names{
-        "verify",  "indirect",       "texture",         "diagnostics", "fast draw",
-        "ocarina", "feedback",       "inline index",    "quads",       "uint8 index",
-        "mesh",    "not built",      "texture buffers", "repack",      "list owes",
-        "gather",  "indirect reset",
+        "verify",      "indirect",  "texture",      "diagnostics",
+        "fast draw",   "feedback",  "inline index", "quads",
+        "uint8 index", "mesh",      "not built",    "texture buffers",
+        "repack",      "list owes", "gather",       "indirect reset",
     };
     std::string lent;
     u64 total = 0;
