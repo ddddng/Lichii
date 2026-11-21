@@ -290,6 +290,7 @@ public:
         ConditionalEnd, ///< EDEN_NX2_RENDER_POST_CONDITIONAL: a static render enable's end
         QueryReset,     ///< EDEN_NX2_RENDER_POST_QUERY: a Z-pass counter reset
         QueryReport,    ///< EDEN_NX2_RENDER_POST_QUERY: a Z-pass report that is not a fence
+        SignalFence,    ///< EDEN_NX2_RENDER_POST_SIGNAL_FENCE: a fence with a callback
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).

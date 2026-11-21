@@ -233,6 +233,10 @@ private:
     /// the closing gather run here first. False when it has to be lent.
     template <typename Op>
     bool PostFence(Op&& op);
+    /// Whether a fence of the kind can be posted now (counts why not).
+    bool FencePostable(VideoCommon::GpuSplit::PostedOp kind);
+    template <typename Op>
+    void PostCheckedFence(VideoCommon::GpuSplit::PostedOp kind, Op&& op);
     /// The back: a report since the last lent fence owes the query sync (PostFence).
     bool fence_query_owed{};
     /// GPURender, playing a posted fence: the back ran its closing gather.

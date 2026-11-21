@@ -1714,11 +1714,10 @@ bool RasterizerVulkan::PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& o
     return true;
 }
 
-template <typename Op>
-bool RasterizerVulkan::PostFence(Op&& op) {
+bool RasterizerVulkan::FencePostable(VideoCommon::GpuSplit::PostedOp kind) {
     using VideoCommon::GpuSplit;
     auto& split = GpuSplit::Get();
-    if (!split.Posts(GpuSplit::PostedOp::Fence)) {
+    if (!split.Posts(kind)) {
         return false;
     }
     // Fritchii 440c984e7: GPURender's fence must not enter the back's buffer cache: nothing to
@@ -1746,8 +1745,13 @@ bool RasterizerVulkan::PostFence(Op&& op) {
         split.NoteFenceLent(GpuSplit::FenceLent::NoView);
         return false;
     }
+    return true;
+}
+
+template <typename Op>
+void RasterizerVulkan::PostCheckedFence(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
     InvalidateGPUCache();
-    PostRenderOp(GpuSplit::PostedOp::Fence, [this, op = std::forward<Op>(op)]() mutable {
+    PostRenderOp(kind, [this, op = std::forward<Op>(op)]() mutable {
         posted_fence_playing = true;
         fence_manager.skip_buffer_half = true;
         SCOPE_EXIT {
@@ -1757,7 +1761,15 @@ bool RasterizerVulkan::PostFence(Op&& op) {
         op();
     });
     // Its texture downloads and the guest increment land on GPURender without a lend.
-    split.MarkGuestWrite();
+    VideoCommon::GpuSplit::Get().MarkGuestWrite();
+}
+
+template <typename Op>
+bool RasterizerVulkan::PostFence(Op&& op) {
+    if (!FencePostable(VideoCommon::GpuSplit::PostedOp::Fence)) {
+        return false;
+    }
+    PostCheckedFence(VideoCommon::GpuSplit::PostedOp::Fence, std::forward<Op>(op));
     return true;
 }
 
@@ -3986,6 +3998,16 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    // EDEN_NX2_RENDER_POST_SIGNAL_FENCE: as a posted sync point. The callback runs where it did,
+    // on the fence's completion; only the fence is made on GPURender in stream order.
+    if (FencePostable(VideoCommon::GpuSplit::PostedOp::SignalFence)) {
+        PostCheckedFence(VideoCommon::GpuSplit::PostedOp::SignalFence,
+                         [this, func = std::move(func)]() mutable {
+                             VideoCommon::Nx2FastDraw::NoteSync();
+                             fence_manager.SignalFence(std::move(func));
+                         });
+        return;
+    }
     if (VideoCommon::GpuSplit::LendsToRender()) {
         fence_query_owed = false;
     }
