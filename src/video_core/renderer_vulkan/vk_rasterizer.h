@@ -255,6 +255,14 @@ private:
     void PostCheckedFence(VideoCommon::GpuSplit::PostedOp kind, Op&& op);
     /// The back: a report since the last lent fence owes the query sync (PostFence).
     bool fence_query_owed{};
+    /// The back (EDEN_NX2_RENDER_PAYLOAD_E): the host syncs of the payload releases it wrote, in
+    /// stream order, until a lent call hands them to the query cache (LendEnter).
+    struct PayloadSync {
+        DAddr address;
+        u64 value;
+        u64 size;
+    };
+    std::vector<PayloadSync> back_payload_sync;
     /// GPURender, playing a posted fence: the back ran its closing gather.
     bool posted_fence_playing{};
     /// GPURender: records an unlent draw from its view of the channel's registers.

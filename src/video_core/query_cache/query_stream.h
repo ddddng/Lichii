@@ -53,6 +53,10 @@ public:
         /* Do Nothing */
     }
 
+    /// A value to sync as is at the next SyncWrites, with no query behind it.
+    virtual void AddSyncValue([[maybe_unused]] VAddr address, [[maybe_unused]] u64 value,
+                              [[maybe_unused]] u64 size) {}
+
     virtual size_t WriteCounter(VAddr address, bool has_timestamp, u32 value,
                                 std::optional<u32> subreport = std::nullopt) = 0;
 

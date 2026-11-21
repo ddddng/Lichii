@@ -1750,6 +1750,9 @@ bool RasterizerVulkan::FencePostable(VideoCommon::GpuSplit::PostedOp kind) {
 
 template <typename Op>
 void RasterizerVulkan::PostCheckedFence(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
+    if (!back_payload_sync.empty()) [[unlikely]] {
+        VideoCommon::GpuSplit::Get().NotePayloadSyncsLeft();
+    }
     InvalidateGPUCache();
     PostRenderOp(kind, [this, op = std::forward<Op>(op)]() mutable {
         posted_fence_playing = true;
@@ -2050,7 +2053,14 @@ void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
 }
 
 void* RasterizerVulkan::LendEnter(void* argument) {
-    Tegra::Engines::Maxwell3D* const engine = static_cast<RasterizerVulkan*>(argument)->maxwell3d;
+    auto& self = *static_cast<RasterizerVulkan*>(argument);
+    // EDEN_NX2_RENDER_PAYLOAD_E: before anything the call syncs. A report sets fence_query_owed,
+    // so no sync is posted until a lent fence clears it after this.
+    for (const PayloadSync& sync : self.back_payload_sync) {
+        self.query_cache.AddPayloadSync(sync.address, sync.value, sync.size);
+    }
+    self.back_payload_sync.clear();
+    Tegra::Engines::Maxwell3D* const engine = self.maxwell3d;
     if (engine == nullptr || !engine->render_view_writes) {
         return nullptr;
     }
@@ -3579,6 +3589,36 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         fence_query_owed = true;
     }
     using VideoCommon::GpuSplit;
+    if (type == VideoCommon::QueryType::Payload &&
+        False(flags & VideoCommon::QueryPropertiesFlags::IsAFence) && !Settings::IsGPULevelHigh() &&
+        GpuSplit::PayloadsOnBack()) {
+        // EDEN_NX2_RENDER_PAYLOAD_E: such a release registers no query and writes at once, so the
+        // back writes it at its place in the stream. Its later writes follow on this thread; an
+        // unplayed draw reading the pools there is waited for. The host sync waits in
+        // back_payload_sync for the next lent call, and fence_query_owed lends the next sync.
+        const auto device = gpu_memory->GpuToCpuAddress(gpu_addr);
+        if (!device) {
+            return;
+        }
+        const bool wide = True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout);
+        const bool mirrored = True(flags & VideoCommon::QueryPropertiesFlags::Nx2Mirror);
+        const u64 size = wide ? 16 : 4;
+        auto& split = GpuSplit::Get();
+        split.GuardStreamWrite(gpu_addr, size);
+        split.StampWrite(*device, size);
+        VideoCommon::Nx2FastDraw::NoteSync();
+        // A read download still to land there is finished on GPURender.
+        const bool lent = VideoCore::ReadDownloadsMayCover(*device, size);
+        split.NotePayloadOnBack(lent);
+        if (lent) {
+            split.LendRender(
+                [&] { query_cache.WriteImmediate(gpu_addr, *device, payload, wide, mirrored); });
+        } else {
+            query_cache.WriteImmediate(gpu_addr, *device, payload, wide, mirrored);
+        }
+        back_payload_sync.push_back({*device, payload, wide ? u64{8} : u64{4}});
+        return;
+    }
     if (type == VideoCommon::QueryType::ZPassPixelCount64 &&
         False(flags & VideoCommon::QueryPropertiesFlags::IsAFence) &&
         GpuSplit::Get().Posts(GpuSplit::PostedOp::QueryReport)) {
@@ -4511,6 +4551,9 @@ void RasterizerVulkan::WaitForIdle() {
     // EDEN_NX2_RENDER_POST_WFI: with no report since the last lent fence (whose commit synced
     // the queries), no streamer has a sync pending and NotifyWFI leaves the back's buffer cache
     // alone: the rest is GPURender's recording.
+    if (!fence_query_owed && !back_payload_sync.empty()) [[unlikely]] {
+        VideoCommon::GpuSplit::Get().NotePayloadSyncsLeft();
+    }
     if (!fence_query_owed && PostRenderOp(VideoCommon::GpuSplit::PostedOp::WaitForIdle, [this] {
             if (query_cache.HasPendingSync()) [[unlikely]] {
                 VideoCommon::GpuSplit::Get().NotePostedWaitSynced();

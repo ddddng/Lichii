@@ -340,6 +340,18 @@ public:
     void NoteSoftRelease() {
         ++soft_releases;
     }
+    /// EDEN_NX2_RENDER_PAYLOAD_E (needs EDEN_NX2_RENDER_UNLEND=1): a payload release with no fence
+    /// flag below High accuracy is written by the back at its place in the stream.
+    [[nodiscard]] static bool PayloadsOnBack() {
+        return on_back_thread && instance.payload_e;
+    }
+    void NotePayloadOnBack(bool lent) {
+        ++(lent ? payloads.lent : payloads.written);
+    }
+    /// The back posted a sync while it held payload values to sync to the host (must be 0).
+    void NotePayloadSyncsLeft() {
+        ++payloads.syncs_left;
+    }
     [[nodiscard]] static bool UnlendsMesh() {
         return on_back_thread && instance.unlend_mesh;
     }
@@ -1325,6 +1337,13 @@ private:
     DispatchCounts dispatches;
     bool soft_release_e{};
     u64 soft_releases{};
+    bool payload_e{};
+    struct PayloadCounts {
+        u64 written{};
+        u64 lent{};
+        u64 syncs_left{};
+    };
+    PayloadCounts payloads;
     std::atomic<u64> unlent_emulated_mesh{};
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};

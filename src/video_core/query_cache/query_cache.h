@@ -56,8 +56,12 @@ public:
     size_t WriteCounter(VAddr address, bool has_timestamp, u32 value,
                         std::optional<u32> subreport = std::nullopt) override {
         auto new_id = BuildQuery(has_timestamp, address, static_cast<u64>(value));
-        pending_sync.push_back(new_id);
+        pending_sync.push_back({.id = new_id});
         return new_id;
+    }
+
+    void AddSyncValue(VAddr address, u64 value, u64 size) override {
+        pending_sync.push_back({.id = NoQuery, .value{address, value, size}});
     }
 
     bool HasPendingSync() const override {
@@ -70,8 +74,12 @@ public:
         }
         std::vector<SyncValuesStruct> sync_values;
         sync_values.reserve(pending_sync.size());
-        for (size_t pending_id : pending_sync) {
-            auto& query = slot_queries[pending_id];
+        for (const PendingSync& pending : pending_sync) {
+            if (pending.id == NoQuery) {
+                sync_values.push_back(pending.value);
+                continue;
+            }
+            auto& query = slot_queries[pending.id];
             if (True(query.flags & QueryFlagBits::IsRewritten) ||
                 True(query.flags & QueryFlagBits::IsInvalidated)) {
                 continue;
@@ -89,8 +97,14 @@ public:
     }
 
 private:
+    static constexpr size_t NoQuery = ~size_t{0};
+    struct PendingSync {
+        size_t id;
+        SyncValuesStruct value{};
+    };
+
     RuntimeType& runtime;
-    std::deque<size_t> pending_sync;
+    std::deque<PendingSync> pending_sync;
 };
 
 template <typename Traits>
@@ -282,6 +296,12 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return;
     }
     DAddr cpu_addr = *cpu_addr_opt;
+    if (!is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
+        // Synced by value: a query freed here could be built again before the sync reads it.
+        WriteImmediate(addr, cpu_addr, payload, has_timestamp, mirrored);
+        streamer->AddSyncValue(cpu_addr, payload, has_timestamp ? 8 : 4);
+        return;
+    }
     const size_t new_query_id = streamer->WriteCounter(cpu_addr, has_timestamp, payload, subreport);
     auto* query = streamer->GetQuery(new_query_id);
     if (is_fence) {
@@ -294,18 +314,13 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,
                                         static_cast<u32>(cur_addr & Core::DEVICE_PAGEMASK));
     };
-    u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
-    u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
     const u64 report_size = has_timestamp ? 16 : 4;
-    const bool immediate =
-        !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
-    if (!posted && !immediate && VideoCommon::GpuSplit::TracksPendingReports()) {
+    if (!posted && VideoCommon::GpuSplit::TracksPendingReports()) {
         NotePendingReport(cpu_addr);
     }
     const bool report_noted =
-        posted ? posted->noted
-               : !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
+        posted ? posted->noted : impl->rasterizer.NoteReportPending(cpu_addr, report_size);
     // What the operation needs, small enough for MSVC's std::function to hold without allocating:
     // a report per draw (Ocarina of Time's occlusion counts) allocated one each. Host pointers are
     // looked up when it runs.
@@ -420,36 +435,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
     } else {
-        if (immediate) {
-            FinishReads(cpu_addr, has_timestamp ? 16 : 4);
-            auto& shadow = Tegra::Nx2MirrorShadow::Get();
-            if (mirrored && shadow.Diverts(cpu_addr)) {
-                u32 guest;
-                std::memcpy(&guest, pointer, sizeof(guest));
-                shadow.Set(cpu_addr, payload, guest);
-            } else if (has_timestamp) {
-                u64 timestamp = impl->gpu.GetTicks();
-                u64 value = static_cast<u64>(payload);
-                std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
-                std::memcpy(pointer, &value, sizeof(value));
-            } else {
-                std::memcpy(pointer, &payload, sizeof(payload));
-            }
-            if (!mirrored) {
-                shadow.NoteDirectRelease(cpu_addr, addr);
-            }
-            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
-            if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
-                LOG_INFO(HW_GPU,
-                         "DKB_QUERY write n={} path=immediate as={} gpu={:#x} device={:#x} type={} "
-                         "bytes={} value={:#x} flags={:#x}",
-                         trace, gpu_memory->GetID(), addr, cpu_addr,
-                         static_cast<u32>(counter_type), has_timestamp ? 8 : 4, payload,
-                         static_cast<u32>(query->flags));
-            }
-            streamer->Free(new_query_id);
-            return;
-        }
         impl->rasterizer.SyncOperation(std::move(operation));
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
@@ -467,6 +452,48 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         old_query->flags |= QueryFlagBits::IsRewritten;
         sub_container.insert_or_assign(base, query_location);
     }
+}
+
+template <typename Traits>
+void QueryCacheBase<Traits>::WriteImmediate(GPUVAddr addr, DAddr cpu_addr, u32 payload,
+                                            bool has_timestamp, bool mirrored) {
+    FinishReads(cpu_addr, has_timestamp ? 16 : 4);
+    u8* const pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
+    auto& shadow = Tegra::Nx2MirrorShadow::Get();
+    if (pointer == nullptr) {
+        // Unmapped: nothing to write.
+    } else if (mirrored && shadow.Diverts(cpu_addr)) {
+        u32 guest;
+        std::memcpy(&guest, pointer, sizeof(guest));
+        shadow.Set(cpu_addr, payload, guest);
+    } else if (has_timestamp) {
+        const u64 timestamp = impl->gpu.GetTicks();
+        const u64 value = static_cast<u64>(payload);
+        if (u8* const pointer_timestamp =
+                impl->device_memory.template GetPointer<u8>(cpu_addr + 8)) {
+            std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
+        }
+        std::memcpy(pointer, &value, sizeof(value));
+    } else {
+        std::memcpy(pointer, &payload, sizeof(payload));
+    }
+    if (!mirrored) {
+        shadow.NoteDirectRelease(cpu_addr, addr);
+    }
+    Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
+    if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
+        LOG_INFO(HW_GPU,
+                 "DKB_QUERY write n={} path=immediate gpu={:#x} device={:#x} type={} bytes={} "
+                 "value={:#x}",
+                 trace, addr, cpu_addr, static_cast<u32>(QueryType::Payload), has_timestamp ? 8 : 4,
+                 payload);
+    }
+}
+
+template <typename Traits>
+void QueryCacheBase<Traits>::AddPayloadSync(DAddr address, u64 value, u64 size) {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::AddPayloadSync");
+    impl->streamers[static_cast<size_t>(QueryType::Payload)]->AddSyncValue(address, value, size);
 }
 
 template <typename Traits>

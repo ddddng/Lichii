@@ -185,6 +185,12 @@ public:
     };
     void CounterReport(GPUVAddr addr, QueryType counter_type, QueryPropertiesFlags flags,
                        u32 payload, u32 subreport, const PostedReport* posted = nullptr);
+    /// Any thread: a payload release with no fence flag below High accuracy, written now (on the
+    /// back with EDEN_NX2_RENDER_PAYLOAD_E). The caller syncs its value to the host.
+    void WriteImmediate(GPUVAddr addr, DAddr cpu_addr, u32 payload, bool has_timestamp,
+                        bool mirrored);
+    /// GPURender: the host sync of a value WriteImmediate wrote, at the next NotifyWFI.
+    void AddPayloadSync(DAddr address, u64 value, u64 size);
 
     void NotifyWFI();
 

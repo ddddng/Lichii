@@ -266,6 +266,14 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_SOFT_RELEASE_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const payload_switch = std::getenv("EDEN_NX2_RENDER_PAYLOAD_E");
+        const bool payload_wanted = payload_switch != nullptr && payload_switch[0] == '1';
+        payload_e = payload_wanted && render_unlend;
+        payloads = {};
+        if (payload_wanted && !payload_e) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_PAYLOAD_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const mesh_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_MESH");
         const bool mesh_wanted = mesh_switch != nullptr && mesh_switch[0] == '1';
         unlend_mesh = mesh_wanted && render_unlend;
@@ -395,6 +403,7 @@ void GpuSplit::Stop() {
         unlend_clear = false;
         unlend_dispatch = false;
         soft_release_e = false;
+        payload_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1400,6 +1409,12 @@ void GpuSplit::RenderLoop() {
     if (soft_release_e) {
         LOG_INFO(HW_GPU, "GPU render unforced fence releases returned on the back: {}",
                  soft_releases);
+    }
+    if (payload_e) {
+        LOG_INFO(HW_GPU,
+                 "GPU render payload releases on the back: {} written, {} lent for a read "
+                 "download; must be 0: {} posted syncs with payload host syncs left on the back",
+                 payloads.written, payloads.lent, payloads.syncs_left);
     }
     if (unlend_mesh) {
         LOG_INFO(HW_GPU, "GPU render unlent mesh draws: must be 0: {} on an emulated mesh pipeline",
