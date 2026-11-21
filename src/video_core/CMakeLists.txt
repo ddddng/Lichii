@@ -285,6 +285,8 @@ add_library(video_core STATIC
     renderer_vulkan/upload_batch.h
     renderer_vulkan/vk_render_pass_cache.cpp
     renderer_vulkan/vk_render_pass_cache.h
+    renderer_vulkan/vk_render_view.cpp
+    renderer_vulkan/vk_render_view.h
     renderer_vulkan/vk_resource_pool.cpp
     renderer_vulkan/vk_resource_pool.h
     renderer_vulkan/frame_pacer.h

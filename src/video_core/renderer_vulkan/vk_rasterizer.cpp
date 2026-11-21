@@ -65,6 +65,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_render_view.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -81,6 +82,7 @@
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_render_view.h"
 
 namespace Vulkan {
 
@@ -998,6 +1000,10 @@ template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect,
                                    std::optional<u32> direct_instances) {
     auto& split = VideoCommon::GpuSplit::Get();
+    const VideoCommon::Nx2RenderView::DrawCheck view_check{*maxwell3d};
+    if (Tegra::Engines::Maxwell3D* const view = view_check.View()) {
+        VerifyRenderViewBuild(*view, *maxwell3d, pipeline_cache.Features());
+    }
     DrawReuse reuse = DrawReuse::Count;
     DrawPath reuse_path = DrawPath::Full;
     u64 reuse_probe_ns = 0;
