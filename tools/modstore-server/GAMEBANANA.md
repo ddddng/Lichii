@@ -4,7 +4,9 @@ Run the importer with Python 3.9 or later on a workstation, outside the
 mod-store container. It writes one JSON manifest to stdout and puts diagnostics
 on stderr. It uses public GameBanana API v11 JSON and links back to the author,
 submission, preview images and official download. It does not scrape pages,
-sign in, mirror files, or create installable mod-store versions.
+sign in, mirror files, or create server-hosted versions. The desktop client can
+download supported files directly from GameBanana when the catalog has their
+SHA-256.
 
 ## Stage a manifest
 
@@ -83,9 +85,9 @@ ID and upstream MD5 so later runs with `--inspect-files` can reuse it without
 downloading the archive again. Keep that flag on to carry cached evidence
 into the next manifest.
 
-Missing hashes or build IDs mean no evidence was collected. A build ID in a
-filename is a clue, not a compatibility check. Imported files stay unverified
-in the store.
+Missing hashes or build IDs mean that evidence was not collected. Files without
+a SHA-256 are link-only. A build ID in a filename is a clue, not a compatibility
+check. Imported files remain unverified unless exact compatibility is established.
 
 ## Publish a reviewed manifest
 

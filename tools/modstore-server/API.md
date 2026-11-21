@@ -96,12 +96,25 @@ The detail response for GameBanana has an empty `versions` array and an
 | `external.preview_urls` | GameBanana preview-image URLs. |
 | `external.files` | Objects with `id`, `name`, `size_bytes`, `uploaded_at`, `download_url`, `sha256`, and `build_ids`. |
 
-`download_url` points directly to `https://gamebanana.com/dl/<file ID>`.
-`sha256` is nullable. `build_ids` contains file-name evidence, so may be empty
-or contain short 16-digit prefixes. Even a full build ID does not establish a
-game version, a minimum Lichii release, or safe installation. Show **Unverified**
-and offer **View on GameBanana** for these listings. Do not use the local-mod
-installer to download or unpack them. GameBanana controls file availability.
+`download_url` points to `https://gamebanana.com/dl/<file ID>`. The client
+downloads the selected file from GameBanana, not from the Pi. Offer **Install**
+for a supported archive with a valid catalog SHA-256, an installed target game,
+and no known compatibility mismatch. Keep **View on GameBanana** beside it for
+credit and as the fallback for files the client cannot verify or install.
+
+Follow HTTPS redirects only to known GameBanana file hosts. Do not forward
+credentials or bypass login or an access block. Stream into a bounded temporary
+file and verify the catalog's length and SHA-256 before extracting anywhere.
+If the bytes no longer match, discard them, leave installed mods unchanged, and
+offer to open the listing. Apply the same path validation, staging, and
+store-owned directory rules as for local packages.
+
+`sha256` is nullable. A null hash means the file cannot be installed through
+the client. `build_ids` contains patch metadata evidence and may be empty or
+contain short 16-digit prefixes. Even a full build ID alone does not establish
+a game version or minimum Lichii release. Show **Unverified** when required
+compatibility evidence is unknown, and disclose that before installing.
+Do not turn a known mismatch into an installable warning.
 
 ## Qt compatibility and installation
 
@@ -126,7 +139,7 @@ use a test-only install path in a scratch profile and supply the matching
 synthetic metadata explicitly. The demo ZIP contains a README and a uniquely
 named inert RomFS text marker; it has no game content or executable code.
 
-Check same origin before fetching media and do not follow a cross-origin
+For local catalog media, check same origin and do not follow a cross-origin
 redirect. Enforce the expected download length and SHA-256, then validate
 and extract the ZIP independently of the server. Entry paths are relative
 to a single client-created `load/<title_id>/<mod.id>/` directory; the ZIP
