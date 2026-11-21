@@ -82,9 +82,11 @@ can get a hash but contribute no member evidence.
 
 The temporary archive is deleted. Successful verification is cached by file
 ID and upstream MD5 so later runs with `--inspect-files` can reuse it without
-downloading again. Failed attempts count against the download budget but do
-not prevent a later run from checking the file after any upstream cooldown.
-Keep the flag on to carry cached evidence into the next manifest.
+downloading again. An unavailable or changed file skips repeat attempts for
+24 hours so the next run can inspect other files. Rate limits and transient
+errors stop the run without creating a per-file result. Respect the upstream
+cooldown before retrying. Keep the flag on to carry verified evidence into
+the next manifest.
 
 Missing hashes or build IDs mean that evidence was not collected. Files without
 a SHA-256 are link-only. A build ID in a filename is a clue, not a compatibility

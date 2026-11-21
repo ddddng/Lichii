@@ -27,6 +27,7 @@ USER_AGENT = "Lichii Mod Store catalog importer (+https://github.com/zortos293/L
 SORTS = ("Generic_NewAndUpdated", "Generic_MostLiked")
 MIB = 1024 * 1024
 METADATA_TTL = 24 * 60 * 60
+UNAVAILABLE_RETRY = 24 * 60 * 60
 ROW_FLAGS = (
     "_bIsPrivate", "_bIsTrashed", "_bIsWithheld", "_bIsFlagged", "_bIsObsolete",
     "_bIsArchived", "_bHasContentRatings", "_aContentRatings", "_bIsNsfw", "_bIsAdult",
@@ -572,6 +573,9 @@ class Inspector:
                     ) or sha is None and ids):
                 raise ImportFailure(f"file {file_id}: invalid cached inspection")
             if sha is None:
+                if evidence.get("unavailable") is True and time.time() - cache.stat().st_mtime < UNAVAILABLE_RETRY:
+                    print(f"file {file_id}: recently unavailable; SHA/IDs skipped", file=sys.stderr)
+                    return
                 evidence = None
         if evidence is None:
             if self.upstream.offline or not self.remaining or file["size_bytes"] > self.max_bytes:
@@ -581,6 +585,7 @@ class Inspector:
             try:
                 evidence = self.download(file, md5, suffix)
             except Unavailable as error:
+                write_cache(cache, b'{"sha256":null,"build_ids":[],"unavailable":true}')
                 print(f"file {file_id}: {error}; SHA/IDs skipped", file=sys.stderr)
                 return
             write_cache(cache, json.dumps(evidence).encode())

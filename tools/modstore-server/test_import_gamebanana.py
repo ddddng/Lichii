@@ -1,8 +1,10 @@
 import hashlib
 import io
 import json
+import os
 import stat
 import tempfile
+import time
 import unittest
 import zipfile
 from contextlib import redirect_stderr
@@ -373,10 +375,39 @@ class InspectionTests(unittest.TestCase):
                 inspector.inspect(small, md5)
                 inspector.inspect(small, md5)
                 download.assert_called_once()
-            self.assertFalse((Path(directory) / "inspection").exists())
             for file in (too_large, small):
                 self.assertIsNone(file["sha256"])
                 self.assertEqual(file["build_ids"], [])
+
+    def test_unavailable_entries_yield_the_next_budget_then_expire(self):
+        raw = b"archive fixture"
+        md5 = hashlib.md5(raw, usedforsecurity=False).hexdigest()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()):
+            root = Path(directory)
+            upstream = gb.Upstream(root)
+            first = gb.public_file(file_row(_nFilesize=len(raw)))
+            second = gb.public_file(file_row(FILE + 1, _nFilesize=len(raw)))
+            with patch.object(upstream, "archive", side_effect=gb.Unavailable("file removed")):
+                gb.Inspector(upstream, 8, 1).inspect(first, md5)
+            cache = root / "inspection" / f"{FILE}-{md5}.json"
+            self.assertTrue(json.loads(cache.read_text())["unavailable"])
+            with patch.object(upstream, "archive", return_value=Response(
+                body=raw, headers={"Content-Type": "application/zip"}
+            )) as download:
+                inspector = gb.Inspector(upstream, 8, 1)
+                inspector.inspect(first, md5)
+                inspector.inspect(second, md5)
+                download.assert_called_once_with(second["download_url"])
+            self.assertIsNone(first["sha256"])
+            self.assertEqual(second["sha256"], hashlib.sha256(raw).hexdigest())
+            expired = time.time() - gb.UNAVAILABLE_RETRY - 1
+            os.utime(cache, (expired, expired))
+            with patch.object(upstream, "archive", return_value=Response(
+                body=raw, headers={"Content-Type": "application/zip"}
+            )) as download:
+                gb.Inspector(upstream, 8, 1).inspect(first, md5)
+                download.assert_called_once_with(first["download_url"])
+            self.assertEqual(first["sha256"], second["sha256"])
 
     def test_retries_after_transient_failure_and_ignores_legacy_null_cache(self):
         raw = b"archive fixture"
