@@ -605,18 +605,18 @@ private:
             titles = QDir(context.mods_root).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
         }
         for (const auto& id : titles) {
-            for (const auto& local : ReadInstalledMods(context.mods_root, id)) {
+            for (const auto& installed : ReadInstalledMods(context.mods_root, id)) {
                 if (!search->text().trimmed().isEmpty() &&
-                    !local.name.contains(search->text().trimmed(), Qt::CaseInsensitive)) {
+                    !installed.name.contains(search->text().trimmed(), Qt::CaseInsensitive)) {
                     continue;
                 }
                 const auto game = std::ranges::find(games, id, &Game::title_id);
                 auto* item = new QTreeWidgetItem(
-                    results, {local.name, game != games.cend() ? game->name : id});
+                    results, {installed.name, game != games.cend() ? game->name : id});
                 item->setSizeHint(0, QSize(0, row_height));
-                item->setData(0, IdRole, local.id);
+                item->setData(0, IdRole, installed.id);
                 item->setData(0, TitleRole, id);
-                item->setToolTip(0, local.version);
+                item->setToolTip(0, installed.version);
             }
         }
         results->headerItem()->setText(1, tr("Game"));
@@ -682,9 +682,9 @@ private:
         FetchDetail(id);
     }
 
-    void FetchDetail(const QString& id) {
+    void FetchDetail(const QString& mod_id) {
         const auto epoch = mod_epoch;
-        mod_request = client.GetMod(id, [this, epoch](auto response) {
+        mod_request = client.GetMod(mod_id, [this, epoch](auto response) {
             if (epoch != mod_epoch) {
                 return;
             }
