@@ -4492,8 +4492,8 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
-    const bool gpu_written =
-        VideoCommon::GpuSplit::GathersGpuWrittenOnBack() && !BufferArena::Collecting();
+    const bool gpu_written = VideoCommon::GpuSplit::GathersGpuWrittenOnBack() &&
+                             maxwell3d != nullptr && !BufferArena::Collecting();
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
         BackTakesInvalidation(ranges, VideoCommon::GpuSplit::InvalSite::Gather,
