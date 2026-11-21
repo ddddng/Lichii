@@ -4082,6 +4082,13 @@ void RasterizerVulkan::SignalReference() {
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    // EDEN_NX2_RENDER_SOFT_RELEASE_E: with the fencing thread an unforced release does nothing
+    // (FenceManager::WaitPendingFences), so the back has nothing to lend (Fritchii 554125b40).
+    static_assert(FenceManagerParams::HAS_ASYNC_CHECK);
+    if (!force && VideoCommon::GpuSplit::SoftReleasesOnBack()) {
+        VideoCommon::GpuSplit::Get().NoteSoftRelease();
+        return;
+    }
     // With immediate fences the forced release's wait ends inside SignalFence (Fritchii 440c984e7).
     if (force && PostFence([this] { fence_manager.WaitPendingFences(true); })) {
         return;

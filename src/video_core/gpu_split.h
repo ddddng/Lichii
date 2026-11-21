@@ -332,6 +332,14 @@ public:
     /// cache tracks the reports still to land, and the back flushes only a range with one.
     /// EDEN_NX2_RENDER_UNLEND_MESH (needs EDEN_NX2_RENDER_UNLEND=1): native task/mesh draws go
     /// unlent.
+    /// EDEN_NX2_RENDER_SOFT_RELEASE_E (needs EDEN_NX2_RENDER_UNLEND=1): unforced fence releases
+    /// return on the back.
+    [[nodiscard]] static bool SoftReleasesOnBack() {
+        return on_back_thread && instance.soft_release_e;
+    }
+    void NoteSoftRelease() {
+        ++soft_releases;
+    }
     [[nodiscard]] static bool UnlendsMesh() {
         return on_back_thread && instance.unlend_mesh;
     }
@@ -1243,6 +1251,8 @@ private:
     u64 query_flushes_skipped{};
     bool query_flush_e{};
     bool unlend_mesh{};
+    bool soft_release_e{};
+    u64 soft_releases{};
     std::atomic<u64> unlent_emulated_mesh{};
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};

@@ -258,6 +258,14 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const soft_switch = std::getenv("EDEN_NX2_RENDER_SOFT_RELEASE_E");
+        const bool soft_wanted = soft_switch != nullptr && soft_switch[0] == '1';
+        soft_release_e = soft_wanted && render_unlend;
+        soft_releases = 0;
+        if (soft_wanted && !soft_release_e) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_SOFT_RELEASE_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const mesh_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_MESH");
         const bool mesh_wanted = mesh_switch != nullptr && mesh_switch[0] == '1';
         unlend_mesh = mesh_wanted && render_unlend;
@@ -363,6 +371,7 @@ void GpuSplit::Stop() {
         flush_e = false;
         query_flush_e = false;
         unlend_mesh = false;
+        soft_release_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1364,6 +1373,10 @@ void GpuSplit::RenderLoop() {
                  count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
                  count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
                  count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
+    if (soft_release_e) {
+        LOG_INFO(HW_GPU, "GPU render unforced fence releases returned on the back: {}",
+                 soft_releases);
     }
     if (unlend_mesh) {
         LOG_INFO(HW_GPU, "GPU render unlent mesh draws: must be 0: {} on an emulated mesh pipeline",
