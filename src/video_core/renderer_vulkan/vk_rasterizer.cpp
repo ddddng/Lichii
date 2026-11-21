@@ -1847,29 +1847,6 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         maxwell3d->GetNativeMacroEngine().native_turing) {
         return lend(Reason::IndirectReset);
     }
-    // Owed list words (Nx2ListIndirect) in the draw's buffers are patched in its packet, but
-    // the back reads texture handles and storage buffer descriptors from the constant buffers
-    // itself: one over an owed word would read its placeholder.
-    const auto constant_buffers_owe = [&] {
-        const auto& slots = buffer_cache_runtime.Nx2Slots();
-        for (const auto& stage : maxwell3d->state.shader_stages) {
-            for (const auto& cbuf : stage.const_buffers) {
-                if (!cbuf.enabled || cbuf.address == 0 || cbuf.size == 0) {
-                    continue;
-                }
-                for (const auto& [device_addr, size] :
-                     gpu_memory->GetSubmappedDeviceRange(cbuf.address, cbuf.size)) {
-                    if (slots.Owes(device_addr, size)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    };
-    if (buffer_cache_runtime.Nx2Slots().HasOwed() && constant_buffers_owe()) {
-        return lend(Reason::ListOwed);
-    }
     // A direct draw with no vertices or no instances records nothing (as Draw skips it).
     const DrawParams params = MakeDrawParams(draw_state, instance_count, is_indexed);
     if (params.num_vertices == 0 || instance_count == 0) {
@@ -1904,6 +1881,37 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
     if (pipeline == nullptr || !pipeline->CanUnlend()) {
         return lend(pipeline != nullptr && pipeline->IsMeshPipeline() ? Reason::Mesh
                                                                       : Reason::NotBuilt);
+    }
+    // Owed list words (Nx2ListIndirect) in the draw's buffers are patched in its packet, but
+    // the back reads texture handles and storage buffer descriptors from the constant buffers
+    // itself: one over an owed word would read its placeholder. Only the buffers it reads them
+    // from are looked at.
+    const auto constant_buffers_owe = [&] {
+        const auto& slots = buffer_cache_runtime.Nx2Slots();
+        const auto& handle_cbufs = pipeline->HandleConstBuffers();
+        for (size_t stage = 0; stage < handle_cbufs.size(); ++stage) {
+            const auto& cbufs = maxwell3d->state.shader_stages[stage].const_buffers;
+            for (u32 bits = handle_cbufs[stage]; bits != 0; bits &= bits - 1) {
+                const u32 index = static_cast<u32>(std::countr_zero(bits));
+                if (index >= cbufs.size()) {
+                    break;
+                }
+                const auto& cbuf = cbufs[index];
+                if (!cbuf.enabled || cbuf.address == 0 || cbuf.size == 0) {
+                    continue;
+                }
+                for (const auto& [device_addr, size] :
+                     gpu_memory->GetSubmappedDeviceRange(cbuf.address, cbuf.size)) {
+                    if (slots.Owes(device_addr, size)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+    if (buffer_cache_runtime.Nx2Slots().HasOwed() && constant_buffers_owe()) {
+        return lend(Reason::ListOwed);
     }
     // Ocarina of Time's No Sharpening bypass: the back's next dispatches read the tracked target.
     if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {

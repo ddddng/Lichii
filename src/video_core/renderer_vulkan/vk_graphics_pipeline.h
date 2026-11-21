@@ -295,6 +295,11 @@ public:
         VideoCommon::CommandArena commands;
         u64 stamp{};
     };
+    /// Per stage, the constant buffers the back reads handles and storage buffer descriptors
+    /// from (all of them where a handle is computed at draw time).
+    [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstBuffers() const noexcept {
+        return handle_cbufs;
+    }
     /// Whether the pipeline's draws can go unlent: built, no texture or image buffers, no mesh.
     [[nodiscard]] bool CanUnlend() const noexcept {
         return !unlend_texel_buffers && !IsMeshPipeline() && IsBuilt() && !Failed();
@@ -501,6 +506,7 @@ private:
     std::array<std::vector<u8>, NUM_STAGES> kept_spirv; ///< zstd, after the build
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
+    std::array<u32, NUM_STAGES> handle_cbufs{};
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};

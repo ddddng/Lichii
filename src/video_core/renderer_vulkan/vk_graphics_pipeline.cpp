@@ -416,6 +416,28 @@ GraphicsPipeline::GraphicsPipeline(
         num_image_elements += Shader::NumDescriptors(info->texture_descriptors);
         num_image_elements += Shader::NumDescriptors(info->image_descriptors);
         num_descriptor_entries += NumDescriptorEntries(*info);
+        u32& handles = handle_cbufs[stage];
+        const auto add = [&handles](const auto& descriptors) {
+            for (const auto& desc : descriptors) {
+                if constexpr (requires { desc.handle_program; }) {
+                    if (desc.handle_program != ~0U) {
+                        handles = ~0U;
+                    }
+                }
+                if constexpr (requires { desc.secondary_cbuf_index; }) {
+                    if (desc.has_secondary) {
+                        handles |=
+                            desc.secondary_cbuf_index < 32 ? 1U << desc.secondary_cbuf_index : ~0U;
+                    }
+                }
+                handles |= desc.cbuf_index < 32 ? 1U << desc.cbuf_index : ~0U;
+            }
+        };
+        add(info->storage_buffers_descriptors);
+        add(info->texture_buffer_descriptors);
+        add(info->image_buffer_descriptors);
+        add(info->texture_descriptors);
+        add(info->image_descriptors);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     on_far_plane = infos[0] && infos[0]->position_on_far_plane && !infos[1] && !infos[2] &&

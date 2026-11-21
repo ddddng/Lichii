@@ -269,6 +269,10 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
         }
     }
     std::ranges::transform(HleWords, hle_sent.begin(), [&](u32 index) { return reg_array[index]; });
+    if ((binds[0] | binds[1]) != 0) {
+        packet.binds.reserve(
+            static_cast<size_t>(std::popcount(binds[0]) + std::popcount(binds[1])));
+    }
     for (u32 word = 0; word < binds.size(); ++word) {
         for (u64 bits = binds[word]; bits != 0; bits &= bits - 1) {
             const u32 bit = word * 64 + static_cast<u32>(std::countr_zero(bits));
