@@ -3492,8 +3492,9 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
     const std::array<std::pair<DAddr, u64>, 1> range{{{addr, size}}};
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
-        BackTakesInvalidation(std::span<const std::pair<DAddr, u64>>{range},
-                              VideoCommon::GpuSplit::InvalSite::Region);
+        BackTakesInvalidation(
+            std::span<const std::pair<DAddr, u64>>{range}, VideoCommon::GpuSplit::InvalSite::Region,
+            which & (VideoCommon::CacheType::TextureCache | VideoCommon::CacheType::QueryCache));
     if (!buffer_half_only) {
         RENDER_LEND(InvalidateRegion(addr, size, which))
     }
@@ -3521,22 +3522,22 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 
 template <typename Size>
 bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Size>> ranges,
-                                             VideoCommon::GpuSplit::InvalSite site) {
+                                             VideoCommon::GpuSplit::InvalSite site,
+                                             VideoCommon::CacheType rest) {
     using Site = VideoCommon::GpuSplit::InvalSite;
-    const bool gather = site == Site::Gather;
+    using VideoCommon::CacheType;
     auto& split = VideoCommon::GpuSplit::Get();
+    const auto valid = [](const auto& range) { return range.first != 0 && range.second != 0; };
     const auto hit = [&]() -> std::optional<Site> {
-        for (const auto& [addr, size] : ranges) {
-            if (addr == 0 || size == 0) {
+        for (const auto& range : ranges) {
+            if (!valid(range)) {
                 continue;
             }
-            if (texture_cache.page_filter.Any(addr, size)) {
+            if (texture_cache.page_filter.Any(range.first, range.second)) {
                 return Site::Texture;
             }
-            if (pipeline_cache.page_filter.Any(addr, size)) {
-                return Site::Shader;
-            }
-            if (!gather && query_cache.page_filter.Any(addr, size)) {
+            if (True(rest & CacheType::QueryCache) &&
+                query_cache.page_filter.Any(range.first, range.second)) {
                 return Site::Query;
             }
         }
@@ -3546,7 +3547,17 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
         split.NoteInvalidation(site);
         return false;
     };
-    if (const auto first = hit()) {
+    // Shaders are looked up on the back as well: their invalidation stays lent.
+    if (std::ranges::any_of(ranges, [&](const auto& range) {
+            return valid(range) && pipeline_cache.page_filter.Any(range.first, range.second);
+        })) {
+        return lend(Site::Shader);
+    }
+    // EDEN_NX2_RENDER_POST_INVAL: GPURender's half (images, queries) is posted at this place.
+    const bool posts = split.Posts(VideoCommon::GpuSplit::PostedOp::Invalidation) &&
+                       maxwell3d != nullptr && maxwell3d->render_view_writes;
+    auto first = hit();
+    if (first && !posts) {
         return lend(*first);
     }
     {
@@ -3562,14 +3573,39 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
             }
         }
     }
-    // GPURender registers images while the back goes on: stamp, fence, look again. Either this
-    // sees its registration, or its upload sees the stamp (CheckRenderRead, must be 0).
-    for (const auto& [addr, size] : ranges) {
-        split.StampWrite(addr, size);
+    if (!first) {
+        // GPURender registers images while the back goes on: stamp, fence, look again. Either
+        // this sees its registration, or its upload sees the stamp (CheckRenderRead, must be 0).
+        for (const auto& [addr, size] : ranges) {
+            split.StampWrite(addr, size);
+        }
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        first = hit();
+        if (first && !posts) {
+            return lend(Site::Recheck);
+        }
     }
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (hit()) {
-        return lend(Site::Recheck);
+    if (first) {
+        boost::container::small_vector<std::pair<DAddr, u64>, 8> posted;
+        for (const auto& range : ranges) {
+            if (valid(range)) {
+                posted.emplace_back(range.first, range.second);
+            }
+        }
+        PostRenderOp(VideoCommon::GpuSplit::PostedOp::Invalidation,
+                     [this, rest, posted = std::move(posted)] {
+                         if (True(rest & CacheType::TextureCache)) {
+                             std::scoped_lock lock{texture_cache.mutex};
+                             for (const auto& [addr, size] : posted) {
+                                 texture_cache.WriteMemory(addr, size);
+                             }
+                         }
+                         if (True(rest & CacheType::QueryCache)) {
+                             for (const auto& [addr, size] : posted) {
+                                 query_cache.InvalidateRegion(addr, size);
+                             }
+                         }
+                     });
     }
     split.NoteInvalidation(site);
     return true;
@@ -3578,7 +3614,9 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
-        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw);
+        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw,
+                              VideoCommon::CacheType::TextureCache |
+                                  VideoCommon::CacheType::QueryCache);
     if (!buffer_half_only) {
         RENDER_LEND(InnerInvalidation(sequences))
     }
@@ -3589,7 +3627,9 @@ void RasterizerVulkan::InvalidateConstantBufferData(
     std::span<const std::pair<DAddr, std::size_t>> sequences) {
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
-        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw);
+        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw,
+                              VideoCommon::CacheType::TextureCache |
+                                  VideoCommon::CacheType::QueryCache);
     if (!buffer_half_only) {
         RENDER_LEND(InvalidateConstantBufferData(sequences))
     }
@@ -3708,7 +3748,8 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
-        BackTakesInvalidation(ranges, VideoCommon::GpuSplit::InvalSite::Gather);
+        BackTakesInvalidation(ranges, VideoCommon::GpuSplit::InvalSite::Gather,
+                              VideoCommon::CacheType::TextureCache);
     if (!buffer_half_only) {
         RENDER_LEND(OnCacheInvalidations(ranges))
     }

@@ -565,11 +565,13 @@ private:
     void InvalidateCachedWrites(std::span<const std::pair<DAddr, std::size_t>> sequences,
                                 bool constant_buffer_data, bool buffer_half_only);
     /// The back (EDEN_NX2_RENDER_INVAL_E): whether it applies these writes' buffer half itself.
-    /// No range is on a page an image, a shader or a query was registered on, nor a page holding
-    /// GPU-written buffer data; the writes are stamped for GPURender's uploads.
+    /// No range is on a page a shader was registered on, nor a page holding GPU-written buffer
+    /// data. A range on an image or query page lends the call, or with
+    /// EDEN_NX2_RENDER_POST_INVAL posts GPURender's half (the caches in rest); otherwise the
+    /// writes are stamped for GPURender's uploads.
     template <typename Size>
     bool BackTakesInvalidation(std::span<const std::pair<DAddr, Size>> ranges,
-                               VideoCommon::GpuSplit::InvalSite site);
+                               VideoCommon::GpuSplit::InvalSite site, VideoCommon::CacheType rest);
     /// Whether the draw TakeReusableDraw took still holds once the caches are locked (serial and
     /// map_serial as read then), and the images it samples need no preparing.
     bool DeltaStillHolds(u64 serial, u64 map_serial);

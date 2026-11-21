@@ -285,6 +285,7 @@ public:
         FlushCommands,   ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FlushCommands
         FragmentBarrier, ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FragmentBarrier
         Fence, ///< EDEN_NX2_RENDER_POST_FENCE: clean sync points, references and forced releases
+        Invalidation, ///< EDEN_NX2_RENDER_POST_INVAL: an invalidation's image and query half
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).

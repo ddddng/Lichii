@@ -232,7 +232,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         // Render follower port, step 8: posted render ops, one switch each.
         static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
             post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK", "EDEN_NX2_RENDER_POST_FLUSH",
-                          "EDEN_NX2_RENDER_POST_FLUSH", "EDEN_NX2_RENDER_POST_FENCE"};
+                          "EDEN_NX2_RENDER_POST_FLUSH", "EDEN_NX2_RENDER_POST_FENCE",
+                          "EDEN_NX2_RENDER_POST_INVAL"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -253,6 +254,10 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         }
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
+        if (posts[static_cast<size_t>(PostedOp::Invalidation)] && !inval_e) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_POST_INVAL needs EDEN_NX2_RENDER_INVAL_E=1: ignored");
         }
         engine_early.store(0, std::memory_order_relaxed);
         if (unlend_wanted && !render_unlend) {
@@ -1277,11 +1282,13 @@ void GpuSplit::RenderLoop() {
     if (std::ranges::any_of(posts, [](bool on) { return on; })) {
         LOG_INFO(
             HW_GPU,
-            "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers; must be "
-            "0: {} frame ticks, {} owed list word landings on GPURender outside a lent call",
+            "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers, {} "
+            "invalidation halves; must be 0: {} frame ticks, {} owed list word landings on "
+            "GPURender outside a lent call",
             posted[static_cast<size_t>(PostedOp::IdleHook)],
             posted[static_cast<size_t>(PostedOp::FlushCommands)],
             posted[static_cast<size_t>(PostedOp::FragmentBarrier)],
+            posted[static_cast<size_t>(PostedOp::Invalidation)],
             unparked[static_cast<size_t>(Unparked::FrameTick)].load(std::memory_order_relaxed),
             unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed));
         if (posts[static_cast<size_t>(PostedOp::Fence)]) {
