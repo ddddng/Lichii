@@ -180,7 +180,6 @@ void FlyHighFrameGen::Build(MemoryAllocator& memory_allocator, VkFormat format, 
     FhSessionOptions session = fh.fh_session_options_default(extent.width, extent.height);
     session.keep_static = protect_hud ? 1 : 0;
     FhStreamOptions stream_options = fh.fh_stream_options_default();
-    stream_options.inputs = 3;
     stream_options.outputs = static_cast<u32>(MAX_GENERATIONS);
     stream = fh.fh_stream_create(engine, model, &session, &stream_options);
     if (stream == nullptr) {
