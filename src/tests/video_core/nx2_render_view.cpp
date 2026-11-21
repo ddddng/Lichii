@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <chrono>
+#include <cstdio>
 #include <functional>
 #include <optional>
 
@@ -214,4 +217,94 @@ TEST_CASE("Render view packets seed once, then carry what changed", "[nx2_render
     CHECK(View::Forwarded().test(VideoCommon::Dirty::VertexBuffers));
     CHECK(!View::Forwarded().test(VideoCommon::Dirty::IndexBuffer));
     CHECK(!View::Watched(MAXWELL3D_REG_INDEX(const_buffer.buffer)));
+}
+
+TEST_CASE("Render view packets carry each noted word once, at its final value",
+          "[nx2_render_view]") {
+    ViewFixture f;
+    View::Writes writes{f.maxwell3d};
+    (void)writes.Pack(f.maxwell3d);
+    writes.DrawDone(f.maxwell3d);
+    u32 last = View::NumRegs - 1;
+    while (!View::Watched(last)) {
+        --last;
+    }
+    auto& regs = f.maxwell3d.regs.reg_array;
+    for (const u32 index : {64U, 63U, last, 64U}) {
+        regs[index] = index + 1;
+        writes.Note(index);
+    }
+    regs[64] = 0x1234;
+    writes.Note(View::NumRegs);
+    writes.Note(MAXWELL3D_REG_INDEX(shadow_scratch));
+    const View::Packet packet = writes.Pack(f.maxwell3d);
+    REQUIRE(packet.words.size() == 3);
+    CHECK(packet.words[0].index == 63);
+    CHECK(packet.words[0].value == 64);
+    CHECK(packet.words[1].index == 64);
+    CHECK(packet.words[1].value == 0x1234);
+    CHECK(packet.words[2].index == last);
+    CHECK(packet.words[2].value == last + 1);
+    writes.DrawDone(f.maxwell3d);
+    CHECK(writes.Pack(f.maxwell3d).words.empty());
+}
+
+TEST_CASE("Render view tracker cost per register write", "[.][nx2_render_view_bench]") {
+    ViewFixture f;
+    View::Writes writes{f.maxwell3d};
+    (void)writes.Pack(f.maxwell3d);
+    writes.DrawDone(f.maxwell3d);
+    // One draw's writes: half constant buffer data (not watched), the rest a hot set of state
+    // words written again and again, and a few spread over the register file.
+    constexpr size_t WritesPerDraw = 64;
+    std::array<u32, WritesPerDraw * 16> indices{};
+    u32 seed = 12345;
+    for (u32& index : indices) {
+        seed = seed * 1664525 + 1013904223;
+        const u32 pick = seed >> 8;
+        if (pick % 10 < 5) {
+            index = MAXWELL3D_REG_INDEX(const_buffer.buffer) + pick % 16;
+        } else if (pick % 10 < 8) {
+            index = ViewportScaleX + pick % 32;
+        } else {
+            index = 0x200 + pick % 0xb00;
+        }
+    }
+    constexpr u32 Draws = 200000;
+    using Clock = std::chrono::steady_clock;
+    u64 checksum = 0;
+    Clock::duration note_time{};
+    Clock::duration empty_time{};
+    // Notes alone: every index between two packs, so the clock reads cost little per write.
+    constexpr u32 NoteRounds = Draws / 16;
+    for (u32 round = 0; round < NoteRounds; ++round) {
+        const auto start = Clock::now();
+        for (const u32 index : indices) {
+            writes.Note(index);
+        }
+        const auto middle = Clock::now();
+        const auto end = Clock::now();
+        note_time += middle - start;
+        empty_time += end - middle;
+        checksum += writes.Pack(f.maxwell3d).words.size();
+        writes.DrawDone(f.maxwell3d);
+    }
+    const auto pack_start = Clock::now();
+    for (u32 draw = 0; draw < Draws; ++draw) {
+        const u32* const batch = &indices[(draw % 16) * WritesPerDraw];
+        for (size_t i = 0; i < WritesPerDraw; ++i) {
+            writes.Note(batch[i]);
+        }
+        checksum += writes.Pack(f.maxwell3d).words.size();
+        writes.DrawDone(f.maxwell3d);
+    }
+    const auto pack_time = Clock::now() - pack_start;
+    const auto ns = [](Clock::duration d) {
+        return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
+    };
+    std::printf("tracker: %.2f ns per write (Note), %.1f ns per draw (64 notes and a pack), "
+                "checksum %llu\n",
+                (ns(note_time) - ns(empty_time)) / (NoteRounds * indices.size()),
+                ns(pack_time) / Draws, static_cast<unsigned long long>(checksum));
+    CHECK(checksum != 0);
 }

@@ -110,6 +110,24 @@ struct Packet {
 /// GPURender: the view takes the packet.
 void Apply(Maxwell3D& view, const Packet& packet);
 
+/// The words a draw reads, one bit per register: all but the constant buffer data words and the
+/// write offset they advance, the firmware and shadow scratch (written all the time, read by no
+/// draw).
+inline constexpr std::array<u64, NumRegs / 64> WatchMask = [] {
+    std::array<u64, NumRegs / 64> mask{};
+    mask.fill(~u64{0});
+    const auto unwatch = [&mask](u32 first, u32 count) {
+        for (u32 i = first; i < first + count && i < NumRegs; ++i) {
+            mask[i / 64] &= ~(u64{1} << (i % 64));
+        }
+    };
+    unwatch(MAXWELL3D_REG_INDEX(const_buffer.offset), 1);
+    unwatch(MAXWELL3D_REG_INDEX(const_buffer.buffer), Maxwell3D::Regs::NumCBData);
+    unwatch(MAXWELL3D_REG_INDEX(falcon), 32);
+    unwatch(MAXWELL3D_REG_INDEX(shadow_scratch), 0x100);
+    return mask;
+}();
+
 /// The back's side for one 3D engine (Maxwell3D::render_view_writes).
 class Writes {
 public:
@@ -117,9 +135,8 @@ public:
     ~Writes();
 
     void Note(u32 index) noexcept {
-        if (index < NumRegs && !noted.test(index)) {
-            noted.set(index);
-            touched.push_back(static_cast<u16>(index));
+        if (index < NumRegs) {
+            dirty[index / 64] |= WatchMask[index / 64] & (u64{1} << (index % 64));
         }
     }
     void NoteBind(size_t stage, u32 slot) noexcept;
@@ -137,8 +154,7 @@ public:
 
 private:
     std::unique_ptr<Maxwell3D> view;
-    std::bitset<NumRegs> noted;
-    std::vector<u16> touched;
+    std::array<u64, NumRegs / 64> dirty{};
     std::array<u64, 2> binds{};
     Flags after;
     Flags consumed;

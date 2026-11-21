@@ -9,6 +9,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -25,23 +26,9 @@ using Regs = Maxwell3D::Regs;
 constexpr u32 Slots = Regs::MaxConstBuffers;
 
 struct Partition {
-    std::bitset<NumRegs> watched;
     Flags forward;
 
     Partition() {
-        watched.set();
-        const auto unwatch = [this](u32 first, u32 count) {
-            for (u32 i = first; i < first + count && i < NumRegs; ++i) {
-                watched.reset(i);
-            }
-        };
-        // Written all the time and read by no draw: the constant buffer data words and the write
-        // offset they advance, the firmware and shadow scratch.
-        unwatch(MAXWELL3D_REG_INDEX(const_buffer.offset), 1);
-        unwatch(MAXWELL3D_REG_INDEX(const_buffer.buffer), Regs::NumCBData);
-        unwatch(MAXWELL3D_REG_INDEX(falcon), 32);
-        unwatch(MAXWELL3D_REG_INDEX(shadow_scratch), 0x100);
-
         forward.set();
         forward.reset(Dirty::NullEntry);
         forward.reset(Dirty::IndexBuffer);
@@ -179,7 +166,7 @@ void ResetForTest() {
 }
 
 bool Watched(u32 index) {
-    return index < NumRegs && Parts().watched.test(index);
+    return index < NumRegs && ((WatchMask[index / 64] >> (index % 64)) & 1) != 0;
 }
 
 const Flags& Forwarded() {
@@ -223,9 +210,7 @@ void Apply(Maxwell3D& view, const Packet& packet) {
 }
 
 Writes::Writes(Maxwell3D& engine)
-    : view{std::make_unique<Maxwell3D>(engine.GetMemoryManager())}, hle_sent(HleWords.size()) {
-    touched.reserve(256);
-}
+    : view{std::make_unique<Maxwell3D>(engine.GetMemoryManager())}, hle_sent(HleWords.size()) {}
 
 Writes::~Writes() {
     if (seeded) {
@@ -262,10 +247,7 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
         packet.raised = now;
         packet.values = values;
         packet.has_values = true;
-        for (const u16 index : touched) {
-            noted.reset(index);
-        }
-        touched.clear();
+        dirty = {};
         binds = {};
         consumed.reset();
         after = now;
@@ -279,14 +261,13 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
             Note(HleWords[i]);
         }
     }
-    packet.words.reserve(touched.size());
-    for (const u16 index : touched) {
-        noted.reset(index);
-        if (Watched(index)) {
+    packet.words.reserve(64);
+    for (u32 word = 0; word < dirty.size(); ++word) {
+        for (u64 bits = std::exchange(dirty[word], 0); bits != 0; bits &= bits - 1) {
+            const u32 index = word * 64 + static_cast<u32>(std::countr_zero(bits));
             packet.words.push_back({index, reg_array[index]});
         }
     }
-    touched.clear();
     std::ranges::transform(HleWords, hle_sent.begin(), [&](u32 index) { return reg_array[index]; });
     for (u32 word = 0; word < binds.size(); ++word) {
         for (u64 bits = binds[word]; bits != 0; bits &= bits - 1) {
