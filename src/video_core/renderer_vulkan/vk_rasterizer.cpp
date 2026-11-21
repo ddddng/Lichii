@@ -58,6 +58,13 @@
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
 #endif
+#include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_backx.h"
+#include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_profile.h"
+#include "video_core/nx2_render_view.h"
 #include "video_core/renderer_vulkan/submission_policy.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -72,17 +79,11 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_handle_program.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/memory_manager.h"
-#include "video_core/nx2.h"
-#include "video_core/nx2_backx.h"
-#include "video_core/nx2_debug_control.h"
-#include "video_core/nx2_fast_draw.h"
-#include "video_core/nx2_profile.h"
-#include "video_core/nx2_render_view.h"
 
 // EDEN_NX2_RENDER_OWNS=1: on the back, an entry into GPURender's objects runs on GPURender, the
 // back parked (Fritchii ead877857's ONEF_LEND); other threads run it where they are.
@@ -568,6 +569,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       descriptor_pool(device, scheduler),
       guest_descriptor_queue(device, UpdateDescriptorQueue::GUEST_FRAME_PAYLOAD_SIZE,
                              device.IsExtDescriptorBufferSupported()),
+      unlend_capture(device, 0x1000, device.IsExtDescriptorBufferSupported()),
       compute_pass_descriptor_queue(device, UpdateDescriptorQueue::COMPUTE_FRAME_PAYLOAD_SIZE),
       descriptor_buffer_ring(device, memory_allocator),
       blit_image(device, scheduler, state_tracker, descriptor_pool), render_pass_cache(device),
@@ -579,7 +581,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                            guest_descriptor_queue, compute_pass_descriptor_queue, descriptor_pool),
       buffer_cache(device_memory, buffer_cache_runtime),
       query_cache_runtime(this, device_memory, buffer_cache, device, memory_allocator, scheduler,
-                          staging_pool, compute_pass_descriptor_queue, descriptor_pool, texture_cache),
+                          staging_pool, compute_pass_descriptor_queue, descriptor_pool,
+                          texture_cache),
       query_cache(gpu, *this, device_memory, query_cache_runtime),
       pipeline_cache(device_memory, device, scheduler, descriptor_pool, guest_descriptor_queue,
                      descriptor_buffer_ring, render_pass_cache, buffer_cache, texture_cache,
@@ -602,6 +605,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
             owner->FlushDeferred();
         },
         &scheduler);
+    VideoCommon::GpuSplit::Get().SetLendHooks(&LendEnter, &LendLeave, this);
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
         device.IsHostQueryResetSupported());
@@ -1053,7 +1057,8 @@ template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect,
                                    std::optional<u32> direct_instances) {
     auto& split = VideoCommon::GpuSplit::Get();
-    const VideoCommon::Nx2RenderView::DrawCheck view_check{*maxwell3d};
+    const VideoCommon::Nx2RenderView::DrawCheck view_check{
+        *maxwell3d, std::exchange(unlend_verify_draw, false)};
     if (Tegra::Engines::Maxwell3D* const view = view_check.View()) {
         VerifyRenderViewBuild(*view, *maxwell3d, pipeline_cache.Features());
     }
@@ -1498,41 +1503,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     submitted = true;
     buffer_cache.NoteWorkRecorded(false);
-    constexpr u64 final_vertex = 0x16aff33d999f993fULL;
-    constexpr u64 final_fragment = 0x52402d8e8ab55263ULL;
-    const auto hashes = pipeline->ShaderHashes();
-    if (oot_4k_scene_frame == render_trace_frame && hashes[5] == final_fragment &&
-        std::ranges::find(hashes, final_vertex) != hashes.end()) {
-        const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
-        if (target_id) {
-            const auto& target = texture_cache.GetImageView(target_id);
-            if (target.size.width == 2560 && target.size.height == 1440 &&
-                target.format == VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB) {
-                oot_4k_guest_present = target.ImageHandle();
-            }
-        }
-    }
-    // The game draws Navi's glow, fireflies and dust right after the fog. They write no depth and
-    // move on their own, so FSR must not take them from its history. DLSS doesn't use the mask.
-    constexpr u64 fog_fragment = 0x3ddfb1d7a854c849ULL;
-    if (hashes[5] == fog_fragment && oot_live_dlss && OcarinaTemporalEnabled() &&
-        oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr &&
-        oot_camera_sample_frame == render_trace_frame && !frame_dump.Capturing()) {
-        const auto scene_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
-        if (scene_id) {
-            const auto& scene = texture_cache.GetImageView(scene_id);
-            if (scene.format == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT &&
-                scene.size.width == oot_motion.extent.width &&
-                scene.size.height == oot_motion.extent.height && !scene.IsRescaled() &&
-                scene.range == VideoCommon::SubresourceRange{}) {
-                oot_effects_scene = scene.Handle(Shader::TextureType::Color2D);
-                oot_effects_address = scene.gpu_addr;
-                oot_effects_frame = render_trace_frame;
-                oot_live_dlss->SaveEffectsBase(oot_effects_scene, oot_motion.extent,
-                                               render_trace_frame);
-            }
-        }
-    }
+    NoteOcarinaDraw(*pipeline);
     if (fast_draw_on) {
         NoteResolvedDraw(pipeline, is_indexed, is_indirect, draw_serial, draw_map_serial);
     }
@@ -1584,6 +1555,43 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 }
 
+void RasterizerVulkan::NoteOcarinaDraw(const GraphicsPipeline& pipeline) {
+    constexpr u64 final_vertex = 0x16aff33d999f993fULL;
+    constexpr u64 final_fragment = 0x52402d8e8ab55263ULL;
+    const auto hashes = pipeline.ShaderHashes();
+    if (oot_4k_scene_frame == render_trace_frame && hashes[5] == final_fragment &&
+        std::ranges::find(hashes, final_vertex) != hashes.end()) {
+        const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+        if (target_id) {
+            const auto& target = texture_cache.GetImageView(target_id);
+            if (target.size.width == 2560 && target.size.height == 1440 &&
+                target.format == VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB) {
+                oot_4k_guest_present = target.ImageHandle();
+            }
+        }
+    }
+    // The game draws Navi's glow, fireflies and dust right after the fog. They write no depth and
+    // move on their own, so FSR must not take them from its history. DLSS doesn't use the mask.
+    constexpr u64 fog_fragment = 0x3ddfb1d7a854c849ULL;
+    if (hashes[5] == fog_fragment && oot_live_dlss && OcarinaTemporalEnabled() &&
+        oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr &&
+        oot_camera_sample_frame == render_trace_frame && !frame_dump.Capturing()) {
+        const auto scene_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+        if (scene_id) {
+            const auto& scene = texture_cache.GetImageView(scene_id);
+            if (scene.format == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT &&
+                scene.size.width == oot_motion.extent.width &&
+                scene.size.height == oot_motion.extent.height && !scene.IsRescaled() &&
+                scene.range == VideoCommon::SubresourceRange{}) {
+                oot_effects_scene = scene.Handle(Shader::TextureType::Color2D);
+                oot_effects_address = scene.gpu_addr;
+                oot_effects_frame = render_trace_frame;
+                oot_live_dlss->SaveEffectsBase(oot_effects_scene, oot_motion.extent,
+                                               render_trace_frame);
+            }
+        }
+    }
+}
 
 namespace {
 // EDEN_NX2_WINDOW_TRACE: describe clears and draws into screen-sized colour targets (debug aid).
@@ -1666,8 +1674,259 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 }
 } // Anonymous namespace
 
+struct RasterizerVulkan::UnlentDraw {
+    RasterizerVulkan* rasterizer;
+    Tegra::Engines::Maxwell3D* engine;
+    GraphicsPipeline* pipeline;
+    VideoCommon::Nx2RenderView::Packet view;
+    GraphicsPipeline::BackHalf half;
+    DrawParams params;
+    u64 position{};
+
+    void operator()() {
+        rasterizer->PlayUnlentDraw(*this);
+    }
+};
+
+bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
+    using Reason = VideoCommon::GpuSplit::UnlendReason;
+    namespace Profile = VideoCommon::Nx2Profile;
+    namespace View = VideoCommon::Nx2RenderView;
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto lend = [&split](Reason reason) {
+        split.NoteLent(reason);
+        return false;
+    };
+    const auto& regs = maxwell3d->regs;
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    static const bool diagnostics = [] {
+        for (const char* name :
+             {"EDEN_NX2_FRAME_DUMP", "EDEN_NATIVE_DRAW_CAPTURE", "EDEN_NX2_CB24_TRACE",
+              "EDEN_NX2_TRACE_VS", "EDEN_NX2_SKIP_VS", "EDEN_NX2_RT_TRACE", "EDEN_NX2_WINDOW_TRACE",
+              "EDEN_NX2_PENDING_WRITE_TRACE", "EDEN_NX2_NO_MESH", "EDEN_NX2_NO_MESH_FILE"}) {
+            if (std::getenv(name) != nullptr) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    if (diagnostics || !split.RenderPosting() || frame_dump.Capturing() ||
+        Common::DkbFrameTrace::Enabled() || VideoCommon::RenderTrace::Enabled() ||
+        GPU::Logging::IsActive() || DrawReuseProbeEnabled() ||
+        VideoCommon::HandleTableNotes::Wanted() ||
+        Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
+        return lend(Reason::Diagnostics);
+    }
+    const u64 first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first;
+    const u64 count = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+    if (first + count > (u64{1} << 24)) {
+        return lend(Reason::Diagnostics);
+    }
+    if (VideoCommon::Nx2FastDraw::Enabled() || fast_draw_on) {
+        return lend(Reason::FastDraw);
+    }
+    // Ocarina of Time's upscaler hooks read GPURender's state at every draw.
+    constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
+    if ((program_id == ocarina_program &&
+         (!oot_backend || *oot_backend != VideoCommon::OcarinaUpscaleBackend::Native)) ||
+        VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
+        return lend(Reason::Ocarina);
+    }
+    if (regs.transform_feedback_enabled != 0) {
+        return lend(Reason::Feedback);
+    }
+    if (!draw_state.inline_index_draw_indexes.empty()) {
+        return lend(Reason::InlineIndex);
+    }
+    if (draw_state.topology == Maxwell::PrimitiveTopology::Quads ||
+        draw_state.topology == Maxwell::PrimitiveTopology::QuadStrip) {
+        return lend(Reason::Quads);
+    }
+    if (is_indexed && draw_state.index_buffer.format == Maxwell::IndexFormat::UnsignedByte &&
+        !device.IsExtIndexTypeUint8Supported()) {
+        return lend(Reason::Uint8Index);
+    }
+    if (regs.IsMeshEnabled()) {
+        return lend(Reason::Mesh);
+    }
+    if (!is_indexed && instance_count == 1 &&
+        draw_state.topology == Maxwell::PrimitiveTopology::Points &&
+        maxwell3d->GetNativeMacroEngine().native_turing) {
+        return lend(Reason::IndirectReset);
+    }
+    if (buffer_cache_runtime.Nx2Slots().HasOwed()) {
+        return lend(Reason::ListOwed);
+    }
+    // A direct draw with no vertices or no instances records nothing (as Draw skips it).
+    const DrawParams params = MakeDrawParams(draw_state, instance_count, is_indexed);
+    if (params.num_vertices == 0 || instance_count == 0) {
+        const GraphicsPipeline* const pipeline =
+            params.num_vertices == 0 ? nullptr : pipeline_cache.CurrentGraphicsPipeline();
+        if (pipeline == nullptr || !pipeline->IsMeshPipeline()) {
+            if (gpu.HasSyncRequests()) {
+                split.LendRender([this] { gpu.TickWork(); });
+            }
+            return true;
+        }
+        return lend(Reason::Mesh);
+    }
+    static const u64 verify_every = [] {
+        const char* const value = std::getenv("EDEN_NX2_RENDER_VERIFY_EVERY");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+    }();
+    if (verify_every != 0 && ++unlend_candidates % verify_every == 0) {
+        split.NoteUnlendVerify();
+        unlend_verify_draw = true;
+        return lend(Reason::Verify);
+    }
+    // The draw's start: cached writes reach the caches, lent where they reach GPURender's.
+    unlend_gather_hit = false;
+    gpu_memory->FlushCaching();
+    if (unlend_gather_hit) {
+        return lend(Reason::Gather);
+    }
+    const View::Flags& forwarded = View::Forwarded();
+    const View::Flags start_flags = maxwell3d->dirty.flags & forwarded;
+    GraphicsPipeline* const pipeline = [&] {
+        Profile::Scope scope{Profile::Zone::PipelineLookup};
+        return pipeline_cache.CurrentGraphicsPipeline();
+    }();
+    if (pipeline == nullptr || !pipeline->CanUnlend()) {
+        return lend(pipeline != nullptr && pipeline->IsMeshPipeline() ? Reason::Mesh
+                                                                      : Reason::NotBuilt);
+    }
+    std::unique_lock lock{buffer_cache.mutex};
+    pipeline->SetEngine(maxwell3d, gpu_memory);
+    const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
+        maxwell3d->regs, pipeline->HasDynamicVertexInput());
+    if (repack_dirty) {
+        auto& flags = maxwell3d->dirty.flags;
+        flags[VideoCommon::Dirty::VertexBuffers] = true;
+        flags[Dirty::VertexInput] = true;
+        for (u32 binding = 0; binding < 32; ++binding) {
+            if (repack_dirty & (1U << binding)) {
+                flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
+            }
+        }
+    }
+    if (buffer_cache_runtime.AnyVertexRepacked()) {
+        lock.unlock();
+        return lend(Reason::Repack);
+    }
+    // GPURender can submit before it plays the draw, and a new command buffer has no vertex
+    // buffers: bind every enabled one (the bindings stay resolved while VertexBuffers is clear).
+    for (u32 binding = 0; binding < Maxwell::NumVertexArrays; ++binding) {
+        maxwell3d->dirty.flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
+    }
+    if (!maxwell3d->render_view_writes) {
+        maxwell3d->render_view_writes = std::make_unique<View::Writes>(*maxwell3d);
+    }
+    UnlentDraw draw{
+        .rasterizer = this,
+        .engine = maxwell3d,
+        .pipeline = pipeline,
+        .view = maxwell3d->render_view_writes->Pack(*maxwell3d, true),
+        .half = {},
+        .params = params,
+    };
+    buffer_cache.BeginGraphicsUniforms(nullptr);
+    uniform_writes_lost = taken_delta_unconsumed = false;
+    {
+        Profile::Scope scope{Profile::Zone::Configure};
+        const BufferArena::Collect collect{draw.half.commands};
+        pipeline->ConfigureBack(is_indexed, draw.half, unlend_capture);
+    }
+    buffer_cache.NoteWorkRecorded(false);
+    lock.unlock();
+    draw.half.stamp = buffer_cache_runtime.Arena().CloseCollected();
+    // What GPURender consumes goes in the packet, raised by events: the back's copy starts over.
+    draw.view.raised |= start_flags | (maxwell3d->dirty.flags & forwarded);
+    maxwell3d->dirty.flags &= ~forwarded;
+    split.NotePools(regs.tex_header.Address(), (u64{regs.tex_header.limit} + 1) * 32,
+                    regs.tex_sampler.Address(), (u64{regs.tex_sampler.limit} + 1) * 32);
+    split.PostUnlent(std::move(draw));
+    if (gpu.HasSyncRequests()) {
+        split.LendRender([this] { gpu.TickWork(); });
+    }
+    return true;
+}
+
+void RasterizerVulkan::PlayUnlentDraw(UnlentDraw& draw) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    Tegra::Engines::Maxwell3D& view = draw.engine->render_view_writes->View();
+    VideoCommon::Nx2RenderView::Apply(view, draw.view);
+    VideoCommon::GpuSplit::SetPlayingPosition(draw.position);
+    render_engine = &view;
+    Tegra::Engines::Maxwell3D* const texture_engine = texture_cache.SwapMaxwell3D(&view);
+    Tegra::Engines::Maxwell3D* const query_engine = query_cache.SwapMaxwell3D(&view);
+    auto* const flags = state_tracker.SwapFlags(&view.dirty.flags);
+    SCOPE_EXIT {
+        state_tracker.SwapFlags(flags);
+        query_cache.SwapMaxwell3D(query_engine);
+        texture_cache.SwapMaxwell3D(texture_engine);
+        render_engine = nullptr;
+        VideoCommon::GpuSplit::SetPlayingPosition(~u64{0});
+    };
+    {
+        // A submit here invalidates the view's flags: the dynamic state is GPURender's.
+        Profile::Scope scope{Profile::Zone::FlushWork};
+        FlushWork();
+    }
+    std::scoped_lock lock{texture_cache.mutex};
+    GraphicsPipeline& pipeline = *draw.pipeline;
+    bool configured;
+    {
+        Profile::Scope scope{Profile::Zone::Configure};
+        configured = pipeline.ConfigureRender(draw.half, view);
+    }
+    if (!configured) {
+        VideoCommon::GpuSplit::Get().NoteUnlentFailed();
+        TraceDrawFailure("configure failed (unlent)");
+        return;
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DynamicState};
+        UpdateOcarinaJitter();
+        UpdateDynamicStates(&pipeline);
+    }
+    query_cache.NotifySegment(true);
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              view.regs.zpass_pixel_count_enable);
+    {
+        Profile::Scope scope{Profile::Zone::DrawRecord};
+        const auto& hashes = pipeline.ShaderHashes();
+        scheduler.TraceGraphicsPipeline(hashes);
+        trace_draw_hashes = {hashes[1], hashes[5]};
+        RecordDirectDraw(scheduler, draw.params, trace_draw_hashes);
+    }
+    NoteOcarinaDraw(pipeline);
+}
+
+void* RasterizerVulkan::LendEnter(void* argument) {
+    Tegra::Engines::Maxwell3D* const engine = static_cast<RasterizerVulkan*>(argument)->maxwell3d;
+    if (engine == nullptr || !engine->render_view_writes) {
+        return nullptr;
+    }
+    engine->dirty.flags |=
+        engine->render_view_writes->View().dirty.flags & VideoCommon::Nx2RenderView::Forwarded();
+    return engine;
+}
+
+void RasterizerVulkan::LendLeave(void*, void* token) {
+    auto* const engine = static_cast<Tegra::Engines::Maxwell3D*>(token);
+    auto& view_flags = engine->render_view_writes->View().dirty.flags;
+    const auto& forwarded = VideoCommon::Nx2RenderView::Forwarded();
+    view_flags = (view_flags & ~forwarded) | (engine->dirty.flags & forwarded);
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    RENDER_LEND(Draw(is_indexed, instance_count))
+    if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {
+        if (VideoCommon::GpuSplit::Unlends() && TryUnlendDraw(is_indexed, instance_count)) {
+            return;
+        }
+        VideoCommon::GpuSplit::Get().LendRender([&] { Draw(is_indexed, instance_count); });
+        return;
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
@@ -1890,6 +2149,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    if (VideoCommon::GpuSplit::Unlends()) {
+        VideoCommon::GpuSplit::Get().NoteLent(VideoCommon::GpuSplit::UnlendReason::Indirect);
+    }
     RENDER_LEND(DrawIndirect())
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
@@ -2162,6 +2424,9 @@ void RasterizerVulkan::CollectIndirectTrace() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    if (VideoCommon::GpuSplit::Unlends()) {
+        VideoCommon::GpuSplit::Get().NoteLent(VideoCommon::GpuSplit::UnlendReason::Texture);
+    }
     RENDER_LEND(DrawTexture())
 
     SCOPE_EXIT {
@@ -2934,6 +3199,23 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
     if (addr == 0 || size == 0) {
         return;
     }
+    if (VideoCommon::GpuSplit::PlayingUnlent() && VideoCommon::GpuSplit::UnlendEnabled()) {
+        // GPURender reading guest memory for an unlent draw (image uploads) stays out of the
+        // back's buffer cache and CPU write gather (Fritchii ba647008e).
+        auto& split = VideoCommon::GpuSplit::Get();
+        split.CheckRenderRead(addr, size);
+        if (True(which & VideoCommon::CacheType::BufferCache)) {
+            split.NoteSkippedBackFlush();
+        }
+        if (True(which & VideoCommon::CacheType::TextureCache)) {
+            std::scoped_lock lock{texture_cache.mutex};
+            texture_cache.DownloadMemory(addr, size);
+        }
+        if (True(which & VideoCommon::CacheType::QueryCache)) {
+            query_cache.FlushRegion(addr, size);
+        }
+        return;
+    }
     if (True(which & VideoCommon::CacheType::BufferCache) &&
         VideoCommon::GpuSplit::OwnsScheduler()) {
         // A reader that flushes first gets the GPU-written list words owed there (Nx2ListIndirect).
@@ -3150,6 +3432,9 @@ void RasterizerVulkan::InvalidateCachedWrites(
         }
         return false;
     };
+    // A draw the back wanted to unlend waits for these to reach GPURender's caches.
+    unlend_gather_hit = any(texture_cache.page_filter) || any(query_cache.page_filter) ||
+                        any(pipeline_cache.page_filter);
     // Even with skip_cpu_inner_invalidation: engines writing images in software (DMA pitch to
     // block linear copies of decoded video frames) reach the texture cache only through here.
     if (any(texture_cache.page_filter)) {
@@ -3651,7 +3936,7 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
     // the scene size, so a depth pre-pass and the colour passes move together; shadow maps,
     // half-size passes and full-screen passes (which keep the depth bound without using it, as
     // #678 found, some with depth writes on: with the test off nothing writes depth) stay put.
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = DrawEngine().regs;
     if (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr && oot_motion.extent.width != 0 &&
         oot_dlss_frame && *oot_dlss_frame + 1 >= render_trace_frame && regs.depth_test_enable) {
         const auto& targets = texture_cache.GetRenderTargets();
@@ -3671,7 +3956,7 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
     }
     if (want != oot_jitter_applied) {
         oot_jitter_applied = want;
-        maxwell3d->dirty.flags[Dirty::Viewports] = true;
+        DrawEngine().dirty.flags[Dirty::Viewports] = true;
     }
 }
 
@@ -4470,15 +4755,15 @@ void RasterizerVulkan::RecordDynamic(F&& command, std::source_location location)
 }
 
 void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
-    auto& regs = maxwell3d->regs;
-    auto& flags = maxwell3d->dirty.flags;
+    auto& regs = DrawEngine().regs;
+    auto& flags = DrawEngine().dirty.flags;
     // A mesh emulation pipeline has static input assembly and vertex input. Binding it replaces
     // that dynamic state, so leave it to the next regular draw to set again.
     const bool emulated_mesh{pipeline != nullptr && pipeline->IsEmulatedMesh()};
     if (emulated_mesh) {
         state_tracker.InvalidateInputState();
     }
-    const auto topology = maxwell3d->draw_manager.draw_state.topology;
+    const auto topology = DrawEngine().draw_manager.draw_state.topology;
     const bool topology_changed = !emulated_mesh && state_tracker.ChangePrimitiveTopology(topology);
     if (topology_changed) {
         flags[Dirty::DepthBiasEnable] = true;
@@ -4577,7 +4862,7 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
 void RasterizerVulkan::HandleTransformFeedback() {
     static std::once_flag warn_unsupported;
 
-    const auto& regs = maxwell3d->regs;
+    const auto& regs = DrawEngine().regs;
     if (!device.IsExtTransformFeedbackSupported()) {
         if (regs.transform_feedback_enabled != 0) {
             std::call_once(warn_unsupported, [&] {
@@ -4608,7 +4893,7 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
         return;
     }
 
-    maxwell3d->dirty.flags[Dirty::Scissors] = true;
+    DrawEngine().dirty.flags[Dirty::Scissors] = true;
 
     if (!regs.viewport_scale_offset_enabled) {
         float x = static_cast<float>(regs.surface_clip.x);
@@ -4967,7 +5252,8 @@ void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::R
     if (device.IsMoltenVK()) {
         enable = true;
     } else if (enable) {
-        const auto topology = MaxwellToVK::PrimitiveTopology(device, maxwell3d->draw_manager.draw_state.topology);
+        const auto topology =
+            MaxwellToVK::PrimitiveTopology(device, DrawEngine().draw_manager.draw_state.topology);
         enable = IsPrimitiveRestartSupported(device, topology);
     }
 
@@ -5057,7 +5343,7 @@ void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& re
         return;
     }
     const bool enable =
-        far_plane_draw || PolygonOffsetEnabled(regs, maxwell3d->draw_manager.draw_state.topology);
+        far_plane_draw || PolygonOffsetEnabled(regs, DrawEngine().draw_manager.draw_state.topology);
     RecordDynamic([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable); });
 }
 
@@ -5312,7 +5598,7 @@ void RasterizerVulkan::UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& 
 }
 
 void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) {
-    auto& dirty{maxwell3d->dirty.flags};
+    auto& dirty{DrawEngine().dirty.flags};
     const bool record = dirty[Dirty::VertexInput] || dirty[VideoCommon::Dirty::VertexBuffers];
     if (!record && !verify_vertex_input) {
         return;

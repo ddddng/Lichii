@@ -137,12 +137,16 @@ u32 FirstFlag(const Flags& flags) {
 
 } // Anonymous namespace
 
-bool Enabled() {
+bool VerifyAll() {
     static const bool env = [] {
         const char* const value = std::getenv("EDEN_NX2_RENDER_VIEW_VERIFY");
         return value != nullptr && value[0] == '1';
     }();
     return g_test_enabled.value_or(env);
+}
+
+bool Enabled() {
+    return VerifyAll() || GpuSplit::UnlendEnabled();
 }
 
 void SetEnabledForTest(std::optional<bool> on) {
@@ -241,7 +245,7 @@ void Writes::NoteBind(size_t stage, u32 slot) noexcept {
     binds[bit / 64] |= u64{1} << (bit % 64);
 }
 
-Packet Writes::Pack(Maxwell3D& engine) {
+Packet Writes::Pack(Maxwell3D& engine, bool events) {
     Packet packet;
     const Flags now = engine.dirty.flags & Forwarded();
     const EngineValues values = ValuesOf(engine);
@@ -296,6 +300,13 @@ Packet Writes::Pack(Maxwell3D& engine) {
         packet.has_values = true;
         sent = values;
     }
+    if (events) {
+        packet.raised = now;
+        g_words += packet.words.size();
+        g_binds += packet.binds.size();
+        g_raised += packet.raised.count();
+        return packet;
+    }
     packet.consumed = consumed;
     consumed.reset();
     packet.raised = now & ~after;
@@ -340,7 +351,8 @@ void Compare(Maxwell3D& view, Maxwell3D& engine) {
         Note(Check::ViewWords, fmt::format("{} words, first {:#x}: view {:#x}, engine {:#x}",
                                            differing, first, v[first], e[first]));
     }
-    const Flags flags = (view.dirty.flags ^ engine.dirty.flags) & Forwarded();
+    const Flags flags =
+        GpuSplit::UnlendEnabled() ? Flags{} : (view.dirty.flags ^ engine.dirty.flags) & Forwarded();
     if (flags.any()) {
         const u32 flag = FirstFlag(flags);
         Note(Check::ViewFlags, fmt::format("{} flags, first {}: view {}, engine {}", flags.count(),
@@ -379,17 +391,23 @@ void Compare(Maxwell3D& view, Maxwell3D& engine) {
     }
 }
 
-DrawCheck::DrawCheck(Maxwell3D& engine_) {
+DrawCheck::DrawCheck(Maxwell3D& engine_, bool verify) {
     if (!Enabled()) {
         return;
     }
+    const bool unlend = GpuSplit::UnlendEnabled();
     engine = &engine_;
     if (!engine_.render_view_writes) {
         engine_.render_view_writes = std::make_unique<Writes>(engine_);
     }
     writes = engine_.render_view_writes.get();
     Maxwell3D* const view = &writes->View();
-    GpuSplit::Get().LendRender([view, packet = writes->Pack(engine_)] { Apply(*view, packet); });
+    GpuSplit::Get().LendRender(
+        [view, packet = writes->Pack(engine_, unlend)] { Apply(*view, packet); });
+    compared = !unlend || verify || VerifyAll();
+    if (!compared) {
+        return;
+    }
     Compare(*view, engine_);
     static u32 draws{};
     static auto next = std::chrono::steady_clock::now() + std::chrono::seconds{10};
@@ -400,7 +418,7 @@ DrawCheck::DrawCheck(Maxwell3D& engine_) {
 }
 
 DrawCheck::~DrawCheck() {
-    if (writes != nullptr) {
+    if (writes != nullptr && !GpuSplit::UnlendEnabled()) {
         writes->DrawDone(*engine);
     }
 }

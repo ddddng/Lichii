@@ -132,6 +132,16 @@ public:
         return vertex_repack_mask != 0;
     }
 
+    /// EDEN_NX2_RENDER_UNLEND: where buffer bindings go, the back's capture queue while it runs an
+    /// unlent draw's buffer half.
+    GuestDescriptorQueue* SwapDescriptorQueue(GuestDescriptorQueue* queue) noexcept {
+        return std::exchange(guest_descriptor_queue, queue);
+    }
+
+    [[nodiscard]] BufferArena& Arena() noexcept {
+        return arena;
+    }
+
     /// Scheduler::CurrentTick, inline: the stream uniform reuse asks for it on every small
     /// uniform buffer bind.
     u64 CurrentTick() const noexcept {
@@ -294,7 +304,7 @@ public:
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
     /// it and the GPU has not even started on it.
     void RebindStreamUniform(const StreamUniformRef& ref, u32 size) {
-        guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address, ref.offset, size);
+        guest_descriptor_queue->AddBuffer(ref.buffer, ref.device_address, ref.offset, size);
     }
 
     [[nodiscard]] VkDeviceSize SparseAlignmentFor(bool sparse_compatible) const noexcept {
@@ -361,11 +371,11 @@ private:
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
         if (handle == VK_NULL_HANDLE) {
-            guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
+            guest_descriptor_queue->AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
             // A descriptor range of 0 is invalid; an unmapped binding covers the null buffer.
             const VkDeviceSize range = buffer.IsNull() && size == 0 ? NullBufferSize() : size;
-            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, range);
+            guest_descriptor_queue->AddBuffer(handle, buffer.DeviceAddress(), offset, range);
         }
     }
 
@@ -383,7 +393,7 @@ private:
     Scheduler& scheduler;
     const MasterSemaphore& master_semaphore; ///< The scheduler's, for CurrentTick
     StagingBufferPool& staging_pool;
-    GuestDescriptorQueue& guest_descriptor_queue;
+    GuestDescriptorQueue* guest_descriptor_queue;
     BufferArena arena;
     std::unique_ptr<StagingBufferPool> upload_pool;
 

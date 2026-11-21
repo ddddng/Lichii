@@ -214,6 +214,7 @@ void BufferCache<P>::TickFrame() {
         RunGarbageCollector(total_used_memory >= critical_memory);
     }
     ++frame_tick;
+    VideoCommon::GpuSplit::Get().CheckBufferFree();
     delayed_destruction_ring.Tick();
 
     // Pages draws wrote: their early downloads, now that the frame's work is recorded.

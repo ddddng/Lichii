@@ -98,6 +98,9 @@ public:
     ~RasterizerVulkan() override;
 
     void Draw(bool is_indexed, u32 instance_count) override;
+
+    /// EDEN_NX2_RENDER_UNLEND: a draw the back posts unlent, which GPURender records.
+    struct UnlentDraw;
     void DrawIndirect() override;
     void DrawTexture() override;
     void Clear(u32 layer_count) override;
@@ -218,6 +221,22 @@ private:
     void TrackOotTonemappedImage();
     bool TryNx2IndirectReset(bool is_indexed, u32 instance_count);
 
+    /// EDEN_NX2_RENDER_UNLEND, on the back: resolves the pipeline and the buffer half of a warm
+    /// direct draw and posts the rest to GPURender. False when the draw has to be lent instead.
+    bool TryUnlendDraw(bool is_indexed, u32 instance_count);
+    /// GPURender: records an unlent draw from its view of the channel's registers.
+    void PlayUnlentDraw(UnlentDraw& draw);
+    /// Around each lent call (GpuSplit::SetLendHooks): the engine takes the flags GPURender's
+    /// view holds, and the view takes the engine's after the call.
+    static void* LendEnter(void* rasterizer);
+    static void LendLeave(void* rasterizer, void* engine);
+    /// The registers GPURender's dynamic state reads: its view while it plays an unlent draw.
+    [[nodiscard]] Tegra::Engines::Maxwell3D& DrawEngine() noexcept {
+        return render_engine != nullptr ? *render_engine : *maxwell3d;
+    }
+    /// What a draw leaves for Ocarina of Time's upscalers once recorded.
+    void NoteOcarinaDraw(const GraphicsPipeline& pipeline);
+
     void FlushWork();
 
     void TraceRenderState(bool is_indexed, const char* outcome, const Framebuffer* framebuffer);
@@ -314,6 +333,8 @@ private:
     StagingBufferPool staging_pool;
     DescriptorPool descriptor_pool;
     GuestDescriptorQueue guest_descriptor_queue;
+    /// EDEN_NX2_RENDER_UNLEND: the back's buffer entries of the draw it unlends.
+    GuestDescriptorQueue unlend_capture;
     ComputePassDescriptorQueue compute_pass_descriptor_queue;
     DescriptorBufferRing descriptor_buffer_ring;
     BlitImageHelper blit_image;
@@ -569,6 +590,13 @@ private:
     /// for it: it gets a depth bias towards the far value and depth clamping (see
     /// UpdateDynamicStates).
     bool far_plane_draw{};
+    /// EDEN_NX2_RENDER_UNLEND: the view GPURender records an unlent draw from (DrawEngine).
+    Tegra::Engines::Maxwell3D* render_engine{};
+    /// Set in a lent gather that reached GPURender's caches (images, queries, shaders).
+    bool unlend_gather_hit{};
+    /// The back forced this lent draw to compare its view (EDEN_NX2_RENDER_VERIFY_EVERY).
+    bool unlend_verify_draw{};
+    u64 unlend_candidates{};
     float depth_bias_slope_scale = 1.0f;
     VertexInputState recorded_vertex_input;
     bool vertex_input_recorded{};

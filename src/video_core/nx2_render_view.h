@@ -32,7 +32,10 @@ using Maxwell3D = Tegra::Engines::Maxwell3D;
 using Flags = Maxwell3D::DirtyState::Flags;
 inline constexpr u32 NumRegs = Maxwell3D::Regs::NUM_REGS;
 
+/// The view runs with EDEN_NX2_RENDER_VIEW_VERIFY=1 or EDEN_NX2_RENDER_UNLEND.
 [[nodiscard]] bool Enabled();
+/// EDEN_NX2_RENDER_VIEW_VERIFY=1: every lent draw compares (with unlend, only forced ones else).
+[[nodiscard]] bool VerifyAll();
 void SetEnabledForTest(std::optional<bool> on);
 
 /// Must-be-0 checks.
@@ -121,8 +124,9 @@ public:
     }
     void NoteBind(size_t stage, u32 slot) noexcept;
 
-    /// At a draw: what the view needs to match the engine now.
-    [[nodiscard]] Packet Pack(Maxwell3D& engine);
+    /// At a draw: what the view needs to match the engine now. With `events` (unlend) the flags
+    /// set on the engine are raised on the view, the caller clearing what GPURender consumes.
+    [[nodiscard]] Packet Pack(Maxwell3D& engine, bool events = false);
     /// After the draw: the forwarded flags it cleared go in the next packet.
     void DrawDone(const Maxwell3D& engine);
 
@@ -145,13 +149,15 @@ private:
 
 void NoteWrite(Writes& writes, u32 index) noexcept;
 
-/// The view against the engine at a draw, GPURender idle: words, flags, draw, pools, values.
+/// The view against the engine at a draw, GPURender idle: words, flags (not with unlend, where
+/// each side consumes its own), draw, pools, values.
 void Compare(Maxwell3D& view, Maxwell3D& engine);
 
 /// At every draw on the back: sends the packet, lets GPURender apply it, compares.
 class DrawCheck {
 public:
-    explicit DrawCheck(Maxwell3D& engine);
+    /// `verify`: compare even with unlend on (EDEN_NX2_RENDER_VERIFY_EVERY).
+    explicit DrawCheck(Maxwell3D& engine, bool verify = false);
     ~DrawCheck();
 
     DrawCheck(const DrawCheck&) = delete;
@@ -159,12 +165,13 @@ public:
 
     /// GPURender's view of the draw's engine (null when off), for the build compares.
     [[nodiscard]] Maxwell3D* View() const {
-        return writes != nullptr ? &writes->View() : nullptr;
+        return compared ? &writes->View() : nullptr;
     }
 
 private:
     Maxwell3D* engine{};
     Writes* writes{};
+    bool compared{};
 };
 
 /// Every count, once a draw compared.

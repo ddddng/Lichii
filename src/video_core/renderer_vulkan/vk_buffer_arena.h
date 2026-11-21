@@ -9,6 +9,7 @@
 
 #include "common/common_types.h"
 #include "video_core/buffer_cache/command_arena.h"
+#include "video_core/gpu_split.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -67,6 +68,23 @@ public:
 
     /// Plays the queued commands. Scheduler entry points call PlayPending.
     void Play();
+
+    /// EDEN_NX2_RENDER_UNLEND: while one lives, the back's commands go to `into` by value, the
+    /// buffer half of a draw GPURender records.
+    struct Collect {
+        explicit Collect(VideoCommon::CommandArena& into) noexcept {
+            collecting = &into;
+        }
+        ~Collect() {
+            collecting = nullptr;
+        }
+    };
+    /// The back, posting what it collected: the stamp GPURender maps when it plays it.
+    [[nodiscard]] u64 CloseCollected() noexcept {
+        return clock.Close();
+    }
+    /// GPURender: plays what the back collected for a draw, stamped `stamp`.
+    void PlayCollected(const VideoCommon::CommandArena& commands, u64 stamp);
     /// Once a frame: frees the stamp of commands that ran without the arena.
     void TickFrame();
 
@@ -180,7 +198,10 @@ private:
     void Exec(const BindVerticesBody& body, std::span<const VertexBinding> bindings);
     void Exec(const BindFeedbackBody& body, std::span<const VertexBinding> bindings);
 
+    void PlayRecords(const VideoCommon::CommandArena& commands);
+
     static inline thread_local BufferArena* pending{};
+    static inline thread_local VideoCommon::CommandArena* collecting{};
     static inline thread_local u32 side_depth{};
     static inline thread_local u32 immediate_depth{};
     static inline thread_local bool playing{};
@@ -203,6 +224,16 @@ private:
     u64 played_records{};
     u64 direct_records{};
     std::atomic<u64> immediates{};
+    /// EDEN_NX2_RENDER_UNLEND: the back takes stamps while GPURender plays, so GPURender takes
+    /// them only inside a lent call, the back parked (must be 0 outside).
+    u64 unowned_stamps{};
+    bool unlend_seen{};
+    void NoteStamp() noexcept {
+        if (VideoCommon::GpuSplit::UnlendEnabled()) {
+            unlend_seen = true;
+            unowned_stamps += VideoCommon::GpuSplit::PlayingUnlent() ? 1 : 0;
+        }
+    }
     static inline std::atomic<u64> outside_records{};
 };
 

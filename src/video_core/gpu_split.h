@@ -197,11 +197,10 @@ public:
         return front_macros;
     }
 
-    /// Whether the calling thread is the back. GPURender counts as the back while it owns the
-    /// back's renderer state (EDEN_NX2_RENDER_OWNS): it runs what the back lends it, the back
-    /// parked (Fritchii ead877857).
+    /// Whether the calling thread is the back. GPURender counts as the back inside a call the
+    /// back lent it, the back parked (Fritchii ead877857).
     [[nodiscard]] static bool OnBackThread() {
-        return on_back_thread || (on_render_thread && instance.render_owns);
+        return on_back_thread || render_lent;
     }
     /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
     static void MarkGpuThread() {
@@ -236,6 +235,98 @@ public:
     /// the texture cache, the guest descriptor queue, the query cache) is lent to it.
     [[nodiscard]] static bool LendsToRender() {
         return on_back_thread && instance.render_owns;
+    }
+    /// EDEN_NX2_RENDER_UNLEND=1: the back resolves a warm direct draw's pipeline and buffer half,
+    /// and GPURender records the rest from its register view while the back goes on (Fritchii
+    /// 036fe4b23's step 4).
+    [[nodiscard]] static bool Unlends() {
+        return on_back_thread && instance.render_unlend;
+    }
+    [[nodiscard]] static bool UnlendEnabled() {
+        return instance.render_unlend;
+    }
+    /// On GPURender while it plays an unlent draw, outside a lent call.
+    [[nodiscard]] static bool PlayingUnlent() {
+        return on_render_thread && !render_lent;
+    }
+    /// Why a draw was lent with unlend on (EDEN_NX2_RENDER_UNLEND), for the shutdown line.
+    enum class UnlendReason : u8 {
+        Verify,
+        Indirect,
+        Texture,
+        Diagnostics,
+        FastDraw,
+        Ocarina,
+        Feedback,
+        InlineIndex,
+        Quads,
+        Uint8Index,
+        Mesh,
+        NotBuilt,
+        TextureBuffers,
+        Repack,
+        ListOwed,
+        Gather,
+        IndirectReset,
+        Count,
+    };
+    void NoteLent(UnlendReason reason) {
+        ++unlend.lent[static_cast<size_t>(reason)];
+    }
+    /// The back: posts an unlent draw to GPURender.
+    template <typename Packet>
+    void PostUnlent(Packet&& packet) {
+        ++unlend.unlent;
+        packet.position = back_entry_start;
+        if (render_follower->Post(back_entry_start, std::forward<Packet>(packet))) {
+            CheckRenderLocks();
+        }
+    }
+    /// The back, at each unlent draw: GPURender reads the TIC and TSC pools in these ranges.
+    void NotePools(GPUVAddr tic, u64 tic_size, GPUVAddr tsc, u64 tsc_size);
+    /// The back, before it writes guest memory without the caches: waits for GPURender while a
+    /// draw it has not played reads a pool there (Fritchii's GuardStreamWrite, e18356afa), and
+    /// stamps the pages for CheckRenderRead.
+    [[nodiscard]] bool Guarding() const {
+        return on_back_thread && render_unlend && render_follower->Pending();
+    }
+    void GuardStreamWrite(GPUVAddr gpu_addr, u64 size) {
+        if (Guarding()) [[unlikely]] {
+            GuardPools(gpu_addr, size);
+        }
+    }
+    void StampWrite(DAddr device_addr, u64 size) {
+        if (Guarding()) [[unlikely]] {
+            Stamp(device_addr, size);
+        }
+    }
+    /// GPURender reading guest memory for an unlent draw (image uploads): bytes the back wrote
+    /// after it posted the draw are counted (texture reads ahead, must be 0; Fritchii c389ff6cb).
+    void CheckRenderRead(DAddr device_addr, u64 size);
+    /// GPURender playing an unlent draw: its flush of guest memory leaves out the back's half
+    /// (the buffer cache, the CPU write gather; Fritchii ba647008e).
+    void NoteSkippedBackFlush() {
+        ++unlend.skipped_back_flushes;
+    }
+    /// The buffer cache frees buffers here: must not while GPURender may still play a draw that
+    /// binds them.
+    void CheckBufferFree() {
+        if (render_unlend && on_back_thread && render_follower->Pending()) [[unlikely]] {
+            unlend.frees_ahead.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    void NoteUnlendVerify() {
+        ++unlend.verified;
+    }
+    void NoteLookupLend() {
+        ++unlend.lookup_lends;
+    }
+    void NoteUnlentFailed() {
+        ++unlend.failed;
+    }
+    /// GPURender, while it plays an unlent draw: the ring position the back posted it at.
+    static void SetPlayingPosition(u64 position) {
+        playing_position = position;
     }
     /// Entry points of GPURender's objects: a use on the back is counted (owner on E, must be 0).
     static void RenderOwned(const char* where,
@@ -315,12 +406,25 @@ public:
             site,
             [](void* argument) {
                 render_lent = true;
+                void* const token = instance.render_unlend && instance.lend_enter != nullptr
+                                        ? instance.lend_enter(instance.lend_argument)
+                                        : nullptr;
                 SCOPE_EXIT {
+                    if (token != nullptr) {
+                        instance.lend_leave(instance.lend_argument, token);
+                    }
                     render_lent = false;
                 };
                 (*static_cast<std::remove_reference_t<Call>*>(argument))();
             },
             &call);
+    }
+    /// EDEN_NX2_RENDER_UNLEND: around each lent call, the renderer evens out the dirty flags of
+    /// its engine and GPURender's view (enter returns what leave takes, null for nothing).
+    void SetLendHooks(void* (*enter)(void*), void (*leave)(void*, void*), void* argument) {
+        lend_enter = enter;
+        lend_leave = leave;
+        lend_argument = argument;
     }
     /// The back never waits for GPURender holding one of these (the caches' locks), but at the
     /// scheduler's joins: GPURender's packets take none.
@@ -975,9 +1079,37 @@ private:
     static inline thread_local bool on_render_thread{};
     /// On GPURender while it runs a call the back lent it.
     static inline thread_local bool render_lent{};
+    /// On GPURender while it plays an unlent draw: where the back posted it (TrackFencedWrite).
+    static inline thread_local u64 playing_position{~u64{0}};
     bool render_follower_supported{};
     /// EDEN_NX2_RENDER_OWNS=1, set before the back and GPURender start.
     bool render_owns{};
+    /// EDEN_NX2_RENDER_UNLEND=1 (needs the owner switch), set before the back and GPURender start.
+    bool render_unlend{};
+    bool fast_draw_restore{};
+    struct UnlendCounts {
+        u64 unlent{};
+        std::array<u64, static_cast<size_t>(UnlendReason::Count)> lent{};
+        u64 verified{};
+        u64 lookup_lends{};
+        u64 stream_drains{};
+        u64 skipped_back_flushes{};
+        u64 failed{};
+        std::atomic<u64> reads_ahead{};
+        std::atomic<u64> frees_ahead{};
+    };
+    UnlendCounts unlend;
+    struct PoolRange {
+        GPUVAddr begin;
+        GPUVAddr end;
+        u64 packet;
+    };
+    std::array<PoolRange, 4> pool_ranges{};
+    void GuardPools(GPUVAddr gpu_addr, u64 size);
+    void Stamp(DAddr device_addr, u64 size);
+    /// Device page and the back's packet count when it wrote there (CheckRenderRead), hashed.
+    std::unique_ptr<std::atomic<u64>[]> stamps;
+    void LogUnlend() const;
     /// Must be 0: uses of GPURender's objects on the back, and of the back's on GPURender
     /// outside a lent call.
     std::atomic<u64> owner_on_e{};
@@ -1016,6 +1148,9 @@ private:
     SiteCounts lend_sites;
     void (*idle_hook)(void*){};
     void* idle_argument{};
+    void* (*lend_enter)(void*){};
+    void (*lend_leave)(void*, void*){};
+    void* lend_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
     std::atomic<bool> back_quiet{true};

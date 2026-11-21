@@ -165,6 +165,15 @@ public:
 
     // Counters: E's are read on E or once it stopped, R's on R or once it stopped.
 
+    /// E: the number of the last packet posted.
+    [[nodiscard]] u64 Pushed() const {
+        return pushed;
+    }
+    /// Either side: the number of the last packet R finished.
+    [[nodiscard]] u64 Played() const {
+        return played.load(std::memory_order_acquire);
+    }
+
     [[nodiscard]] u64 MaxDepth() const {
         return max_depth;
     }

@@ -217,6 +217,11 @@ struct GPU::Impl {
     }
 
     /// Tick pending requests within the GPU.
+    bool HasSyncRequests() {
+        std::scoped_lock lck{sync_request_mutex};
+        return !sync_requests.empty();
+    }
+
     void TickWork() {
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
@@ -634,6 +639,10 @@ void GPU::WaitForSyncOperation(u64 fence) {
 
 void GPU::TickWork() {
     impl->TickWork();
+}
+
+bool GPU::HasSyncRequests() {
+    return impl->HasSyncRequests();
 }
 
 /// Gets a mutable reference to the Host1x interface

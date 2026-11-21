@@ -378,7 +378,7 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
                                        DescriptorPool& descriptor_pool)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
       master_semaphore{scheduler_.GetMasterSemaphore()}, staging_pool{staging_pool_},
-      guest_descriptor_queue{guest_descriptor_queue_}, arena{device_, scheduler_},
+      guest_descriptor_queue{&guest_descriptor_queue_}, arena{device_, scheduler_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
@@ -441,7 +441,7 @@ void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
                                            VideoCore::Surface::PixelFormat format) {
     const bool is_null = buffer.IsNull();
     if (is_null && device.HasNullDescriptor()) {
-        guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, 0, 0, 0, VK_FORMAT_R8_UNORM);
+        guest_descriptor_queue->AddTexelBuffer(VK_NULL_HANDLE, 0, 0, 0, VK_FORMAT_R8_UNORM);
         return;
     }
     if (format == VideoCore::Surface::PixelFormat::Invalid) {
@@ -457,7 +457,7 @@ void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
         block_size % 3 == 0 ? block_size / 3 : block_size);
     const auto buffer_size = is_null ? NullBufferSize() : buffer.SizeBytes();
     const auto view_offset = is_null ? 0u : offset;
-    const bool descriptor_buffer = guest_descriptor_queue.UsesDescriptorBuffer();
+    const bool descriptor_buffer = guest_descriptor_queue->UsesDescriptorBuffer();
     const auto address = buffer.DeviceAddress();
     const auto range = ClampTexelBufferRange(view_offset, is_null ? block_size : size, buffer_size,
                                             descriptor_buffer ? 1 : alignment,
@@ -476,18 +476,18 @@ void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
                       host_format, offset, size, buffer_size, address, alignment,
                       device.GetMaxTexelBufferElements());
         }
-        guest_descriptor_queue.RejectTexelBuffer();
+        guest_descriptor_queue->RejectTexelBuffer();
         return;
     }
     if (descriptor_buffer) {
-        guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, address, view_offset, range,
-                                              host_format);
+        guest_descriptor_queue->AddTexelBuffer(VK_NULL_HANDLE, address, view_offset, range,
+                                               host_format);
         return;
     }
     if (const auto view = buffer.View(view_offset, range, host_format)) {
-        guest_descriptor_queue.AddTexelBuffer(view);
+        guest_descriptor_queue->AddTexelBuffer(view);
     } else {
-        guest_descriptor_queue.RejectTexelBuffer();
+        guest_descriptor_queue->RejectTexelBuffer();
     }
 }
 
@@ -700,7 +700,7 @@ bool BufferCacheRuntime::BindMultiRangeStorageBuffer(u64 key, bool is_written) {
         PostCopyBarrier();
         multi_range_buffers.MarkGathered(key);
     }
-    guest_descriptor_queue.AddBuffer(ref.handle, ref.address, 0, ref.size);
+    guest_descriptor_queue->AddBuffer(ref.handle, ref.address, 0, ref.size);
     return true;
 }
 

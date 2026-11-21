@@ -51,6 +51,11 @@ BufferArena::~BufferArena() {
              "immediate buffer side paths; {} buffer side records outside the arena (must be 0)",
              played_records, plays, direct_records, immediates.load(std::memory_order_relaxed),
              outside_records.load(std::memory_order_relaxed));
+    if (unlend_seen) {
+        LOG_INFO(Render_Vulkan,
+                 "Buffer arena clock: must be 0: {} stamps taken on GPURender outside a lent call",
+                 unowned_stamps);
+    }
 }
 
 bool BufferArena::Enabled() {
@@ -63,6 +68,10 @@ bool BufferArena::Enabled() {
 
 template <typename Body, typename E>
 void BufferArena::Submit(Op op, const Body& body, std::span<const E> array) {
+    if (collecting != nullptr) {
+        collecting->Push(static_cast<u16>(op), body, array);
+        return;
+    }
     if (enabled && VideoCommon::GpuSplit::OwnsScheduler()) {
         queued.Push(static_cast<u16>(op), body, array);
         pending = this;
@@ -139,12 +148,25 @@ void BufferArena::Play() {
         return;
     }
     play.Swap(queued);
+    NoteStamp();
     clock.Map(scheduler.CurrentTick());
+    PlayRecords(play);
+    play.Clear();
+}
+
+void BufferArena::PlayCollected(const VideoCommon::CommandArena& commands, u64 stamp) {
+    clock.Map(stamp, scheduler.CurrentTick());
+    if (!commands.Empty()) {
+        PlayRecords(commands);
+    }
+}
+
+void BufferArena::PlayRecords(const VideoCommon::CommandArena& commands) {
     ++plays;
-    played_records += play.Records();
+    played_records += commands.Records();
     playing = true;
     using Arena = VideoCommon::CommandArena;
-    play.ForEach([this](u16 kind, const u8* record) {
+    commands.ForEach([this](u16 kind, const u8* record) {
         switch (static_cast<Op>(kind)) {
         case Op::OutsideRenderPass:
             Exec(Arena::Body<OutsideBody>(record), {});
@@ -181,11 +203,11 @@ void BufferArena::Play() {
         }
     });
     playing = false;
-    play.Clear();
 }
 
 void BufferArena::TickFrame() {
     if (enabled && queued.Empty()) {
+        NoteStamp();
         clock.Map(scheduler.CurrentTick());
     }
 }

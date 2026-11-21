@@ -122,14 +122,27 @@ public:
 
     /// The stamp of the commands recorded now, played at the next Map.
     [[nodiscard]] u64 Now() const noexcept {
-        return mapped.load(std::memory_order_acquire) + 1;
+        return next.load(std::memory_order_acquire);
     }
 
-    /// The commands stamped Now() go in tick. Ticks never decrease.
-    void Map(u64 tick) noexcept {
-        const u64 stamp = mapped.load(std::memory_order_relaxed) + 1;
+    /// Ends the batch stamped Now(), for a player that maps it later: what is recorded after it
+    /// gets the next stamp. Returns the batch's stamp.
+    u64 Close() noexcept {
+        return next.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    /// The batch `stamp` goes in tick. Batches are mapped in order, and ticks never decrease.
+    void Map(u64 stamp, u64 tick) noexcept {
         ticks[stamp % Window].store(tick, std::memory_order_relaxed);
         mapped.store(stamp, std::memory_order_release);
+    }
+
+    /// The commands stamped Now() go in tick, mapped before the next stamp opens. Stamps are
+    /// taken (here and by Close) by one thread at a time: the buffer cache's owner.
+    void Map(u64 tick) noexcept {
+        const u64 stamp = next.load(std::memory_order_relaxed);
+        Map(stamp, tick);
+        next.store(stamp + 1, std::memory_order_release);
     }
 
     /// Whether the host GPU completed a stamp; tick_done(tick) answers for a tick.
@@ -147,6 +160,7 @@ public:
     }
 
 private:
+    std::atomic<u64> next{1};
     std::atomic<u64> mapped{};
     std::array<std::atomic<u64>, Window> ticks{};
 };

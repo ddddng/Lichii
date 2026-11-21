@@ -43,6 +43,16 @@ namespace VideoCommon {
 
 namespace {
 
+// CheckRenderRead's stamps: a device page and the low bits of the back's packet count, hashed.
+constexpr size_t StampSlots = size_t{1} << 16;
+constexpr u64 StampPageBits = 12;
+constexpr u64 StampSeqBits = 24;
+constexpr u64 StampSeqMask = (u64{1} << StampSeqBits) - 1;
+
+size_t StampSlot(u64 page) {
+    return static_cast<size_t>((page ^ (page >> 16) ^ (page >> 32)) & (StampSlots - 1));
+}
+
 void Pause() {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     _mm_pause();
@@ -204,6 +214,34 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         // descriptor queue and the query cache; the back lends it every call into them.
         const char* const owns = std::getenv("EDEN_NX2_RENDER_OWNS");
         render_owns = owns != nullptr && owns[0] == '1';
+        // EDEN_NX2_RENDER_UNLEND=1: warm direct draws go to GPURender unlent.
+        const char* const unlend_switch = std::getenv("EDEN_NX2_RENDER_UNLEND");
+        const bool unlend_wanted = unlend_switch != nullptr && unlend_switch[0] == '1';
+        const char* const arena_switch = std::getenv("EDEN_NX2_BUFFER_ARENA");
+        const bool arena = arena_switch != nullptr && arena_switch[0] == '1';
+        render_unlend = render_owns && arena && unlend_wanted;
+        if (unlend_wanted && !render_unlend) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_UNLEND needs EDEN_NX2_RENDER_OWNS=1 and "
+                                "EDEN_NX2_BUFFER_ARENA=1: ignored");
+        }
+        unlend.unlent = 0;
+        unlend.lent = {};
+        unlend.verified = 0;
+        unlend.lookup_lends = 0;
+        unlend.stream_drains = 0;
+        unlend.skipped_back_flushes = 0;
+        unlend.failed = 0;
+        unlend.reads_ahead.store(0, std::memory_order_relaxed);
+        unlend.frees_ahead.store(0, std::memory_order_relaxed);
+        pool_ranges = {};
+        if (render_unlend) {
+            if (!stamps) {
+                stamps = std::make_unique<std::atomic<u64>[]>(StampSlots);
+            }
+            // Fast draws' delta reads GPURender's scheduler state at the back's draw, and the
+            // packet does not carry it yet: they stay off while draws go unlent.
+            fast_draw_restore = Nx2FastDraw::g_enabled.exchange(false, std::memory_order_relaxed);
+        }
         owner_on_e.store(0, std::memory_order_relaxed);
         owner_on_r.store(0, std::memory_order_relaxed);
         render_follower.emplace(spin_time, ahead);
@@ -214,7 +252,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                  spin_time.count(),
                  ahead ? "posts ahead of unplayed packets" : "one packet at a time",
                  two_positions ? "GPURender's position" : "the back's position",
-                 render_owns ? ", owns the renderer state (the back lends every call)" : "");
+                 render_unlend ? ", owns the renderer state (warm direct draws unlent)"
+                 : render_owns ? ", owns the renderer state (the back lends every call)"
+                               : "");
     }
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -238,6 +278,10 @@ void GpuSplit::Stop() {
         render_follower.reset();
         two_positions = false;
         render_owns = false;
+        if (render_unlend && fast_draw_restore) {
+            Nx2FastDraw::g_enabled.store(true, std::memory_order_relaxed);
+        }
+        render_unlend = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -494,7 +538,8 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
 }
 
 GpuSplit::FencedHold GpuSplit::TrackFencedWrite() {
-    if (!OnBackThread()) {
+    const bool playing = PlayingUnlent() && playing_position != ~u64{0};
+    if (!OnBackThread() && !playing) {
         if (check_owner && on_render_thread) {
             LOG_ERROR(HW_GPU, "GPU split owner check: render packet tried to publish a fence hold");
         }
@@ -503,7 +548,8 @@ GpuSplit::FencedHold GpuSplit::TrackFencedWrite() {
     std::scoped_lock lock{fenced_mutex};
     // Never below what the back published as consumed: a hold taken between entries (the idle
     // hook) holds the entries after it.
-    const u64 tag = std::max(EntryTag(back_entry_start), fenced_sealed);
+    const u64 tag =
+        std::max(EntryTag(playing ? playing_position : back_entry_start), fenced_sealed);
     if (fenced_entries.empty() || fenced_entries.back().tag != tag) {
         fenced_entries.push_back({tag, 0});
     }
@@ -1135,6 +1181,101 @@ void GpuSplit::RenderLoop() {
                                   : std::string{});
     join_sites.Log("joins");
     lend_sites.Log("lends");
+    if (render_unlend) {
+        LogUnlend();
+    }
+}
+
+void GpuSplit::NotePools(GPUVAddr tic, u64 tic_size, GPUVAddr tsc, u64 tsc_size) {
+    const u64 packet = render_follower->Pushed() + 1;
+    for (const auto& [begin, size] : {std::pair{tic, tic_size}, std::pair{tsc, tsc_size}}) {
+        if (begin == 0 || size == 0) {
+            continue;
+        }
+        PoolRange* slot = &pool_ranges[0];
+        for (PoolRange& range : pool_ranges) {
+            if (range.begin == begin && range.end == begin + size) {
+                slot = &range;
+                break;
+            }
+            if (range.packet < slot->packet) {
+                slot = &range;
+            }
+        }
+        *slot = {begin, begin + size, packet};
+    }
+}
+
+void GpuSplit::GuardPools(GPUVAddr gpu_addr, u64 size) {
+    const u64 done = render_follower->Played();
+    const GPUVAddr end = gpu_addr + size;
+    for (const PoolRange& range : pool_ranges) {
+        if (range.packet > done && gpu_addr < range.end && range.begin < end) {
+            ++unlend.stream_drains;
+            CheckRenderLocks();
+            const bool parked = render_follower->Wait();
+            render_parks += parked ? 1 : 0;
+            join_sites.Note(std::source_location::current(), parked);
+            return;
+        }
+    }
+}
+
+void GpuSplit::Stamp(DAddr device_addr, u64 size) {
+    const u64 seq = render_follower->Pushed() & StampSeqMask;
+    for (u64 page = device_addr >> StampPageBits;
+         page <= (device_addr + (std::max)(size, u64{1}) - 1) >> StampPageBits; ++page) {
+        stamps[StampSlot(page)].store((page << StampSeqBits) | seq, std::memory_order_release);
+    }
+}
+
+void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
+    if (!stamps || size == 0) {
+        return;
+    }
+    const u64 packet = (render_follower->Played() + 1) & StampSeqMask;
+    for (u64 page = device_addr >> StampPageBits; page <= (device_addr + size - 1) >> StampPageBits;
+         ++page) {
+        const u64 stamp = stamps[StampSlot(page)].load(std::memory_order_acquire);
+        if ((stamp >> StampSeqBits) != page) {
+            continue;
+        }
+        if ((((stamp & StampSeqMask) - packet) & StampSeqMask) < (StampSeqMask >> 1)) {
+            if (unlend.reads_ahead.fetch_add(1, std::memory_order_relaxed) < 8) {
+                LOG_ERROR(HW_GPU,
+                          "GPU render unlend: GPURender read {:#x}+{:#x} for packet {}, which the "
+                          "back wrote after it posted the packet",
+                          device_addr, size, packet);
+            }
+            return;
+        }
+    }
+}
+
+void GpuSplit::LogUnlend() const {
+    static constexpr std::array<const char*, static_cast<size_t>(UnlendReason::Count)> names{
+        "verify",  "indirect",       "texture",         "diagnostics", "fast draw",
+        "ocarina", "feedback",       "inline index",    "quads",       "uint8 index",
+        "mesh",    "not built",      "texture buffers", "repack",      "list owes",
+        "gather",  "indirect reset",
+    };
+    std::string lent;
+    u64 total = 0;
+    for (size_t i = 0; i < names.size(); ++i) {
+        total += unlend.lent[i];
+        if (unlend.lent[i] != 0) {
+            lent += fmt::format(" {}:{}", names[i], unlend.lent[i]);
+        }
+    }
+    LOG_INFO(HW_GPU,
+             "GPU render unlend: {} draws unlent, {} lent (by reason:{}); {} lookup lends, {} "
+             "stream write drains, {} GPURender flushes without the back's half, {} unlent draws "
+             "GPURender could not configure; must be 0: {} texture reads ahead, {} buffer frees "
+             "ahead",
+             unlend.unlent, total, lent.empty() ? " none" : lent, unlend.lookup_lends,
+             unlend.stream_drains, unlend.skipped_back_flushes, unlend.failed,
+             unlend.reads_ahead.load(std::memory_order_relaxed),
+             unlend.frees_ahead.load(std::memory_order_relaxed));
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {
