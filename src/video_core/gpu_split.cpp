@@ -257,6 +257,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const query_flush_switch = std::getenv("EDEN_NX2_RENDER_QUERY_FLUSH_E");
+        const bool query_flush_wanted =
+            query_flush_switch != nullptr && query_flush_switch[0] == '1';
+        query_flush_e = query_flush_wanted && render_unlend;
+        query_flushes_nothing_pending = 0;
+        reports_landed_untracked.store(0, std::memory_order_relaxed);
+        if (query_flush_wanted && !query_flush_e) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_QUERY_FLUSH_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const flush_switch = std::getenv("EDEN_NX2_RENDER_FLUSH_E");
         const bool flush_wanted = flush_switch != nullptr && flush_switch[0] == '1';
         flush_e = flush_wanted && render_unlend;
@@ -341,6 +351,7 @@ void GpuSplit::Stop() {
         render_unlend = false;
         inval_e = false;
         flush_e = false;
+        query_flush_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1338,6 +1349,13 @@ void GpuSplit::RenderLoop() {
                  count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
                  count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
                  count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
+    if (query_flush_e) {
+        LOG_INFO(HW_GPU,
+                 "GPU render query flushes on the back: {} with no report still to land; must be "
+                 "0: {} reports landed untracked",
+                 query_flushes_nothing_pending,
+                 reports_landed_untracked.load(std::memory_order_relaxed));
     }
     if (flush_e) {
         LOG_INFO(

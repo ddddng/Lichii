@@ -3192,6 +3192,9 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                 .noted = NoteReportPending(*device, wide ? 16 : 4),
             };
             query_cache.page_filter.Mark(*device, 16);
+            if (GpuSplit::TracksPendingReports()) {
+                query_cache.NotePendingReport(*device);
+            }
             VideoCommon::Nx2FastDraw::NoteSync();
             if (PostRenderOp(GpuSplit::PostedOp::QueryReport, [this, gpu_addr, type, flags, payload,
                                                                subreport, posted] {
@@ -4047,6 +4050,14 @@ void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
     if (GpuSplit::Get().Posts(GpuSplit::PostedOp::QueryReport) &&
         (addr == 0 || size == 0 || !query_cache.page_filter.Any(addr, size))) {
         GpuSplit::Get().NoteQueryFlushSkipped();
+        return;
+    }
+    // EDEN_NX2_RENDER_QUERY_FLUSH_E: SemiFlushRegion only writes out values a report's own
+    // operation writes when it lands, and waits for the reports still to land: none means the
+    // range already holds every value. The back counts a report pending before it posts or lends
+    // it; its operation uncounts it once the value is written.
+    if (GpuSplit::QueryFlushesOnBack() && !query_cache.HasPendingReports(addr, size)) {
+        GpuSplit::Get().NoteQueryFlushNothingPending();
         return;
     }
     RENDER_LEND(FlushQueryResults(addr, size))

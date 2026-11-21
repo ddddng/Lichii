@@ -300,6 +300,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
+    if (!posted && !immediate && VideoCommon::GpuSplit::TracksPendingReports()) {
+        NotePendingReport(cpu_addr);
+    }
     const bool report_noted =
         posted ? posted->noted
                : !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
@@ -341,6 +344,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         SCOPE_EXIT {
             if (op.noted) {
                 impl->rasterizer.FinishReport(op_cpu_addr, op_report_size);
+            }
+            if (VideoCommon::GpuSplit::TracksPendingReports() && !NoteReportLanded(op_cpu_addr))
+                [[unlikely]] {
+                VideoCommon::GpuSplit::Get().NoteReportLandedUntracked();
             }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {

@@ -7,12 +7,13 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
-#include "video_core/page_filter.h"
-#include "common/container/unordered_map.h"
 #include <utility>
+#include "common/container/unordered_map.h"
+#include "video_core/page_filter.h"
 
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -127,6 +128,34 @@ public:
             }
         }
         return false;
+    }
+
+    /// EDEN_NX2_RENDER_QUERY_FLUSH_E: a report whose value is still to land, from before it is
+    /// recorded until its operation wrote or discarded it.
+    void NotePendingReport(DAddr addr) {
+        std::scoped_lock lock{pending_reports_mutex};
+        ++pending_reports[addr];
+    }
+    /// False when no report was pending there (must not happen).
+    bool NoteReportLanded(DAddr addr) {
+        std::scoped_lock lock{pending_reports_mutex};
+        const auto it = pending_reports.find(addr);
+        if (it == pending_reports.end()) {
+            return false;
+        }
+        if (--it->second == 0) {
+            pending_reports.erase(it);
+        }
+        return true;
+    }
+    /// Any thread: whether a report whose value (and timestamp, 16 bytes) reaches into the range
+    /// is still to land.
+    [[nodiscard]] bool HasPendingReports(DAddr addr, u64 size) {
+        constexpr u64 report_size = 16;
+        const DAddr begin = addr >= report_size - 1 ? addr - (report_size - 1) : 0;
+        std::scoped_lock lock{pending_reports_mutex};
+        const auto it = pending_reports.lower_bound(begin);
+        return it != pending_reports.end() && it->first < addr + size;
     }
 
     /// Return true when a CPU region is modified from the GPU
@@ -284,6 +313,8 @@ protected:
 
     ::Common::unordered_map<u64, ::Common::unordered_map<u32, QueryLocation>> cached_queries;
     std::mutex cache_mutex;
+    std::mutex pending_reports_mutex;
+    std::map<DAddr, u32> pending_reports;
 
     struct QueryCacheBaseImpl;
     friend struct QueryCacheBaseImpl;

@@ -326,6 +326,21 @@ public:
     /// EDEN_NX2_RENDER_INVAL_E=1 (needs the unlend switch): the back applies the buffer half of
     /// invalidations with no range on a page GPURender's caches hold (Fritchii c389ff6cb's
     /// INVAL_E, f5afca4c9's GATHER_E).
+    /// EDEN_NX2_RENDER_QUERY_FLUSH_E (needs EDEN_NX2_RENDER_UNLEND=1): any thread. The query
+    /// cache tracks the reports still to land, and the back flushes only a range with one.
+    [[nodiscard]] static bool TracksPendingReports() {
+        return instance.query_flush_e;
+    }
+    [[nodiscard]] static bool QueryFlushesOnBack() {
+        return on_back_thread && instance.query_flush_e;
+    }
+    void NoteQueryFlushNothingPending() {
+        ++query_flushes_nothing_pending;
+    }
+    /// A report operation that found no pending entry for its address (must be 0).
+    void NoteReportLandedUntracked() {
+        reports_landed_untracked.fetch_add(1, std::memory_order_relaxed);
+    }
     [[nodiscard]] static bool InvalidatesOnBack() {
         return on_back_thread && instance.inval_e;
     }
@@ -1211,6 +1226,9 @@ private:
     std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
     std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
     u64 query_flushes_skipped{};
+    bool query_flush_e{};
+    u64 query_flushes_nothing_pending{};
+    std::atomic<u64> reports_landed_untracked{};
     std::atomic<u64> posted_reports_moved{};
     bool inval_e{};
     bool flush_e{};
