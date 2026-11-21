@@ -1881,6 +1881,15 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
             return false;
         }
         ssbo_addr = holder + indirect_offset;
+        if constexpr (requires { runtime.Nx2Owes(DAddr{}, u64{}); }) {
+            // An unlent draw's back reads the entry itself: its constant buffers were checked.
+            if (VideoCommon::GpuSplit::Unlends()) {
+                const auto device = gpu_memory->GpuToCpuAddress(ssbo_addr);
+                if (device && runtime.Nx2Owes(*device, 2 * sizeof(u64))) {
+                    VideoCommon::GpuSplit::Get().NoteOwedTableRead();
+                }
+            }
+        }
     }
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const bool indirect = indirect_offset != ~0U;

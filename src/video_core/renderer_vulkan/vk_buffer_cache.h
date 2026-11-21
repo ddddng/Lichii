@@ -13,6 +13,7 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/nx2_list_slots.h"
 #include "video_core/renderer_vulkan/vk_buffer_arena.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
@@ -261,8 +262,27 @@ public:
         if (!nx2_list_slots.HasOwed()) {
             return false;
         }
+        if (BufferArena::Collecting()) {
+            // An unlent draw's buffer half: the copies go in its packet, after its uploads. The
+            // slot stays pinned until a landing, which runs with the back parked, after GPURender
+            // played the packet.
+            const bool patched = nx2_list_slots.Patch(
+                device_addr, size, buffer, offset, read, reader,
+                [this](VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies) {
+                    arena.OutsideRenderPass();
+                    arena.Copy(src, dst, copies, BufferArena::CopyMode::Plain, true);
+                });
+            if (patched) {
+                VideoCommon::GpuSplit::Get().NoteUnlentPatch();
+            }
+            return patched;
+        }
         const BufferArena::ImmediateScope immediate{arena};
-        return nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
+        return nx2_list_slots.Patch(
+            device_addr, size, buffer, offset, read, reader,
+            [this](VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies) {
+                nx2_list_slots.RecordCopies(src, dst, copies);
+            });
     }
 
     /// Whether [device_addr, +size) holds owed list words (Nx2ListIndirect).

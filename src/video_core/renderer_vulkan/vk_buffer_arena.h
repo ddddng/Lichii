@@ -79,6 +79,9 @@ public:
             collecting = nullptr;
         }
     };
+    [[nodiscard]] static bool Collecting() noexcept {
+        return collecting != nullptr;
+    }
     /// The back, posting what it collected: the stamp GPURender maps when it plays it.
     [[nodiscard]] u64 CloseCollected() noexcept {
         return clock.Close();

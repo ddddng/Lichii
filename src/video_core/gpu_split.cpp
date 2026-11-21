@@ -266,6 +266,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         unlend.stream_drains = 0;
         unlend.skipped_back_flushes = 0;
         unlend.failed = 0;
+        unlend.owed_patches = 0;
+        unlend.owed_table_reads = 0;
         unlend.reads_ahead.store(0, std::memory_order_relaxed);
         unlend.frees_ahead.store(0, std::memory_order_relaxed);
         pool_ranges = {};
@@ -1394,12 +1396,13 @@ void GpuSplit::LogUnlend() const {
     LOG_INFO(HW_GPU,
              "GPU render unlend: {} draws unlent, {} lent (by reason:{}); {} lookup lends, {} "
              "stream write drains, {} GPURender flushes without the back's half, {} unlent draws "
-             "GPURender could not configure; must be 0: {} texture reads ahead, {} buffer frees "
-             "ahead",
+             "GPURender could not configure, {} owed list word patches in unlent packets; must be "
+             "0: {} texture reads ahead, {} buffer frees ahead, {} owed list words read through a "
+             "storage buffer table",
              unlend.unlent, total, lent.empty() ? " none" : lent, unlend.lookup_lends,
-             unlend.stream_drains, unlend.skipped_back_flushes, unlend.failed,
+             unlend.stream_drains, unlend.skipped_back_flushes, unlend.failed, unlend.owed_patches,
              unlend.reads_ahead.load(std::memory_order_relaxed),
-             unlend.frees_ahead.load(std::memory_order_relaxed));
+             unlend.frees_ahead.load(std::memory_order_relaxed), unlend.owed_table_reads);
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {

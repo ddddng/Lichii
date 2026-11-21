@@ -103,9 +103,10 @@ class Nx2ListSlots {
     /// `offset`, filled already: records copies of the slot words owed there over it. `read`
     /// gives the word guest memory holds at a device address: a word that no longer holds its
     /// placeholder is no longer owed. Whether it copied any.
-    template <typename Read>
+    /// record(src, dst, copies) records the copies: RecordCopies, or the back's packet.
+    template <typename Read, typename Record>
     bool Patch(DAddr device_addr, u32 size, VkBuffer dst, u64 offset, Read&& read,
-               Tegra::Nx2ListIndirect::OwedReader reader) {
+               Tegra::Nx2ListIndirect::OwedReader reader, Record&& record) {
         if (dst == VK_NULL_HANDLE || size == 0 || owed.Empty()) {
             return false;
         }
@@ -147,7 +148,7 @@ class Nx2ListSlots {
             Tegra::Nx2ListIndirect::Stats::Count(
                 Tegra::Nx2ListIndirect::Stats::Get().patched_binds);
         }
-        RecordCopies(*buffer, dst, copies);
+        record(*buffer, dst, std::span<const VkBufferCopy>{copies});
         if (Tegra::Nx2ListIndirect::Stats::g_check) {
             CheckPatch(dst);
         }
@@ -205,7 +206,9 @@ class Nx2ListSlots {
     /// EDEN_NX2_LIST_INDIRECT_CHECK: compares the arguments of the dispatch just recorded.
     void CheckDispatch(u32 slot);
 
-  private:
+    void RecordCopies(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> regions);
+
+private:
     static constexpr u32 NoEntry = ~0U;
     static constexpr u32 SlotWordBytes = Tegra::Nx2ListIndirect::SlotWords * sizeof(u32);
     static constexpr u32 ReadbackSlots = 256;
@@ -216,7 +219,6 @@ class Nx2ListSlots {
     /// Records `regions` from `src` to `dst` outside a render pass, between barriers as
     /// BufferCacheRuntime::CopyBuffer puts them: after every write and read before (a slot a copy
     /// writes may be read by an earlier dispatch or copy), before every read and write after.
-    void RecordCopies(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> regions);
 
     /// Records a barrier that makes transfer writes visible to the host, after a fence wait.
     void RecordHostBarrier();

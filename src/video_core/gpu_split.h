@@ -397,6 +397,14 @@ public:
     void NoteUnlentFailed() {
         ++unlend.failed;
     }
+    /// The back, resolving an unlent draw: copies of owed list words over its buffers went in
+    /// its packet; a storage buffer table entry it read held one (must be 0).
+    void NoteUnlentPatch() {
+        ++unlend.owed_patches;
+    }
+    void NoteOwedTableRead() {
+        ++unlend.owed_table_reads;
+    }
     /// GPURender, while it plays an unlent draw: the ring position the back posted it at.
     static void SetPlayingPosition(u64 position) {
         playing_position = position;
@@ -1181,6 +1189,8 @@ private:
     struct UnlendCounts {
         u64 unlent{};
         std::array<u64, static_cast<size_t>(UnlendReason::Count)> lent{};
+        u64 owed_patches{};
+        u64 owed_table_reads{};
         u64 verified{};
         u64 lookup_lends{};
         u64 stream_drains{};

@@ -1783,9 +1783,9 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         return false;
     }();
     if (diagnostics || !split.RenderPosting() || frame_dump.Capturing() ||
-        Common::DkbFrameTrace::Enabled() || VideoCommon::RenderTrace::Enabled() ||
-        GPU::Logging::IsActive() || DrawReuseProbeEnabled() ||
-        VideoCommon::HandleTableNotes::Wanted() ||
+        Tegra::Nx2ListIndirect::Stats::g_check || Common::DkbFrameTrace::Enabled() ||
+        VideoCommon::RenderTrace::Enabled() || GPU::Logging::IsActive() ||
+        DrawReuseProbeEnabled() || VideoCommon::HandleTableNotes::Wanted() ||
         Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         return lend(Reason::Diagnostics);
     }
@@ -1819,7 +1819,27 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         maxwell3d->GetNativeMacroEngine().native_turing) {
         return lend(Reason::IndirectReset);
     }
-    if (buffer_cache_runtime.Nx2Slots().HasOwed()) {
+    // Owed list words (Nx2ListIndirect) in the draw's buffers are patched in its packet, but
+    // the back reads texture handles and storage buffer descriptors from the constant buffers
+    // itself: one over an owed word would read its placeholder.
+    const auto constant_buffers_owe = [&] {
+        const auto& slots = buffer_cache_runtime.Nx2Slots();
+        for (const auto& stage : maxwell3d->state.shader_stages) {
+            for (const auto& cbuf : stage.const_buffers) {
+                if (!cbuf.enabled || cbuf.address == 0 || cbuf.size == 0) {
+                    continue;
+                }
+                for (const auto& [device_addr, size] :
+                     gpu_memory->GetSubmappedDeviceRange(cbuf.address, cbuf.size)) {
+                    if (slots.Owes(device_addr, size)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+    if (buffer_cache_runtime.Nx2Slots().HasOwed() && constant_buffers_owe()) {
         return lend(Reason::ListOwed);
     }
     // A direct draw with no vertices or no instances records nothing (as Draw skips it).
