@@ -248,6 +248,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         const bool inval_wanted = inval_switch != nullptr && inval_switch[0] == '1';
         inval_e = inval_wanted && render_unlend;
         invalidations = {};
+        for (auto& count : unparked) {
+            count.store(0, std::memory_order_relaxed);
+        }
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
@@ -1270,10 +1273,15 @@ void GpuSplit::RenderLoop() {
         LogUnlend();
     }
     if (std::ranges::any_of(posts, [](bool on) { return on; })) {
-        LOG_INFO(HW_GPU, "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers",
-                 posted[static_cast<size_t>(PostedOp::IdleHook)],
-                 posted[static_cast<size_t>(PostedOp::FlushCommands)],
-                 posted[static_cast<size_t>(PostedOp::FragmentBarrier)]);
+        LOG_INFO(
+            HW_GPU,
+            "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers; must be "
+            "0: {} frame ticks, {} owed list word landings on GPURender outside a lent call",
+            posted[static_cast<size_t>(PostedOp::IdleHook)],
+            posted[static_cast<size_t>(PostedOp::FlushCommands)],
+            posted[static_cast<size_t>(PostedOp::FragmentBarrier)],
+            unparked[static_cast<size_t>(Unparked::FrameTick)].load(std::memory_order_relaxed),
+            unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed));
         if (posts[static_cast<size_t>(PostedOp::Fence)]) {
             LOG_INFO(HW_GPU,
                      "GPU render posted fences: {} posted, lent: {} delayed, {} query sync owed, "

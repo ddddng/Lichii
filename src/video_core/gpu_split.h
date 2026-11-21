@@ -320,6 +320,14 @@ public:
     void NoteInvalidation(InvalSite site) {
         ++invalidations[static_cast<size_t>(site)];
     }
+    /// GPURender changing the back's state outside a lent call (must be 0): frame ticks and
+    /// owed list word landings run only with the back parked.
+    enum class Unparked : u8 { FrameTick, OwedLanding, Count };
+    static void CheckParked(Unparked what) {
+        if (PlayingUnlent()) [[unlikely]] {
+            instance.unparked[static_cast<size_t>(what)].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     [[nodiscard]] bool Posts(PostedOp op) const {
         return on_back_thread && posts[static_cast<size_t>(op)];
     }
@@ -1169,6 +1177,7 @@ private:
     std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
     std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
     bool inval_e{};
+    std::array<std::atomic<u64>, static_cast<size_t>(Unparked::Count)> unparked{};
     std::array<u64, static_cast<size_t>(InvalSite::Count)> invalidations{};
     struct UnlendCounts {
         u64 unlent{};

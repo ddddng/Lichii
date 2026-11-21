@@ -3241,6 +3241,7 @@ void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
 }
 
 bool RasterizerVulkan::Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real) {
+    VideoCommon::GpuSplit::CheckParked(VideoCommon::GpuSplit::Unparked::OwedLanding);
     if (!Tegra::Nx2ListIndirect::LandOwedWord(device_memory, device_addr, value, real)) {
         return false;
     }
@@ -4500,6 +4501,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 
 void RasterizerVulkan::TickFrame() {
     RENDER_LEND(TickFrame())
+    VideoCommon::GpuSplit::CheckParked(VideoCommon::GpuSplit::Unparked::FrameTick);
     buffer_cache_runtime.Nx2Slots().LandDone(
         std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     if (VideoCore::Nx2Debug::HasRequests()) {
