@@ -727,7 +727,7 @@ endif()
 # own Apache-2.0 library, flyhigh.dll / libflyhigh.so, loaded at run time from beside the
 # executable. Only its C header is compiled in; the model (CC BY-NC 4.0) is not shipped.
 cmake_dependent_option(ENABLE_FLYHIGH "Enable FlyHigh frame generation" ON
-                       "ENABLE_LSFG;ARCHITECTURE_x86_64;NOT APPLE;NOT ANDROID" OFF)
+                       "ENABLE_LSFG;ARCHITECTURE_x86_64;WIN32 OR CMAKE_SYSTEM_NAME STREQUAL Linux" OFF)
 set(LICHII_FLYHIGH_SDK "" CACHE PATH
     "FlyHigh engine release directory with include/ and lib/ (empty: download the release)")
 if (ENABLE_FLYHIGH)

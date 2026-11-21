@@ -54,6 +54,14 @@ void ReleaseHandle(intptr_t handle, bool imported) {
     throw std::runtime_error(what);
 }
 
+const VideoCore::FrameGen::FlyHighLibrary& RequireLibrary() {
+    const auto* library = VideoCore::FrameGen::LoadFlyHighLibrary();
+    if (library == nullptr) {
+        Fail("the FlyHigh library is missing or too old");
+    }
+    return *library;
+}
+
 VkImageMemoryBarrier Transition(VkImage image, VkAccessFlags src_access, VkAccessFlags dst_access,
                                 VkImageLayout old_layout, VkImageLayout new_layout) {
     return VkImageMemoryBarrier{
@@ -117,14 +125,7 @@ bool IsSrgb(VkFormat format) {
 
 FlyHighFrameGen::FlyHighFrameGen(const Device& device_, MemoryAllocator& memory_allocator,
                                  VkExtent2D extent_, VkFormat format, bool protect_hud)
-    : fh{[] -> const VideoCore::FrameGen::FlyHighLibrary& {
-          const auto* library = VideoCore::FrameGen::LoadFlyHighLibrary();
-          if (library == nullptr) {
-              Fail("the FlyHigh library is missing or too old");
-          }
-          return *library;
-      }()},
-      device{device_}, extent{extent_} {
+    : fh{RequireLibrary()}, device{device_}, extent{extent_} {
     try {
         Build(memory_allocator, format, protect_hud);
     } catch (...) {

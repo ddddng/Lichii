@@ -17,8 +17,6 @@ namespace {
 
 #ifdef _WIN32
 constexpr const char* LIBRARY_NAME = "flyhigh.dll";
-#elif defined(__APPLE__)
-constexpr const char* LIBRARY_NAME = "libflyhigh.dylib";
 #else
 constexpr const char* LIBRARY_NAME = "libflyhigh.so";
 #endif
@@ -29,11 +27,18 @@ struct Loaded {
 };
 
 std::optional<Loaded> Load() {
+#ifdef _WIN32
     const std::filesystem::path path = Common::FS::GetExeDirectory() / LIBRARY_NAME;
+#else
+    std::error_code ec;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    const auto path = executable.parent_path() / LIBRARY_NAME;
+#endif
     Loaded loaded;
-    // Beside the executable first, then the system's search path (a distribution's package).
-    if (!loaded.library.Open(Common::FS::PathToUTF8String(path).c_str()) &&
-        !loaded.library.Open(LIBRARY_NAME)) {
+    if (!path.is_absolute() || !loaded.library.Open(Common::FS::PathToUTF8String(path).c_str())) {
         LOG_WARNING(Render_Vulkan, "FlyHigh: {} not found beside Lichii", LIBRARY_NAME);
         return std::nullopt;
     }
