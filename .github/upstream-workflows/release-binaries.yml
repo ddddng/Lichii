@@ -150,7 +150,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/apt-archives
-          key: apt-${{ matrix.platform }}-v1-${{ hashFiles('.github/workflows/release-binaries.yml') }}
+          key: apt-${{ matrix.platform }}-v1-${{ github.run_id }}
           restore-keys: |
             apt-${{ matrix.platform }}-v1-
 
@@ -159,6 +159,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/apt-archives/partial"
+          echo "APT_DEBS_RESTORED=$(find "$RUNNER_TEMP/apt-archives" -maxdepth 1 -name '*.deb' | wc -l)" >> "$GITHUB_ENV"
           echo "Dir::Cache::Archives \"$RUNNER_TEMP/apt-archives\";" |
             sudo tee /etc/apt/apt.conf.d/90lichii-archives > /dev/null
           sudo apt-get update
@@ -241,16 +242,23 @@ jobs:
 
       # Branch builds restore nx2's caches without saving their own, which no other branch can
       # restore: only nx2 saves and keeps one entry per cache family (docs/CI.md).
+      # A new snapshot is saved only when this run downloaded packages the cache lacked.
       - name: Drop superseded apt packages
-        if: startsWith(matrix.platform, 'linux-x86_64') && github.ref == 'refs/heads/nx2' && steps.apt-cache.outputs.cache-hit != 'true'
+        if: startsWith(matrix.platform, 'linux-x86_64') && github.ref == 'refs/heads/nx2'
+        id: apt-trim
         shell: bash
         run: |
+          if [ "$(find "$RUNNER_TEMP/apt-archives" -maxdepth 1 -name '*.deb' | wc -l)" = "$APT_DEBS_RESTORED" ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           sudo apt-get autoclean
           sudo rm -rf "$RUNNER_TEMP/apt-archives/partial" "$RUNNER_TEMP/apt-archives/lock"
           sudo chown -R "$USER" "$RUNNER_TEMP/apt-archives"
+          echo "save=true" >> "$GITHUB_OUTPUT"
 
       - name: Save apt packages
-        if: startsWith(matrix.platform, 'linux-x86_64') && github.ref == 'refs/heads/nx2' && steps.apt-cache.outputs.cache-hit != 'true'
+        if: steps.apt-trim.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/apt-archives
