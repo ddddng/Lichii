@@ -232,8 +232,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         // Render follower port, step 8: posted render ops, one switch each.
         static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
             post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK", "EDEN_NX2_RENDER_POST_FLUSH",
-                          "EDEN_NX2_RENDER_POST_FLUSH", "EDEN_NX2_RENDER_POST_FENCE",
-                          "EDEN_NX2_RENDER_POST_INVAL"};
+                          "EDEN_NX2_RENDER_POST_FLUSH",     "EDEN_NX2_RENDER_POST_FENCE",
+                          "EDEN_NX2_RENDER_POST_INVAL",     "EDEN_NX2_RENDER_POST_INLINE"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -1283,12 +1283,14 @@ void GpuSplit::RenderLoop() {
         LOG_INFO(
             HW_GPU,
             "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers, {} "
-            "invalidation halves; must be 0: {} frame ticks, {} owed list word landings on "
+            "invalidation halves, {} inline uploads; must be 0: {} frame ticks, {} owed list word "
+            "landings on "
             "GPURender outside a lent call",
             posted[static_cast<size_t>(PostedOp::IdleHook)],
             posted[static_cast<size_t>(PostedOp::FlushCommands)],
             posted[static_cast<size_t>(PostedOp::FragmentBarrier)],
             posted[static_cast<size_t>(PostedOp::Invalidation)],
+            posted[static_cast<size_t>(PostedOp::Inline)],
             unparked[static_cast<size_t>(Unparked::FrameTick)].load(std::memory_order_relaxed),
             unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed));
         if (posts[static_cast<size_t>(PostedOp::Fence)]) {

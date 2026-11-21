@@ -4759,10 +4759,20 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
     return accelerate_dma;
 }
 
-void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
-                                                std::span<const u8> memory) {
-    RENDER_LEND(AccelerateInlineToMemory(address, copy_size, memory))
-    auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
+namespace {
+// EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
+bool InlineDefers() {
+    static const bool defer = [] {
+        const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
+        return value == nullptr || value[0] != '0';
+    }();
+    return defer;
+}
+} // namespace
+
+void RasterizerVulkan::TraceInlineToMemory(GPUVAddr address, size_t copy_size,
+                                           std::span<const u8> memory,
+                                           std::optional<DAddr> cpu_addr) {
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};
         if (memory.size() >= sizeof(first_word)) std::memcpy(&first_word, memory.data(), sizeof(first_word));
@@ -4777,19 +4787,15 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
                      address, copy_size, first_word);
         }
     }
-    if (!cpu_addr) [[unlikely]] {
-        gpu_memory->WriteBlock(address, memory.data(), copy_size);
-        return;
-    }
-    gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
-    // EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
-    static const bool defer = [] {
-        const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
-        return value == nullptr || value[0] != '0';
-    }();
+}
+
+bool RasterizerVulkan::InlineBufferHalf(DAddr cpu_addr_value, size_t copy_size,
+                                        std::span<const u8> memory) {
+    const std::optional<DAddr> cpu_addr{cpu_addr_value};
+    const bool defer = InlineDefers();
+    bool uploaded = false;
     // One cache at a time: holding both while waiting for either (std::lock) waited longer, the
     // fencing thread and CPU write traps holding one of them most of the time.
-    bool uploaded = false;
     // InlineMemory uploads only into GPU-written buffer data, and Nx2NoteListHostWrite acts only
     // on command list pages and kept words (GPU-written too). Every range the buffer cache records
     // as GPU-written marks its pages in Tegra::g_nx2_gpu_written_pages first, under its lock, on
@@ -4832,6 +4838,70 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
             buffer_cache.WriteMemory(*cpu_addr, copy_size);
         }
     }
+    return uploaded;
+}
+
+bool RasterizerVulkan::PostInlineToMemory(GPUVAddr address, size_t copy_size,
+                                          std::span<const u8> memory) {
+    using VideoCommon::GpuSplit;
+    if (!GpuSplit::Get().Posts(GpuSplit::PostedOp::Inline) || !InlineDefers()) {
+        return false;
+    }
+    const auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
+    // The back looks up shaders itself: an upload over one stays lent.
+    if (!cpu_addr || pipeline_cache.page_filter.Any(*cpu_addr, copy_size)) {
+        return false;
+    }
+    TraceInlineToMemory(address, copy_size, memory, cpu_addr);
+    gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
+    bool uploaded;
+    {
+        // Uploads into GPU-written buffer data go in the op, played where the lent call ran.
+        const BufferArena::Collect collect{inline_commands};
+        uploaded = InlineBufferHalf(*cpu_addr, copy_size, memory);
+    }
+    const bool query = query_cache.page_filter.Any(*cpu_addr, copy_size);
+    if (!uploaded) {
+        gpu_memory->AccumulateInvalidation(address, copy_size);
+    }
+    if (inline_commands.Empty() && !query && !uploaded) {
+        return true;
+    }
+    VideoCommon::CommandArena commands;
+    commands.Swap(inline_commands);
+    const u64 stamp = commands.Empty() ? 0 : buffer_cache_runtime.Arena().CloseCollected();
+    PostRenderOp(GpuSplit::PostedOp::Inline, [this, commands = std::move(commands), stamp,
+                                              device = *cpu_addr, copy_size, query, uploaded] {
+        if (!commands.Empty()) {
+            buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
+        }
+        // Pending query results must not land over the new words later.
+        if (query) {
+            query_cache.InvalidateRegion(device, copy_size);
+        }
+        if (uploaded) {
+            std::scoped_lock lock{texture_cache.mutex};
+            texture_cache.WriteMemory(device, copy_size);
+        }
+    });
+    return true;
+}
+
+void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
+                                                std::span<const u8> memory) {
+    if (PostInlineToMemory(address, copy_size, memory)) {
+        return;
+    }
+    RENDER_LEND(AccelerateInlineToMemory(address, copy_size, memory))
+    auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
+    TraceInlineToMemory(address, copy_size, memory, cpu_addr);
+    if (!cpu_addr) [[unlikely]] {
+        gpu_memory->WriteBlock(address, memory.data(), copy_size);
+        return;
+    }
+    gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
+    const bool defer = InlineDefers();
+    const bool uploaded = InlineBufferHalf(*cpu_addr, copy_size, memory);
     // Pending query results must not land over the new words later: drop them now.
     query_cache.InvalidateRegion(*cpu_addr, copy_size);
     if (!uploaded && defer) {

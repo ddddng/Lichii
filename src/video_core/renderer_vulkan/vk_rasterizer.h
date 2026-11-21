@@ -562,6 +562,17 @@ private:
     /// (Nx2ListIndirect), unless something wrote the word since, and tells the caches.
     bool Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real);
 
+    /// The buffer half of an inline upload: uploads into GPU-written buffer data. Whether it
+    /// uploaded.
+    bool InlineBufferHalf(DAddr cpu_addr, size_t copy_size, std::span<const u8> memory);
+    void TraceInlineToMemory(GPUVAddr address, size_t copy_size, std::span<const u8> memory,
+                             std::optional<DAddr> cpu_addr);
+    /// The back (EDEN_NX2_RENDER_POST_INLINE): writes guest memory and runs the buffer half
+    /// itself, and posts GPURender's half (the collected uploads, the query and image
+    /// invalidations). False to lend the call: an upload over a shader page.
+    bool PostInlineToMemory(GPUVAddr address, size_t copy_size, std::span<const u8> memory);
+    VideoCommon::CommandArena inline_commands;
+
     void InvalidateCachedWrites(std::span<const std::pair<DAddr, std::size_t>> sequences,
                                 bool constant_buffer_data, bool buffer_half_only);
     /// The back (EDEN_NX2_RENDER_INVAL_E): whether it applies these writes' buffer half itself.
