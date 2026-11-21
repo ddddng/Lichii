@@ -560,6 +560,7 @@ class Inspector:
             return
         md5 = md5.lower()
         cache = self.upstream.root / "inspection" / f"{file_id}-{md5}.json"
+        evidence = None
         if cache.is_file():
             evidence = json_object(cache.read_bytes(), f"file {file_id} inspection")
             sha = evidence.get("sha256")
@@ -570,26 +571,21 @@ class Inspector:
                         for build_id in ids
                     ) or sha is None and ids):
                 raise ImportFailure(f"file {file_id}: invalid cached inspection")
-        elif self.upstream.offline or not self.remaining or file["size_bytes"] > self.max_bytes:
-            print(f"file {file_id}: offline or over archive budget; SHA/IDs skipped", file=sys.stderr)
-            return
-        else:
-            evidence = {"sha256": None, "build_ids": []}
+            if sha is None:
+                evidence = None
+        if evidence is None:
+            if self.upstream.offline or not self.remaining or file["size_bytes"] > self.max_bytes:
+                print(f"file {file_id}: offline or over archive budget; SHA/IDs skipped", file=sys.stderr)
+                return
+            self.remaining -= 1
             try:
                 evidence = self.download(file, md5, suffix)
-            except Cooldown:
-                raise
             except Unavailable as error:
                 print(f"file {file_id}: {error}; SHA/IDs skipped", file=sys.stderr)
-            except (OSError, ImportFailure, http.client.HTTPException):
-                write_cache(cache, json.dumps(evidence).encode())
-                raise
-            self.remaining -= 1
+                return
             write_cache(cache, json.dumps(evidence).encode())
         file.update(sha256=evidence["sha256"], build_ids=evidence["build_ids"])
-        if file["sha256"] is None:
-            print(f"file {file_id}: no inspection evidence", file=sys.stderr)
-        elif not file["build_ids"]:
+        if not file["build_ids"]:
             print(f"file {file_id}: SHA-256 available; no patch build IDs", file=sys.stderr)
 
     def download(self, file, md5, suffix):

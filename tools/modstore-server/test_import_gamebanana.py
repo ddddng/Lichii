@@ -373,9 +373,31 @@ class InspectionTests(unittest.TestCase):
                 inspector.inspect(small, md5)
                 inspector.inspect(small, md5)
                 download.assert_called_once()
+            self.assertFalse((Path(directory) / "inspection").exists())
             for file in (too_large, small):
                 self.assertIsNone(file["sha256"])
                 self.assertEqual(file["build_ids"], [])
+
+    def test_retries_after_transient_failure_and_ignores_legacy_null_cache(self):
+        raw = b"archive fixture"
+        md5 = hashlib.md5(raw, usedforsecurity=False).hexdigest()
+        for error in (gb.Blocked("rate limited"), gb.ImportFailure("HTTP 503"), TimeoutError()):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream = gb.Upstream(root)
+                file = gb.public_file(file_row(_nFilesize=len(raw)))
+                cache = root / "inspection" / f"{FILE}-{md5}.json"
+                with patch.object(upstream, "archive", side_effect=error), self.assertRaises(type(error)):
+                    gb.Inspector(upstream, 8, 1).inspect(file, md5)
+                self.assertFalse(cache.exists())
+                gb.write_cache(cache, b'{"sha256":null,"build_ids":[]}')
+                with patch.object(upstream, "archive", return_value=Response(
+                    body=raw, headers={"Content-Type": "application/zip"}
+                )) as download, redirect_stderr(io.StringIO()):
+                    gb.Inspector(upstream, 8, 1).inspect(file, md5)
+                    download.assert_called_once_with(file["download_url"])
+                self.assertEqual(file["sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(json.loads(cache.read_text()), {"sha256": file["sha256"], "build_ids": []})
 
 
 if __name__ == "__main__":

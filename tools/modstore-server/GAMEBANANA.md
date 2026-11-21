@@ -80,10 +80,11 @@ patch directories. These reads are capped at 64 KiB per patch and 256 KiB
 per archive. The importer never extracts or executes patches. RAR and 7z
 can get a hash but contribute no member evidence.
 
-The temporary archive is deleted. The inspection result is cached by file
+The temporary archive is deleted. Successful verification is cached by file
 ID and upstream MD5 so later runs with `--inspect-files` can reuse it without
-downloading the archive again. Keep that flag on to carry cached evidence
-into the next manifest.
+downloading again. Failed attempts count against the download budget but do
+not prevent a later run from checking the file after any upstream cooldown.
+Keep the flag on to carry cached evidence into the next manifest.
 
 Missing hashes or build IDs mean that evidence was not collected. Files without
 a SHA-256 are link-only. A build ID in a filename is a clue, not a compatibility
