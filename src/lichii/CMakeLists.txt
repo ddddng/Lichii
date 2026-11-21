@@ -129,6 +129,12 @@ add_executable(lichii
     configuration/configure_per_game_addons.cpp
     configuration/configure_per_game_addons.h
     configuration/configure_per_game_addons.ui
+    mod_store/mod_store_client.cpp
+    mod_store/mod_store_client.h
+    mod_store/mod_store_dialog.cpp
+    mod_store/mod_store_dialog.h
+    mod_store/mod_store_install.cpp
+    mod_store/mod_store_install.h
     configuration/configure_profile_manager.cpp
     configuration/configure_profile_manager.h
     configuration/configure_profile_manager.ui
@@ -456,11 +462,11 @@ endif()
 
 target_link_libraries(lichii PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lichii PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent Qt6::Network)
+target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent Qt6::Network QuaZip::QuaZip)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(lichii PRIVATE ZLIB::ZLIB)
 if (WIN32)
-    target_link_libraries(lichii PRIVATE QuaZip::QuaZip advapi32)
+    target_link_libraries(lichii PRIVATE advapi32)
 endif()
 target_link_libraries(lichii PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
