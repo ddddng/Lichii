@@ -691,8 +691,11 @@ ComputePipeline::ConfigureResult ComputePipeline::Configure(
     }
 
     part.emplace(Zone::ComputeBuffers);
-    buffer_cache.UpdateComputeBuffers();
-    buffer_cache.BindHostComputeBuffers();
+    {
+        const BufferArena::SideScope side;
+        buffer_cache.UpdateComputeBuffers();
+        buffer_cache.BindHostComputeBuffers();
+    }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
