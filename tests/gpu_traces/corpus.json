@@ -111,6 +111,24 @@
           "68c6c9baa2b53f9146b06cb6eaad8a5d"
         ]
       }
+    },
+    {
+      "id": "uploads-render-owns",
+      "source": "generated",
+      "generator": "--gpu-trace-sample-uploads",
+      "environment": {
+        "EDEN_NX2_RENDER_FOLLOWER": "1",
+        "EDEN_NX2_RENDER_OWNS": "1"
+      },
+      "description": "The uploads trace with GPURender owning the scheduler, texture, descriptor and query caches and the back lending it every call (EDEN_NX2_RENDER_OWNS=1): the same frames as without it",
+      "expected": {
+        "lavapipe": [
+          "dd42c28cbf8b3c528a996bd19ff168bb",
+          "9b7159366a2c2327d893ef5eded50cc8",
+          "e5ccb3347abbdf23e1368538c0678c12",
+          "68c6c9baa2b53f9146b06cb6eaad8a5d"
+        ]
+      }
     }
   ]
 }
