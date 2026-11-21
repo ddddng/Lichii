@@ -266,6 +266,8 @@ public:
         return render_thread.joinable();
     }
     void PostRender(Nx2RenderFollower::Work work);
+    /// Runs `work` on GPURender while the back waits for it; inline without the follower.
+    void RunOnRender(Nx2RenderFollower::Work work);
     void WaitRender();
 
     /// What the sender of an entry tells about the guest memory the back writes running it, for

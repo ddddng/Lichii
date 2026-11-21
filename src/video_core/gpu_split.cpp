@@ -959,6 +959,15 @@ void GpuSplit::PostRender(Nx2RenderFollower::Work work) {
     render_follower->Publish(std::move(work));
 }
 
+void GpuSplit::RunOnRender(Nx2RenderFollower::Work work) {
+    if (!on_back_thread || !render_follower) {
+        work();
+        return;
+    }
+    render_follower->Publish(std::move(work));
+    WaitRender();
+}
+
 void GpuSplit::WaitRender() {
     if (on_back_thread && RenderPending()) {
         ++render_joins;
