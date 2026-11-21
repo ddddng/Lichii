@@ -127,7 +127,6 @@ FlyHighPanel::FlyHighPanel(QWidget* parent) : QWidget(parent) {
         std::filesystem::create_directories(folder, ec);
         QDesktopServices::openUrl(QUrl::fromLocalFile(PathText(folder)));
     });
-    Refresh();
 }
 
 void FlyHighPanel::showEvent(QShowEvent* event) {
