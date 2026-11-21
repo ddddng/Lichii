@@ -477,6 +477,26 @@ if (UNIX AND NOT APPLE)
     target_link_libraries(lichii PRIVATE Qt6::DBus)
 endif()
 
+get_target_property(FLYHIGH_DIR video_core FLYHIGH_RUNTIME_DIR)
+if (FLYHIGH_DIR)
+    target_sources(lichii PRIVATE
+        configuration/flyhigh_dialog.cpp
+        configuration/flyhigh_dialog.h
+        configuration/flyhigh_menu_row.cpp
+        configuration/flyhigh_menu_row.h
+        configuration/flyhigh_panel.cpp
+        configuration/flyhigh_panel.h
+    )
+    set(FLYHIGH_LICENSE_DIR "$<TARGET_FILE_DIR:lichii>/licenses/flyhigh")
+    add_custom_command(TARGET lichii POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FLYHIGH_DIR}/lib/flyhigh.dll" "$<TARGET_FILE_DIR:lichii>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${FLYHIGH_LICENSE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FLYHIGH_DIR}/LICENSE" "${FLYHIGH_DIR}/NOTICE" "${FLYHIGH_LICENSE_DIR}"
+        VERBATIM)
+endif()
+
 if (ENABLE_WEB_SERVICE)
     target_compile_definitions(lichii PRIVATE ENABLE_WEB_SERVICE)
 endif()
