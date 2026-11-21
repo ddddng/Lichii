@@ -4,19 +4,19 @@
 #include "lichii/mod_store/mod_store_dialog.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <variant>
 
-#include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QFutureWatcher>
-#include <QGroupBox>
+#include <QGridLayout>
 #include <QHash>
 #include <QHeaderView>
 #include <QLabel>
@@ -46,6 +46,19 @@ constexpr int PageSize = 50;
 constexpr qint64 MaxArchiveBytes = 64 * 1024 * 1024;
 constexpr int IdRole = Qt::UserRole;
 constexpr int TitleRole = Qt::UserRole + 1;
+const QString PrimaryButtonStyle = QStringLiteral(
+    "QPushButton { background: #d52c5b; border: 1px solid #d52c5b; border-radius: 7px;"
+    " color: white; font-weight: 600; padding: 0 12px; min-height: 30px; }"
+    "QPushButton:hover { background: #bc1f4b; border-color: #bc1f4b; }"
+    "QPushButton:pressed { background: #a61942; border-color: #a61942; }"
+    "QPushButton:focus { border-color: palette(window-text); }");
+const QString DarkPrimaryButtonStyle = QStringLiteral(
+    "QPushButton { background: #f0386b; border-color: #f0386b; color: white; font-weight: 600;"
+    " border-width: 1px; border-style: solid; border-radius: 7px; padding: 0 12px;"
+    " min-height: 30px; }"
+    "QPushButton:hover { background: #f45a85; border-color: #f45a85; }"
+    "QPushButton:pressed { background: #d42c5a; border-color: #d42c5a; }"
+    "QPushButton:focus { border-color: white; }");
 
 enum class Compatibility { Match, Unknown, Mismatch };
 
@@ -121,17 +134,20 @@ public:
     Dialog(QWidget* parent, DialogContext ctx)
         : QDialog(parent), context(std::move(ctx)), client(context.base_url, this) {
         setWindowTitle(tr("Mod Store"));
-        resize(1050, 750);
+        resize(1050, 760);
         setMinimumSize(730, 520);
 
+        const auto border = dark ? QStringLiteral("#2a2b30") : QStringLiteral("#cbd0d6");
+        const auto tree_style = QStringLiteral("QTreeWidget { border: 1px solid %1; }").arg(border);
         auto* root = new QVBoxLayout(this);
+        root->setSpacing(8);
         auto* games_row = new QHBoxLayout;
         auto* toolbar = new QHBoxLayout;
         game_picker = new QComboBox(this);
         game_picker->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         game_picker->setMinimumContentsLength(22);
         refresh = new QPushButton(tr("Refresh"), this);
-        auto* all_games = new QPushButton(tr("All games"), this);
+        all_games = new QPushButton(tr("All games"), this);
         installed_mode = new QPushButton(tr("Installed"), this);
         installed_mode->setCheckable(true);
         games_row->addWidget(new QLabel(tr("Game:"), this));
@@ -168,6 +184,8 @@ public:
         game_tree->setHeaderLabels({tr("Games"), tr("Mods")});
         game_tree->setRootIsDecorated(false);
         game_tree->setUniformRowHeights(true);
+        game_tree->setStyleSheet(tree_style);
+        game_tree->header()->setMinimumHeight(row_height);
         game_tree->header()->setStretchLastSection(false);
         game_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
         game_tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
@@ -180,6 +198,8 @@ public:
         results->setRootIsDecorated(false);
         results->setUniformRowHeights(true);
         results->setAlternatingRowColors(true);
+        results->setStyleSheet(tree_style);
+        results->header()->setMinimumHeight(row_height);
         results->header()->setStretchLastSection(false);
         results->header()->setSectionResizeMode(0, QHeaderView::Stretch);
         results->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
@@ -189,12 +209,15 @@ public:
         middle_layout->addWidget(more);
 
         auto* inspector = new QScrollArea(split);
-        inspector->setFrameShape(QFrame::NoFrame);
+        inspector->setObjectName(QStringLiteral("modStoreInspector"));
+        inspector->setStyleSheet(
+            QStringLiteral("QScrollArea#modStoreInspector { border: 1px solid %1; }").arg(border));
         inspector->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         inspector->setWidgetResizable(true);
         auto* pane = new QWidget(inspector);
         auto* detail = new QVBoxLayout(pane);
-        detail->setContentsMargins(8, 0, 4, 8);
+        detail->setContentsMargins(8, 8, 8, 8);
+        detail->setSpacing(6);
         name = PlainLabel(pane, true);
         QFont heading = name->font();
         heading.setBold(true);
@@ -204,7 +227,7 @@ public:
         description = PlainLabel(pane, true);
         preview = PlainLabel(pane);
         preview->setAlignment(Qt::AlignCenter);
-        preview->setMinimumHeight(125);
+        preview->setFixedHeight(180);
         preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         preview->setToolTip(tr("Mod preview"));
         preview_select = new QComboBox(pane);
@@ -212,16 +235,6 @@ public:
         detail->addWidget(name);
         detail->addWidget(byline);
         detail->addWidget(description);
-        detail->addWidget(preview);
-        detail->addWidget(preview_select);
-        compatibility_group = new QGroupBox(tr("Compatibility"), pane);
-        auto* compatibility_layout = new QVBoxLayout(compatibility_group);
-        compatibility_state = PlainLabel(compatibility_group);
-        compatibility_layout->addWidget(compatibility_state);
-        compatibility = PlainLabel(compatibility_group, true);
-        compatibility_layout->addWidget(compatibility);
-        detail->addWidget(compatibility_group);
-
         target_picker = new QComboBox(pane);
         target_picker->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         target_picker->setMinimumContentsLength(20);
@@ -229,12 +242,54 @@ public:
         release = new QComboBox(pane);
         release->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         release->setMinimumContentsLength(20);
-        release->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-        release->setMinimumContentsLength(20);
         detail->addWidget(release);
+        detail->addWidget(preview);
+        detail->addWidget(preview_select);
+
+        compatibility_card = new QFrame(pane);
+        compatibility_card->setObjectName(QStringLiteral("modStoreCompatibility"));
+        compatibility_card->setStyleSheet(
+            QStringLiteral("QFrame#modStoreCompatibility { background: %1; border: 1px solid %2;"
+                           " border-radius: 6px; }")
+                .arg(dark ? QStringLiteral("#1b1c20") : QStringLiteral("#f7f7f8"),
+                     dark ? QStringLiteral("#34363c") : QStringLiteral("#cbd0d6")));
+        auto* compatibility_layout = new QGridLayout(compatibility_card);
+        compatibility_layout->setContentsMargins(9, 8, 9, 8);
+        compatibility_layout->setHorizontalSpacing(12);
+        compatibility_layout->setVerticalSpacing(4);
+        compatibility_layout->setColumnStretch(1, 1);
+        auto* caption = PlainLabel(compatibility_card);
+        caption->setText(tr("Compatibility"));
+        auto caption_font = caption->font();
+        caption_font.setBold(true);
+        caption->setFont(caption_font);
+        compatibility_state = PlainLabel(compatibility_card);
+        compatibility_state->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        compatibility_layout->addWidget(caption, 0, 0);
+        compatibility_layout->addWidget(compatibility_state, 0, 1);
+        const auto divider = [&](int row) {
+            auto* rule = new QFrame(compatibility_card);
+            rule->setFixedHeight(1);
+            rule->setStyleSheet(dark ? QStringLiteral("background: #34363c;")
+                                     : QStringLiteral("background: #cbd0d6;"));
+            compatibility_layout->addWidget(rule, row, 0, 1, 2);
+        };
+        divider(1);
+        for (size_t i = 0; i < compatibility_rows.size(); ++i) {
+            auto& [key, value] = compatibility_rows[i];
+            key = PlainLabel(compatibility_card, true);
+            key->setStyleSheet(dark ? QStringLiteral("color: #9b9da4;")
+                                    : QStringLiteral("color: #555c67;"));
+            value = PlainLabel(compatibility_card, true);
+            const auto row = static_cast<int>(i) + (i < 5 ? 2 : 3);
+            compatibility_layout->addWidget(key, row, 0, Qt::AlignTop);
+            compatibility_layout->addWidget(value, row, 1, Qt::AlignTop);
+        }
+        divider(7);
+        detail->addWidget(compatibility_card);
+
         hint = PlainLabel(pane, true);
-        detail->addWidget(hint);
-        auto* mod_actions = new QHBoxLayout;
+        mod_actions = new QHBoxLayout;
         install = new QPushButton(tr("Install"), pane);
         source = new QPushButton(tr("View on GameBanana"), pane);
         mod_actions->addWidget(install);
@@ -248,6 +303,7 @@ public:
         installed_actions->addWidget(uninstall);
         installed_actions->addStretch();
         detail->addLayout(installed_actions);
+        detail->addWidget(hint);
         detail->addStretch(1);
         inspector->setWidget(pane);
         split->setChildrenCollapsible(false);
@@ -272,6 +328,9 @@ public:
         progress_layout->addWidget(progress_label);
         progress_layout->addWidget(progress_bar);
         progress_layout->addWidget(cancel_button, 0, Qt::AlignRight);
+        for (auto* button : findChildren<QPushButton*>()) {
+            button->setAutoDefault(false);
+        }
         connect(cancel_button, &QPushButton::clicked, this, [this] { CancelDownload(); });
         connect(progress, &QDialog::rejected, this, [this] { CancelDownload(); });
         debounce.setSingleShot(true);
@@ -401,6 +460,7 @@ private:
         const auto append = [&](const QString& id, const QString& game, const QString& count) {
             game_picker->addItem(game, id);
             auto* node = new QTreeWidgetItem(game_tree, {game, count});
+            node->setSizeHint(0, QSize(0, row_height));
             node->setData(0, IdRole, id);
             node->setToolTip(0, game);
             node->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
@@ -496,6 +556,7 @@ private:
                         continue;
                     }
                     auto* item = new QTreeWidgetItem(results, {mod.name, TypeName(mod.type)});
+                    item->setSizeHint(0, QSize(0, row_height));
                     item->setData(0, IdRole, mod.id);
                     item->setToolTip(0, mod.summary);
                     const auto key = mod.id;
@@ -525,6 +586,7 @@ private:
                 const auto game = std::ranges::find(games, id, &Game::title_id);
                 auto* item = new QTreeWidgetItem(
                     results, {local.name, game != games.cend() ? game->name : id});
+                item->setSizeHint(0, QSize(0, row_height));
                 item->setData(0, IdRole, local.id);
                 item->setData(0, TitleRole, id);
                 item->setToolTip(0, local.version);
@@ -555,7 +617,7 @@ private:
         preview->clear();
         preview->hide();
         preview_select->hide();
-        compatibility_group->hide();
+        compatibility_card->hide();
         target_picker->hide();
         release->hide();
         hint->clear();
@@ -690,9 +752,12 @@ private:
                     {file, ExternalVersion(file), MatchExternal(identity, file),
                      file.name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
                          file.size_bytes <= MaxArchiveBytes});
-                const auto kib = file.size_bytes / 1024 + (file.size_bytes % 1024 != 0);
-                release->addItem(tr("%1 (%2 KiB)").arg(file.name).arg(kib));
-                release->setItemData(release->count() - 1, file.name, Qt::ToolTipRole);
+                const auto entry =
+                    tr("%1 · %2 · %3")
+                        .arg(file.name, locale().formattedDataSize(file.size_bytes),
+                             locale().toString(file.uploaded_at.date(), QLocale::ShortFormat));
+                release->addItem(entry);
+                release->setItemData(release->count() - 1, entry, Qt::ToolTipRole);
                 if (first_match < 0 && CanInstall(offer_list.back())) {
                     first_match = release->count() - 1;
                 }
@@ -740,43 +805,50 @@ private:
             return build.size() > 16 ? QStringLiteral("%1…%2").arg(build.left(12), build.right(8))
                                      : build;
         };
-        QStringList full_builds;
-        if (KnownBuild(identity.build_id)) {
-            full_builds << tr("Installed build ID: %1").arg(identity.build_id);
-        }
-        QStringList rows{
-            tr("Installed game version: %1")
-                .arg(identity.display_version.isEmpty()
-                         ? (identity.installed ? unknown : tr("Not in your library"))
-                         : identity.display_version),
-            tr("Installed build ID: %1")
-                .arg(KnownBuild(identity.build_id) ? short_build(identity.build_id) : unknown),
-            tr("Running Lichii: %1")
-                .arg(Common::g_build_release_tag[0]
-                         ? QString::fromLatin1(Common::g_build_release_tag)
-                         : tr("Local build; release number unavailable"))};
+        const auto set_row = [&](size_t row, const QString& key, const QString& value,
+                                 const QString& tooltip = {}) {
+            const auto [left, right] = compatibility_rows[row];
+            left->setText(key);
+            right->setText(value);
+            right->setToolTip(tooltip);
+            left->setVisible(!key.isEmpty());
+            right->setVisible(!key.isEmpty());
+        };
+        const auto game = std::ranges::find(games, local_title, &Game::title_id);
+        set_row(0, tr("Catalog game"), game == games.cend() ? unknown : game->name);
+        set_row(1, tr("Title ID"), local_title);
+        set_row(2, tr("Target game version"), unknown);
+        set_row(3, tr("Target build ID"), unknown);
+        set_row(4, tr("Minimum Lichii"), unknown);
+        set_row(5, tr("Installed version"),
+                identity.display_version.isEmpty()
+                    ? (identity.installed ? unknown : tr("Not in your library"))
+                    : identity.display_version);
+        set_row(6, tr("Installed build ID"),
+                KnownBuild(identity.build_id) ? short_build(identity.build_id) : unknown,
+                KnownBuild(identity.build_id) ? identity.build_id : QString{});
+        set_row(7, tr("Running Lichii"),
+                Common::g_build_release_tag[0] ? QString::fromLatin1(Common::g_build_release_tag)
+                                               : tr("Release number unavailable"));
         if (offer) {
-            const bool dark = palette().color(QPalette::Window).lightness() < 128;
-            auto palette = compatibility_state->palette();
-            const char* color =
-                offer->compatibility == Compatibility::Match      ? (dark ? "#79d798" : "#25623b")
-                : offer->compatibility == Compatibility::Mismatch ? (dark ? "#ff9595" : "#a12828")
-                                                                  : (dark ? "#f1bf64" : "#795100");
-            palette.setColor(QPalette::WindowText, QColor(QString::fromLatin1(color)));
-            compatibility_state->setPalette(palette);
-            compatibility_state->setText(CompatibilityName(offer->compatibility));
+            const auto color = offer->compatibility == Compatibility::Match
+                                   ? (dark ? QStringLiteral("#79d798") : QStringLiteral("#25623b"))
+                               : offer->compatibility == Compatibility::Mismatch
+                                   ? (dark ? QStringLiteral("#ff9595") : QStringLiteral("#a12828"))
+                                   : (dark ? QStringLiteral("#f1bf64") : QStringLiteral("#795100"));
+            compatibility_state->setStyleSheet(QStringLiteral("color: %1;").arg(color));
+            compatibility_state->setText(
+                QStringLiteral("●  %1").arg(CompatibilityName(offer->compatibility)));
             if (const auto* version = std::get_if<Version>(&offer->file)) {
-                full_builds << tr("Target build ID: %1").arg(version->build_id);
-                rows << tr("Target title: %1").arg(version->title_id)
-                     << tr("Target game version: %1").arg(version->game_version)
-                     << tr("Target build ID: %1").arg(short_build(version->build_id))
-                     << tr("Minimum Lichii: %1").arg(version->min_lichii_build);
+                set_row(1, tr("Title ID"), version->title_id);
+                set_row(2, tr("Target game version"), version->game_version);
+                set_row(3, tr("Target build ID"), short_build(version->build_id),
+                        version->build_id);
+                set_row(4, tr("Minimum Lichii"), version->min_lichii_build);
             } else {
                 const auto& file = std::get<ExternalFile>(offer->file);
                 QString visible_builds = unknown;
                 if (!file.build_ids.isEmpty()) {
-                    full_builds
-                        << tr("Target build IDs:\n%1").arg(file.build_ids.join(QLatin1Char('\n')));
                     visible_builds = short_build(file.build_ids.front());
                     if (file.build_ids.size() > 1) {
                         visible_builds = tr("%1 and %n more", nullptr,
@@ -784,15 +856,12 @@ private:
                                              .arg(visible_builds);
                     }
                 }
-                rows << tr("Catalog title: %1").arg(local_title)
-                     << tr("Target build IDs: %1").arg(visible_builds)
-                     << tr("Target game version and minimum Lichii: unverified");
+                set_row(3, tr("Target build IDs"), visible_builds,
+                        file.build_ids.join(QLatin1Char('\n')));
             }
         }
         compatibility_state->setVisible(offer != nullptr);
-        compatibility->setText(rows.join(QLatin1Char('\n')));
-        compatibility->setToolTip(full_builds.join(QLatin1Char('\n')));
-        compatibility_group->show();
+        compatibility_card->show();
         UpdateButtons();
     }
 
@@ -815,6 +884,17 @@ private:
         install->setVisible(offer != nullptr);
         install->setText(installed ? tr("Update") : tr("Install"));
         install->setEnabled(!busy && offer && !current && CanInstall(*offer));
+        source->setEnabled(!busy);
+        const auto& primary = dark ? DarkPrimaryButtonStyle : PrimaryButtonStyle;
+        const bool install_primary = install->isEnabled();
+        const bool source_primary = !install_primary && !source->isHidden() && !busy;
+        install->setStyleSheet(install_primary ? primary : QString{});
+        source->setStyleSheet(source_primary ? primary : QString{});
+        if (mod_actions->indexOf(source_primary ? source : install) != 0) {
+            auto* first = source_primary ? source : install;
+            mod_actions->removeWidget(first);
+            mod_actions->insertWidget(0, first);
+        }
         enable->setVisible(installed);
         uninstall->setVisible(installed);
         enable->setEnabled(!busy && static_cast<bool>(context.set_enabled));
@@ -871,6 +951,7 @@ private:
         busy = value;
         for (QWidget* widget :
              {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(refresh),
+              static_cast<QWidget*>(all_games), static_cast<QWidget*>(preview_select),
               static_cast<QWidget*>(installed_mode), static_cast<QWidget*>(search),
               static_cast<QWidget*>(game_tree), static_cast<QWidget*>(results),
               static_cast<QWidget*>(more), static_cast<QWidget*>(release),
@@ -1066,6 +1147,8 @@ private:
     bool changed{};
     bool busy{};
     bool applying{};
+    const bool dark = palette().color(QPalette::Window).lightness() < 128;
+    const int row_height = qMax(28, fontMetrics().height() + 10);
     QComboBox* game_picker{};
     QComboBox* type{};
     QComboBox* sort{};
@@ -1080,14 +1163,16 @@ private:
     QLabel* description{};
     QLabel* preview{};
     QLabel* compatibility_state{};
-    QLabel* compatibility{};
     QLabel* hint{};
     QLabel* status{};
-    QGroupBox* compatibility_group{};
+    QFrame* compatibility_card{};
+    std::array<std::pair<QLabel*, QLabel*>, 8> compatibility_rows{};
+    QHBoxLayout* mod_actions{};
     QDialog* progress{};
     QLabel* progress_label{};
     QProgressBar* progress_bar{};
     QPushButton* cancel_button{};
+    QPushButton* all_games{};
     QPushButton* refresh{};
     QPushButton* installed_mode{};
     QPushButton* more{};
