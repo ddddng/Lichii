@@ -94,27 +94,32 @@ The detail response for GameBanana has an empty `versions` array and an
 | `external.category` | Original GameBanana category. |
 | `external.credits` | Objects with `name`, `role` and `url`. `url` is empty if no GameBanana profile is known. |
 | `external.preview_urls` | GameBanana preview-image URLs. |
-| `external.files` | Objects with `id`, `name`, `size_bytes`, `uploaded_at`, `download_url`, `sha256`, and `build_ids`. |
+| `external.files` | Objects with `id`, `name`, `size_bytes`, `uploaded_at`, `download_url`, `sha256`, `build_ids`, and optional boolean `ambiguous_layout`. |
 
 `download_url` points to `https://gamebanana.com/dl/<file ID>`. The client
 downloads the selected file from GameBanana, not from the Pi. Offer **Install**
-for a supported archive with a valid catalog SHA-256, an installed target game,
-and no known compatibility mismatch. Keep **View on GameBanana** beside it for
-credit and as the fallback for files the client cannot verify or install.
+for a supported ZIP with an installed target game, no known compatibility
+mismatch, and no `ambiguous_layout: true` marker. A file with that marker is
+link-only because an operator confirmed that it contains independent components
+the client cannot select. An absent marker is equivalent to `false` for the
+client. Keep **View on GameBanana** available for credit and as the fallback.
 
 Follow HTTPS redirects only to known GameBanana file hosts. Do not forward
 credentials or bypass login or an access block. Stream into a bounded temporary
-file and verify the catalog's length and SHA-256 before extracting anywhere.
-If the bytes no longer match, discard them, leave installed mods unchanged, and
-offer to open the listing. Apply the same path validation, staging, and
-store-owned directory rules as for local packages.
+file, check the catalog's length, and calculate SHA-256 before extracting
+anywhere. Compare the digest with the catalog SHA-256 when one is present.
+Discard mismatched bytes, leave installed mods unchanged, and offer to open
+the listing. Apply the same path validation, staging, and store-owned
+directory rules as for local packages.
 
-`sha256` is nullable. A null hash means the file cannot be installed through
-the client. `build_ids` contains patch metadata evidence and may be empty or
-contain short 16-digit prefixes. Even a full build ID alone does not establish
-a game version or minimum Lichii release. Show **Unverified** when required
-compatibility evidence is unknown, and disclose that before installing.
-Do not turn a known mismatch into an installable warning.
+`sha256` is nullable. A null hash means there is no catalog digest to compare
+against. It does not block installation on its own. The client still computes
+a local digest and validates the ZIP layout. `build_ids` contains patch
+metadata evidence and may be empty or contain short 16-digit prefixes.
+Even a full build ID alone does not establish a game version or minimum Lichii
+release. Show **Unverified** when required compatibility evidence is unknown,
+and disclose that before installing. Do not turn a known mismatch into an
+installable warning.
 
 ## Qt compatibility and installation
 
@@ -181,8 +186,12 @@ version and create a new one. Version IDs are unique within a mod, at most
 underscores and hyphens. A mod holds at most 128 versions.
 
 GameBanana imports upsert only the included listings in one transaction. They
-preserve local moderation status. They do not delete unlisted records. Reject
-a listing in the admin API if its author removes it or requests removal.
+preserve local moderation status and do not delete unlisted listings. In
+`games[].mods[].files[]`, set `ambiguous_layout` to `true` only for an
+operator-confirmed ambiguous layout. Omission preserves the stored value for
+the same file ID in the same mod. Explicit `false` clears a block after
+re-review. New files with no marker are unblocked by this rule. Reject a
+listing in the admin API if its author removes it or requests removal.
 
 The ZIP limit is 64 MiB compressed and 256 MiB extracted. The archive can
 contain up to 4096 entries. It must include at least one regular file

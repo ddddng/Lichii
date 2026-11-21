@@ -13,6 +13,7 @@ struct InstalledMod {
     QString id;
     QString version;
     QString name;
+    QByteArray sha256;
 };
 
 [[nodiscard]] QString InstallMod(const QString& root, const QString& title_id,

@@ -26,13 +26,14 @@ type gameBananaCredit struct {
 }
 
 type gameBananaFile struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	SizeBytes   int64     `json:"size_bytes"`
-	UploadedAt  time.Time `json:"uploaded_at"`
-	DownloadURL string    `json:"download_url"`
-	SHA256      *string   `json:"sha256"`
-	BuildIDs    []string  `json:"build_ids"`
+	ID              int64           `json:"id"`
+	Name            string          `json:"name"`
+	SizeBytes       int64           `json:"size_bytes"`
+	UploadedAt      time.Time       `json:"uploaded_at"`
+	DownloadURL     string          `json:"download_url"`
+	SHA256          *string         `json:"sha256"`
+	BuildIDs        []string        `json:"build_ids"`
+	AmbiguousLayout json.RawMessage `json:"ambiguous_layout,omitempty"`
 }
 
 type gameBananaMetadata struct {
@@ -92,6 +93,11 @@ func validateGameBananaMod(m gameBananaModInput) error {
 			(file.SHA256 != nil && !fileSHA256.MatchString(*file.SHA256)) ||
 			(file.SHA256 == nil && len(file.BuildIDs) != 0) {
 			return invalid(fmt.Sprintf("invalid GameBanana file %d for listing %d", file.ID, m.ID))
+		}
+		switch string(file.AmbiguousLayout) {
+		case "", "true", "false":
+		default:
+			return invalid(fmt.Sprintf("expected a boolean ambiguous_layout for GameBanana file %d", file.ID))
 		}
 		seen[file.ID] = true
 		for _, build := range file.BuildIDs {
@@ -158,11 +164,29 @@ func (s *store) putGameBanana(w http.ResponseWriter, r *http.Request) error {
 			} else {
 				m.PreviewURLs = []string{}
 			}
-			for i := range m.Files {
-				if m.Files[i].BuildIDs == nil {
-					m.Files[i].BuildIDs = []string{}
+			layouts := make(map[int64]json.RawMessage)
+			var raw string
+			err = tx.QueryRowContext(ctx, "SELECT metadata FROM gamebanana WHERE mod_id=?", id).Scan(&raw)
+			if err == nil {
+				var previous gameBananaMetadata
+				if err := json.Unmarshal([]byte(raw), &previous); err != nil {
+					return err
 				}
-				m.Files[i].UploadedAt = m.Files[i].UploadedAt.UTC()
+				for _, file := range previous.Files {
+					layouts[file.ID] = file.AmbiguousLayout
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			for i := range m.Files {
+				file := &m.Files[i]
+				if file.AmbiguousLayout == nil {
+					file.AmbiguousLayout = layouts[file.ID]
+				}
+				if file.BuildIDs == nil {
+					file.BuildIDs = []string{}
+				}
+				file.UploadedAt = file.UploadedAt.UTC()
 			}
 			m.Compatibility = "unverified"
 			metadata, err := json.Marshal(m.gameBananaMetadata)

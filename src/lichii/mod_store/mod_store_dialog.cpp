@@ -116,9 +116,12 @@ struct Offer {
     bool supported;
 };
 
-QString ExternalVersion(const ExternalFile& file) {
-    return QStringLiteral("%1-%2").arg(file.id).arg(
-        QString::fromLatin1(file.sha256.toHex().left(16)));
+QString ExternalVersionPrefix(qint64 id) {
+    return QStringLiteral("%1-").arg(id);
+}
+
+QString ExternalVersion(qint64 id, const QByteArray& sha256) {
+    return ExternalVersionPrefix(id) + QString::fromLatin1(sha256.toHex().left(16));
 }
 
 QLabel* PlainLabel(QWidget* parent, bool wrap = false) {
@@ -300,6 +303,9 @@ public:
             compatibility_layout->addWidget(value, row, 1, Qt::AlignTop);
         }
         divider(7);
+        catalog_note = PlainLabel(compatibility_card, true);
+        catalog_note->setText(tr("Not verified by the catalog"));
+        compatibility_layout->addWidget(catalog_note, 11, 0, 1, 2);
         detail->addWidget(compatibility_card);
 
         detail->addStretch();
@@ -343,9 +349,12 @@ public:
         progress->setMinimumWidth(360);
         auto* progress_layout = new QVBoxLayout(progress);
         progress_label = PlainLabel(progress, true);
+        progress_catalog_note = PlainLabel(progress, true);
+        progress_catalog_note->setText(catalog_note->text());
         progress_bar = new QProgressBar(progress);
         cancel_button = new QPushButton(tr("Cancel"), progress);
         progress_layout->addWidget(progress_label);
+        progress_layout->addWidget(progress_catalog_note);
         progress_layout->addWidget(progress_bar);
         progress_layout->addWidget(cancel_button, 0, Qt::AlignRight);
         for (auto* button : findChildren<QPushButton*>()) {
@@ -794,9 +803,10 @@ private:
         release->clear();
         int first_match = -1;
         if (selected->external) {
+            bool first_match_has_checksum = false;
             for (const auto& file : selected->external->files) {
                 offer_list.append(
-                    {file, ExternalVersion(file), MatchExternal(identity, file),
+                    {file, {}, MatchExternal(identity, file),
                      file.name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
                          file.size_bytes <= MaxArchiveBytes});
                 const auto entry =
@@ -805,8 +815,10 @@ private:
                              locale().toString(file.uploaded_at.date(), QLocale::ShortFormat));
                 release->addItem(entry);
                 release->setItemData(release->count() - 1, entry, Qt::ToolTipRole);
-                if (first_match < 0 && CanInstall(offer_list.back())) {
+                if ((first_match < 0 || (!first_match_has_checksum && !file.sha256.isEmpty())) &&
+                    CanInstall(offer_list.back())) {
                     first_match = release->count() - 1;
+                    first_match_has_checksum = !file.sha256.isEmpty();
                 }
             }
         } else {
@@ -831,14 +843,16 @@ private:
         return index >= 0 && index < offer_list.size() ? &offer_list[index] : nullptr;
     }
 
-    static QByteArray Digest(const Offer& offer) {
-        return std::visit([](const auto& x) { return x.sha256; }, offer.file);
-    }
-
     bool CanInstall(const Offer& offer) {
-        return selected && !selected->demo && offer.supported && Digest(offer).size() == 32 &&
-               Identity(local_title).installed && offer.compatibility != Compatibility::Mismatch &&
-               (selected->external || offer.compatibility == Compatibility::Match);
+        if (!selected || selected->demo || !offer.supported || !Identity(local_title).installed ||
+            offer.compatibility == Compatibility::Mismatch) {
+            return false;
+        }
+        if (const auto* file = std::get_if<ExternalFile>(&offer.file)) {
+            return !file->ambiguous_layout && (file->sha256.isEmpty() || file->sha256.size() == 32);
+        }
+        return offer.compatibility == Compatibility::Match &&
+               std::get<Version>(offer.file).sha256.size() == 32;
     }
 
     void UpdateOffer() {
@@ -877,6 +891,8 @@ private:
         set_row(7, tr("Running Lichii"),
                 Common::g_build_release_tag[0] ? QString::fromLatin1(Common::g_build_release_tag)
                                                : tr("Release number unavailable"));
+        const auto* external = offer ? std::get_if<ExternalFile>(&offer->file) : nullptr;
+        catalog_note->setVisible(external && external->sha256.isEmpty());
         if (offer) {
             const auto color = offer->compatibility == Compatibility::Match
                                    ? (dark ? QStringLiteral("#79d798") : QStringLiteral("#25623b"))
@@ -926,10 +942,20 @@ private:
 
     void UpdateButtons() {
         const auto* offer = CurrentOffer();
+        const auto* external = offer ? std::get_if<ExternalFile>(&offer->file) : nullptr;
         const bool installed = local.has_value();
-        const bool current = offer && installed && local->version == offer->version;
+        const bool same_file =
+            external && installed && local->version.startsWith(ExternalVersionPrefix(external->id));
+        const bool reinstall = same_file && external->sha256.isEmpty();
+        const bool current =
+            offer && installed &&
+            (external ? same_file && !reinstall &&
+                            (local->sha256.isEmpty()
+                                 ? local->version == ExternalVersion(external->id, external->sha256)
+                                 : local->sha256 == external->sha256)
+                      : local->version == offer->version);
         install->setVisible(offer != nullptr);
-        install->setText(installed ? tr("Update") : tr("Install"));
+        install->setText(reinstall ? tr("Reinstall") : installed ? tr("Update") : tr("Install"));
         install->setEnabled(!busy && offer && !current && CanInstall(*offer));
         source->setEnabled(!busy);
         const auto& primary = dark ? DarkPrimaryButtonStyle : PrimaryButtonStyle;
@@ -953,19 +979,20 @@ private:
         if (offer && selected) {
             if (selected->demo) {
                 hint->setText(tr("This sample is not available for installation."));
+            } else if (external && external->ambiguous_layout) {
+                hint->setText(tr("This ZIP requires choosing components. Open GameBanana to "
+                                 "install it manually."));
             } else if (offer->compatibility == Compatibility::Mismatch) {
                 hint->setText(
                     tr("This release does not match the installed game or Lichii build."));
             } else if (!offer->supported) {
                 hint->setText(tr("Only ZIP files up to 64 MiB can be installed. Open GameBanana "
                                  "for this file."));
-            } else if (Digest(*offer).size() != 32) {
-                hint->setText(tr("Install unavailable: the catalog has no SHA-256 for this file."));
             } else if (!Identity(local_title).installed) {
                 hint->setText(tr("Add this game to your library to install its mods."));
             } else if (!CanInstall(*offer)) {
                 hint->setText(tr("The installed game or Lichii build could not be verified."));
-            } else if (current) {
+            } else if (current || reinstall) {
                 hint->setText(enabled ? tr("Installed and enabled") : tr("Installed and disabled"));
             } else {
                 hint->setText(installed ? tr("A different release is available.") : QString{});
@@ -979,6 +1006,20 @@ private:
     void OpenSource() {
         if (selected && selected->source == Source::GameBanana && !selected->source_url.isEmpty()) {
             QDesktopServices::openUrl(selected->source_url);
+        }
+    }
+
+    void InstallFailed(const QString& error, bool external) {
+        Status(error);
+        if (!external) {
+            return;
+        }
+        QMessageBox prompt(QMessageBox::Warning, tr("Could not install the mod"), error,
+                           QMessageBox::Close, this);
+        auto* open = prompt.addButton(tr("View on GameBanana"), QMessageBox::ActionRole);
+        prompt.exec();
+        if (prompt.clickedButton() == open) {
+            OpenSource();
         }
     }
 
@@ -1017,11 +1058,13 @@ private:
         if (!offer || !CanInstall(*offer) || busy) {
             return;
         }
-        const bool external = selected->external.has_value();
         const auto chosen = *offer;
+        const auto* external_file = std::get_if<ExternalFile>(&chosen.file);
+        const bool external = external_file != nullptr;
+        const bool unverified = external && external_file->sha256.isEmpty();
         const auto label = selected->name;
         const auto epoch = mod_epoch;
-        if (external && chosen.compatibility == Compatibility::Unknown &&
+        if (external && !unverified && chosen.compatibility == Compatibility::Unknown &&
             QMessageBox::question(
                 this, tr("Compatibility unverified"),
                 tr("Lichii could not confirm that this file works with your game version. "
@@ -1034,43 +1077,31 @@ private:
         }
         debounce.stop();
         SetBusy(true);
+        progress_catalog_note->setVisible(unverified);
         SetProgress(tr("Downloading %1…").arg(label), 0, true);
         const auto generation = ++install_epoch;
         const auto version = chosen.version;
-        const auto digest = Digest(chosen);
-        auto receive = [this, generation, version, digest, label, external](auto response) {
+        const auto file_id = external ? external_file->id : 0;
+        auto receive = [this, generation, version, file_id, label, external](auto response) {
             if (generation != install_epoch) {
                 return;
             }
             if (const auto* error = std::get_if<Error>(&response)) {
                 FinishOperation();
-                if (external && error->code == ErrorCode::IntegrityMismatch) {
-                    QMessageBox prompt(
-                        QMessageBox::Warning, tr("Download no longer matches"),
-                        tr("The file on GameBanana no longer matches the catalog checksum. "
-                           "No changes were made to your add-ons."),
-                        QMessageBox::Close, this);
-                    auto* open =
-                        prompt.addButton(tr("View on GameBanana"), QMessageBox::ActionRole);
-                    prompt.exec();
-                    if (prompt.clickedButton() == open) {
-                        OpenSource();
-                    }
-                } else {
-                    Status(tr("Could not download the mod: %1").arg(error->message));
-                }
+                InstallFailed(tr("Could not download the mod: %1").arg(error->message), external);
                 return;
             }
-            auto owned =
-                std::shared_ptr<QTemporaryFile>(std::get<DownloadedFile>(std::move(response)));
-            ApplyDownloaded(owned, version, digest, label, external);
+            auto received = std::get<DownloadedFile>(std::move(response));
+            auto owned = std::shared_ptr<QTemporaryFile>(std::move(received.file));
+            ApplyDownloaded(owned, external ? ExternalVersion(file_id, received.sha256) : version,
+                            received.sha256, label, external);
         };
-        auto report = [this, generation](qint64 received, qint64 total) {
+        auto report = [this, generation, unverified](qint64 received, qint64 total) {
             if (generation != install_epoch || total <= 0) {
                 return;
             }
             if (received >= total) {
-                SetProgress(tr("Verifying SHA-256…"), -1);
+                SetProgress(unverified ? tr("Checking the download…") : tr("Verifying SHA-256…"));
             } else {
                 SetProgress(tr("Downloading %1 of %2 KiB…").arg(received / 1024).arg(total / 1024),
                             static_cast<int>(100 * received / total), true);
@@ -1085,13 +1116,13 @@ private:
 
     void ApplyDownloaded(const std::shared_ptr<QTemporaryFile>& file, const QString& version,
                          const QByteArray& digest, const QString& label, bool external) {
-        SetProgress(tr("Verifying and installing the mod…"));
+        SetProgress(tr("Checking the ZIP and installing the mod…"));
         applying = true;
         const auto root = context.mods_root;
         const auto target = local_title;
         const auto id = local_id;
         auto* install_task = new QFutureWatcher<QString>(this);
-        connect(install_task, &QFutureWatcher<QString>::finished, this, [this, install_task] {
+        connect(install_task, &QFutureWatcher<QString>::finished, this, [this, install_task, external] {
             const auto error = install_task->result();
             install_task->deleteLater();
             if (error.isEmpty()) {
@@ -1099,8 +1130,11 @@ private:
                 ReadLocal();
             }
             FinishOperation();
-            Status(error.isEmpty() ? tr("Installation complete. The mod is available in Add-Ons.")
-                                   : error);
+            if (error.isEmpty()) {
+                Status(tr("Installation complete. The mod is available in Add-Ons."));
+            } else {
+                InstallFailed(error, external);
+            }
         });
         install_task->setFuture(QtConcurrent::run([root, target, id, label, version, file, digest,
                                                    external] {
@@ -1215,6 +1249,7 @@ private:
     QToolButton* description_toggle{};
     QLabel* preview{};
     QLabel* compatibility_state{};
+    QLabel* catalog_note{};
     QLabel* hint{};
     QLabel* status{};
     QFrame* compatibility_card{};
@@ -1222,6 +1257,7 @@ private:
     QHBoxLayout* mod_actions{};
     QDialog* progress{};
     QLabel* progress_label{};
+    QLabel* progress_catalog_note{};
     QProgressBar* progress_bar{};
     QPushButton* cancel_button{};
     QPushButton* all_games{};

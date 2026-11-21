@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"reflect"
@@ -81,4 +82,45 @@ func TestGameBananaRejectsInvalidManifest(t *testing.T) {
 	if len(games.Games) != 1 {
 		t.Fatal("the rejected reassignment should not change the catalog")
 	}
+}
+
+func TestGameBananaAmbiguousLayout(t *testing.T) {
+	api := newTestAPI(t)
+	sample := strings.Replace(gameBananaSample, "alternate.7z", "alternate.zip", 1)
+	withLayout := func(value string) string {
+		return strings.Replace(sample, `"sha256":null`, `"ambiguous_layout":`+value+`,"sha256":null`, 1)
+	}
+	checkFiles := func(id, wantLayout string) {
+		t.Helper()
+		detail := parse[struct {
+			External struct {
+				Files []struct {
+					ID              int64           `json:"id"`
+					SHA256          json.RawMessage `json:"sha256"`
+					AmbiguousLayout json.RawMessage `json:"ambiguous_layout"`
+				} `json:"files"`
+			} `json:"external"`
+		}](t, api.get("/api/v1/mods/"+id, 200))
+		files := detail.External.Files
+		if len(files) != 2 || files[0].ID != 456 || len(files[0].AmbiguousLayout) != 0 ||
+			files[1].ID != 457 || string(files[1].SHA256) != "null" ||
+			string(files[1].AmbiguousLayout) != wantLayout {
+			t.Fatalf("files = %+v, want 456 unchanged and 457 with null SHA and layout %q", files, wantLayout)
+		}
+	}
+
+	api.put("/gamebanana", withLayout(`"true"`), http.StatusBadRequest)
+	api.put("/gamebanana", withLayout("null"), http.StatusBadRequest)
+	api.put("/gamebanana", sample, http.StatusOK)
+	checkFiles("gb-123", "")
+	api.put("/gamebanana", withLayout("true"), http.StatusOK)
+	checkFiles("gb-123", "true")
+	api.put("/gamebanana", strings.Replace(sample, "alternate.zip", "renamed.zip", 1), http.StatusOK)
+	checkFiles("gb-123", "true")
+	api.put("/gamebanana", strings.ReplaceAll(sample, "123", "124"), http.StatusOK)
+	checkFiles("gb-124", "")
+	api.put("/gamebanana", withLayout("false"), http.StatusOK)
+	checkFiles("gb-123", "false")
+	api.put("/gamebanana", sample, http.StatusOK)
+	checkFiles("gb-123", "false")
 }

@@ -5,8 +5,7 @@ mod-store container. It writes one JSON manifest to stdout and puts diagnostics
 on stderr. It uses public GameBanana API v11 JSON and links back to the author,
 submission, preview images and official download. It does not scrape pages,
 sign in, mirror files, or create server-hosted versions. The desktop client can
-download supported files directly from GameBanana when the catalog has their
-SHA-256.
+download supported ZIPs directly from GameBanana, even without a catalog SHA-256.
 
 ## Stage a manifest
 
@@ -88,13 +87,27 @@ errors stop the run without creating a per-file result. Respect the upstream
 cooldown before retrying. Keep the flag on to carry verified evidence into
 the next manifest.
 
-Missing hashes or build IDs mean that evidence was not collected. Files without
-a SHA-256 are link-only. A build ID in a filename is a clue, not a compatibility
-check. Imported files remain unverified unless exact compatibility is established.
+Missing hashes or build IDs mean that evidence was not collected. Without a
+catalog hash, the client computes a local SHA-256 and still validates the archive
+layout. A build ID in a filename is a clue, not a compatibility check. Imported
+files remain unverified unless exact compatibility is established.
 
 ## Publish a reviewed manifest
 
-Review the staged JSON before uploading it. Only the server operator runs this
+Review the staged JSON before uploading it. If you confirm that an archive
+contains independent components the client cannot select, add
+`"ambiguous_layout": true` to that file object in `games[].mods[].files[]`.
+The file stays link-only even if it has a SHA-256. Do not infer the marker from
+a name, a missing hash, or a failed download. The importer does not set it.
+
+Leave the field out of routine re-imports. The server preserves a marker for
+the same file ID in the same mod. To clear a block after re-review, publish
+`"ambiguous_layout": false` on that file. The marker does not affect other
+files in the listing.
+
+Deploy a server binary that supports `ambiguous_layout` before uploading a
+manifest with the field. Publish known blocks before releasing clients that
+allow installs without a catalog hash. Only the server operator runs this
 command, from the mod-store Compose directory on the deployment host:
 
 ```sh
@@ -103,9 +116,10 @@ sudo docker compose exec -T modstore /modstore admin \
 ```
 
 The private admin endpoint upserts supplied listings and preserves local
-moderation. It does not remove listings absent from the new sample. After
-verifying the first real publish in the public catalog, remove demo listings
-with the separate private command:
+moderation. It does not remove listings absent from the new sample. Verify
+that marked files expose `ambiguous_layout: true` under `external.files` in
+the public mod detail. After verifying the first real publish in the public
+catalog, remove demo listings with the separate private command:
 
 ```sh
 sudo docker compose exec -T modstore /modstore admin \

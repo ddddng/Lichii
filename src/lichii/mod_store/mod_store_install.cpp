@@ -104,11 +104,23 @@ std::optional<InstalledMod> ReadOwnedMod(const QString& path, const QString& tit
         return std::nullopt;
     }
     const QJsonObject object = QJsonDocument::fromJson(bytes).object();
-    InstalledMod mod{object[u"id"_s].toString(), object[u"version"_s].toString(),
-                     object[u"name"_s].toString()};
+    InstalledMod mod{
+        .id = object[u"id"_s].toString(),
+        .version = object[u"version"_s].toString(),
+        .name = object[u"name"_s].toString(),
+        .sha256 = {},
+    };
     if (object[u"schema"_s] != QJsonValue(1) || object[u"title_id"_s].toString() != title_id ||
         mod.id != mod_id || !IsDisplayMetadata(mod.name, mod.version)) {
         return std::nullopt;
+    }
+    if (const QJsonValue digest = object.value(u"sha256"_s); !digest.isUndefined()) {
+        static const QRegularExpression pattern(u"\\A[0-9a-f]{64}\\z"_s);
+        const QString hex = digest.toString();
+        if (!pattern.match(hex).hasMatch()) {
+            return std::nullopt;
+        }
+        mod.sha256 = QByteArray::fromHex(hex.toLatin1());
     }
     return mod;
 }
@@ -522,20 +534,25 @@ QString InstallMod(const QString& root, const QString& title_id, const QString& 
             return u"Could not stage the downloaded ZIP."_s;
         }
     }
-    if (hash.result() != sha256) {
+    const QByteArray snapshot_sha256 = hash.result();
+    if (snapshot_sha256 != sha256) {
         return u"The downloaded ZIP does not match its expected SHA-256."_s;
     }
 
+    const QString unsafe_archive_error = u"The ZIP is malformed or contains unsafe entries."_s;
     const int count = ReadDirectoryCount(snapshot);
     QuaZip zip(&snapshot);
     zip.setAutoClose(false);
     zip.setFileNameCodec("UTF-8");
     if (count == 0 || !zip.open(QuaZip::mdUnzip) || zip.getEntriesCount() != count) {
-        return u"The download is not a supported mod ZIP."_s;
+        return unsafe_archive_error;
     }
     QList<ZipEntry> entries = ReadEntries(zip, count, snapshot.size(), external);
+    if (entries.isEmpty()) {
+        return unsafe_archive_error;
+    }
     if (!PlanExtraction(entries, title, external)) {
-        return u"The ZIP contains unsafe entries or does not contain one mod for this title."_s;
+        return u"The ZIP does not contain a single supported mod layout for this title."_s;
     }
 
     if (!IsDirectory(mods_dir.path()) &&
@@ -554,8 +571,12 @@ QString InstallMod(const QString& root, const QString& title_id, const QString& 
 
     QFile manifest(stage.filePath(ManifestName));
     const QJsonObject object{
-        {u"schema"_s, 1},  {u"title_id"_s, title},  {u"id"_s, mod_id},
-        {u"name"_s, name}, {u"version"_s, version},
+        {u"schema"_s, 1},
+        {u"title_id"_s, title},
+        {u"id"_s, mod_id},
+        {u"name"_s, name},
+        {u"version"_s, version},
+        {u"sha256"_s, QString::fromLatin1(snapshot_sha256.toHex())},
     };
     const QByteArray bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!manifest.open(QIODevice::WriteOnly | QIODevice::NewOnly) ||

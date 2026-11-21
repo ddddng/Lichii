@@ -51,6 +51,7 @@ struct ExternalFile {
     QUrl download_url;
     QByteArray sha256;
     QStringList build_ids;
+    bool ambiguous_layout{};
 };
 
 struct Credit {
@@ -103,6 +104,7 @@ enum class ErrorCode {
     InvalidResponse,
     InvalidImage,
     MissingSha256,
+    SizeMismatch,
     IntegrityMismatch,
     TooLarge,
     Http,
@@ -123,7 +125,11 @@ template <typename T>
 using Callback = std::function<void(std::variant<T, Error>)>;
 
 using Progress = std::function<void(qint64 received, qint64 total)>;
-using DownloadedFile = std::unique_ptr<QTemporaryFile>;
+
+struct DownloadedFile {
+    std::unique_ptr<QTemporaryFile> file;
+    QByteArray sha256;
+};
 
 class Client;
 

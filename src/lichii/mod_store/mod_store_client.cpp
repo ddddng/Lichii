@@ -66,10 +66,12 @@ Error MakeError(ErrorCode code, int status = 0) {
     case MissingSha256:
         return {code, QCoreApplication::translate("ModStoreClient",
                                                   "The catalog has no checksum for this file.")};
+    case SizeMismatch:
+        return {code, QCoreApplication::translate("ModStoreClient",
+                                                  "The file does not match the catalog size.")};
     case IntegrityMismatch:
-        return {code,
-                QCoreApplication::translate(
-                    "ModStoreClient", "The file does not match the catalog checksum or size.")};
+        return {code, QCoreApplication::translate("ModStoreClient",
+                                                  "The file does not match the catalog checksum.")};
     case TooLarge:
         return {code, QCoreApplication::translate("ModStoreClient",
                                                   "The response exceeds the size limit.")};
@@ -264,6 +266,7 @@ std::optional<Version> ParseVersion(const QJsonObject& row, const Mod& mod) {
 }
 
 std::optional<ExternalFile> ParseExternalFile(const QJsonObject& row) {
+    const auto ambiguous_layout = row.value("ambiguous_layout"_L1);
     ExternalFile file{
         .id = row.value("id"_L1).toInteger(-1),
         .name = row.value("name"_L1).toString(),
@@ -272,11 +275,12 @@ std::optional<ExternalFile> ParseExternalFile(const QJsonObject& row) {
         .download_url = QUrl(row.value("download_url"_L1).toString(), QUrl::StrictMode),
         .sha256 = ParseHash(row.value("sha256"_L1)),
         .build_ids = {},
+        .ambiguous_layout = ambiguous_layout.toBool(),
     };
     auto build_ids = StringList(row.value("build_ids"_L1), 32, EvidenceBuildId);
     if (file.id <= 0 || !IsText(file.name, 240) || file.size_bytes <= 0 ||
         !file.uploaded_at.isValid() || file.download_url != GameBananaUrl("dl"_L1, file.id) ||
-        !build_ids ||
+        !build_ids || (!ambiguous_layout.isUndefined() && !ambiguous_layout.isBool()) ||
         (file.sha256.isEmpty() && (!row.value("sha256"_L1).isNull() || !build_ids->isEmpty()))) {
         return std::nullopt;
     }
@@ -494,7 +498,7 @@ struct Request::Transfer {
     Progress progress;
     std::optional<Error> error;
     QByteArray bytes;
-    DownloadedFile file;
+    std::unique_ptr<QTemporaryFile> file;
     std::optional<QCryptographicHash> hash;
     QPointer<QNetworkReply> reply;
     QTimer* deadline{};
@@ -613,7 +617,7 @@ bool Request::CheckHeaders() {
     bool known_size{};
     const qint64 size = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&known_size);
     if (transfer->archive && known_size && size != transfer->limit) {
-        Finish(MakeError(ErrorCode::IntegrityMismatch));
+        Finish(MakeError(ErrorCode::SizeMismatch));
         return false;
     }
     if (known_size && size > transfer->limit) {
@@ -638,8 +642,7 @@ void Request::Drain() {
         }
         transfer->received += chunk.size();
         if (transfer->received > transfer->limit) {
-            Finish(
-                MakeError(transfer->archive ? ErrorCode::IntegrityMismatch : ErrorCode::TooLarge));
+            Finish(MakeError(transfer->archive ? ErrorCode::SizeMismatch : ErrorCode::TooLarge));
             return;
         }
         if (transfer->archive) {
@@ -678,14 +681,16 @@ void Request::Complete() {
         Finish(MakeError(ErrorCode::InvalidResponse));
     } else if (!transfer->archive) {
         Finish(std::move(transfer->bytes));
-    } else if (transfer->received != transfer->limit ||
-               transfer->hash->result() != transfer->expected_hash) {
+    } else if (transfer->received != transfer->limit) {
+        Finish(MakeError(ErrorCode::SizeMismatch));
+    } else if (QByteArray sha256 = transfer->hash->result();
+               !transfer->expected_hash.isEmpty() && sha256 != transfer->expected_hash) {
         Finish(MakeError(ErrorCode::IntegrityMismatch));
     } else if (!transfer->file->flush()) {
         Finish(MakeError(ErrorCode::File));
     } else {
         transfer->file->close();
-        Finish(std::move(transfer->file));
+        Finish(DownloadedFile{std::move(transfer->file), std::move(sha256)});
     }
 }
 
@@ -867,7 +872,8 @@ Request* Client::Download(const Version& version, Callback<DownloadedFile> done,
 
 Request* Client::Download(const ExternalFile& file, Callback<DownloadedFile> done,
                           Progress progress) {
-    const QUrl url = file.id > 0 && file.download_url == GameBananaUrl("dl"_L1, file.id)
+    const QUrl url = !file.ambiguous_layout && file.name.endsWith(u".zip", Qt::CaseInsensitive) &&
+                             file.id > 0 && file.download_url == GameBananaUrl("dl"_L1, file.id)
                          ? file.download_url
                          : QUrl{};
     return DownloadFile(url, true, file.size_bytes, file.sha256, std::move(done),
@@ -877,7 +883,8 @@ Request* Client::Download(const ExternalFile& file, Callback<DownloadedFile> don
 Request* Client::DownloadFile(const QUrl& url, bool gamebanana, qint64 size, const QByteArray& hash,
                               Callback<DownloadedFile> done, Progress progress) {
     std::optional<Error> error;
-    if (hash.size() != QCryptographicHash::hashLength(QCryptographicHash::Sha256)) {
+    if ((!gamebanana || !hash.isEmpty()) &&
+        hash.size() != QCryptographicHash::hashLength(QCryptographicHash::Sha256)) {
         error = MakeError(ErrorCode::MissingSha256);
     } else if (size <= 0) {
         error = MakeError(ErrorCode::InvalidInput);
