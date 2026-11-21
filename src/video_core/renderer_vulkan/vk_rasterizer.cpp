@@ -1907,8 +1907,11 @@ void* RasterizerVulkan::LendEnter(void* argument) {
     if (engine == nullptr || !engine->render_view_writes) {
         return nullptr;
     }
-    engine->dirty.flags |=
-        engine->render_view_writes->View().dirty.flags & VideoCommon::Nx2RenderView::Forwarded();
+    // GPURender's submits outside a lent call invalidate the view's flags, the per-binding vertex
+    // buffer flags among them: the back's own, which the lent call consumes.
+    auto& view_flags = engine->render_view_writes->View().dirty.flags;
+    engine->dirty.flags |= view_flags;
+    view_flags &= VideoCommon::Nx2RenderView::Forwarded();
     return engine;
 }
 
