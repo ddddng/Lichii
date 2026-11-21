@@ -274,6 +274,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_MESH needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const clear_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_CLEAR");
+        const bool clear_wanted = clear_switch != nullptr && clear_switch[0] == '1';
+        unlend_clear = clear_wanted && render_unlend;
+        clears.unlent = 0;
+        clears.lent = {};
+        clears.view_differences.store(0, std::memory_order_relaxed);
+        if (clear_wanted && !unlend_clear) {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_RENDER_UNLEND_CLEAR needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         const char* const query_flush_switch = std::getenv("EDEN_NX2_RENDER_QUERY_FLUSH_E");
         const bool query_flush_wanted =
             query_flush_switch != nullptr && query_flush_switch[0] == '1';
@@ -371,6 +381,7 @@ void GpuSplit::Stop() {
         flush_e = false;
         query_flush_e = false;
         unlend_mesh = false;
+        unlend_clear = false;
         soft_release_e = false;
     }
     active = false;
@@ -1381,6 +1392,17 @@ void GpuSplit::RenderLoop() {
     if (unlend_mesh) {
         LOG_INFO(HW_GPU, "GPU render unlent mesh draws: must be 0: {} on an emulated mesh pipeline",
                  unlent_emulated_mesh.load(std::memory_order_relaxed));
+    }
+    if (unlend_clear) {
+        const auto lent = [this](ClearLent reason) {
+            return clears.lent[static_cast<size_t>(reason)];
+        };
+        LOG_INFO(HW_GPU,
+                 "GPU render unlent clears: {} unlent, lent: {} diagnostics, {} verify, {} volume "
+                 "slices, {} gathers; must be 0: {} view differences on a verify clear",
+                 clears.unlent, lent(ClearLent::Diagnostics), lent(ClearLent::Verify),
+                 lent(ClearLent::Volume), lent(ClearLent::Gather),
+                 clears.view_differences.load(std::memory_order_relaxed));
     }
     if (query_flush_e) {
         LOG_INFO(HW_GPU,

@@ -2632,9 +2632,8 @@ void RasterizerVulkan::DrawTexture() {
 // zeros into the clear's rectangle of exactly the slices the clear names; the rest of the volume
 // keeps its contents. The rectangle can be smaller than the target: in handheld mode the game
 // clears a 48-wide fog volume through a 64-wide render target.
-bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 first_slice,
-                                         u32 slice_count) {
-    const auto& regs = maxwell3d->regs;
+bool RasterizerVulkan::ClearVolumeSlices(const Maxwell& regs, const Framebuffer* framebuffer,
+                                         u32 first_slice, u32 slice_count) {
     const u32 target_index = regs.clear_surface.RT;
     const auto& color_buffer_ids = texture_cache.GetRenderTargets().color_buffer_ids;
     // Depth and stencil clears take the normal path, so only a colour-only clear qualifies.
@@ -2707,9 +2706,103 @@ bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 fir
     return true;
 }
 
-void RasterizerVulkan::Clear(u32 layer_count) {
-    RENDER_LEND(Clear(layer_count))
+struct RasterizerVulkan::UnlentClear {
+    RasterizerVulkan* rasterizer;
+    Tegra::Engines::Maxwell3D* engine;
+    VideoCommon::Nx2RenderView::Packet view;
+    u32 layer_count;
+    u64 position{};
+
+    void operator()() {
+        rasterizer->PlayUnlentClear(*this);
+    }
+};
+
+bool RasterizerVulkan::TryUnlendClear(u32 layer_count) {
+    using Lent = VideoCommon::GpuSplit::ClearLent;
+    namespace View = VideoCommon::Nx2RenderView;
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto lend = [&split](Lent reason) {
+        split.NoteClearLent(reason);
+        return false;
+    };
+    static const bool window_trace = std::getenv("EDEN_NX2_WINDOW_TRACE") != nullptr;
+    if (window_trace || !split.RenderPosting() || frame_dump.Capturing() ||
+        VideoCommon::RenderTrace::Enabled() || GPU::Logging::IsActive() ||
+        Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
+        return lend(Lent::Diagnostics);
+    }
+    const auto& regs = maxwell3d->regs;
+    const auto& surface = regs.clear_surface;
+    // Colour-only clears of a volume target can take ClearVolumeSlices (a staging upload).
+    if (!surface.Z && !surface.S && surface.RT < regs.rt.size() && regs.rt[surface.RT].depth > 1) {
+        return lend(Lent::Volume);
+    }
+    if (const u64 verify_every = RenderVerifyEvery();
+        verify_every != 0 && ++unlend_clear_candidates % verify_every == 0) {
+        unlend_verify_clear = true;
+        return lend(Lent::Verify);
+    }
+    unlend_gather_hit = false;
+    gpu_memory->FlushCaching();
+    if (unlend_gather_hit) {
+        return lend(Lent::Gather);
+    }
+    if (surface.R || surface.G || surface.B || surface.A || surface.Z || surface.S) {
+        if (!maxwell3d->render_view_writes) {
+            maxwell3d->render_view_writes = std::make_unique<View::Writes>(*maxwell3d);
+        }
+        UnlentClear clear{
+            .rasterizer = this,
+            .engine = maxwell3d,
+            .view = maxwell3d->render_view_writes->Pack(*maxwell3d, true),
+            .layer_count = layer_count,
+        };
+        // The packet raised the forwarded flags: GPURender consumes them on the view.
+        maxwell3d->dirty.flags &= ~View::Forwarded();
+        split.PostUnlent(std::move(clear), VideoCommon::GpuSplit::UnlentKind::Clear);
+    }
+    if (gpu.HasSyncRequests()) {
+        split.LendRender([this] { gpu.TickWork(); });
+    }
+    return true;
+}
+
+void RasterizerVulkan::PlayUnlentClear(UnlentClear& clear) {
+    Tegra::Engines::Maxwell3D& view = clear.engine->render_view_writes->View();
+    VideoCommon::Nx2RenderView::Apply(view, clear.view);
+    VideoCommon::GpuSplit::SetPlayingPosition(clear.position);
+    render_engine = &view;
+    Tegra::Engines::Maxwell3D* const texture_engine = texture_cache.SwapMaxwell3D(&view);
+    Tegra::Engines::Maxwell3D* const query_engine = query_cache.SwapMaxwell3D(&view);
+    auto* const flags = state_tracker.SwapFlags(&view.dirty.flags);
+    SCOPE_EXIT {
+        state_tracker.SwapFlags(flags);
+        query_cache.SwapMaxwell3D(query_engine);
+        texture_cache.SwapMaxwell3D(texture_engine);
+        render_engine = nullptr;
+        VideoCommon::GpuSplit::SetPlayingPosition(~u64{0});
+    };
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
+    FlushWork();
+    ClearImpl(view.regs, clear.layer_count);
+}
+
+void RasterizerVulkan::Clear(u32 layer_count) {
+    if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {
+        if (VideoCommon::GpuSplit::UnlendsClear() && TryUnlendClear(layer_count)) {
+            return;
+        }
+        VideoCommon::GpuSplit::Get().LendRender([&] { Clear(layer_count); });
+        return;
+    }
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
+    if (std::exchange(unlend_verify_clear, false)) {
+        const VideoCommon::Nx2RenderView::DrawCheck view_check{*maxwell3d, true};
+        if (view_check.Differed()) {
+            VideoCommon::GpuSplit::Get().NoteUnlentClearView();
+        }
+    }
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
         LOG_INFO(HW_GPU, "after upscale: clear rt0 {:#x} {}x{} fmt {:#x} surface {:#x} colour {} {} {} {}",
@@ -2720,8 +2813,10 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     TraceWindowTarget(*maxwell3d, *gpu_memory, "clear", layer_count);
     FlushWork();
     gpu_memory->FlushCaching();
+    ClearImpl(maxwell3d->regs, layer_count);
+}
 
-    auto& regs = maxwell3d->regs;
+void RasterizerVulkan::ClearImpl(Maxwell& regs, u32 layer_count) {
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
                            regs.clear_surface.A;
     const bool use_depth = regs.clear_surface.Z;
@@ -2745,7 +2840,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                   "Framebuffer clear layers: base={}, requested={}, clipped={}, framebuffer={}",
                   base_array_layer, layer_count, clear_layers.count, framebuffer->Layers());
     }
-    if (ClearVolumeSlices(framebuffer, base_array_layer, layer_count)) {
+    if (ClearVolumeSlices(regs, framebuffer, base_array_layer, layer_count)) {
         return;
     }
     if (clear_layers.count == 0) {

@@ -166,8 +166,8 @@ private:
 void NoteWrite(Writes& writes, u32 index) noexcept;
 
 /// The view against the engine at a draw, GPURender idle: words, flags (not with unlend, where
-/// each side consumes its own), draw, pools, values.
-void Compare(Maxwell3D& view, Maxwell3D& engine);
+/// each side consumes its own), draw, pools, values. True when something differed.
+bool Compare(Maxwell3D& view, Maxwell3D& engine);
 
 /// At every draw on the back: sends the packet, lets GPURender apply it, compares.
 class DrawCheck {
@@ -183,11 +183,15 @@ public:
     [[nodiscard]] Maxwell3D* View() const {
         return compared ? &writes->View() : nullptr;
     }
+    [[nodiscard]] bool Differed() const {
+        return differed;
+    }
 
 private:
     Maxwell3D* engine{};
     Writes* writes{};
     bool compared{};
+    bool differed{};
 };
 
 /// Every count, once a draw compared.

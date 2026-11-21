@@ -102,6 +102,8 @@ public:
 
     /// EDEN_NX2_RENDER_UNLEND: a draw the back posts unlent, which GPURender records.
     struct UnlentDraw;
+    /// EDEN_NX2_RENDER_UNLEND_CLEAR: a clear the back posts unlent, which GPURender records.
+    struct UnlentClear;
     void DrawIndirect() override;
     void DrawTexture() override;
     void Clear(u32 layer_count) override;
@@ -225,6 +227,13 @@ private:
     /// EDEN_NX2_RENDER_UNLEND, on the back: resolves the pipeline and the buffer half of a warm
     /// direct draw and posts the rest to GPURender. False when the draw has to be lent instead.
     bool TryUnlendDraw(bool is_indexed, u32 instance_count);
+    /// EDEN_NX2_RENDER_UNLEND_CLEAR, on the back: posts a clear to GPURender. False when it has
+    /// to be lent instead.
+    bool TryUnlendClear(u32 layer_count);
+    /// GPURender: records an unlent clear from its view of the channel's registers.
+    void PlayUnlentClear(UnlentClear& clear);
+    /// The clear itself, from the engine's registers or GPURender's view of them.
+    void ClearImpl(Tegra::Engines::Maxwell3D::Regs& regs, u32 layer_count);
     /// The back: posts `op` to GPURender with the state tracker on the view's flags (its submits
     /// invalidate those, LendEnter hands them to the engine). False when `kind` is not posted.
     template <typename Op>
@@ -321,7 +330,8 @@ private:
     VideoCommon::VertexInputCache<VertexInputState> vertex_input_cache;
 
     /// Clears a 3D color target whose slices the framebuffer can't reach. Returns true when handled.
-    bool ClearVolumeSlices(const Framebuffer* framebuffer, u32 first_slice, u32 slice_count);
+    bool ClearVolumeSlices(const Tegra::Engines::Maxwell3D::Regs& regs,
+                           const Framebuffer* framebuffer, u32 first_slice, u32 slice_count);
     void FrameDumpPass(const Framebuffer* framebuffer);
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
@@ -651,6 +661,9 @@ private:
     /// The back forced this lent draw to compare its view (EDEN_NX2_RENDER_VERIFY_EVERY).
     bool unlend_verify_draw{};
     u64 unlend_candidates{};
+    /// The back forced this lent clear to compare its view (EDEN_NX2_RENDER_VERIFY_EVERY).
+    bool unlend_verify_clear{};
+    u64 unlend_clear_candidates{};
     float depth_bias_slope_scale = 1.0f;
     VertexInputState recorded_vertex_input;
     bool vertex_input_recorded{};

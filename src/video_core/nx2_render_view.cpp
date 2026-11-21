@@ -313,8 +313,9 @@ void Writes::DrawDone(const Maxwell3D& engine) {
     after &= exit;
 }
 
-void Compare(Maxwell3D& view, Maxwell3D& engine) {
+bool Compare(Maxwell3D& view, Maxwell3D& engine) {
     g_compared.fetch_add(1, std::memory_order_relaxed);
+    bool differs = false;
     const auto& v = view.regs.reg_array;
     const auto& e = engine.regs.reg_array;
     u32 differing = 0;
@@ -333,6 +334,7 @@ void Compare(Maxwell3D& view, Maxwell3D& engine) {
         }
     }
     if (differing != 0) {
+        differs = true;
         Note(Check::ViewWords, fmt::format("{} words, first {:#x}: view {:#x}, engine {:#x}",
                                            differing, first, v[first], e[first]));
     }
@@ -340,20 +342,24 @@ void Compare(Maxwell3D& view, Maxwell3D& engine) {
         GpuSplit::UnlendEnabled() ? Flags{} : (view.dirty.flags ^ engine.dirty.flags) & Forwarded();
     if (flags.any()) {
         const u32 flag = FirstFlag(flags);
+        differs = true;
         Note(Check::ViewFlags, fmt::format("{} flags, first {}: view {}, engine {}", flags.count(),
                                            flag, view.dirty.flags.test(flag),
                                            engine.dirty.flags.test(flag)));
     }
     if (!SameDraw(DrawOf(view), DrawOf(engine))) {
+        differs = true;
         Note(Check::ViewDraw, "the draw values against the draw manager");
     }
     const auto& vr = view.regs;
     const auto& er = engine.regs;
     if (!SameBytes(vr.tex_header, er.tex_header) || !SameBytes(vr.tex_sampler, er.tex_sampler) ||
         vr.sampler_binding != er.sampler_binding) {
+        differs = true;
         Note(Check::ViewPools, "the TIC/TSC pools or the sampler binding");
     }
     if (ValuesOf(view) != ValuesOf(engine)) {
+        differs = true;
         Note(Check::ViewValues, fmt::format("engine hint {} native {}, engine {} native {}",
                                             static_cast<u32>(view.engine_state),
                                             ValuesOf(view).native,
@@ -370,10 +376,11 @@ void Compare(Maxwell3D& view, Maxwell3D& engine) {
                                  "{:#x}+{:#x} {}",
                                  slot, stage, a.address, a.size, a.enabled, b.address, b.size,
                                  b.enabled));
-                return;
+                return true;
             }
         }
     }
+    return differs;
 }
 
 DrawCheck::DrawCheck(Maxwell3D& engine_, bool verify) {
@@ -393,7 +400,7 @@ DrawCheck::DrawCheck(Maxwell3D& engine_, bool verify) {
     if (!compared) {
         return;
     }
-    Compare(*view, engine_);
+    differed = Compare(*view, engine_);
     static u32 draws{};
     static auto next = std::chrono::steady_clock::now() + std::chrono::seconds{10};
     if (++draws % 1024 == 0 && std::chrono::steady_clock::now() >= next) {

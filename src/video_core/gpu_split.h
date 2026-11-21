@@ -343,6 +343,20 @@ public:
     [[nodiscard]] static bool UnlendsMesh() {
         return on_back_thread && instance.unlend_mesh;
     }
+    /// EDEN_NX2_RENDER_UNLEND_CLEAR (needs EDEN_NX2_RENDER_UNLEND=1): clears go unlent, GPURender
+    /// recording them from its view.
+    [[nodiscard]] static bool UnlendsClear() {
+        return on_back_thread && instance.unlend_clear;
+    }
+    /// Why the back lent a clear with EDEN_NX2_RENDER_UNLEND_CLEAR on.
+    enum class ClearLent : u8 { Diagnostics, Verify, Volume, Gather, Count };
+    void NoteClearLent(ClearLent reason) {
+        ++clears.lent[static_cast<size_t>(reason)];
+    }
+    /// A verify clear whose view differed from the engine (must be 0).
+    void NoteUnlentClearView() {
+        clears.view_differences.fetch_add(1, std::memory_order_relaxed);
+    }
     /// GPURender: an unlent draw on an emulated mesh pipeline, skipped (must be 0).
     void NoteUnlentEmulatedMesh() {
         unlent_emulated_mesh.fetch_add(1, std::memory_order_relaxed);
@@ -411,10 +425,11 @@ public:
             CheckRenderLocks();
         }
     }
-    /// The back: posts an unlent draw to GPURender.
+    enum class UnlentKind : u8 { Draw, Clear };
+    /// The back: posts an unlent draw or clear to GPURender.
     template <typename Packet>
-    void PostUnlent(Packet&& packet) {
-        ++unlend.unlent;
+    void PostUnlent(Packet&& packet, UnlentKind kind = UnlentKind::Draw) {
+        ++(kind == UnlentKind::Draw ? unlend.unlent : clears.unlent);
         packet.position = back_entry_start;
         if (render_follower->Post(back_entry_start, std::forward<Packet>(packet))) {
             CheckRenderLocks();
@@ -1251,6 +1266,13 @@ private:
     u64 query_flushes_skipped{};
     bool query_flush_e{};
     bool unlend_mesh{};
+    bool unlend_clear{};
+    struct ClearCounts {
+        u64 unlent{};
+        std::array<u64, static_cast<size_t>(ClearLent::Count)> lent{};
+        std::atomic<u64> view_differences{};
+    };
+    ClearCounts clears;
     bool soft_release_e{};
     u64 soft_releases{};
     std::atomic<u64> unlent_emulated_mesh{};
