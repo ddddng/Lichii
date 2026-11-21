@@ -4709,6 +4709,28 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
+    using VideoCommon::GpuSplit;
+    using RenderEnable = Tegra::Engines::Maxwell3D::Regs::RenderEnable;
+    if (GpuSplit::Get().Posts(GpuSplit::PostedOp::ConditionalEnd) && maxwell3d != nullptr) {
+        // EDEN_NX2_RENDER_POST_CONDITIONAL: a static render enable (an override, or True or
+        // False) is decided from the back's registers, and only ends host conditional
+        // rendering on GPURender, posted in order. The dynamic modes read the query cache.
+        const auto& regs = maxwell3d->regs;
+        const bool dynamic =
+            regs.render_enable_override == RenderEnable::Override::UseRenderEnable &&
+            regs.render_enable.mode != RenderEnable::Mode::True &&
+            regs.render_enable.mode != RenderEnable::Mode::False;
+        if (!dynamic) {
+            gpu_memory->FlushCaching();
+            if (host_conditional_may_be_set) {
+                host_conditional_may_be_set = false;
+                PostRenderOp(GpuSplit::PostedOp::ConditionalEnd,
+                             [this] { query_cache.EndHostConditionalRendering(); });
+            }
+            return false;
+        }
+        host_conditional_may_be_set = true;
+    }
     RENDER_LEND_RESULT(AccelerateConditionalRendering())
     gpu_memory->FlushCaching();
     return query_cache.AccelerateHostConditionalRendering();

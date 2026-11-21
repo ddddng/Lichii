@@ -285,8 +285,9 @@ public:
         FlushCommands,   ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FlushCommands
         FragmentBarrier, ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FragmentBarrier
         Fence, ///< EDEN_NX2_RENDER_POST_FENCE: clean sync points, references and forced releases
-        Invalidation, ///< EDEN_NX2_RENDER_POST_INVAL: an invalidation's image and query half
-        Inline,       ///< EDEN_NX2_RENDER_POST_INLINE: an inline upload's GPURender half
+        Invalidation,   ///< EDEN_NX2_RENDER_POST_INVAL: an invalidation's image and query half
+        Inline,         ///< EDEN_NX2_RENDER_POST_INLINE: an inline upload's GPURender half
+        ConditionalEnd, ///< EDEN_NX2_RENDER_POST_CONDITIONAL: a static render enable's end
         Count,
     };
     /// Why a fence the back could post was lent (EDEN_NX2_RENDER_POST_FENCE).

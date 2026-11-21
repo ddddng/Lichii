@@ -524,6 +524,12 @@ void QueryCacheBase<Traits>::NotifySegment(bool resume) {
 }
 
 template <typename Traits>
+void QueryCacheBase<Traits>::EndHostConditionalRendering() {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::EndHostConditionalRendering");
+    impl->runtime.EndHostConditionalRendering();
+}
+
+template <typename Traits>
 bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
     VideoCommon::GpuSplit::RenderOwned("QueryCache::AccelerateHostConditionalRendering");
     bool qc_dirty = false;

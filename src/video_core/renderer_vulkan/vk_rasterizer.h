@@ -572,6 +572,9 @@ private:
     /// invalidations). False to lend the call: an upload over a shader page.
     bool PostInlineToMemory(GPUVAddr address, size_t copy_size, std::span<const u8> memory);
     VideoCommon::CommandArena inline_commands;
+    /// The back (EDEN_NX2_RENDER_POST_CONDITIONAL): a dynamic render enable may have set host
+    /// conditional rendering since the last end it posted.
+    bool host_conditional_may_be_set{true};
 
     void InvalidateCachedWrites(std::span<const std::pair<DAddr, std::size_t>> sequences,
                                 bool constant_buffer_data, bool buffer_half_only);

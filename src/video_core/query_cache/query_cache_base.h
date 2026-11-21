@@ -154,6 +154,8 @@ public:
     void NotifyWFI();
 
     bool AccelerateHostConditionalRendering();
+    /// GPURender: what AccelerateHostConditionalRendering does for a static render enable.
+    void EndHostConditionalRendering();
 
     // Async downloads
     void CommitAsyncFlushes();
