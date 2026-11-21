@@ -190,6 +190,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         render_overlap_entries = 0;
         render_joins = 0;
         render_parks = 0;
+        join_site_count = 0;
+        join_sites_other = 0;
         render_follower.emplace(spin_time);
         render_thread = std::jthread([this] { RenderLoop(); });
         LOG_INFO(HW_GPU, "GPU render follower: enabled, polls {} us before parking",
@@ -959,12 +961,61 @@ void GpuSplit::PostRender(Nx2RenderFollower::Work work) {
     render_follower->Publish(std::move(work));
 }
 
-void GpuSplit::WaitRender() {
+void GpuSplit::WaitRender(std::source_location site) {
     if (on_back_thread && RenderPending()) {
         ++render_joins;
         const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-        render_parks += render_follower->Wait() ? 1 : 0;
+        const bool parked = render_follower->Wait();
+        render_parks += parked ? 1 : 0;
+        NoteJoinSite(site, parked);
     }
+}
+
+void GpuSplit::NoteJoinSite(const std::source_location& site, bool parked) {
+    JoinSite* slot = nullptr;
+    for (size_t i = 0; i < join_site_count; ++i) {
+        // Inline functions name their file once per translation unit.
+        if (join_sites[i].line == site.line() &&
+            (join_sites[i].file == site.file_name() ||
+             std::strcmp(join_sites[i].file, site.file_name()) == 0)) {
+            slot = &join_sites[i];
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        if (join_site_count == join_sites.size()) {
+            ++join_sites_other;
+            return;
+        }
+        slot = &join_sites[join_site_count++];
+        *slot = {site.file_name(), site.function_name(), site.line(), 0, 0};
+    }
+    ++slot->joins;
+    slot->parks += parked ? 1 : 0;
+}
+
+void GpuSplit::LogJoinSites() const {
+    std::array<const JoinSite*, 64> order;
+    for (size_t i = 0; i < join_site_count; ++i) {
+        order[i] = &join_sites[i];
+    }
+    std::sort(order.begin(), order.begin() + join_site_count,
+              [](const JoinSite* a, const JoinSite* b) { return a->joins > b->joins; });
+    std::string text;
+    for (size_t i = 0; i < join_site_count; ++i) {
+        const JoinSite& site = *order[i];
+        std::string_view function{site.function};
+        function = function.substr(0, function.find('('));
+        function = function.substr(function.rfind(' ') + 1);
+        std::string_view file{site.file};
+        file = file.substr(file.find_last_of("/\\") + 1);
+        text += fmt::format("{}{} ({}:{}) {} ({} parked)", i != 0 ? ", " : "", function, file,
+                            site.line, site.joins, site.parks);
+    }
+    if (join_sites_other != 0) {
+        text += fmt::format(", other sites {}", join_sites_other);
+    }
+    LOG_INFO(HW_GPU, "GPU render follower joins by site: {}", text.empty() ? "none" : text);
 }
 
 void GpuSplit::RenderLoop() {
@@ -1003,6 +1054,7 @@ void GpuSplit::RenderLoop() {
                  ? fmt::format(", {:.3f} ms thread CPU",
                                static_cast<double>(*cpu_end - *cpu_start) / 1e6)
                  : std::string{});
+    LogJoinSites();
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {

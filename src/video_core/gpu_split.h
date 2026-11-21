@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <thread>
 #include <type_traits>
@@ -217,9 +218,9 @@ public:
         return Get().BackRunning() ? on_back_thread : on_gpu_thread;
     }
     /// Every scheduler entry point: on the back, waits for the draw packet GPURender records.
-    static void JoinRender() {
+    static void JoinRender(std::source_location site = std::source_location::current()) {
         if (on_back_thread && instance.render_follower) {
-            instance.WaitRender();
+            instance.WaitRender(site);
         }
     }
     /// Draw state belongs to the split back thread, or the sole GPU scheduler owner.
@@ -266,7 +267,7 @@ public:
         return render_thread.joinable();
     }
     void PostRender(Nx2RenderFollower::Work work);
-    void WaitRender();
+    void WaitRender(std::source_location site = std::source_location::current());
 
     /// What the sender of an entry tells about the guest memory the back writes running it, for
     /// the front's reads of guest memory (WaitForWrites, MemoryWritesTarget).
@@ -911,6 +912,20 @@ private:
     u64 render_overlap_entries{};
     u64 render_joins{};
     u64 render_parks{};
+    /// Where the back joined GPURender (the shutdown line's histogram, as Fritchii's lend trace
+    /// by site, 5659ace40).
+    struct JoinSite {
+        const char* file;
+        const char* function;
+        u32 line;
+        u64 joins;
+        u64 parks;
+    };
+    std::array<JoinSite, 64> join_sites{};
+    size_t join_site_count{};
+    u64 join_sites_other{};
+    void NoteJoinSite(const std::source_location& site, bool parked);
+    void LogJoinSites() const;
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
