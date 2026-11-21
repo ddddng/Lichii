@@ -27,10 +27,12 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QTemporaryFile>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrentRun>
@@ -208,12 +210,18 @@ public:
         middle_layout->addWidget(results, 1);
         middle_layout->addWidget(more);
 
-        auto* inspector = new QScrollArea(split);
-        inspector->setObjectName(QStringLiteral("modStoreInspector"));
-        inspector->setStyleSheet(
-            QStringLiteral("QScrollArea#modStoreInspector { border: 1px solid %1; }").arg(border));
+        auto* inspector_frame = new QFrame(split);
+        inspector_frame->setObjectName(QStringLiteral("modStoreInspector"));
+        inspector_frame->setStyleSheet(
+            QStringLiteral("QFrame#modStoreInspector { border: 1px solid %1; }").arg(border));
+        auto* inspector_layout = new QVBoxLayout(inspector_frame);
+        inspector_layout->setContentsMargins(1, 1, 1, 1);
+        inspector_layout->setSpacing(0);
+        inspector = new QScrollArea(inspector_frame);
+        inspector->setFrameShape(QFrame::NoFrame);
         inspector->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         inspector->setWidgetResizable(true);
+        inspector_layout->addWidget(inspector, 1);
         auto* pane = new QWidget(inspector);
         auto* detail = new QVBoxLayout(pane);
         detail->setContentsMargins(8, 8, 8, 8);
@@ -225,9 +233,12 @@ public:
         name->setFont(heading);
         byline = PlainLabel(pane, true);
         description = PlainLabel(pane, true);
+        description_toggle = new QToolButton(pane);
+        description_toggle->setCheckable(true);
+        description_toggle->setAutoRaise(true);
         preview = PlainLabel(pane);
         preview->setAlignment(Qt::AlignCenter);
-        preview->setFixedHeight(180);
+        preview->setFixedHeight(172);
         preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         preview->setToolTip(tr("Mod preview"));
         preview_select = new QComboBox(pane);
@@ -235,6 +246,7 @@ public:
         detail->addWidget(name);
         detail->addWidget(byline);
         detail->addWidget(description);
+        detail->addWidget(description_toggle, 0, Qt::AlignLeft);
         target_picker = new QComboBox(pane);
         target_picker->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         target_picker->setMinimumContentsLength(20);
@@ -242,9 +254,11 @@ public:
         release = new QComboBox(pane);
         release->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         release->setMinimumContentsLength(20);
-        detail->addWidget(release);
+        auto* media_options = new QHBoxLayout;
+        media_options->addWidget(release, 1);
+        media_options->addWidget(preview_select);
+        detail->addLayout(media_options);
         detail->addWidget(preview);
-        detail->addWidget(preview_select);
 
         compatibility_card = new QFrame(pane);
         compatibility_card->setObjectName(QStringLiteral("modStoreCompatibility"));
@@ -288,24 +302,30 @@ public:
         divider(7);
         detail->addWidget(compatibility_card);
 
-        hint = PlainLabel(pane, true);
+        detail->addStretch();
+        inspector->setWidget(pane);
+
+        auto* actions = new QWidget(inspector_frame);
+        auto* actions_layout = new QVBoxLayout(actions);
+        actions_layout->setContentsMargins(8, 4, 8, 8);
+        actions_layout->setSpacing(6);
+        inspector_layout->addWidget(actions);
+        hint = PlainLabel(actions, true);
         mod_actions = new QHBoxLayout;
-        install = new QPushButton(tr("Install"), pane);
-        source = new QPushButton(tr("View on GameBanana"), pane);
+        install = new QPushButton(tr("Install"), actions);
+        source = new QPushButton(tr("View on GameBanana"), actions);
         mod_actions->addWidget(install);
         mod_actions->addWidget(source);
         mod_actions->addStretch();
-        detail->addLayout(mod_actions);
+        actions_layout->addLayout(mod_actions);
         auto* installed_actions = new QHBoxLayout;
-        enable = new QPushButton(pane);
-        uninstall = new QPushButton(tr("Uninstall"), pane);
+        enable = new QPushButton(actions);
+        uninstall = new QPushButton(tr("Uninstall"), actions);
         installed_actions->addWidget(enable);
         installed_actions->addWidget(uninstall);
         installed_actions->addStretch();
-        detail->addLayout(installed_actions);
-        detail->addWidget(hint);
-        detail->addStretch(1);
-        inspector->setWidget(pane);
+        actions_layout->addLayout(installed_actions);
+        actions_layout->addWidget(hint);
         split->setChildrenCollapsible(false);
         split->setSizes({208, 330, 500});
         split->setStretchFactor(2, 1);
@@ -377,6 +397,13 @@ public:
             BuildOffers();
         });
         connect(preview_select, &QComboBox::currentIndexChanged, this, [this] { LoadPreview(); });
+        connect(description_toggle, &QToolButton::toggled, this, [this](bool expanded) {
+            if (selected) {
+                description_toggle->setText(expanded ? tr("Show less")
+                                                     : tr("Show full description"));
+                description->setText(expanded ? selected->description : description_excerpt);
+            }
+        });
         connect(source, &QPushButton::clicked, this, [this] { OpenSource(); });
         connect(install, &QPushButton::clicked, this, [this] { StartInstall(); });
         connect(enable, &QPushButton::clicked, this, [this] { ToggleEnabled(); });
@@ -614,6 +641,8 @@ private:
         name->setText(tr("Select a mod to see its details"));
         byline->clear();
         description->clear();
+        description_toggle->hide();
+        inspector->verticalScrollBar()->setValue(0);
         preview->clear();
         preview->hide();
         preview_select->hide();
@@ -621,6 +650,7 @@ private:
         target_picker->hide();
         release->hide();
         hint->clear();
+        hint->hide();
         source->hide();
         install->hide();
         enable->hide();
@@ -660,6 +690,7 @@ private:
             }
             if (const auto* error = std::get_if<Error>(&response)) {
                 hint->setText(tr("Could not load details: %1").arg(error->message));
+                hint->show();
                 return;
             }
             selected = std::get<Mod>(std::move(response));
@@ -692,7 +723,23 @@ private:
                                      selected->source == Source::GameBanana ? tr("GameBanana")
                                      : selected->demo                       ? tr("Sample")
                                                       : tr("Lichii catalog")));
-            description->setText(selected->description);
+            const auto full = selected->description.trimmed();
+            description_excerpt = full.section(QLatin1Char('\n'), 0, 1).simplified();
+            if (description_excerpt.size() > 200) {
+                description_excerpt.truncate(200);
+                if (description_excerpt.back().isHighSurrogate()) {
+                    description_excerpt.chop(1);
+                }
+            }
+            const bool truncated = description_excerpt != full.simplified();
+            if (truncated) {
+                description_excerpt = description_excerpt.trimmed() + QStringLiteral("…");
+            }
+            const QSignalBlocker description_signals(description_toggle);
+            description_toggle->setChecked(false);
+            description_toggle->setText(tr("Show full description"));
+            description_toggle->setVisible(truncated);
+            description->setText(truncated ? description_excerpt : full);
             source->setVisible(selected->source == Source::GameBanana);
             {
                 const QSignalBlocker block(preview_select);
@@ -902,11 +949,10 @@ private:
         const bool enabled =
             installed && (!context.is_enabled || context.is_enabled(local_title, local_id));
         enable->setText(enabled ? tr("Disable") : tr("Enable"));
+        hint->clear();
         if (offer && selected) {
             if (selected->demo) {
                 hint->setText(tr("This sample is not available for installation."));
-            } else if (!Identity(local_title).installed) {
-                hint->setText(tr("Add this game to your library to install its mods."));
             } else if (offer->compatibility == Compatibility::Mismatch) {
                 hint->setText(
                     tr("This release does not match the installed game or Lichii build."));
@@ -915,6 +961,8 @@ private:
                                  "for this file."));
             } else if (Digest(*offer).size() != 32) {
                 hint->setText(tr("Install unavailable: the catalog has no SHA-256 for this file."));
+            } else if (!Identity(local_title).installed) {
+                hint->setText(tr("Add this game to your library to install its mods."));
             } else if (!CanInstall(*offer)) {
                 hint->setText(tr("The installed game or Lichii build could not be verified."));
             } else if (current) {
@@ -925,6 +973,7 @@ private:
         } else if (installed) {
             hint->setText(enabled ? tr("Installed and enabled") : tr("Installed and disabled"));
         }
+        hint->setVisible(!hint->text().isEmpty());
     }
 
     void OpenSource() {
@@ -1131,6 +1180,7 @@ private:
     std::optional<int> next;
     std::optional<Mod> selected;
     std::optional<InstalledMod> local;
+    QString description_excerpt;
     QString title;
     QString local_title;
     QString local_id;
@@ -1158,9 +1208,11 @@ private:
     QLineEdit* search{};
     QTreeWidget* game_tree{};
     QTreeWidget* results{};
+    QScrollArea* inspector{};
     QLabel* name{};
     QLabel* byline{};
     QLabel* description{};
+    QToolButton* description_toggle{};
     QLabel* preview{};
     QLabel* compatibility_state{};
     QLabel* hint{};
