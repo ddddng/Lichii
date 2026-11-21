@@ -1415,10 +1415,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         verify_vertex_input = false;
         const DrawParams params =
             MakeDrawParams(maxwell3d->draw_manager.draw_state, *direct_instances, is_indexed);
-        const bool samples = maxwell3d->regs.zpass_pixel_count_enable;
+        // The query cache stays on the back: its begin lands before the packet's bindings.
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                  maxwell3d->regs.zpass_pixel_count_enable);
         pending_render = Common::UniqueFunction<void>{
-            [this, pipeline, binding = std::move(*prepared), dynamic = std::move(dynamic), params,
-             samples]() mutable {
+            [this, pipeline, binding = std::move(*prepared), dynamic = std::move(dynamic),
+             params]() mutable {
                 {
                     const Profile::Scope scope{Profile::Zone::ConfigureDraw};
                     pipeline->RecordPreparedBinding(binding);
@@ -1431,7 +1433,6 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                         }
                     });
                 }
-                query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, samples);
                 const Profile::Scope scope{Profile::Zone::DrawRecord};
                 const auto& hashes = pipeline->ShaderHashes();
                 scheduler.TraceGraphicsPipeline(hashes);
@@ -1625,9 +1626,6 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    if (VideoCommon::GpuSplit::OnBackThread()) {
-        VideoCommon::GpuSplit::Get().WaitRender();
-    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
@@ -1850,9 +1848,6 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
-    if (VideoCommon::GpuSplit::OnBackThread()) {
-        VideoCommon::GpuSplit::Get().WaitRender();
-    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
     if (Common::DkbFrameTrace::Enabled()) {

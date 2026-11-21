@@ -181,11 +181,19 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (render_requested && !render_follower_supported) {
         LOG_INFO(HW_GPU, "GPU render follower: unsupported on this renderer or driver");
     } else if (render_requested) {
+        // EDEN_NX2_RENDER_SPIN_US: how long each side polls before it parks (0 parks at once).
+        const char* const spin = std::getenv("EDEN_NX2_RENDER_SPIN_US");
+        const auto spin_time = spin != nullptr
+                                   ? std::chrono::microseconds{std::strtoul(spin, nullptr, 10)}
+                                   : std::chrono::duration_cast<std::chrono::microseconds>(
+                                         Nx2RenderFollower::DefaultSpin);
         render_overlap_entries = 0;
         render_joins = 0;
-        render_follower.emplace();
+        render_parks = 0;
+        render_follower.emplace(spin_time);
         render_thread = std::jthread([this] { RenderLoop(); });
-        LOG_INFO(HW_GPU, "GPU render follower: enabled");
+        LOG_INFO(HW_GPU, "GPU render follower: enabled, polls {} us before parking",
+                 spin_time.count());
     }
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -955,24 +963,14 @@ void GpuSplit::WaitRender() {
     if (on_back_thread && RenderPending()) {
         ++render_joins;
         const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-        render_follower->Wait();
+        render_parks += render_follower->Wait() ? 1 : 0;
     }
-}
-
-bool GpuSplit::CanOverlapRender(u64 entry) const {
-    const auto kind = static_cast<Kind>(entry & 0xf);
-    if (kind == Kind::Wrap || kind == Kind::Engine) {
-        return true;
-    }
-    if (kind != Kind::State || !back_engine->method_sink.empty()) {
-        return false;
-    }
-    const auto& engine = *static_cast<Tegra::Engines::Maxwell3D*>(back_engine);
-    return !engine.draw_manager.HasDeferredDraw();
 }
 
 void GpuSplit::RenderLoop() {
     Common::SetCurrentThreadName("GPURender");
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+    Common::SetCurrentThreadToPerformanceCores();
     system->RegisterHostThread();
     on_render_thread = true;
     const bool profile = Nx2Profile::Enabled();
@@ -993,19 +991,18 @@ void GpuSplit::RenderLoop() {
         ++packets;
         Nx2Profile::Report("GPU render thread");
     }
-    if (profile) {
-        const auto cpu_end = Common::CurrentThreadCpuTimeNs();
-        if (cpu_start && cpu_end) {
-            LOG_INFO(HW_GPU,
-                     "GPU render follower: {} packets, {} overlapping entries, {} joins, "
-                     "{:.3f} ms thread CPU",
-                     packets, render_overlap_entries, render_joins,
-                     static_cast<double>(*cpu_end - *cpu_start) / 1e6);
-        }
-    } else {
-        LOG_INFO(HW_GPU, "GPU render follower: {} packets, {} overlapping entries, {} joins",
-                 packets, render_overlap_entries, render_joins);
-    }
+    const double joined = packets != 0 ? 100.0 * static_cast<double>(render_joins) /
+                                             static_cast<double>(packets)
+                                       : 0.0;
+    const auto cpu_end = profile ? Common::CurrentThreadCpuTimeNs() : std::nullopt;
+    LOG_INFO(HW_GPU,
+             "GPU render follower: {} packets, {} overlapping entries, {} joins ({:.1f}% of "
+             "packets), {} parked{}",
+             packets, render_overlap_entries, render_joins, joined, render_parks,
+             cpu_start && cpu_end
+                 ? fmt::format(", {:.3f} ms thread CPU",
+                               static_cast<double>(*cpu_end - *cpu_start) / 1e6)
+                 : std::string{});
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {
@@ -1054,6 +1051,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 // The front may already see everything consumed: Drain() waits for back_quiet
                 // too, so the deferred submit can't overlap whatever the front does next.
                 if (!back_quiet.load(std::memory_order_relaxed)) {
+                    WaitRender();
                     if (idle_hook != nullptr) {
                         idle_hook(idle_argument);
                     }
@@ -1087,12 +1085,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
+            // A draw packet records beside every entry: the scheduler joins it (JoinRender).
             if (RenderPending()) {
-                if (CanOverlapRender(ring[index])) {
-                    ++render_overlap_entries;
-                } else {
-                    WaitRender();
-                }
+                ++render_overlap_entries;
             }
             back_entry_start = read_position;
             const size_t size =
@@ -1109,14 +1104,14 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if ((read_position - last_store >= 4096 ||
                  read_position >= wait_target.load(std::memory_order_relaxed)) &&
                 read_position != available) {
-                WaitRender();
                 SealFencedEntries(read_position);
                 consumed.store(read_position, std::memory_order_seq_cst);
                 last_store = read_position;
                 NotifyFront();
             }
         }
-        WaitRender();
+        // No join: a packet only records, and nothing the front reads from a consumed position
+        // depends on it. The front takes the scheduler only once the back is quiet (below).
         SealFencedEntries(read_position);
         consumed.store(read_position, std::memory_order_seq_cst);
         NotifyFront();

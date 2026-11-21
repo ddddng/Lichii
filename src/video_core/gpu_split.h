@@ -207,13 +207,20 @@ public:
     [[nodiscard]] static bool OnGpuThread() {
         return on_gpu_thread;
     }
-    /// The GPU back owns the scheduler while the split runs, except while a draw packet is
-    /// lent to GPURender. Without the split the GPU thread owns it.
+    /// The GPU back owns the scheduler while the split runs; GPURender records a draw packet the
+    /// back lent it, and the back takes the scheduler back at its next use (JoinRender). Without
+    /// the split the GPU thread owns it.
     [[nodiscard]] static bool OwnsScheduler() {
         if (on_render_thread) {
             return true;
         }
-        return Get().BackRunning() ? on_back_thread && !instance.RenderPending() : on_gpu_thread;
+        return Get().BackRunning() ? on_back_thread : on_gpu_thread;
+    }
+    /// Every scheduler entry point: on the back, waits for the draw packet GPURender records.
+    static void JoinRender() {
+        if (on_back_thread && instance.render_follower) {
+            instance.WaitRender();
+        }
     }
     /// Draw state belongs to the split back thread, or the sole GPU scheduler owner.
     [[nodiscard]] static bool CanReuseDrawState() {
@@ -782,7 +789,6 @@ private:
     [[nodiscard]] bool RenderPending() const {
         return render_follower && render_follower->Pending();
     }
-    [[nodiscard]] bool CanOverlapRender(u64 entry) const;
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
@@ -891,6 +897,7 @@ private:
     std::jthread render_thread;
     u64 render_overlap_entries{};
     u64 render_joins{};
+    u64 render_parks{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};

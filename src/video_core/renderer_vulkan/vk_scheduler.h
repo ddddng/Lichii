@@ -86,6 +86,7 @@ public:
 
     /// Keeps the worker from executing chunks while the lock is held. Take it before submit_mutex.
     [[nodiscard]] std::unique_lock<std::mutex> PauseWorker() {
+        VideoCommon::GpuSplit::JoinRender();
         return std::unique_lock{execution_mutex};
     }
 
@@ -140,38 +141,46 @@ public:
         std::source_location location = std::source_location::current());
 
     void DeferFragmentBarrier() {
+        VideoCommon::GpuSplit::JoinRender();
         fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
     }
 
     bool HasFragmentBarrier() const {
+        VideoCommon::GpuSplit::JoinRender();
         return fragment_barrier.Pending();
     }
 
     void NoteRenderPassStores() {
+        VideoCommon::GpuSplit::JoinRender();
         render_pass_has_stores = true;
     }
 
     bool RenderPassHasStores() const {
+        VideoCommon::GpuSplit::JoinRender();
         return render_pass_has_stores;
     }
 
     /// A dispatch was recorded: the next render pass must see what it wrote.
     void NoteComputeWrites() {
+        VideoCommon::GpuSplit::JoinRender();
         compute_writes_pending = true;
     }
 
     /// Returns true when a render pass is currently active in the scheduler state.
     bool IsRenderPassActive() const {
+        VideoCommon::GpuSplit::JoinRender();
         return state.renderpass != VK_NULL_HANDLE;
     }
 
     /// Changes whenever a render pass begins or ends.
     u64 RenderPassSerial() const {
+        VideoCommon::GpuSplit::JoinRender();
         return render_pass_serial;
     }
 
     /// The graphics pipeline bound in the current command buffer, if the scheduler knows it.
     const GraphicsPipeline* BoundGraphicsPipeline() const {
+        VideoCommon::GpuSplit::JoinRender();
         return state.graphics_pipeline;
     }
 
@@ -215,6 +224,7 @@ public:
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command,
                                 std::source_location location = std::source_location::current()) {
+        VideoCommon::GpuSplit::JoinRender();
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
@@ -247,6 +257,7 @@ public:
     /// Whether anything was recorded since the last Flush or Finish, or waits to be: batched
     /// uploads and a deferred clear reach the command buffer only at the next record or submit.
     [[nodiscard]] bool RecordedSinceSubmit() const noexcept {
+        VideoCommon::GpuSplit::JoinRender();
         return record_serial != submitted_serial || uploads_pending ||
                deferred_clear.framebuffer != nullptr;
     }
@@ -273,6 +284,7 @@ public:
     /// Changes whenever recorded command buffer state may have been reset (InvalidateState, the
     /// end of a render pass), so a binding recorded at the same epoch is still bound.
     [[nodiscard]] u64 RecordingEpoch() const noexcept {
+        VideoCommon::GpuSplit::JoinRender();
         return recording_epoch;
     }
 
