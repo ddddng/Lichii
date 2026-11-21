@@ -416,8 +416,9 @@ jobs:
             flags+=" -Wno-error=backend-plugin"
           fi
           # The ThinLTO backend runs at link time, which ccache doesn't cover; lld caches each
-          # module's native code, so a link only recompiles the modules that changed.
-          lto_cache="/lldltocache:$(cygpath -m "$PWD/.lto-cache") /lldltocachepolicy:cache_size_bytes=1g"
+          # module's native code, so a link only recompiles the modules that changed. One build's
+          # entries take 1.3 GB.
+          lto_cache="/lldltocache:$(cygpath -m "$PWD/.lto-cache") /lldltocachepolicy:cache_size_bytes=1500m"
           aftermath=()
           if [ '${{ inputs.nsight_aftermath }}' = true ]; then
             aftermath=(-DENABLE_NSIGHT_AFTERMATH=ON)
