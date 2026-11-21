@@ -3740,6 +3740,11 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    // GPURender's scheduler alone, nothing back to the back (Fritchii f5afca4c9, fdd2b9472).
+    if (PostRenderOp(VideoCommon::GpuSplit::PostedOp::FragmentBarrier,
+                     [this] { FragmentBarrier(); })) {
+        return;
+    }
     RENDER_LEND(FragmentBarrier())
     // The next draw breaks the render pass only if it reads what this one wrote (#161): Ocarina
     // ended ~5,900 render passes a second here.
@@ -3751,6 +3756,11 @@ void RasterizerVulkan::TiledCacheBarrier() {
 }
 
 void RasterizerVulkan::FlushCommands() {
+    // GPURender's own counters (draw_counter, pending_native_work) and scheduler, nothing back to
+    // the back (Fritchii f5afca4c9).
+    if (PostRenderOp(VideoCommon::GpuSplit::PostedOp::FlushCommands, [this] { FlushCommands(); })) {
+        return;
+    }
     RENDER_LEND(FlushCommands())
     if (draw_counter == 0 && !pending_native_work) {
         return;

@@ -282,7 +282,9 @@ public:
     /// Render ops the back posts to GPURender instead of lending them, each behind its switch
     /// (render follower port, step 8; they need EDEN_NX2_RENDER_UNLEND=1 for the view's flags).
     enum class PostedOp : u8 {
-        IdleHook, ///< EDEN_NX2_RENDER_POST_IDLE_HOOK: the back's idle hook (FlushDeferred)
+        IdleHook,        ///< EDEN_NX2_RENDER_POST_IDLE_HOOK: the back's idle hook (FlushDeferred)
+        FlushCommands,   ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FlushCommands
+        FragmentBarrier, ///< EDEN_NX2_RENDER_POST_FLUSH: RasterizerVulkan::FragmentBarrier
         Count,
     };
     [[nodiscard]] bool Posts(PostedOp op) const {

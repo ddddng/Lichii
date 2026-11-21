@@ -231,7 +231,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         guest_write_op.store(0, std::memory_order_relaxed);
         // Render follower port, step 8: posted render ops, one switch each.
         static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
-            post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK"};
+            post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK", "EDEN_NX2_RENDER_POST_FLUSH",
+                          "EDEN_NX2_RENDER_POST_FLUSH"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -1260,8 +1261,10 @@ void GpuSplit::RenderLoop() {
         LogUnlend();
     }
     if (std::ranges::any_of(posts, [](bool on) { return on; })) {
-        LOG_INFO(HW_GPU, "GPU render posted ops: {} idle hooks",
-                 posted[static_cast<size_t>(PostedOp::IdleHook)]);
+        LOG_INFO(HW_GPU, "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers",
+                 posted[static_cast<size_t>(PostedOp::IdleHook)],
+                 posted[static_cast<size_t>(PostedOp::FlushCommands)],
+                 posted[static_cast<size_t>(PostedOp::FragmentBarrier)]);
     }
 }
 
