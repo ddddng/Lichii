@@ -30,6 +30,7 @@
 #include "video_core/query_cache/query_cache_base.h"
 #include "video_core/query_cache/query_stream.h"
 #include "video_core/query_cache/types.h"
+#include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
 
