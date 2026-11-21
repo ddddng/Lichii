@@ -1299,8 +1299,12 @@ void FileEnvironment::Deserialize(std::istream& file, std::streampos end) {
         cbuf_values.erase(it);
     } else if (HasNativeInstructions() && !Tegra::Texture::UsesHeaderByteOffsetHandles(
                                             true, Settings::GetCurrentProgramID())) {
-        const auto ambiguous = [](const auto& entry) {
-            return entry.first != 0 && entry.first % 32 == 0;
+        const auto ambiguous = [this](const auto& entry) {
+            if (entry.first == 0 || entry.first % 32 != 0) {
+                return false;
+            }
+            dropped_texture_handles.push_back(entry.first);
+            return true;
         };
         erase_if(texture_types, ambiguous);
         erase_if(texture_pixel_formats, ambiguous);
@@ -1428,6 +1432,8 @@ Shader::TextureType FileEnvironment::ReadTextureType(u32 handle) {
             return guess->texture_type;
         }
         lacks_recorded_value = true;
+        lacks_dropped_value |= std::ranges::find(dropped_texture_handles, handle) !=
+                               dropped_texture_handles.end();
         throw Shader::LogicError("Uncached read texture type");
     }
     return it->second;
@@ -1442,6 +1448,8 @@ Shader::TexturePixelFormat FileEnvironment::ReadTexturePixelFormat(u32 handle) {
             return guess->pixel_format;
         }
         lacks_recorded_value = true;
+        lacks_dropped_value |= std::ranges::find(dropped_texture_handles, handle) !=
+                               dropped_texture_handles.end();
         throw Shader::LogicError("Uncached read texture pixel format");
     }
     return it->second;
