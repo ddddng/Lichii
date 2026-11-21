@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/logging.h"
 #include "input_common/main.h"
 #include "qt_config.h"
@@ -79,6 +81,40 @@ void QtConfig::SaveLastSeenRelease(u32 build) {
     WriteSettingGeneric(&UISettings::values.last_seen_release);
     EndGroup();
     WriteToIni();
+}
+
+bool QtConfig::SetAddonEnabled(u64 title_id, const std::string& name, bool enabled) {
+    if (!global) {
+        return false;
+    }
+    auto& addons = Settings::values.disabled_addons;
+    const auto previous = addons.find(title_id);
+    auto disabled = previous == addons.end() ? std::vector<std::string>{} : previous->second;
+    if (enabled) {
+        if (std::erase(disabled, name) == 0) {
+            return true;
+        }
+    } else {
+        if (std::ranges::find(disabled, name) != disabled.end()) {
+            return true;
+        }
+        disabled.push_back(name);
+        std::ranges::sort(disabled);
+    }
+    auto [it, inserted] = addons.try_emplace(title_id);
+    it->second.swap(disabled);
+    SaveDisabledAddOnValues();
+    if (WriteToIni()) {
+        return true;
+    }
+
+    if (inserted) {
+        addons.erase(it);
+    } else {
+        it->second.swap(disabled);
+    }
+    SaveDisabledAddOnValues();
+    return false;
 }
 
 void QtConfig::ReadQtValues() {
