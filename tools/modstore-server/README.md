@@ -1,7 +1,8 @@
 # Lichii Mod Store server
 
 This standalone service serves a moderated catalog from SQLite and a directory of
-local files. There is no public upload, account system, or external asset fetch.
+local files. The server does not fetch or proxy third-party files or previews.
+There is no public upload or account system.
 See [API.md](API.md) for the Qt contract and private admin routes.
 
 ## Start on the host
@@ -96,6 +97,9 @@ printf '%s\n' '{"status":"approved"}' | sudo docker compose exec -T modstore \
 Set the same object to `rejected` to hide it. Rejection does not delete the
 bytes. Stop the service before running `seed-demo` on an existing catalog.
 Running it again doesn't overwrite records or undo moderation.
+
+GameBanana entries are links to third-party listings, not locally hosted mods.
+See [the import guide](GAMEBANANA.md) to refresh them and remove the demo listings.
 
 ## Back up or restore
 

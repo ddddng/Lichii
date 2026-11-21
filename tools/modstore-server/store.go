@@ -48,10 +48,22 @@ CREATE TABLE IF NOT EXISTS versions (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS versions_catalog_mod ON versions (mod_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS versions_catalog_title ON versions (title_id, status, mod_id);
+CREATE TABLE IF NOT EXISTS gamebanana (
+    mod_id TEXT PRIMARY KEY REFERENCES mods(id),
+    title_id TEXT NOT NULL REFERENCES games(title_id),
+    page_url TEXT NOT NULL,
+    preview_url TEXT,
+    metadata TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS gamebanana_title ON gamebanana(title_id, mod_id);
+CREATE VIEW IF NOT EXISTS catalog_targets AS
+    SELECT mod_id, title_id, status='approved' AS available FROM versions
+    UNION ALL
+    SELECT mod_id, title_id, 1 AS available FROM gamebanana;
 `
 
 const publicMod = `m.status = 'approved' AND EXISTS (
-    SELECT 1 FROM versions v WHERE v.mod_id=m.id AND v.status='approved')`
+    SELECT 1 FROM catalog_targets t WHERE t.mod_id=m.id AND t.available)`
 
 type store struct {
 	db     *sql.DB
@@ -95,6 +107,8 @@ type mod struct {
 	Author     string   `json:"author"`
 	Type       string   `json:"type"`
 	Demo       bool     `json:"demo"`
+	Source     string   `json:"source"`
+	SourceURL  string   `json:"source_url,omitempty"`
 	PreviewURL *string  `json:"preview_url"`
 	UpdatedAt  string   `json:"updated_at"`
 	Status     string   `json:"status,omitempty"`
@@ -102,8 +116,9 @@ type mod struct {
 
 type modDetail struct {
 	mod
-	Description string    `json:"description"`
-	Versions    []version `json:"versions"`
+	Description string              `json:"description"`
+	Versions    []version           `json:"versions"`
+	External    *gameBananaMetadata `json:"external,omitempty"`
 }
 
 type version struct {
@@ -120,15 +135,17 @@ type version struct {
 }
 
 func modColumns(admin bool) string {
-	match := "v.mod_id=m.id"
+	match := "t.mod_id=m.id"
 	if !admin {
-		match += " AND v.status='approved'"
+		match += " AND t.available"
 	}
 	return `m.id, (SELECT json_group_array(title_id) FROM
-	    (SELECT DISTINCT v.title_id FROM versions v WHERE ` + match + ` ORDER BY v.title_id)),
-	    m.name, m.summary, m.author, m.type, m.demo, m.preview_sha, m.updated_at, m.status`
+	    (SELECT DISTINCT t.title_id FROM catalog_targets t WHERE ` + match + ` ORDER BY t.title_id)),
+	    m.name, m.summary, m.author, m.type, m.demo, m.preview_sha, m.updated_at, m.status,
+	    gb.page_url, gb.preview_url`
 }
 
+const modsFrom = " FROM mods m LEFT JOIN gamebanana gb ON gb.mod_id=m.id"
 const publicPrefix = "/api/v1"
 const adminPrefix = "/admin/v1"
 
@@ -139,9 +156,10 @@ type scanner interface {
 func scanMod(row scanner, admin bool, description *string) (mod, error) {
 	var m mod
 	var titleIDs string
-	var preview sql.NullString
+	var preview, sourceURL, remotePreview sql.NullString
 	var updated int64
-	args := []any{&m.ID, &titleIDs, &m.Name, &m.Summary, &m.Author, &m.Type, &m.Demo, &preview, &updated, &m.Status}
+	args := []any{&m.ID, &titleIDs, &m.Name, &m.Summary, &m.Author, &m.Type, &m.Demo, &preview, &updated, &m.Status,
+		&sourceURL, &remotePreview}
 	if description != nil {
 		args = append(args, description)
 	}
@@ -157,7 +175,19 @@ func scanMod(row scanner, admin bool, description *string) (mod, error) {
 	} else {
 		m.Status = ""
 	}
-	if preview.Valid {
+	switch {
+	case sourceURL.Valid:
+		m.Source = "gamebanana"
+		m.SourceURL = sourceURL.String
+		if remotePreview.Valid {
+			m.PreviewURL = &remotePreview.String
+		}
+	case m.Demo:
+		m.Source = "demo"
+	default:
+		m.Source = "submission"
+	}
+	if preview.Valid && !sourceURL.Valid {
 		previewURL := prefix + "/mods/" + m.ID + "/preview"
 		m.PreviewURL = &previewURL
 	}
@@ -180,11 +210,19 @@ func (s *store) detail(ctx context.Context, id string, admin bool) (modDetail, e
 		modWhere += " AND " + publicMod
 		versionWhere += " AND status='approved'"
 	}
-	detail.mod, err = scanMod(tx.QueryRowContext(ctx, "SELECT "+modColumns(admin)+", m.description FROM mods m WHERE "+modWhere, id), admin, &detail.Description)
+	detail.mod, err = scanMod(tx.QueryRowContext(ctx, "SELECT "+modColumns(admin)+", m.description"+modsFrom+" WHERE "+modWhere, id), admin, &detail.Description)
 	if err != nil {
 		return detail, err
 	}
 	detail.Versions = []version{}
+	if detail.Source == "gamebanana" {
+		var raw string
+		if err := tx.QueryRowContext(ctx, "SELECT metadata FROM gamebanana WHERE mod_id=?", id).Scan(&raw); err != nil {
+			return detail, err
+		}
+		detail.External = new(gameBananaMetadata)
+		return detail, json.Unmarshal([]byte(raw), detail.External)
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, title_id, game_version, build_id, min_lichii_build, sha256,
 	    size_bytes, unpacked_size_bytes, status FROM versions WHERE `+versionWhere+" ORDER BY created_at DESC, id ASC", id)
 	if err != nil {

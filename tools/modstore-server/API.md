@@ -9,7 +9,7 @@ an account or token.
 | Request | Response |
 |---|---|
 | `GET /healthz` | `{"status":"ok"}`, or 503 if the database or asset directory is unavailable. |
-| `GET /api/v1/games` | `{"games":[{"title_id":"0400C3F00006E000","name":"Mario Kart World","mod_count":2}],"next_offset":null}`. Only games with an available mod are included. The count is of distinct mods, including demos. |
+| `GET /api/v1/games` | `{"games":[{"title_id":"0400C3F00006E000","name":"Mario Kart World","mod_count":2}],"next_offset":null}`. Only games with an available catalog entry are included. The count is of distinct mods. |
 | `GET /api/v1/mods` | `{"mods":[...],"next_offset":null}`. Each result has the fields shown below, except `description` and `versions`. |
 | `GET /api/v1/mods/{id}` | One mod with its approved versions. |
 | `GET /api/v1/mods/{id}/preview` | The original PNG or JPEG, when present. |
@@ -25,7 +25,7 @@ accepts these optional parameters:
 
 | Parameter | Meaning |
 |---|---|
-| `title_id` | 16 hex digits, case-insensitive. Matches an approved version for that title. |
+| `title_id` | 16 hex digits, case-insensitive. Matches an approved version or a GameBanana listing for that title. |
 | `q` | Literal substring, up to 128 characters after trimming. Matches name, summary, description or author. SQLite folds ASCII case; it does not do locale-aware matching. |
 | `type` | One of `graphics`, `fps`, `cheats`, `translation`, `gameplay`. |
 | `sort` | `updated` by most recent public mod change first (default), or `name` by name. Both break ties by mod ID. |
@@ -44,6 +44,7 @@ for the generated fixture's values.
   "author": "Lichii",
   "type": "translation",
   "demo": true,
+  "source": "demo",
   "preview_url": "/api/v1/mods/demo-kart-translation/preview",
   "updated_at": "2026-01-01T00:00:00.000Z",
   "versions": [
@@ -62,12 +63,12 @@ for the generated fixture's values.
 }
 ```
 
-`title_ids` is the sorted set of approved version title IDs, even when
-the mod list is filtered by title. Versions are ordered newest upload
+`title_ids` is the sorted set of available title IDs, even when the mod list
+is filtered by title. A local mod's versions are ordered newest upload
 first, then by version ID. Each row applies to one title and one exact
 version/build. A different target needs a separate version ID, even
 when the archive is identical. The preview URL is nullable. Times are
-UTC RFC 3339. URLs begin with `/api/v1/` and belong to the same origin.
+UTC RFC 3339. Local asset URLs begin with `/api/v1/` and belong to the same origin.
 
 Public records require approval of both mod and version. An unavailable
 mod, version, or preview returns 404, whether absent or pending/rejected.
@@ -76,6 +77,31 @@ handler rejects a request it returns `{"error":{"code":"invalid_input","message"
 or another stable code with the appropriate status. Unmatched paths,
 methods and HTTP transport errors may return plain text instead. Handle
 non-2xx status codes before parsing a success body.
+
+### GameBanana listings
+
+`source` is `demo`, `submission`, or `gamebanana`. GameBanana entries have an ID
+of the form `gb-<GameBanana mod ID>`, one catalog title, and a `source_url`
+pointing to the canonical author page. The list may return a `preview_url`
+on `images.gamebanana.com`. Do not proxy or rehost that image.
+
+The detail response for GameBanana has an empty `versions` array and an
+`external` object. `external.compatibility` is `unverified`.
+
+| Field | Value |
+|---|---|
+| `external.id` | Numeric GameBanana mod ID. |
+| `external.category` | Original GameBanana category. |
+| `external.credits` | Objects with `name`, `role` and `url`. `url` is empty if no GameBanana profile is known. |
+| `external.preview_urls` | GameBanana preview-image URLs. |
+| `external.files` | Objects with `id`, `name`, `size_bytes`, `uploaded_at`, `download_url`, `sha256`, and `build_ids`. |
+
+`download_url` points directly to `https://gamebanana.com/dl/<file ID>`.
+`sha256` is nullable. `build_ids` contains file-name evidence, so may be empty
+or contain short 16-digit prefixes. Even a full build ID does not establish a
+game version, a minimum Lichii release, or safe installation. Show **Unverified**
+and offer **View on GameBanana** for these listings. Do not use the local-mod
+installer to download or unpack them. GameBanana controls file availability.
 
 ## Qt compatibility and installation
 
@@ -132,12 +158,18 @@ finishes.
 | `PUT /admin/v1/mods/{id}/versions/{version_id}` | Raw `application/zip`. URL-encode query fields `title_id`, `game_version`, `build_id`, `min_lichii_build`; all required. Success returns the pending version as JSON with status 201. |
 | `PUT /admin/v1/mods/{id}/status` | JSON `{"status":"approved"}`; also accepts `pending` or `rejected`. |
 | `PUT /admin/v1/mods/{id}/versions/{version_id}/status` | Same status body. |
+| `PUT /admin/v1/gamebanana` | Import the JSON emitted by the GameBanana importer, up to 8 MiB. Returns the processed game and listing counts with 200. |
+| `PUT /admin/v1/gamebanana/drop-demos` | Remove demo records after at least one GameBanana listing is public. Takes no body. |
 
-Successful PUTs return 204 except for version creation. IDs and version
+Successful PUTs return 204 except for version creation and GameBanana imports. IDs and version
 metadata are immutable after upload. For a correction, reject the old
 version and create a new one. Version IDs are unique within a mod, at most
 63 characters, and may use lowercase letters, digits, periods,
 underscores and hyphens. A mod holds at most 128 versions.
+
+GameBanana imports upsert only the included listings in one transaction. They
+preserve local moderation status. They do not delete unlisted records. Reject
+a listing in the admin API if its author removes it or requests removal.
 
 The ZIP limit is 64 MiB compressed and 256 MiB extracted. The archive can
 contain up to 4096 entries. It must include at least one regular file

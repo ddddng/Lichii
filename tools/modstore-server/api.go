@@ -182,9 +182,9 @@ func (s *store) listGames(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT g.title_id, g.name, COUNT(DISTINCT v.mod_id)
-	    FROM games g JOIN versions v ON g.title_id=v.title_id JOIN mods m ON m.id=v.mod_id
-	    WHERE m.status='approved' AND v.status='approved'
+	rows, err := s.db.QueryContext(r.Context(), `SELECT g.title_id, g.name, COUNT(DISTINCT t.mod_id)
+	    FROM games g JOIN catalog_targets t ON g.title_id=t.title_id JOIN mods m ON m.id=t.mod_id
+	    WHERE m.status='approved' AND t.available
 	    GROUP BY g.title_id ORDER BY g.name COLLATE NOCASE, g.title_id LIMIT ? OFFSET ?`, limit+1, offset)
 	if err != nil {
 		return err
@@ -228,11 +228,11 @@ func (s *store) listMods(w http.ResponseWriter, r *http.Request, admin bool) err
 		if !titlePattern.MatchString(title) {
 			return invalid("title_id must contain 16 hexadecimal digits")
 		}
-		match := "v.mod_id=m.id AND v.title_id=?"
+		match := "t.mod_id=m.id AND t.title_id=?"
 		if !admin {
-			match += " AND v.status='approved'"
+			match += " AND t.available"
 		}
-		where = append(where, "EXISTS (SELECT 1 FROM versions v WHERE "+match+")")
+		where = append(where, "EXISTS (SELECT 1 FROM catalog_targets t WHERE "+match+")")
 		args = append(args, title)
 	}
 	if term := strings.TrimSpace(q.Get("q")); term != "" {
@@ -265,7 +265,7 @@ func (s *store) listMods(w http.ResponseWriter, r *http.Request, admin bool) err
 	default:
 		return invalid("sort must be updated or name")
 	}
-	query := "SELECT " + modColumns(admin) + " FROM mods m WHERE " + strings.Join(where, " AND ") +
+	query := "SELECT " + modColumns(admin) + modsFrom + " WHERE " + strings.Join(where, " AND ") +
 		" ORDER BY " + order + " LIMIT ? OFFSET ?"
 	rows, err := s.db.QueryContext(r.Context(), query, append(args, limit+1, offset)...)
 	if err != nil {

@@ -46,6 +46,8 @@ func (s *store) adminHandler(token string) http.Handler {
 	mux.Handle("PUT "+adminPrefix+"/mods/{id}/status", endpoint(s.putStatus))
 	mux.Handle("PUT "+adminPrefix+"/mods/{id}/versions/{version}", endpoint(s.putVersion))
 	mux.Handle("PUT "+adminPrefix+"/mods/{id}/versions/{version}/status", endpoint(s.putStatus))
+	mux.Handle("PUT "+adminPrefix+"/gamebanana", endpoint(s.putGameBanana))
+	mux.Handle("PUT "+adminPrefix+"/gamebanana/drop-demos", endpoint(s.dropDemos))
 	want := sha256.Sum256([]byte("Bearer " + token))
 	writer := make(chan struct{}, 1)
 	return responseHeaders(endpoint(func(w http.ResponseWriter, r *http.Request) error {
@@ -88,10 +90,14 @@ func bodyError(err error) error {
 }
 
 func jsonBody(w http.ResponseWriter, r *http.Request, value any) error {
+	return jsonBodyLimit(w, r, value, 24<<10)
+}
+
+func jsonBodyLimit(w http.ResponseWriter, r *http.Request, value any, limit int64) error {
 	if mediaType(r) != "application/json" {
 		return problem{415, "unsupported_media_type", "expected application/json"}
 	}
-	body, err := requestBody(w, r, 24<<10)
+	body, err := requestBody(w, r, limit)
 	if err != nil {
 		return err
 	}
@@ -146,7 +152,7 @@ func (s *store) putMod(w http.ResponseWriter, r *http.Request) error {
 	input.Summary = strings.TrimSpace(input.Summary)
 	input.Description = strings.TrimSpace(input.Description)
 	input.Author = strings.TrimSpace(input.Author)
-	if !slugPattern.MatchString(id) || !portableName(id) || !validType(input.Type) ||
+	if !slugPattern.MatchString(id) || !portableName(id) || gameBananaIDPattern.MatchString(id) || !validType(input.Type) ||
 		!validText(input.Name, 120, false) || !validText(input.Summary, 240, false) ||
 		!validText(input.Description, 4000, true) || !validText(input.Author, 100, false) {
 		return invalid("invalid mod ID, metadata or type")
@@ -166,6 +172,9 @@ func (s *store) putMod(w http.ResponseWriter, r *http.Request) error {
 
 func (s *store) putPreview(w http.ResponseWriter, r *http.Request) error {
 	id := r.PathValue("id")
+	if gameBananaIDPattern.MatchString(id) {
+		return invalid("GameBanana previews come from the import manifest")
+	}
 	var modID string
 	if err := s.db.QueryRowContext(r.Context(), "SELECT id FROM mods WHERE id=?", id).Scan(&modID); err != nil {
 		return err
@@ -231,6 +240,9 @@ func (s *store) putStatus(w http.ResponseWriter, r *http.Request) error {
 
 func (s *store) putVersion(w http.ResponseWriter, r *http.Request) error {
 	id, ver := r.PathValue("id"), r.PathValue("version")
+	if gameBananaIDPattern.MatchString(id) {
+		return invalid("GameBanana files cannot be uploaded")
+	}
 	if !versionPattern.MatchString(ver) || !portableName(ver) {
 		return invalid("invalid version ID")
 	}
