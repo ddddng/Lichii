@@ -353,7 +353,6 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         } catch (const std::runtime_error& error) {
             LOG_WARNING(Render_Vulkan, "FlyHigh stopped for this session: {}; using optical flow",
                         error.what());
-            scheduler.Finish();
             flyhigh.reset();
             flyhigh_failed = true;
             SetState(VideoCore::FrameGenState::MissingFlyHigh, format);
@@ -523,15 +522,6 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
                                       extent);
         });
     }
-}
-
-SemaphoreValue FrameGen::TakeGeneratedWait() {
-#ifdef HAS_FLYHIGH
-    if (flyhigh) {
-        return flyhigh->TakeWait();
-    }
-#endif
-    return {};
 }
 
 bool FrameGen::FlyHighBlocked(VkColorSpaceKHR color_space) const {

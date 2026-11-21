@@ -346,7 +346,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         generated->game_frame_presents = game_frame_presents;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(SemaphoreValue{*generated->render_ready}, frame_gen.TakeGeneratedWait());
+        scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
     }
 #endif

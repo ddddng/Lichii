@@ -17,7 +17,6 @@
 #ifdef HAS_FLYHIGH
 #include "video_core/renderer_vulkan/present/flyhigh_frame_gen.h"
 #endif
-#include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 namespace Vulkan {
@@ -47,10 +46,6 @@ public:
 
     void GenerateInto(const Device& device, Frame* destination, size_t generation);
     void DrainFlyHighSubmissions();
-
-    /// What the submission of the first generated frame waits for, when a generator on another
-    /// device (FlyHigh) wrote it. Empty otherwise and after it has been taken.
-    [[nodiscard]] SemaphoreValue TakeGeneratedWait();
 
     [[nodiscard]] VideoCore::FrameGenStatus CurrentStatus() const {
         return {.state = state.load(std::memory_order_relaxed),

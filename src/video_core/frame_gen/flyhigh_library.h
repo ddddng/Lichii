@@ -21,7 +21,6 @@ namespace VideoCore::FrameGen {
     X(fh_engine_create)                                                                            \
     X(fh_engine_destroy)                                                                           \
     X(fh_engine_info)                                                                              \
-    X(fh_engine_vulkan_interop)                                                                    \
     X(fh_model_load)                                                                               \
     X(fh_model_destroy)                                                                            \
     X(fh_session_options_default)                                                                  \
@@ -33,15 +32,7 @@ namespace VideoCore::FrameGen {
     X(fh_stream_generate)                                                                          \
     X(fh_stream_warm_up)                                                                           \
     X(fh_stream_write_rgba)                                                                        \
-    X(fh_stream_read_rgba)                                                                         \
-    X(fh_stream_copy_in)                                                                           \
-    X(fh_stream_copy_out)                                                                          \
-    X(fh_vk_row_pitch)                                                                             \
-    X(fh_vk_buffer_import)                                                                         \
-    X(fh_vk_buffer_destroy)                                                                        \
-    X(fh_vk_signal)                                                                                \
-    X(fh_vk_semaphore_import)                                                                      \
-    X(fh_vk_semaphore_destroy)
+    X(fh_stream_read_rgba)
 
 struct FlyHighLibrary {
 #define FLYHIGH_POINTER(name) decltype(&::name) name{};

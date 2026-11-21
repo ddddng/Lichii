@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "common/common_types.h"
-#include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -15,8 +14,6 @@ namespace Vulkan {
 
 class Device;
 class Scheduler;
-
-[[nodiscard]] bool FlyHighZeroCopyRequested();
 
 class FlyHighFrameGen {
 public:
@@ -36,37 +33,16 @@ public:
 
     /// Copies in-between `generation` into destination, left in GENERAL layout.
     void Generate(Scheduler& scheduler, VkImage destination, size_t generation);
-    [[nodiscard]] SemaphoreValue TakeWait();
-
 private:
-    struct SharedBuffer {
-        VkBuffer buffer{};
-        vk::DeviceMemory memory;
-    };
-
     struct Worker;
 
-    void Build(MemoryAllocator& memory_allocator, VkFormat format, bool protect_hud);
-    void ReleaseBuffers() noexcept;
-    void CreateSharedBuffer(SharedBuffer& shared);
-    vk::Semaphore CreateSharedTimeline(bool is_input);
-
-    const Device& device;
     VkExtent2D extent;
-    bool zero_copy;
-    u32 row_pitch{};
     VkDeviceSize buffer_size{};
 
     vk::Image staging;
     vk::Buffer readback;
     std::array<vk::Buffer, MAX_GENERATIONS> uploads;
-    SharedBuffer input;
-    std::array<SharedBuffer, MAX_GENERATIONS> outputs{};
-    vk::Semaphore frames_in;
-    vk::Semaphore frames_out;
-    u64 frame_value{};
     bool generated_once{};
-    bool output_ready{};
     std::shared_ptr<Worker> worker;
 };
 

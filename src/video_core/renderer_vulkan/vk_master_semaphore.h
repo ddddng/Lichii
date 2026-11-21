@@ -21,13 +21,6 @@ namespace Vulkan {
 
 class Device;
 
-/// A semaphore a submission signals or waits for. value is the timeline value, 0 for a binary
-/// semaphore.
-struct SemaphoreValue {
-    VkSemaphore semaphore{};
-    u64 value{};
-};
-
 class MasterSemaphore {
     using Waitable = std::pair<u64, vk::Fence>;
 
@@ -63,11 +56,12 @@ public:
 
     /// Submits the device graphics queue, updating the tick as necessary
     VkResult SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
-                         SemaphoreValue signal, SemaphoreValue wait, u64 host_tick);
+                         VkSemaphore signal_semaphore, VkSemaphore wait_semaphore, u64 host_tick);
 
 private:
     VkResult SubmitQueueTimeline(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
-                                 SemaphoreValue signal, SemaphoreValue wait, u64 host_tick);
+                                 VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                                 u64 host_tick);
     VkResult SubmitQueueFence(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
                               VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                               u64 host_tick);
