@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
@@ -192,6 +193,7 @@ QueryCacheBase<Traits>::~QueryCacheBase() = default;
 
 template <typename Traits>
 void QueryCacheBase<Traits>::CounterEnable(QueryType counter_type, bool is_enabled) {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::CounterEnable");
     size_t index = static_cast<size_t>(counter_type);
     StreamerInterface* streamer = impl->streamers[index];
     if (!streamer) [[unlikely]] {
@@ -218,6 +220,7 @@ void QueryCacheBase<Traits>::CounterClose(QueryType counter_type) {
 
 template <typename Traits>
 void QueryCacheBase<Traits>::CounterReset(QueryType counter_type) {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::CounterReset");
     size_t index = static_cast<size_t>(counter_type);
     StreamerInterface* streamer = impl->streamers[index];
     if (!streamer) [[unlikely]] {
@@ -236,6 +239,7 @@ void QueryCacheBase<Traits>::BindToChannel(s32 id) {
 template <typename Traits>
 void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type,
                                            QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::CounterReport");
     const bool has_timestamp = True(flags & QueryPropertiesFlags::HasTimeout);
     const bool is_fence = True(flags & QueryPropertiesFlags::IsAFence);
     const bool mirrored = True(flags & QueryPropertiesFlags::Nx2Mirror);
@@ -495,6 +499,7 @@ void QueryCacheBase<Traits>::UnregisterPending() {
 
 template <typename Traits>
 void QueryCacheBase<Traits>::NotifyWFI() {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::NotifyWFI");
     bool should_sync = false;
     impl->ForEachStreamer(
         [&should_sync](StreamerInterface* streamer) { should_sync |= streamer->HasPendingSync(); });
@@ -510,6 +515,7 @@ void QueryCacheBase<Traits>::NotifyWFI() {
 
 template <typename Traits>
 void QueryCacheBase<Traits>::NotifySegment(bool resume) {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::NotifySegment");
     if (resume) {
         impl->runtime.ResumeHostConditionalRendering();
     } else {
@@ -519,6 +525,7 @@ void QueryCacheBase<Traits>::NotifySegment(bool resume) {
 
 template <typename Traits>
 bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::AccelerateHostConditionalRendering");
     bool qc_dirty = false;
     const auto gen_lookup = [this, &qc_dirty](GPUVAddr address) -> VideoCommon::LookupData {
         auto cpu_addr_opt = gpu_memory->GpuToCpuAddress(address);
@@ -597,6 +604,7 @@ bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
 // Async downloads
 template <typename Traits>
 void QueryCacheBase<Traits>::CommitAsyncFlushes() {
+    VideoCommon::GpuSplit::RenderOwned("QueryCache::CommitAsyncFlushes");
     // Make sure to have the results synced in Host.
     NotifyWFI();
 

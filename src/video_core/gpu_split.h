@@ -197,9 +197,11 @@ public:
         return front_macros;
     }
 
-    /// Whether the calling thread is the back.
+    /// Whether the calling thread is the back. GPURender counts as the back while it owns the
+    /// back's renderer state (EDEN_NX2_RENDER_OWNS): it runs what the back lends it, the back
+    /// parked (Fritchii ead877857).
     [[nodiscard]] static bool OnBackThread() {
-        return on_back_thread;
+        return on_back_thread || (on_render_thread && instance.render_owns);
     }
     /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
     static void MarkGpuThread() {
@@ -216,12 +218,38 @@ public:
         if (on_render_thread) {
             return true;
         }
+        if (on_back_thread && instance.render_owns) {
+            return false;
+        }
         return Get().BackRunning() ? on_back_thread : on_gpu_thread;
     }
     /// Every scheduler entry point: on the back, waits for the draw packet GPURender records.
     static void JoinRender(std::source_location site = std::source_location::current()) {
         if (on_back_thread && instance.render_follower) {
+            if (instance.render_owns) [[unlikely]] {
+                instance.NoteOwner(false, "Scheduler", site);
+            }
             instance.WaitRender(site);
+        }
+    }
+    /// EDEN_NX2_RENDER_OWNS=1: on the back, every call into GPURender's objects (the scheduler,
+    /// the texture cache, the guest descriptor queue, the query cache) is lent to it.
+    [[nodiscard]] static bool LendsToRender() {
+        return on_back_thread && instance.render_owns;
+    }
+    /// Entry points of GPURender's objects: a use on the back is counted (owner on E, must be 0).
+    static void RenderOwned(const char* where,
+                            std::source_location site = std::source_location::current()) {
+        if (on_back_thread && instance.render_owns) [[unlikely]] {
+            instance.NoteOwner(false, where, site);
+        }
+    }
+    /// Entry points of the back's objects (the buffer cache, the pipeline lookup): a use on
+    /// GPURender outside a lent call is counted (owner on R, must be 0).
+    static void BackOwned(const char* where,
+                          std::source_location site = std::source_location::current()) {
+        if (on_render_thread && !render_lent && instance.render_owns) [[unlikely]] {
+            instance.NoteOwner(true, where, site);
         }
     }
     /// Draw state belongs to the split back thread, or the sole GPU scheduler owner.
@@ -278,13 +306,20 @@ public:
     /// The back: runs "call" on GPURender once it played every earlier packet, the back parked
     /// meanwhile (Fritchii's lend). The back must hold no lock GPURender's packets can take.
     template <typename Call>
-    void LendRender(Call&& call) {
+    void LendRender(Call&& call, std::source_location site = std::source_location::current()) {
         if (!on_back_thread || !render_follower) {
             call();
             return;
         }
         LendRenderCall(
-            [](void* argument) { (*static_cast<std::remove_reference_t<Call>*>(argument))(); },
+            site,
+            [](void* argument) {
+                render_lent = true;
+                SCOPE_EXIT {
+                    render_lent = false;
+                };
+                (*static_cast<std::remove_reference_t<Call>*>(argument))();
+            },
             &call);
     }
     /// The back never waits for GPURender holding one of these (the caches' locks), but at the
@@ -404,8 +439,8 @@ public:
     /// its idle hook, so the front never touches that state itself.
     template <typename Func>
     void Run(const Func& func, DrainSite site = DrainSite::Other) {
-        if (on_back_thread || !active) {
-            if (!on_back_thread) {
+        if (OnBackThread() || !active) {
+            if (!OnBackThread()) {
                 Nx2FastDraw::BreakUnsplit(Nx2FastDraw::Reason::Call);
             }
             func();
@@ -938,7 +973,16 @@ private:
     static inline thread_local bool on_back_thread{};
     static inline thread_local bool on_gpu_thread{};
     static inline thread_local bool on_render_thread{};
+    /// On GPURender while it runs a call the back lent it.
+    static inline thread_local bool render_lent{};
     bool render_follower_supported{};
+    /// EDEN_NX2_RENDER_OWNS=1, set before the back and GPURender start.
+    bool render_owns{};
+    /// Must be 0: uses of GPURender's objects on the back, and of the back's on GPURender
+    /// outside a lent call.
+    std::atomic<u64> owner_on_e{};
+    std::atomic<u64> owner_on_r{};
+    void NoteOwner(bool on_render, const char* where, const std::source_location& site);
     bool render_terminal_draw{};
     std::atomic<bool> render_posting{true};
     std::optional<Nx2RenderFollower> render_follower;
@@ -951,21 +995,25 @@ private:
     u64 render_lock_parks{};
     bool two_positions{};
     void CheckRenderLocks();
-    void LendRenderCall(void (*call)(void*), void* argument);
-    /// Where the back joined GPURender (the shutdown line's histogram, as Fritchii's lend trace
-    /// by site, 5659ace40).
-    struct JoinSite {
-        const char* file;
-        const char* function;
-        u32 line;
-        u64 joins;
-        u64 parks;
+    void LendRenderCall(const std::source_location& site, void (*call)(void*), void* argument);
+    /// Where the back joined GPURender, and where it lent it a call (the shutdown lines'
+    /// histograms, as Fritchii's lend trace by site, 5659ace40 and ddd32f51e).
+    struct SiteCounts {
+        struct Site {
+            const char* file;
+            const char* function;
+            u32 line;
+            u64 count;
+            u64 parks;
+        };
+        std::array<Site, 64> sites{};
+        size_t used{};
+        u64 other{};
+        void Note(const std::source_location& site, bool parked);
+        void Log(const char* what) const;
     };
-    std::array<JoinSite, 64> join_sites{};
-    size_t join_site_count{};
-    u64 join_sites_other{};
-    void NoteJoinSite(const std::source_location& site, bool parked);
-    void LogJoinSites() const;
+    SiteCounts join_sites;
+    SiteCounts lend_sites;
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};

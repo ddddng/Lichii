@@ -190,8 +190,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         render_overlap_entries = 0;
         render_joins = 0;
         render_parks = 0;
-        join_site_count = 0;
-        join_sites_other = 0;
+        join_sites = {};
+        lend_sites = {};
         // EDEN_NX2_RENDER_RING=1: the back posts while earlier packets are unplayed (a ring of
         // packets); without it a post waits for the packet before it, as the single slot did.
         const char* const ring_ahead = std::getenv("EDEN_NX2_RENDER_RING");
@@ -200,14 +200,21 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         // EDEN_NX2_RENDER_PLAYED=1: the front's waits read GPURender's position (FrontPosition).
         const char* const played_switch = std::getenv("EDEN_NX2_RENDER_PLAYED");
         two_positions = played_switch != nullptr && played_switch[0] == '1';
+        // EDEN_NX2_RENDER_OWNS=1: GPURender owns the scheduler, the texture cache, the guest
+        // descriptor queue and the query cache; the back lends it every call into them.
+        const char* const owns = std::getenv("EDEN_NX2_RENDER_OWNS");
+        render_owns = owns != nullptr && owns[0] == '1';
+        owner_on_e.store(0, std::memory_order_relaxed);
+        owner_on_r.store(0, std::memory_order_relaxed);
         render_follower.emplace(spin_time, ahead);
         render_thread = std::jthread([this] { RenderLoop(); });
         LOG_INFO(HW_GPU,
                  "GPU render follower: enabled, polls {} us before parking, {}, front waits "
-                 "for {}",
+                 "for {}{}",
                  spin_time.count(),
                  ahead ? "posts ahead of unplayed packets" : "one packet at a time",
-                 two_positions ? "GPURender's position" : "the back's position");
+                 two_positions ? "GPURender's position" : "the back's position",
+                 render_owns ? ", owns the renderer state (the back lends every call)" : "");
     }
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -230,6 +237,7 @@ void GpuSplit::Stop() {
         render_thread.join();
         render_follower.reset();
         two_positions = false;
+        render_owns = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -486,7 +494,7 @@ std::optional<GpuSplit::SettledWord> GpuSplit::SettledWordAt(const Tegra::Memory
 }
 
 GpuSplit::FencedHold GpuSplit::TrackFencedWrite() {
-    if (!on_back_thread) {
+    if (!OnBackThread()) {
         if (check_owner && on_render_thread) {
             LOG_ERROR(HW_GPU, "GPU split owner check: render packet tried to publish a fence hold");
         }
@@ -970,10 +978,13 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
     return 1;
 }
 
-void GpuSplit::LendRenderCall(void (*call)(void*), void* argument) {
+void GpuSplit::LendRenderCall(const std::source_location& site, void (*call)(void*),
+                              void* argument) {
     CheckRenderLocks();
     const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-    render_parks += render_follower->Lend(back_entry_start, call, argument) ? 1 : 0;
+    const bool parked = render_follower->Lend(back_entry_start, call, argument);
+    render_parks += parked ? 1 : 0;
+    lend_sites.Note(site, parked);
     // GPURender's raise after the lent packet may have read the back's position from before it
     // (Fritchii 3ee8856d2): the front waited for a raise nobody made.
     if (two_positions) {
@@ -996,6 +1007,18 @@ void GpuSplit::RaisePlayed() {
     }
 }
 
+void GpuSplit::NoteOwner(bool on_render, const char* where, const std::source_location& site) {
+    auto& count = on_render ? owner_on_r : owner_on_e;
+    if (count.fetch_add(1, std::memory_order_relaxed) < 8) {
+        LOG_ERROR(HW_GPU, "GPU render follower: {} on {} ({}:{}), owned by {}", where,
+                  on_render ? "GPURender outside a lent call" : "the back", site.file_name(),
+                  site.line(), on_render ? "the back" : "GPURender");
+        if (check_owner) {
+            CheckOwner(where);
+        }
+    }
+}
+
 void GpuSplit::CheckRenderLocks() {
     for (const auto* const lock : render_locks) {
         if (lock != nullptr && lock->HeldByCurrentThread()) {
@@ -1014,55 +1037,55 @@ void GpuSplit::WaitRender(std::source_location site) {
         const Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
         const bool parked = render_follower->Wait();
         render_parks += parked ? 1 : 0;
-        NoteJoinSite(site, parked);
+        join_sites.Note(site, parked);
     }
 }
 
-void GpuSplit::NoteJoinSite(const std::source_location& site, bool parked) {
-    JoinSite* slot = nullptr;
-    for (size_t i = 0; i < join_site_count; ++i) {
+void GpuSplit::SiteCounts::Note(const std::source_location& site, bool parked) {
+    Site* slot = nullptr;
+    for (size_t i = 0; i < used; ++i) {
         // Inline functions name their file once per translation unit.
-        if (join_sites[i].line == site.line() &&
-            (join_sites[i].file == site.file_name() ||
-             std::strcmp(join_sites[i].file, site.file_name()) == 0)) {
-            slot = &join_sites[i];
+        if (sites[i].line == site.line() &&
+            (sites[i].file == site.file_name() ||
+             std::strcmp(sites[i].file, site.file_name()) == 0)) {
+            slot = &sites[i];
             break;
         }
     }
     if (slot == nullptr) {
-        if (join_site_count == join_sites.size()) {
-            ++join_sites_other;
+        if (used == sites.size()) {
+            ++other;
             return;
         }
-        slot = &join_sites[join_site_count++];
+        slot = &sites[used++];
         *slot = {site.file_name(), site.function_name(), site.line(), 0, 0};
     }
-    ++slot->joins;
+    ++slot->count;
     slot->parks += parked ? 1 : 0;
 }
 
-void GpuSplit::LogJoinSites() const {
-    std::array<const JoinSite*, 64> order;
-    for (size_t i = 0; i < join_site_count; ++i) {
-        order[i] = &join_sites[i];
+void GpuSplit::SiteCounts::Log(const char* what) const {
+    std::array<const Site*, 64> order;
+    for (size_t i = 0; i < used; ++i) {
+        order[i] = &sites[i];
     }
-    std::sort(order.begin(), order.begin() + join_site_count,
-              [](const JoinSite* a, const JoinSite* b) { return a->joins > b->joins; });
+    std::sort(order.begin(), order.begin() + used,
+              [](const Site* a, const Site* b) { return a->count > b->count; });
     std::string text;
-    for (size_t i = 0; i < join_site_count; ++i) {
-        const JoinSite& site = *order[i];
+    for (size_t i = 0; i < used; ++i) {
+        const Site& site = *order[i];
         std::string_view function{site.function};
         function = function.substr(0, function.find('('));
         function = function.substr(function.rfind(' ') + 1);
         std::string_view file{site.file};
         file = file.substr(file.find_last_of("/\\") + 1);
         text += fmt::format("{}{} ({}:{}) {} ({} parked)", i != 0 ? ", " : "", function, file,
-                            site.line, site.joins, site.parks);
+                            site.line, site.count, site.parks);
     }
-    if (join_sites_other != 0) {
-        text += fmt::format(", other sites {}", join_sites_other);
+    if (other != 0) {
+        text += fmt::format(", other sites {}", other);
     }
-    LOG_INFO(HW_GPU, "GPU render follower joins by site: {}", text.empty() ? "none" : text);
+    LOG_INFO(HW_GPU, "GPU render follower {} by site: {}", what, text.empty() ? "none" : text);
 }
 
 void GpuSplit::RenderLoop() {
@@ -1099,14 +1122,19 @@ void GpuSplit::RenderLoop() {
     LOG_INFO(HW_GPU,
              "GPU render follower: {} packets ({} lent), {} overlapping entries, {} joins ({:.1f}% "
              "of packets), {} parked, ring depth up to {}, {} room waits, {} wraps; must be 0: {} "
-             "out of order, {} parks holding a cache lock, {} played short at stop{}",
+             "out of order, {} parks holding a cache lock, {} played short at stop{}{}",
              packets, follower.Lent(), render_overlap_entries, render_joins, joined, render_parks,
              follower.MaxDepth(), follower.RoomWaits(), follower.Wraps(), follower.OutOfOrder(),
              render_lock_parks, played_short ? 1 : 0,
+             render_owns ? fmt::format(", {} owner on E, {} owner on R",
+                                       owner_on_e.load(std::memory_order_relaxed),
+                                       owner_on_r.load(std::memory_order_relaxed))
+                         : std::string{},
              cpu_start && cpu_end ? fmt::format(", {:.3f} ms thread CPU",
                                                 static_cast<double>(*cpu_end - *cpu_start) / 1e6)
                                   : std::string{});
-    LogJoinSites();
+    join_sites.Log("joins");
+    lend_sites.Log("lends");
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {

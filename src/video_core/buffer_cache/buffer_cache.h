@@ -1605,6 +1605,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
+    VideoCommon::GpuSplit::BackOwned("BufferCache::BindGraphicsUniformBuffer");
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!device_addr) {
         channel_state->uniform_buffers[stage][index] = NULL_BINDING;
@@ -1630,6 +1631,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
+    VideoCommon::GpuSplit::BackOwned("BufferCache::UpdateGraphicsBuffers");
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
@@ -1638,6 +1640,7 @@ void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::UpdateComputeBuffers() {
+    VideoCommon::GpuSplit::BackOwned("BufferCache::UpdateComputeBuffers");
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateComputeBuffers();

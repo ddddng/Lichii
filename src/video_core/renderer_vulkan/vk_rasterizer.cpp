@@ -84,6 +84,20 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_render_view.h"
 
+// EDEN_NX2_RENDER_OWNS=1: on the back, an entry into GPURender's objects runs on GPURender, the
+// back parked (Fritchii ead877857's ONEF_LEND); other threads run it where they are.
+#define RENDER_LEND(call)                                                                          \
+    if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {                                     \
+        VideoCommon::GpuSplit::Get().LendRender([&] { call; });                                    \
+        return;                                                                                    \
+    }
+#define RENDER_LEND_RESULT(call)                                                                   \
+    if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {                                     \
+        std::optional<std::remove_cvref_t<decltype(call)>> lent_result;                            \
+        VideoCommon::GpuSplit::Get().LendRender([&] { lent_result.emplace(call); });               \
+        return std::move(*lent_result);                                                            \
+    }
+
 namespace Vulkan {
 
 using Maxwell = Tegra::Engines::Maxwell3D::Regs;
@@ -579,7 +593,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
             gpu.ForEachPendingCpuWrite(callback);
         });
     VideoCommon::GpuSplit::Get().SetIdleHook(
-        [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
+        [](void* argument) {
+            auto* const owner = static_cast<Scheduler*>(argument);
+            if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {
+                VideoCommon::GpuSplit::Get().LendRender([owner] { owner->FlushDeferred(); });
+                return;
+            }
+            owner->FlushDeferred();
+        },
         &scheduler);
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
@@ -1646,6 +1667,7 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    RENDER_LEND(Draw(is_indexed, instance_count))
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
@@ -1868,6 +1890,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    RENDER_LEND(DrawIndirect())
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
     if (Common::DkbFrameTrace::Enabled()) {
@@ -2139,6 +2162,7 @@ void RasterizerVulkan::CollectIndirectTrace() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    RENDER_LEND(DrawTexture())
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -2269,6 +2293,7 @@ bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 fir
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    RENDER_LEND(Clear(layer_count))
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
@@ -2497,6 +2522,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    RENDER_LEND(DispatchCompute())
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();
@@ -2751,6 +2777,7 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    RENDER_LEND(ResetCounter(type))
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -2766,6 +2793,7 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    RENDER_LEND(Query(gpu_addr, type, flags, payload, subreport))
     // Reports and semaphore releases reach guest memory the CPU may wait on.
     VideoCommon::Nx2FastDraw::NoteSync();
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
@@ -2847,6 +2875,7 @@ void RasterizerVulkan::Nx2ReleaseListSlot(u32 slot) {
 }
 
 void RasterizerVulkan::Nx2SnapshotListWords(DAddr device_addr, u32 count, u32 slot) {
+    RENDER_LEND(Nx2SnapshotListWords(device_addr, count, slot))
     // The words as GPU work sent before the list left them: the buffer cache's, its CPU writes
     // applied (as a dispatch reading them finds them).
     gpu_memory->FlushCaching();
@@ -2862,6 +2891,7 @@ void RasterizerVulkan::Nx2SnapshotListWords(DAddr device_addr, u32 count, u32 sl
 }
 
 void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
+    RENDER_LEND(Nx2NoteOwedListWord(device_addr, value))
     auto& slots = buffer_cache_runtime.Nx2Slots();
     slots.LandDone(std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     if (slots.NoteOwed(device_addr, value, device_memory.Read<u32>(device_addr))) {
@@ -2893,12 +2923,14 @@ void RasterizerVulkan::Nx2CheckListSlot(u32 slot, std::span<const u32> words) {
 }
 
 void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pages) {
+    RENDER_LEND(FlushGpuWrittenCommandListPages(pages))
     gpu.InvalidateGPUCache();
     std::scoped_lock lock{buffer_cache.mutex};
     buffer_cache.Nx2FlushListPages(pages);
 }
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    RENDER_LEND(FlushRegion(addr, size, which))
     if (addr == 0 || size == 0) {
         return;
     }
@@ -2930,6 +2962,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 }
 
 void RasterizerVulkan::FlushRegionForRead(DAddr addr, u64 size) {
+    RENDER_LEND(FlushRegionForRead(addr, size))
     if (addr == 0 || size == 0) {
         return;
     }
@@ -2971,6 +3004,7 @@ void RasterizerVulkan::FinishReport(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    RENDER_LEND_RESULT(MustFlushRegion(addr, size, which))
     // GPU-written list words owed there land in guest memory at the flush (Nx2ListIndirect).
     if (True(which & VideoCommon::CacheType::BufferCache) &&
         buffer_cache_runtime.Nx2Slots().Owes(addr, size)) {
@@ -2997,18 +3031,22 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
 }
 
 bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(HasPendingQueries(addr, size))
     return query_cache.IsRegionGpuModified(addr, size);
 }
 
 bool RasterizerVulkan::HoldsQueries(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(HoldsQueries(addr, size))
     return query_cache.HoldsQueries(addr, size);
 }
 
 bool RasterizerVulkan::MayHoldImagesOrReports(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(MayHoldImagesOrReports(addr, size))
     return texture_cache.page_filter.Any(addr, size) || query_cache.HoldsQueries(addr, size);
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(GetFlushArea(addr, size))
     // Guest cores ask this on reads of cached pages, and the back holds both caches' locks through
     // each draw. Pages no image was ever registered on, and Switch 2 pages the GPU never wrote,
     // get the clean area the caches would return without a look under their locks (after
@@ -3069,6 +3107,7 @@ void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::Cac
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    RENDER_LEND(InvalidateRegion(addr, size, which))
     if (addr == 0 || size == 0) {
         return;
     }
@@ -3089,11 +3128,13 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    RENDER_LEND(InnerInvalidation(sequences))
     InvalidateCachedWrites(sequences, false);
 }
 
 void RasterizerVulkan::InvalidateConstantBufferData(
     std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    RENDER_LEND(InvalidateConstantBufferData(sequences))
     InvalidateCachedWrites(sequences, true);
 }
 
@@ -3152,6 +3193,7 @@ void RasterizerVulkan::InvalidateCachedWrites(
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(OnCPUWrite(addr, size))
     DEBUG_ASSERT(addr != 0 || size != 0);
     {
         // The pages the write untracks change their host protection after the lock is dropped:
@@ -3198,6 +3240,7 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
+    RENDER_LEND(OnCacheInvalidations(ranges))
     // Each cache's lock is taken once for all the writes, not once a write (jpkto/Lichii
     // f5edeabdbb): guest CPU write traps hold the buffer cache's for long. The caches are
     // independent (TextureCache::WriteMemory reads and changes only texture state, and the page
@@ -3232,6 +3275,7 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
+    RENDER_LEND(OnCacheInvalidation(addr, size))
     if (addr == 0 || size == 0) {
         return;
     }
@@ -3248,6 +3292,7 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
+    RENDER_LEND_RESULT(TryCacheInvalidation(addr, size))
     if (addr == 0 || size == 0) return true;
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -3268,6 +3313,7 @@ void RasterizerVulkan::InvalidateGPUCache() {
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
+    RENDER_LEND(UnmapMemory(addr, size))
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapMemory(addr, size);
@@ -3280,6 +3326,7 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
+    RENDER_LEND(ModifyGPUMemory(as_id, addr, size))
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapGPUMemory(as_id, addr, size);
@@ -3288,30 +3335,36 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    RENDER_LEND(SignalFence(std::move(func)))
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalFence(std::move(func));
 }
 
 void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
+    RENDER_LEND(SyncOperation(std::move(func)))
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SyncOperation(std::move(func));
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
+    RENDER_LEND(SignalSyncPoint(value))
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
+    RENDER_LEND(SignalReference())
     VideoCommon::Nx2FastDraw::NoteSync();
     fence_manager.SignalReference();
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    RENDER_LEND(ReleaseFences(force))
     fence_manager.WaitPendingFences(force);
 }
 
 void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
+    RENDER_LEND(FlushQueryResults(addr, size))
     if (addr == 0 || size == 0 || !query_cache.SemiFlushRegion(addr, size)) {
         return;
     }
@@ -3334,6 +3387,7 @@ void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
 
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
                                                 VideoCommon::CacheType which) {
+    RENDER_LEND(FlushAndInvalidateRegion(addr, size, which))
     if (Settings::IsGPULevelHigh()) {
         FlushRegion(addr, size, which);
     }
@@ -3341,6 +3395,7 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    RENDER_LEND(WaitForIdle())
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -3375,6 +3430,7 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    RENDER_LEND(FragmentBarrier())
     // The next draw breaks the render pass only if it reads what this one wrote (#161): Ocarina
     // ended ~5,900 render passes a second here.
     scheduler.DeferFragmentBarrier();
@@ -3385,6 +3441,7 @@ void RasterizerVulkan::TiledCacheBarrier() {
 }
 
 void RasterizerVulkan::FlushCommands() {
+    RENDER_LEND(FlushCommands())
     if (draw_counter == 0 && !pending_native_work) {
         return;
     }
@@ -3952,6 +4009,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    RENDER_LEND(TickFrame())
     buffer_cache_runtime.Nx2Slots().LandDone(
         std::bind_front(&RasterizerVulkan::Nx2LandOwedWord, this));
     if (VideoCore::Nx2Debug::HasRequests()) {
@@ -4060,6 +4118,7 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
+    RENDER_LEND_RESULT(AccelerateConditionalRendering())
     gpu_memory->FlushCaching();
     return query_cache.AccelerateHostConditionalRendering();
 }
@@ -4071,6 +4130,7 @@ bool RasterizerVulkan::HasDrawTransformFeedback() {
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    RENDER_LEND_RESULT(AccelerateSurfaceCopy(src, dst, copy_config))
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
@@ -4087,6 +4147,7 @@ bool RasterizerVulkan::SupportsGameDlssNetwork() const {
 std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
     std::optional<std::array<u32, 2>> src_region) {
+    RENDER_LEND_RESULT(ProbeGameDlssOutput(src, dst, src_region))
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.ProbeGameDlssOutput(dst, src, src_region);
 }
@@ -4096,6 +4157,8 @@ bool RasterizerVulkan::AccelerateTemporalUpscale(
     const Tegra::Engines::Fermi2D::Surface& motion_vectors, const Tegra::Texture::TICEntry* depth,
     std::array<f32, 2> jitter, std::array<f32, 2> motion_scale, bool use_history,
     std::optional<std::array<u32, 2>> render_region) {
+    RENDER_LEND_RESULT(AccelerateTemporalUpscale(src, dst, motion_vectors, depth, jitter,
+                                                 motion_scale, use_history, render_region))
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.TemporalUpscale(dst, src, motion_vectors, depth, jitter, motion_scale,
                                           use_history, render_region);
@@ -4107,6 +4170,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    RENDER_LEND(AccelerateInlineToMemory(address, copy_size, memory))
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};
@@ -4197,6 +4261,7 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
 
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
+    RENDER_LEND_RESULT(AccelerateDisplay(config, framebuffer_addr, pixel_stride))
     if (!framebuffer_addr) {
         return {};
     }
@@ -4315,6 +4380,7 @@ AccelerateDMA::AccelerateDMA(BufferCache& buffer_cache_, TextureCache& texture_c
     : buffer_cache{buffer_cache_}, texture_cache{texture_cache_}, scheduler{scheduler_} {}
 
 bool AccelerateDMA::BufferClear(GPUVAddr src_address, u64 amount, u32 value) {
+    RENDER_LEND_RESULT(BufferClear(src_address, amount, value))
     std::scoped_lock lock{buffer_cache.mutex};
     buffer_cache.Nx2CollectListCopies(true);
     const bool cleared = buffer_cache.DMAClear(src_address, amount, value);
@@ -4326,6 +4392,7 @@ bool AccelerateDMA::BufferClear(GPUVAddr src_address, u64 amount, u32 value) {
 }
 
 bool AccelerateDMA::BufferCopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
+    RENDER_LEND_RESULT(BufferCopy(src_address, dest_address, amount))
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     buffer_cache.Nx2CollectListCopies(true);
     boost::container::small_vector<std::pair<DAddr, size_t>, 4> gpu_written;
@@ -4347,6 +4414,7 @@ template <bool IS_IMAGE_UPLOAD>
 bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
                                        const Tegra::DMA::BufferOperand& buffer_operand,
                                        const Tegra::DMA::ImageOperand& image_operand) {
+    RENDER_LEND_RESULT(DmaBufferImageCopy<IS_IMAGE_UPLOAD>(copy_info, buffer_operand, image_operand))
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     const auto image_id = texture_cache.DmaImageId(image_operand, IS_IMAGE_UPLOAD);
     if (image_id == VideoCommon::NULL_IMAGE_ID) {
@@ -5364,6 +5432,7 @@ void RasterizerVulkan::BuildVertexInput(const Tegra::Engines::Maxwell3D::Regs& r
 }
 
 void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) {
+    RENDER_LEND(InitializeChannel(channel))
     CreateChannel(channel);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -5376,6 +5445,7 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
 }
 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
+    RENDER_LEND(BindChannel(channel))
     const s32 channel_id = channel.bind_id;
     BindToChannel(channel_id);
     {
@@ -5391,6 +5461,7 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
+    RENDER_LEND(ReleaseChannel(channel_id))
     if (channel_id == bound_channel_id) {
         state_tracker.ClearChannel();
     }

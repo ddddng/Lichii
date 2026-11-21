@@ -1016,6 +1016,7 @@ void PipelineCache::SaveUsedPipelines() {
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+    VideoCommon::GpuSplit::BackOwned("PipelineCache::CurrentGraphicsPipeline");
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
@@ -1131,6 +1132,7 @@ bool PipelineCache::StaleNullPointerSlot(const ComputePipelineCacheEntry& entry)
 }
 
 ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
+    VideoCommon::GpuSplit::BackOwned("PipelineCache::CurrentComputePipeline");
 
     const ShaderInfo* const shader{ComputeShader()};
     if (!shader) {

@@ -26,6 +26,7 @@
 #include "common/alignment.h"
 #include "common/memory_detect.h"
 #include "common/scope_exit.h"
+#include "video_core/gpu_split.h"
 #include "common/settings.h"
 #include "common/dkb_frame_trace.h"
 #include "common/slot_vector.h"
@@ -1314,6 +1315,7 @@ void TextureCache<P>::LogThresholds() const {
 
 template <class P>
 void TextureCache<P>::TickFrame() {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::TickFrame");
     FinishAsyncOverlapDownloads(false);
     if (Common::DkbFrameTrace::Enabled()) {
         static u64 frames{};
@@ -2133,6 +2135,7 @@ typename P::Sampler& TextureCache<P>::GetSampler(SamplerId id) noexcept {
 
 template <class P>
 void TextureCache<P>::SynchronizeDescriptors(bool compute) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::SynchronizeDescriptors");
     if (compute) {
         const bool linked_tsc = kepler_compute->launch_description.linked_tsc;
         const u32 tic_limit = kepler_compute->regs.tic.limit;
@@ -2261,6 +2264,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
 
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::UpdateRenderTargets");
     using namespace VideoCommon::Dirty;
     struct ClearingScope {
         bool& clearing;
@@ -2480,6 +2484,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::WriteMemory");
     if (!async_overlap_downloads.empty()) {
         KeepGuestWrite(cpu_addr, size);
     }
@@ -2586,6 +2591,7 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
 
 template <class P>
 void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::DownloadMemory");
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     // Write-backs landed for this read: an older image downloaded below leaves their ranges as
     // they are, newest data winning as between write-backs. A range a write-back left to newer
@@ -2675,6 +2681,7 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
 template <class P>
 std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(DAddr cpu_addr,
                                                                                u64 size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::GetFlushArea");
     std::optional<VideoCore::RasterizerDownloadArea> area{};
     ForEachImageInRegion(cpu_addr, size, [&](ImageId, ImageBase& image) {
         if (False(image.flags & ImageFlagBits::GpuModified)) {
@@ -2715,6 +2722,7 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
 
 template <class P>
 void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::UnmapMemory");
     if (!async_overlap_downloads.empty()) {
         CancelAsyncOverlapDownloads(cpu_addr, size);
     }
@@ -2734,6 +2742,7 @@ void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
 
 template <class P>
 void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::UnmapGPUMemory");
     if (!async_overlap_downloads.empty()) {
         CancelAsyncOverlapDownloadsGpu(as_id, gpu_addr, size);
     }
@@ -2841,6 +2850,7 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::BlitImage");
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     // A deferred clear parked before this copy has to land before it: realizing it afterwards
     // starts its clear pass after the copy and wipes what the copy wrote. That is what made
@@ -3426,6 +3436,7 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
 
 template <class P>
 bool TextureCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::IsRegionGpuModified");
     bool is_modified = false;
     ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {
         if (False(image.flags & ImageFlagBits::GpuModified)) {
@@ -6170,6 +6181,7 @@ bool TextureCache<P>::ClearCovers(u32 width, u32 height) const {
 
 template <class P>
 void TextureCache<P>::CreateChannel(struct Tegra::Control::ChannelState& channel) {
+    VideoCommon::GpuSplit::RenderOwned("TextureCache::CreateChannel");
     VideoCommon::ChannelSetupCaches<TextureCacheChannelInfo>::CreateChannel(channel);
     const auto it = channel_map.find(channel.bind_id);
     auto* this_state = &channel_storage[it->second];
