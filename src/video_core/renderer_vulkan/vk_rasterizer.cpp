@@ -4121,6 +4121,17 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    // EDEN_NX2_RENDER_POST_WFI: with no report since the last lent fence (whose commit synced
+    // the queries), no streamer has a sync pending and NotifyWFI leaves the back's buffer cache
+    // alone: the rest is GPURender's recording.
+    if (!fence_query_owed && PostRenderOp(VideoCommon::GpuSplit::PostedOp::WaitForIdle, [this] {
+            if (query_cache.HasPendingSync()) [[unlikely]] {
+                VideoCommon::GpuSplit::Get().NotePostedWaitSynced();
+            }
+            WaitForIdle();
+        })) {
+        return;
+    }
     RENDER_LEND(WaitForIdle())
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.

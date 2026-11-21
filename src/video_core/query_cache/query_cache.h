@@ -671,6 +671,16 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
 }
 
 template <typename Traits>
+bool QueryCacheBase<Traits>::HasPendingSync() const {
+    bool result = false;
+    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
+        result |= streamer->HasPendingSync();
+        return result;
+    });
+    return result;
+}
+
+template <typename Traits>
 bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
     bool result = false;
     impl->ForEachStreamer([&result](StreamerInterface* streamer) {

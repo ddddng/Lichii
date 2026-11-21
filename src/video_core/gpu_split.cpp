@@ -235,7 +235,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                           "EDEN_NX2_RENDER_POST_FLUSH",       "EDEN_NX2_RENDER_POST_FENCE",
                           "EDEN_NX2_RENDER_POST_INVAL",       "EDEN_NX2_RENDER_POST_INLINE",
                           "EDEN_NX2_RENDER_POST_CONDITIONAL", "EDEN_NX2_RENDER_POST_QUERY",
-                          "EDEN_NX2_RENDER_POST_QUERY",       "EDEN_NX2_RENDER_POST_SIGNAL_FENCE"};
+                          "EDEN_NX2_RENDER_POST_QUERY",       "EDEN_NX2_RENDER_POST_SIGNAL_FENCE",
+                          "EDEN_NX2_RENDER_POST_WFI"};
         for (size_t op = 0; op < posts.size(); ++op) {
             const char* const value = std::getenv(post_switches[op]);
             const bool wanted = value != nullptr && value[0] == '1';
@@ -263,6 +264,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         query_flush_e = query_flush_wanted && render_unlend;
         query_flushes_nothing_pending = 0;
         reports_landed_untracked.store(0, std::memory_order_relaxed);
+        posted_waits_synced.store(0, std::memory_order_relaxed);
         if (query_flush_wanted && !query_flush_e) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_QUERY_FLUSH_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
@@ -1307,18 +1309,19 @@ void GpuSplit::RenderLoop() {
         LOG_INFO(
             HW_GPU,
             "GPU render posted ops: {} idle hooks, {} flushes, {} fragment barriers, {} "
-            "invalidation halves, {} inline uploads, {} conditional rendering ends; must be 0: {} "
-            "frame ticks, {} owed list word "
-            "landings on "
-            "GPURender outside a lent call",
+            "invalidation halves, {} inline uploads, {} conditional rendering ends, {} waits for "
+            "idle; must be 0: {} frame ticks, {} owed list word landings on GPURender outside a "
+            "lent call, {} posted waits for idle with a query sync pending",
             posted[static_cast<size_t>(PostedOp::IdleHook)],
             posted[static_cast<size_t>(PostedOp::FlushCommands)],
             posted[static_cast<size_t>(PostedOp::FragmentBarrier)],
             posted[static_cast<size_t>(PostedOp::Invalidation)],
             posted[static_cast<size_t>(PostedOp::Inline)],
             posted[static_cast<size_t>(PostedOp::ConditionalEnd)],
+            posted[static_cast<size_t>(PostedOp::WaitForIdle)],
             unparked[static_cast<size_t>(Unparked::FrameTick)].load(std::memory_order_relaxed),
-            unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed));
+            unparked[static_cast<size_t>(Unparked::OwedLanding)].load(std::memory_order_relaxed),
+            posted_waits_synced.load(std::memory_order_relaxed));
         if (posts[static_cast<size_t>(PostedOp::QueryReport)]) {
             LOG_INFO(HW_GPU,
                      "GPU render posted queries: {} Z-pass resets, {} Z-pass reports, {} query "

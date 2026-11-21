@@ -199,6 +199,8 @@ public:
 
     /// Whether a new fence has queries to flush or host writes to sync for this cache.
     bool HasPendingFenceWork() const;
+    /// Whether a streamer has values NotifyWFI would sync.
+    bool HasPendingSync() const;
 
     bool ShouldWaitAsyncFlushes();
 
