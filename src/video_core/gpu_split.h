@@ -251,7 +251,19 @@ public:
         render_follower_supported = supported;
     }
     [[nodiscard]] bool CanPostRender() const {
-        return on_back_thread && render_terminal_draw;
+        return on_back_thread && render_terminal_draw &&
+               render_posting.load(std::memory_order_relaxed);
+    }
+    /// Lets the debug server stop and resume posting draws to a running follower, so one scene
+    /// can be timed both ways. Returns the previous state.
+    bool SetRenderPosting(bool on) {
+        return render_posting.exchange(on, std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool RenderPosting() const {
+        return render_posting.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool RenderFollowerRunning() const {
+        return render_thread.joinable();
     }
     void PostRender(Nx2RenderFollower::Work work);
     void WaitRender();
@@ -893,6 +905,7 @@ private:
     static inline thread_local bool on_render_thread{};
     bool render_follower_supported{};
     bool render_terminal_draw{};
+    std::atomic<bool> render_posting{true};
     std::optional<Nx2RenderFollower> render_follower;
     std::jthread render_thread;
     u64 render_overlap_entries{};
