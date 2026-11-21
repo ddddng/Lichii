@@ -99,16 +99,6 @@ Compatibility MatchVersion(const QString& selected_title, const GameIdentity& ga
                : Compatibility::Unknown;
 }
 
-Compatibility MatchExternal(const GameIdentity& game, const ExternalFile& file) {
-    if (KnownBuild(game.build_id) && !file.build_ids.isEmpty() &&
-        std::ranges::none_of(file.build_ids, [&](const QString& build) {
-            return game.build_id.startsWith(build, Qt::CaseInsensitive);
-        })) {
-        return Compatibility::Mismatch;
-    }
-    return Compatibility::Unknown;
-}
-
 struct Offer {
     std::variant<Version, ExternalFile> file;
     QString version;
@@ -365,7 +355,10 @@ public:
         debounce.setSingleShot(true);
         debounce.setInterval(240);
         connect(&debounce, &QTimer::timeout, this, [this] { ReloadMods(); });
-        connect(search, &QLineEdit::textChanged, this, [this] { debounce.start(); });
+        connect(search, &QLineEdit::textChanged, this, [this] {
+            more->hide();
+            debounce.start();
+        });
         const auto filters_changed = [this] {
             debounce.stop();
             ReloadMods();
@@ -395,7 +388,7 @@ public:
         connect(results, &QTreeWidget::currentItemChanged, this,
                 [this](QTreeWidgetItem* item) { SelectMod(item); });
         connect(more, &QPushButton::clicked, this, [this] {
-            if (next) {
+            if (next && !debounce.isActive() && !reload_after_install) {
                 FetchMods(*next, list_epoch);
             }
         });
@@ -550,6 +543,7 @@ private:
     }
 
     void ReloadMods() {
+        debounce.stop();
         ++list_epoch;
         if (list_request) {
             list_request->Cancel();
@@ -563,19 +557,19 @@ private:
             ShowInstalled();
             return;
         }
+        list_filter = {title, search->text().trimmed(),
+                       type->currentIndex() == 0
+                           ? std::nullopt
+                           : std::optional{static_cast<ModType>(type->currentData().toInt())},
+                       static_cast<Sort>(sort->currentData().toInt())};
         FetchMods(0, list_epoch);
     }
 
     void FetchMods(int offset, int epoch) {
-        const ModFilter filter{title, search->text().trimmed(),
-                               type->currentIndex() == 0 ? std::nullopt
-                                                         : std::optional{static_cast<ModType>(
-                                                               type->currentData().toInt())},
-                               static_cast<Sort>(sort->currentData().toInt())};
         more->setEnabled(false);
         Status(tr("Loading mods…"));
         list_request =
-            client.GetMods(filter, offset, PageSize, [this, offset, epoch](auto response) {
+            client.GetMods(list_filter, offset, PageSize, [this, offset, epoch](auto response) {
                 if (epoch != list_epoch) {
                     return;
                 }
@@ -600,7 +594,7 @@ private:
                 }
                 next = page.next_offset && *page.next_offset > offset ? page.next_offset
                                                                       : std::nullopt;
-                more->setVisible(next.has_value());
+                more->setVisible(next.has_value() && !debounce.isActive() && !reload_after_install);
                 more->setEnabled(true);
                 Status(catalog.isEmpty()
                            ? tr("No matching mods. Change the game, type, or search filter.")
@@ -806,7 +800,7 @@ private:
             bool first_match_has_checksum = false;
             for (const auto& file : selected->external->files) {
                 offer_list.append(
-                    {file, {}, MatchExternal(identity, file),
+                    {file, {}, Compatibility::Unknown,
                      file.name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
                          file.size_bytes <= MaxArchiveBytes});
                 const auto entry =
@@ -844,7 +838,8 @@ private:
     }
 
     bool CanInstall(const Offer& offer) {
-        if (!selected || selected->demo || !offer.supported || !Identity(local_title).installed ||
+        if (!selected || selected->demo || !selected->title_ids.contains(local_title) ||
+            !offer.supported || !Identity(local_title).installed ||
             offer.compatibility == Compatibility::Mismatch) {
             return false;
         }
@@ -919,7 +914,7 @@ private:
                                              .arg(visible_builds);
                     }
                 }
-                set_row(3, tr("Target build IDs"), visible_builds,
+                set_row(3, tr("Patch build IDs"), visible_builds,
                         file.build_ids.join(QLatin1Char('\n')));
             }
         }
@@ -982,6 +977,8 @@ private:
             } else if (external && external->ambiguous_layout) {
                 hint->setText(tr("This ZIP requires choosing components. Open GameBanana to "
                                  "install it manually."));
+            } else if (!selected->title_ids.contains(local_title)) {
+                hint->setText(tr("This listing does not target the selected game."));
             } else if (offer->compatibility == Compatibility::Mismatch) {
                 hint->setText(
                     tr("This release does not match the installed game or Lichii build."));
@@ -1014,12 +1011,13 @@ private:
         if (!external) {
             return;
         }
+        const QUrl source_url = selected ? selected->source_url : QUrl{};
         QMessageBox prompt(QMessageBox::Warning, tr("Could not install the mod"), error,
                            QMessageBox::Close, this);
         auto* open = prompt.addButton(tr("View on GameBanana"), QMessageBox::ActionRole);
         prompt.exec();
-        if (prompt.clickedButton() == open) {
-            OpenSource();
+        if (prompt.clickedButton() == open && !source_url.isEmpty()) {
+            QDesktopServices::openUrl(source_url);
         }
     }
 
@@ -1075,6 +1073,7 @@ private:
         if (epoch != mod_epoch) {
             return;
         }
+        reload_after_install = debounce.isActive();
         debounce.stop();
         SetBusy(true);
         progress_catalog_note->setVisible(unverified);
@@ -1146,6 +1145,10 @@ private:
         applying = false;
         SetProgress({});
         SetBusy(false);
+        if (reload_after_install) {
+            reload_after_install = false;
+            debounce.start();
+        }
     }
 
     void CancelDownload() {
@@ -1190,9 +1193,8 @@ private:
             Status(error);
             return;
         }
-        if (context.set_enabled) {
-            context.set_enabled(local_title, local_id, true);
-        }
+        const bool preference_reset =
+            !context.set_enabled || context.set_enabled(local_title, local_id, true);
         changed = true;
         local.reset();
         if (installed_mode->isChecked()) {
@@ -1200,7 +1202,9 @@ private:
         } else {
             UpdateButtons();
         }
-        Status(tr("Mod uninstalled."));
+        Status(preference_reset
+                   ? tr("Mod uninstalled.")
+                   : tr("Mod uninstalled, but Lichii could not clear its saved disabled state."));
     }
 
     DialogContext context;
@@ -1211,6 +1215,7 @@ private:
     QHash<QString, Mod> catalog;
     QHash<QString, GameIdentity> identities;
     QList<Offer> offer_list;
+    ModFilter list_filter{};
     std::optional<int> next;
     std::optional<Mod> selected;
     std::optional<InstalledMod> local;
@@ -1231,6 +1236,7 @@ private:
     bool changed{};
     bool busy{};
     bool applying{};
+    bool reload_after_install{};
     const bool dark = palette().color(QPalette::Window).lightness() < 128;
     const int row_height = qMax(28, fontMetrics().height() + 10);
     QComboBox* game_picker{};

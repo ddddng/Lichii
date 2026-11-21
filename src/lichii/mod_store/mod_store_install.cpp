@@ -111,7 +111,8 @@ std::optional<InstalledMod> ReadOwnedMod(const QString& path, const QString& tit
         .sha256 = {},
     };
     if (object[u"schema"_s] != QJsonValue(1) || object[u"title_id"_s].toString() != title_id ||
-        mod.id != mod_id || !IsDisplayMetadata(mod.name, mod.version)) {
+        !IsModId(mod.id) || (!mod_id.isEmpty() && mod.id != mod_id) ||
+        !IsDisplayMetadata(mod.name, mod.version)) {
         return std::nullopt;
     }
     if (const QJsonValue digest = object.value(u"sha256"_s); !digest.isUndefined()) {
@@ -137,6 +138,31 @@ bool HasSafeContents(const QString& path) {
         }
     }
     return true;
+}
+
+void RestoreInterruptedUpdates(const QDir& mods_dir, const QDir& title_dir, const QString& title) {
+    const QString pattern = StagingTemplate.left(StagingTemplate.size() - 6) + u"??????"_s;
+    const auto staged = mods_dir.entryList({pattern}, QDir::Dirs | QDir::Hidden | QDir::NoSymLinks);
+    for (const auto& entry : staged) {
+        const QDir transaction(mods_dir.filePath(entry));
+        if (!IsDirectory(transaction.path())) {
+            continue;
+        }
+        const QString backup = transaction.filePath(u"previous"_s);
+        const QString pending = transaction.filePath(u"new"_s);
+        const auto mod = ReadOwnedMod(backup, title, {});
+        if (!mod || !ReadOwnedMod(pending, title, mod->id) || HasNameConflict(title_dir, mod->id) ||
+            !HasSafeContents(backup)) {
+            continue;
+        }
+        const auto destination = title_dir.filePath(mod->id);
+        if (IsAbsent(destination) && QDir().rename(backup, destination)) {
+            if (HasSafeContents(pending)) {
+                QDir(pending).removeRecursively();
+            }
+            QDir().rmdir(transaction.path());
+        }
+    }
 }
 
 struct ZipEntry {
@@ -594,6 +620,7 @@ QString InstallMod(const QString& root, const QString& title_id, const QString& 
                                             !IsDirectory(title_dir.path())))) {
         return root_error;
     }
+    RestoreInterruptedUpdates(mods_dir, title_dir, title);
     if (HasNameConflict(title_dir, mod_id)) {
         return conflict_error;
     }
@@ -638,6 +665,7 @@ QString UninstallMod(const QString& root, const QString& title_id, const QString
     if (!IsDirectory(title_dir.path())) {
         return u"The mods directory is unavailable or is a link."_s;
     }
+    RestoreInterruptedUpdates(mods_dir, title_dir, title);
     const QString destination = title_dir.filePath(mod_id);
     if (HasNameConflict(title_dir, mod_id) ||
         (!IsAbsent(destination) &&
@@ -669,6 +697,7 @@ QList<InstalledMod> ReadInstalledMods(const QString& root, const QString& title_
         !IsDirectory(title_dir.path())) {
         return {};
     }
+    RestoreInterruptedUpdates(mods_dir, title_dir, title);
     QList<InstalledMod> installed;
     for (const QString& id : title_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
         if (IsModId(id)) {

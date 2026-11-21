@@ -317,10 +317,9 @@ std::optional<External> ParseExternal(const QJsonObject& row, const Mod& mod) {
     }
     for (const auto value : previews) {
         const QUrl url(value.toString(), QUrl::StrictMode);
-        if (!IsGameBananaPreview(url)) {
-            return std::nullopt;
+        if (IsGameBananaPreview(url)) {
+            external.preview_urls.append(url);
         }
-        external.preview_urls.append(url);
     }
     for (const auto value : files) {
         auto file = ParseExternalFile(value.toObject());
@@ -373,10 +372,15 @@ std::optional<Mod> ParseMod(const QJsonObject& row, bool detail = false) {
         return std::nullopt;
     }
     if (const auto preview = row.value("preview_url"_L1); !preview.isNull()) {
-        mod.preview_url = QUrl(preview.toString(), QUrl::StrictMode);
-        if (mod.source == Source::GameBanana ? !IsGameBananaPreview(mod.preview_url)
-                                             : mod.preview_url != QUrl(PreviewPath(mod.id))) {
+        const QUrl url(preview.toString(), QUrl::StrictMode);
+        if (mod.source == Source::GameBanana) {
+            if (IsGameBananaPreview(url)) {
+                mod.preview_url = url;
+            }
+        } else if (url != QUrl(PreviewPath(mod.id))) {
             return std::nullopt;
+        } else {
+            mod.preview_url = url;
         }
     }
     if (!detail) {

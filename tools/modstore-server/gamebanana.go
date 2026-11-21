@@ -12,8 +12,8 @@ import (
 )
 
 var gameBananaIDPattern = regexp.MustCompile(`^gb-[0-9]+$`)
-var gameBananaMemberURL = regexp.MustCompile(`^https://gamebanana\.com/members/[0-9]+$`)
-var gameBananaPreviewURL = regexp.MustCompile(`^https://images\.gamebanana\.com/img/ss/mods/[A-Za-z0-9_.-]+\.(?i:jpg|jpeg|png|webp|gif)$`)
+var gameBananaMemberURL = regexp.MustCompile(`^https://gamebanana\.com/members/[0-9]{1,19}$`)
+var gameBananaPreviewURL = regexp.MustCompile(`^https://images\.gamebanana\.com/img/ss/mods/[A-Za-z0-9_.-]{1,240}\.(?i:jpg|jpeg|png|webp|gif)$`)
 var archiveBuildID = regexp.MustCompile(`^([A-F0-9]{16}|[A-F0-9]{64})$`)
 var fileSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 

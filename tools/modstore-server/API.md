@@ -114,12 +114,12 @@ directory rules as for local packages.
 
 `sha256` is nullable. A null hash means there is no catalog digest to compare
 against. It does not block installation on its own. The client still computes
-a local digest and validates the ZIP layout. `build_ids` contains patch
-metadata evidence and may be empty or contain short 16-digit prefixes.
-Even a full build ID alone does not establish a game version or minimum Lichii
-release. Show **Unverified** when required compatibility evidence is unknown,
-and disclose that before installing. Do not turn a known mismatch into an
-installable warning.
+a local digest and validates the ZIP layout. `build_ids` contains patch evidence
+and may include 16-digit prefixes. It does not identify which executable module
+a patch targets. A mismatch with the game's main executable does not establish
+that the patch is incompatible. Show external file compatibility as
+**Unverified**. Known mismatches against exact managed release targets still
+block installation.
 
 ## Qt compatibility and installation
 

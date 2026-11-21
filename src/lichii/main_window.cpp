@@ -4758,6 +4758,11 @@ bool MainWindow::OpenModStore(QWidget* parent, u64 initial_title_id, const std::
         system.IsPoweredOn()) {
         return false;
     }
+    if (nx_metadata_write_in_progress) {
+        QMessageBox::information(parent, tr("Mod Store"),
+                                 tr("Wait for the NX metadata edit to finish before browsing mods."));
+        return false;
+    }
     if (game_list->IsPopulating()) {
         QMessageBox::information(
             parent, tr("Mod Store"), tr("Wait for the game library to finish loading before browsing mods."));

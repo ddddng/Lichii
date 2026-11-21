@@ -22,6 +22,13 @@ const adminAddress = "127.0.0.1:8768"
 
 var tokenPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+func configuredPublicAddress() string {
+	if address := os.Getenv("MODSTORE_PUBLIC_ADDR"); address != "" {
+		return address
+	}
+	return publicAddress
+}
+
 func tokenFromEnv() (string, error) {
 	token := os.Getenv("MODSTORE_ADMIN_TOKEN")
 	if !tokenPattern.MatchString(token) {
@@ -131,8 +138,25 @@ func run(args []string) error {
 	case "admin":
 		return adminRequest(args[1:])
 	case "health":
-		client := http.Client{Timeout: 3 * time.Second}
-		res, err := client.Get("http://" + publicAddress + "/healthz")
+		host, port, err := net.SplitHostPort(configuredPublicAddress())
+		if err != nil {
+			return err
+		}
+		if host == "" || net.ParseIP(host).IsUnspecified() {
+			host = "127.0.0.1"
+		}
+		transport := &http.Transport{DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp4", address)
+		}}
+		defer transport.CloseIdleConnections()
+		client := http.Client{Timeout: 3 * time.Second, Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		r, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			"http://"+net.JoinHostPort(host, port)+"/healthz", nil)
+		if err != nil {
+			return err
+		}
+		res, err := client.Do(r)
 		if err != nil {
 			return err
 		}
@@ -158,11 +182,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		address := os.Getenv("MODSTORE_PUBLIC_ADDR")
-		if address == "" {
-			address = publicAddress
-		}
-		return serve(s, address, token)
+		return serve(s, configuredPublicAddress(), token)
 	default:
 		return errors.New("usage: modstore [serve|seed-demo|health|admin]")
 	}

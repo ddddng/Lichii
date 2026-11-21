@@ -331,6 +331,12 @@ void QtConfig::ReadUIValues() {
     ReadCategory(Settings::Category::Ui);
     ReadCategory(Settings::Category::UiGeneral);
 
+    auto& mod_store_url = UISettings::values.mod_store_api_url;
+    const auto url_key = mod_store_url.GetLabel();
+    mod_store_url.LoadString(ReadBooleanSetting(url_key + "\\default", true)
+                                 ? std::string{}
+                                 : ReadStringSetting(url_key));
+
     EndGroup();
 }
 
@@ -543,6 +549,12 @@ void QtConfig::SaveUIValues() {
 
     WriteCategory(Settings::Category::Ui);
     WriteCategory(Settings::Category::UiGeneral);
+
+    const auto& mod_store_url = UISettings::values.mod_store_api_url;
+    const auto url_key = mod_store_url.GetLabel();
+    const auto url = mod_store_url.ToString();
+    WriteBooleanSetting(url_key + "\\default", url == mod_store_url.DefaultToString());
+    config->SetValue(GetSection().c_str(), GetFullKey(url_key, false).c_str(), url.c_str());
 
     WriteStringSetting(
         std::string("theme"), UISettings::values.theme,
