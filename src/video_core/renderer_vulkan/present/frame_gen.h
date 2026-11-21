@@ -46,6 +46,7 @@ public:
     }
 
     void GenerateInto(const Device& device, Frame* destination, size_t generation);
+    void DrainFlyHighSubmissions();
 
     /// What the submission of the first generated frame waits for, when a generator on another
     /// device (FlyHigh) wrote it. Empty otherwise and after it has been taken.
@@ -61,9 +62,7 @@ private:
                  Settings::FrameGenType type);
     [[nodiscard]] bool HasFlyHigh() const;
     [[nodiscard]] bool FlyHighSettingsChanged() const;
-    /// FlyHigh can't run for frames of this size and format: no library in this build, no
-    /// model, or it failed there before.
-    [[nodiscard]] bool FlyHighBlocked(VkExtent2D extent, VkFormat format) const;
+    [[nodiscard]] bool FlyHighBlocked(VkColorSpaceKHR color_space) const;
     void ResetFlyHigh();
     /// Updates the status bar state and logs each change with its reason.
     void SetState(VideoCore::FrameGenState new_state, VkFormat format);
@@ -79,12 +78,7 @@ private:
     std::optional<OpticalFlowFrameGen> optical_flow_chain;
 #ifdef HAS_FLYHIGH
     std::optional<FlyHighFrameGen> flyhigh;
-    struct FlyHighFailure {
-        VkExtent2D extent;
-        VkFormat format;
-    };
-    /// Where FlyHigh could not start or stopped; Optical Flow runs there instead.
-    std::optional<FlyHighFailure> flyhigh_failed;
+    bool flyhigh_failed{};
     bool built_protect_hud{};
 #endif
     FrameGenPacer pacer;

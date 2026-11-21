@@ -207,12 +207,9 @@ VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuff
     return result;
 }
 
-// Transfer and compute too: frame generation on another device hands its frames over through
-// copies, which must wait for that device as well.
 static constexpr VkPipelineStageFlags wait_stage_mask =
     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
 VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
                                               vk::CommandBuffer& upload_cmdbuf,
@@ -221,6 +218,8 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
     const VkSemaphore timeline_semaphore = *semaphore;
     const VkSemaphore signal_semaphore = signal.semaphore;
     const VkSemaphore wait_semaphore = wait.semaphore;
+    const VkPipelineStageFlags timeline_wait_stage =
+        wait.value ? VkPipelineStageFlags{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT} : wait_stage_mask;
 
     if (device.HasSynchronization2()) {
         const std::array<VkCommandBufferSubmitInfo, 2> cmdbuffer_infos{{
@@ -268,7 +267,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
             .pNext = nullptr,
             .semaphore = wait_semaphore,
             .value = wait.value,
-            .stageMask = static_cast<VkPipelineStageFlags2>(wait_stage_mask),
+            .stageMask = timeline_wait_stage,
             .deviceIndex = 0,
         };
 
@@ -297,7 +296,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
     const VkSemaphore* p_wait_sems =
         (num_wait_semaphores > 0) ? &wait_semaphore : nullptr;
     const VkPipelineStageFlags* p_wait_masks =
-        (num_wait_semaphores > 0) ? &wait_stage_mask : nullptr;
+        (num_wait_semaphores > 0) ? &timeline_wait_stage : nullptr;
     const VkSemaphore* p_signal_sems =
         (num_signal_semaphores > 0) ? signal_semaphores.data() : nullptr;
     const u64 wait_value = wait.value;

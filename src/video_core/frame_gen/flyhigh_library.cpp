@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <array>
-#include <mutex>
 #include <optional>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "common/dynamic_library.h"
 #include "common/fs/fs.h"
@@ -27,8 +29,13 @@ struct Loaded {
 };
 
 std::optional<Loaded> Load() {
+    Loaded loaded;
 #ifdef _WIN32
     const std::filesystem::path path = Common::FS::GetExeDirectory() / LIBRARY_NAME;
+    if (path.is_absolute()) {
+        loaded.library = Common::DynamicLibrary{LoadLibraryExW(
+            path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    }
 #else
     std::error_code ec;
     const auto executable = std::filesystem::read_symlink("/proc/self/exe", ec);
@@ -36,9 +43,11 @@ std::optional<Loaded> Load() {
         return std::nullopt;
     }
     const auto path = executable.parent_path() / LIBRARY_NAME;
+    if (path.is_absolute()) {
+        (void)loaded.library.Open(Common::FS::PathToUTF8String(path).c_str());
+    }
 #endif
-    Loaded loaded;
-    if (!path.is_absolute() || !loaded.library.Open(Common::FS::PathToUTF8String(path).c_str())) {
+    if (!loaded.library.IsOpen()) {
         LOG_WARNING(Render_Vulkan, "FlyHigh: {} not found beside Lichii", LIBRARY_NAME);
         return std::nullopt;
     }
@@ -60,10 +69,11 @@ std::optional<Loaded> Load() {
 } // Anonymous namespace
 
 const FlyHighLibrary* LoadFlyHighLibrary() {
-    static std::once_flag once;
-    static std::optional<Loaded> loaded;
-    std::call_once(once, [] { loaded = Load(); });
-    return loaded ? &loaded->functions : nullptr;
+    static const auto* loaded = []() -> Loaded* {
+        auto result = Load();
+        return result ? new Loaded(std::move(*result)) : nullptr;
+    }();
+    return loaded != nullptr ? &loaded->functions : nullptr;
 }
 
 bool FlyHighLibraryPresent() {

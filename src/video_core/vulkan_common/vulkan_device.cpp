@@ -1557,7 +1557,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     }
 
 #ifdef HAS_FLYHIGH
-    {
+    if (EnvFlagSet("EDEN_NX2_FLYHIGH_ZEROCOPY")) {
 #ifdef _WIN32
         constexpr std::array interop{VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
                                      VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME};

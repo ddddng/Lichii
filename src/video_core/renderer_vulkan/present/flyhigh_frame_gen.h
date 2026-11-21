@@ -4,31 +4,20 @@
 #pragma once
 
 #include <array>
-#include <chrono>
+#include <memory>
 
 #include "common/common_types.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
-struct FhEngine;
-struct FhModel;
-struct FhStream;
-struct FhVkBuffer;
-struct FhVkSemaphore;
-
-namespace VideoCore::FrameGen {
-struct FlyHighLibrary;
-}
-
 namespace Vulkan {
 
 class Device;
 class Scheduler;
 
-/// FlyHigh frame generation: a neural network on its own Vulkan device. Each presented frame is
-/// copied into memory both devices share and handed over with a timeline semaphore; the
-/// in-betweens come back the same way and are copied into the frames Lichii presents.
+[[nodiscard]] bool FlyHighZeroCopyRequested();
+
 class FlyHighFrameGen {
 public:
     static constexpr size_t MAX_GENERATIONS = 3;
@@ -47,49 +36,38 @@ public:
 
     /// Copies in-between `generation` into destination, left in GENERAL layout.
     void Generate(Scheduler& scheduler, VkImage destination, size_t generation);
-
-    /// What the submission of the first generated frame waits for: FlyHigh has written every
-    /// in-between. Empty after it has been taken once.
     [[nodiscard]] SemaphoreValue TakeWait();
 
 private:
     struct SharedBuffer {
         VkBuffer buffer{};
         vk::DeviceMemory memory;
-        FhVkBuffer* imported{};
     };
 
-    struct SharedTimeline {
-        vk::Semaphore semaphore;
-        FhVkSemaphore* imported{};
-        u64 value{};
-    };
+    struct Worker;
 
     void Build(MemoryAllocator& memory_allocator, VkFormat format, bool protect_hud);
-    void Release() noexcept;
+    void ReleaseBuffers() noexcept;
     void CreateSharedBuffer(SharedBuffer& shared);
-    void CreateSharedTimeline(SharedTimeline& shared);
-    void Check(int result, const char* call) const;
+    vk::Semaphore CreateSharedTimeline(bool is_input);
 
-    const VideoCore::FrameGen::FlyHighLibrary& fh;
     const Device& device;
     VkExtent2D extent;
-    u32 row_pitch;
-    VkDeviceSize buffer_size;
+    bool zero_copy;
+    u32 row_pitch{};
+    VkDeviceSize buffer_size{};
 
     vk::Image staging;
-    std::array<SharedBuffer, 2> inputs{};
+    vk::Buffer readback;
+    std::array<vk::Buffer, MAX_GENERATIONS> uploads;
+    SharedBuffer input;
     std::array<SharedBuffer, MAX_GENERATIONS> outputs{};
-    /// One semaphore each way, each signalled by one device only.
-    SharedTimeline frames_in;
-    SharedTimeline frames_out;
-    u64 pending_wait{};
-
-    FhEngine* engine{};
-    FhModel* model{};
-    FhStream* stream{};
-    u64 frame_count{};
-    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+    vk::Semaphore frames_in;
+    vk::Semaphore frames_out;
+    u64 frame_value{};
+    bool generated_once{};
+    bool output_ready{};
+    std::shared_ptr<Worker> worker;
 };
 
 } // namespace Vulkan
