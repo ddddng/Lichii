@@ -299,6 +299,27 @@ public:
     void NoteFenceLent(FenceLent reason) {
         ++fences_lent[static_cast<size_t>(reason)];
     }
+    /// EDEN_NX2_RENDER_INVAL_E: where the back's invalidations of guest writes went.
+    enum class InvalSite : u8 {
+        Draw,       ///< a draw's cached writes: the buffer half on the back
+        Gather,     ///< a gather of CPU writes: the buffer half on the back
+        Region,     ///< an engine write's InvalidateRegion: the buffer half on the back
+        Texture,    ///< lent: a range on an image page
+        Shader,     ///< lent: a range on a shader page
+        Query,      ///< lent: a range on a query page
+        GpuWritten, ///< lent: a range on a page holding GPU-written buffer data
+        Recheck,    ///< lent: GPURender registered on a range's page before the second look
+        Count,
+    };
+    /// EDEN_NX2_RENDER_INVAL_E=1 (needs the unlend switch): the back applies the buffer half of
+    /// invalidations with no range on a page GPURender's caches hold (Fritchii c389ff6cb's
+    /// INVAL_E, f5afca4c9's GATHER_E).
+    [[nodiscard]] static bool InvalidatesOnBack() {
+        return on_back_thread && instance.inval_e;
+    }
+    void NoteInvalidation(InvalSite site) {
+        ++invalidations[static_cast<size_t>(site)];
+    }
     [[nodiscard]] bool Posts(PostedOp op) const {
         return on_back_thread && posts[static_cast<size_t>(op)];
     }
@@ -1147,6 +1168,8 @@ private:
     std::array<bool, static_cast<size_t>(PostedOp::Count)> posts{};
     std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
     std::array<u64, static_cast<size_t>(FenceLent::Count)> fences_lent{};
+    bool inval_e{};
+    std::array<u64, static_cast<size_t>(InvalSite::Count)> invalidations{};
     struct UnlendCounts {
         u64 unlent{};
         std::array<u64, static_cast<size_t>(UnlendReason::Count)> lent{};

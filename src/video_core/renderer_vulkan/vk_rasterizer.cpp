@@ -3246,7 +3246,7 @@ bool RasterizerVulkan::Nx2LandOwedWord(DAddr device_addr, u32 value, u32 real) {
     }
     // The caches learn of it as of the inline upload that wrote the placeholder.
     const std::array<std::pair<DAddr, std::size_t>, 1> written{{{device_addr, sizeof(u32)}}};
-    InvalidateCachedWrites(written, false);
+    InvalidateCachedWrites(written, false, false);
     return true;
 }
 
@@ -3464,17 +3464,27 @@ void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::Cac
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    RENDER_LEND(InvalidateRegion(addr, size, which))
+    const std::array<std::pair<DAddr, u64>, 1> range{{{addr, size}}};
+    const bool buffer_half_only =
+        VideoCommon::GpuSplit::InvalidatesOnBack() &&
+        BackTakesInvalidation(std::span<const std::pair<DAddr, u64>>{range},
+                              VideoCommon::GpuSplit::InvalSite::Region);
+    if (!buffer_half_only) {
+        RENDER_LEND(InvalidateRegion(addr, size, which))
+    }
     if (addr == 0 || size == 0) {
         return;
     }
-    if (True(which & VideoCommon::CacheType::TextureCache)) {
+    if (!buffer_half_only && True(which & VideoCommon::CacheType::TextureCache)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.WriteMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.WriteMemory(addr, size);
+    }
+    if (buffer_half_only) {
+        return;
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
         query_cache.InvalidateRegion(addr, size);
@@ -3484,19 +3494,86 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
     }
 }
 
+template <typename Size>
+bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Size>> ranges,
+                                             VideoCommon::GpuSplit::InvalSite site) {
+    using Site = VideoCommon::GpuSplit::InvalSite;
+    const bool gather = site == Site::Gather;
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto hit = [&]() -> std::optional<Site> {
+        for (const auto& [addr, size] : ranges) {
+            if (addr == 0 || size == 0) {
+                continue;
+            }
+            if (texture_cache.page_filter.Any(addr, size)) {
+                return Site::Texture;
+            }
+            if (pipeline_cache.page_filter.Any(addr, size)) {
+                return Site::Shader;
+            }
+            if (!gather && query_cache.page_filter.Any(addr, size)) {
+                return Site::Query;
+            }
+        }
+        return std::nullopt;
+    };
+    const auto lend = [&split](Site site) {
+        split.NoteInvalidation(site);
+        return false;
+    };
+    if (const auto first = hit()) {
+        return lend(*first);
+    }
+    {
+        // Off the scheduler's owner, BufferCache::WriteMemory leaves out the download of
+        // GPU-written bytes on the pages; only the back changes these ranges while it is not
+        // lending.
+        std::scoped_lock lock{buffer_cache.mutex};
+        for (const auto& [addr, size] : ranges) {
+            const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+            const DAddr end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+            if (size != 0 && buffer_cache.IsRegionGpuModified(begin, end - begin)) {
+                return lend(Site::GpuWritten);
+            }
+        }
+    }
+    // GPURender registers images while the back goes on: stamp, fence, look again. Either this
+    // sees its registration, or its upload sees the stamp (CheckRenderRead, must be 0).
+    for (const auto& [addr, size] : ranges) {
+        split.StampWrite(addr, size);
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (hit()) {
+        return lend(Site::Recheck);
+    }
+    split.NoteInvalidation(site);
+    return true;
+}
+
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
-    RENDER_LEND(InnerInvalidation(sequences))
-    InvalidateCachedWrites(sequences, false);
+    const bool buffer_half_only =
+        VideoCommon::GpuSplit::InvalidatesOnBack() &&
+        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw);
+    if (!buffer_half_only) {
+        RENDER_LEND(InnerInvalidation(sequences))
+    }
+    InvalidateCachedWrites(sequences, false, buffer_half_only);
 }
 
 void RasterizerVulkan::InvalidateConstantBufferData(
     std::span<const std::pair<DAddr, std::size_t>> sequences) {
-    RENDER_LEND(InvalidateConstantBufferData(sequences))
-    InvalidateCachedWrites(sequences, true);
+    const bool buffer_half_only =
+        VideoCommon::GpuSplit::InvalidatesOnBack() &&
+        BackTakesInvalidation(sequences, VideoCommon::GpuSplit::InvalSite::Draw);
+    if (!buffer_half_only) {
+        RENDER_LEND(InvalidateConstantBufferData(sequences))
+    }
+    InvalidateCachedWrites(sequences, true, buffer_half_only);
 }
 
 void RasterizerVulkan::InvalidateCachedWrites(
-    std::span<const std::pair<DAddr, std::size_t>> sequences, bool constant_buffer_data) {
+    std::span<const std::pair<DAddr, std::size_t>> sequences, bool constant_buffer_data,
+    bool buffer_half_only) {
     // The GPU's own cached writes (constant buffer data, every draw): most land where no image,
     // query or shader was ever registered, which page_filter tells without the caches' locks.
     const auto any = [&](const VideoCommon::PageFilter& filter) {
@@ -3508,11 +3585,12 @@ void RasterizerVulkan::InvalidateCachedWrites(
         return false;
     };
     // A draw the back wanted to unlend waits for these to reach GPURender's caches.
-    unlend_gather_hit = any(texture_cache.page_filter) || any(query_cache.page_filter) ||
-                        any(pipeline_cache.page_filter);
+    unlend_gather_hit =
+        !buffer_half_only && (any(texture_cache.page_filter) || any(query_cache.page_filter) ||
+                              any(pipeline_cache.page_filter));
     // Even with skip_cpu_inner_invalidation: engines writing images in software (DMA pitch to
     // block linear copies of decoded video frames) reach the texture cache only through here.
-    if (any(texture_cache.page_filter)) {
+    if (!buffer_half_only && any(texture_cache.page_filter)) {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
             texture_cache.WriteMemory(addr, size);
@@ -3541,6 +3619,9 @@ void RasterizerVulkan::InvalidateCachedWrites(
         for (const auto& [addr, size] : applied) {
             buffer_cache.WriteMemory(addr, size, true, true);
         }
+    }
+    if (buffer_half_only) {
+        return;
     }
     if (any(query_cache.page_filter)) {
         for (const auto& [addr, size] : sequences) {
@@ -3600,7 +3681,12 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
-    RENDER_LEND(OnCacheInvalidations(ranges))
+    const bool buffer_half_only =
+        VideoCommon::GpuSplit::InvalidatesOnBack() &&
+        BackTakesInvalidation(ranges, VideoCommon::GpuSplit::InvalSite::Gather);
+    if (!buffer_half_only) {
+        RENDER_LEND(OnCacheInvalidations(ranges))
+    }
     // Each cache's lock is taken once for all the writes, not once a write (jpkto/Lichii
     // f5edeabdbb): guest CPU write traps hold the buffer cache's for long. The caches are
     // independent (TextureCache::WriteMemory reads and changes only texture state, and the page
@@ -3608,7 +3694,7 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
     const auto valid = [](const std::pair<DAddr, u64>& range) {
         return range.first != 0 && range.second != 0;
     };
-    {
+    if (!buffer_half_only) {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& range : ranges) {
             if (valid(range)) {
@@ -3626,6 +3712,9 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
                 buffer_cache.WriteMemory(range.first, range.second);
             }
         }
+    }
+    if (buffer_half_only) {
+        return;
     }
     for (const auto& range : ranges) {
         if (valid(range)) {

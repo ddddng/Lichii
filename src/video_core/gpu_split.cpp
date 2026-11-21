@@ -244,6 +244,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                             post_switches[op]);
             }
         }
+        const char* const inval_switch = std::getenv("EDEN_NX2_RENDER_INVAL_E");
+        const bool inval_wanted = inval_switch != nullptr && inval_switch[0] == '1';
+        inval_e = inval_wanted && render_unlend;
+        invalidations = {};
+        if (inval_wanted && !inval_e) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         engine_early.store(0, std::memory_order_relaxed);
         if (unlend_wanted && !render_unlend) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_UNLEND needs EDEN_NX2_RENDER_OWNS=1 and "
@@ -310,6 +317,7 @@ void GpuSplit::Stop() {
             Nx2FastDraw::g_enabled.store(true, std::memory_order_relaxed);
         }
         render_unlend = false;
+        inval_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1277,6 +1285,18 @@ void GpuSplit::RenderLoop() {
                      fences_lent[static_cast<size_t>(FenceLent::NoView)]);
         }
     }
+    if (inval_e) {
+        const auto count = [this](InvalSite site) {
+            return invalidations[static_cast<size_t>(site)];
+        };
+        LOG_INFO(HW_GPU,
+                 "GPU render invalidations: buffer halves on the back: {} draws, {} gathers, {} "
+                 "regions; lent: {} image page, {} shader page, {} query page, {} GPU-written "
+                 "buffer page, {} registered before the second look",
+                 count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
+                 count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
+                 count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
 }
 
 void GpuSplit::NotePools(GPUVAddr tic, u64 tic_size, GPUVAddr tsc, u64 tsc_size) {
@@ -1326,6 +1346,9 @@ void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
     if (!stamps || size == 0) {
         return;
     }
+    // The back stamps the writes it applies itself, fences, then looks at the page filters again
+    // (EDEN_NX2_RENDER_INVAL_E): either it saw this image's registration or this sees its stamp.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     const u64 packet = (render_follower->Played() + 1) & StampSeqMask;
     for (u64 page = device_addr >> StampPageBits; page <= (device_addr + size - 1) >> StampPageBits;
          ++page) {
