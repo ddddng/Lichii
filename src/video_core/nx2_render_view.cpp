@@ -261,7 +261,6 @@ Packet Writes::Pack(Maxwell3D& engine, bool events) {
             Note(HleWords[i]);
         }
     }
-    packet.words.reserve(64);
     for (u32 word = 0; word < dirty.size(); ++word) {
         for (u64 bits = std::exchange(dirty[word], 0); bits != 0; bits &= bits - 1) {
             const u32 index = word * 64 + static_cast<u32>(std::countr_zero(bits));

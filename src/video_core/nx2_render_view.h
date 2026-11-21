@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
+
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -97,7 +99,7 @@ struct EngineValues {
 /// One draw's update of the view, by value.
 struct Packet {
     std::vector<u32> seed; ///< the whole register file, when the view starts over
-    std::vector<RegPair> words;
+    boost::container::small_vector<RegPair, 16> words;
     std::vector<BindValue> binds;
     Flags consumed; ///< forwarded flags the previous draw cleared
     Flags raised;

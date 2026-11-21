@@ -10,7 +10,8 @@
 #include <span>
 #include <type_traits>
 #include <utility>
-#include <vector>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -42,7 +43,7 @@ public:
         const size_t array_offset = ArrayOffset<T, E>();
         const size_t bytes = Common::AlignUp(array_offset + array.size_bytes(), Align);
         const size_t start = data.size();
-        data.resize(start + bytes);
+        data.resize(start + bytes, boost::container::default_init);
         u8* const record = data.data() + start;
         const Header header{kind, static_cast<u16>(array.size()), static_cast<u32>(bytes)};
         std::memcpy(record, &header, sizeof(header));
@@ -109,7 +110,7 @@ private:
         return Common::AlignUp(sizeof(Header) + sizeof(T), alignof(E));
     }
 
-    std::vector<u8> data;
+    boost::container::small_vector<u8, 128> data;
     size_t records{};
 };
 
