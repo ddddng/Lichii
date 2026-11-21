@@ -639,10 +639,14 @@ private:
     /// No range is on a page a shader was registered on, nor a page holding GPU-written buffer
     /// data. A range on an image or query page lends the call, or with
     /// EDEN_NX2_RENDER_POST_INVAL posts GPURender's half (the caches in rest); otherwise the
-    /// writes are stamped for GPURender's uploads.
+    /// writes are stamped for GPURender's uploads. With gpu_written (EDEN_NX2_RENDER_GATHER_E), a
+    /// range on GPU-written buffer data stays when the buffer cache uploads it into its buffer.
     template <typename Size>
     bool BackTakesInvalidation(std::span<const std::pair<DAddr, Size>> ranges,
-                               VideoCommon::GpuSplit::InvalSite site, VideoCommon::CacheType rest);
+                               VideoCommon::GpuSplit::InvalSite site, VideoCommon::CacheType rest,
+                               bool gpu_written = false);
+    /// The back (EDEN_NX2_RENDER_GATHER_E): a gather's uploads into GPU-written buffer data.
+    VideoCommon::CommandArena gather_commands;
     /// Whether the draw TakeReusableDraw took still holds once the caches are locked (serial and
     /// map_serial as read then), and the images it samples need no preparing.
     bool DeltaStillHolds(u64 serial, u64 map_serial);

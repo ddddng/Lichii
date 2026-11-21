@@ -4262,7 +4262,7 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 template <typename Size>
 bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Size>> ranges,
                                              VideoCommon::GpuSplit::InvalSite site,
-                                             VideoCommon::CacheType rest) {
+                                             VideoCommon::CacheType rest, bool gpu_written) {
     using Site = VideoCommon::GpuSplit::InvalSite;
     using VideoCommon::CacheType;
     auto& split = VideoCommon::GpuSplit::Get();
@@ -4302,12 +4302,19 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
     {
         // Off the scheduler's owner, BufferCache::WriteMemory leaves out the download of
         // GPU-written bytes on the pages; only the back changes these ranges while it is not
-        // lending.
+        // lending. It uploads the write into the buffer instead where it collects the commands.
         std::scoped_lock lock{buffer_cache.mutex};
         for (const auto& [addr, size] : ranges) {
             const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
             const DAddr end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
-            if (size != 0 && buffer_cache.IsRegionGpuModified(begin, end - begin)) {
+            if (size == 0 || !buffer_cache.IsRegionGpuModified(begin, end - begin)) {
+                continue;
+            }
+            if (!gpu_written) {
+                return lend(Site::GpuWritten);
+            }
+            if (!buffer_cache.InlinesPageWrite(addr, size)) {
+                split.NoteGpuWrittenGather(false);
                 return lend(Site::GpuWritten);
             }
         }
@@ -4485,10 +4492,12 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
+    const bool gpu_written =
+        VideoCommon::GpuSplit::GathersGpuWrittenOnBack() && !BufferArena::Collecting();
     const bool buffer_half_only =
         VideoCommon::GpuSplit::InvalidatesOnBack() &&
         BackTakesInvalidation(ranges, VideoCommon::GpuSplit::InvalSite::Gather,
-                              VideoCommon::CacheType::TextureCache);
+                              VideoCommon::CacheType::TextureCache, gpu_written);
     if (!buffer_half_only) {
         RENDER_LEND(OnCacheInvalidations(ranges))
     }
@@ -4508,6 +4517,11 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
         }
     }
     {
+        // EDEN_NX2_RENDER_GATHER_E: uploads into GPU-written buffer data go in a posted op.
+        std::optional<BufferArena::Collect> collect;
+        if (buffer_half_only && gpu_written) {
+            collect.emplace(gather_commands);
+        }
         std::scoped_lock lock{buffer_cache.mutex};
         // Out of the GPU-written ranges first: applying one write downloads the GPU's bytes
         // elsewhere on its pages (WriteMemory), which would write over the next collected write.
@@ -4517,6 +4531,16 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
                 buffer_cache.WriteMemory(range.first, range.second);
             }
         }
+    }
+    if (!gather_commands.Empty()) {
+        VideoCommon::CommandArena commands;
+        commands.Swap(gather_commands);
+        const u64 stamp = buffer_cache_runtime.Arena().CloseCollected();
+        VideoCommon::GpuSplit::Get().NoteGpuWrittenGather(true);
+        PostRenderOp(VideoCommon::GpuSplit::PostedOp::Invalidation,
+                     [this, commands = std::move(commands), stamp] {
+                         buffer_cache_runtime.Arena().PlayCollected(commands, stamp);
+                     });
     }
     if (buffer_half_only) {
         return;

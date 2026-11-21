@@ -425,6 +425,10 @@ public:
     template <typename Ranges>
     void ClaimCpuWrites(const Ranges& ranges);
 
+    /// Whether WriteMemory uploads a write on a page holding GPU-written data into its buffer
+    /// (Switch 2 titles, a buffer registered there) instead of downloading the page first.
+    [[nodiscard]] bool InlinesPageWrite(DAddr device_addr, u64 size);
+
     /// Return true when there are uncommitted buffers to be downloaded
     [[nodiscard]] bool HasUncommittedFlushes() const noexcept;
 

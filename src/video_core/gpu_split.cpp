@@ -258,6 +258,15 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const gather_switch = std::getenv("EDEN_NX2_RENDER_GATHER_E");
+        const bool gather_wanted = gather_switch != nullptr && gather_switch[0] == '1';
+        gather_e = gather_wanted && inval_e && posts[static_cast<size_t>(PostedOp::Invalidation)];
+        gathers.applied = gathers.lent = 0;
+        gathers.off_owner.store(0, std::memory_order_relaxed);
+        if (gather_wanted && !gather_e) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_GATHER_E needs EDEN_NX2_RENDER_INVAL_E=1 and "
+                                "EDEN_NX2_RENDER_POST_INVAL=1: ignored");
+        }
         const char* const soft_switch = std::getenv("EDEN_NX2_RENDER_SOFT_RELEASE_E");
         const bool soft_wanted = soft_switch != nullptr && soft_switch[0] == '1';
         soft_release_e = soft_wanted && render_unlend;
@@ -408,6 +417,7 @@ void GpuSplit::Stop() {
         }
         render_unlend = false;
         inval_e = false;
+        gather_e = false;
         flush_e = false;
         query_flush_e = false;
         unlend_mesh = false;
@@ -1421,6 +1431,13 @@ void GpuSplit::RenderLoop() {
                  count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
                  count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
                  count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
+    if (gather_e) {
+        LOG_INFO(HW_GPU,
+                 "GPU render GPU-written page gathers on the back: {} with collected uploads, {} "
+                 "lent (a write the buffer cache would not upload); must be 0: {} GPU-written page "
+                 "writes on the back without the scheduler or a collected upload",
+                 gathers.applied, gathers.lent, gathers.off_owner.load(std::memory_order_relaxed));
     }
     if (soft_release_e) {
         LOG_INFO(HW_GPU, "GPU render unforced fence releases returned on the back: {}",

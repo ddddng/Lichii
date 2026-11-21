@@ -379,6 +379,21 @@ public:
     [[nodiscard]] static bool UnlendsMesh() {
         return on_back_thread && instance.unlend_mesh;
     }
+    /// EDEN_NX2_RENDER_GATHER_E (needs EDEN_NX2_RENDER_INVAL_E=1 and EDEN_NX2_RENDER_POST_INVAL=1):
+    /// a gather of CPU writes on pages holding GPU-written buffer data stays on the back when the
+    /// buffer cache uploads each write into its buffer (Switch 2 titles); GPURender plays the
+    /// collected uploads at the gather's place.
+    [[nodiscard]] static bool GathersGpuWrittenOnBack() {
+        return on_back_thread && instance.gather_e;
+    }
+    void NoteGpuWrittenGather(bool applied) {
+        ++(applied ? gathers.applied : gathers.lent);
+    }
+    /// The back reached BufferCache::WriteMemory's GPU-written page path without the scheduler
+    /// or a collected upload: the GPU's bytes elsewhere on the page are dropped (must be 0).
+    void NoteGpuPageOffOwner() {
+        gathers.off_owner.fetch_add(1, std::memory_order_relaxed);
+    }
     /// EDEN_NX2_RENDER_UNLEND_CLEAR (needs EDEN_NX2_RENDER_UNLEND=1): clears go unlent, GPURender
     /// recording them from its view.
     [[nodiscard]] static bool UnlendsClear() {
@@ -1383,6 +1398,13 @@ private:
     };
     QuerySyncCounts query_sync;
     std::atomic<u64> unlent_emulated_mesh{};
+    bool gather_e{};
+    struct GatherCounts {
+        u64 applied{};
+        u64 lent{};
+        std::atomic<u64> off_owner{};
+    };
+    GatherCounts gathers;
     u64 query_flushes_nothing_pending{};
     std::atomic<u64> reports_landed_untracked{};
     std::atomic<u64> posted_waits_synced{};

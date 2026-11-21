@@ -143,6 +143,11 @@ public:
         return arena;
     }
 
+    /// The back collects buffer commands for GPURender to play (EDEN_NX2_RENDER_UNLEND).
+    [[nodiscard]] static bool CollectsCommands() noexcept {
+        return BufferArena::Collecting();
+    }
+
     /// Scheduler::CurrentTick, inline: the stream uniform reuse asks for it on every small
     /// uniform buffer bind.
     u64 CurrentTick() const noexcept {
