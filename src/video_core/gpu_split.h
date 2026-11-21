@@ -273,6 +273,12 @@ public:
     void NoteLent(UnlendReason reason) {
         ++unlend.lent[static_cast<size_t>(reason)];
     }
+    /// The back, posting a packet that writes game memory on GPURender without a lend (a fence
+    /// or report op): the front's waits on the back's position wait for GPURender to play it
+    /// (Fritchii's GuestWriteOpMark, 347d15c12 and a6acbfa50).
+    void MarkGuestWrite() {
+        guest_write_op.store(back_entry_start + 1, std::memory_order_release);
+    }
     /// The back: posts an unlent draw to GPURender.
     template <typename Packet>
     void PostUnlent(Packet&& packet) {
@@ -951,8 +957,20 @@ private:
     bool WaitFor(u64 target, DrainSite site);
 
     /// One step of a front wait for the back to consume `target`.
-    void Backoff(u32 spins, u64 target);
-    void SleepForBack(u64 target, bool wait_for_idle = false);
+    void Backoff(u32 spins, u64 target, bool on_engine = false);
+    void SleepForBack(u64 target, bool wait_for_idle = false, bool on_engine = false);
+    /// EDEN_NX2_RENDER_WAITS_E (Fritchii 347d15c12): whether a wait at `site` reads the back's
+    /// position. Game memory, the buffer cache and the lists are the back's, and what GPURender
+    /// does there runs lent; acquires, fences, maps, safe reads and macro DMA flushes wait for
+    /// GPURender.
+    [[nodiscard]] static bool SiteOnEngine(DrainSite site) noexcept;
+    [[nodiscard]] bool UsesEngine(DrainSite site) const {
+        return waits_e && SiteOnEngine(site);
+    }
+    /// Whether the front's wait for `target` is over: GPURender played it, or with `on_engine`
+    /// the back ran it and GPURender played the newest op before it that writes game memory
+    /// without a lend (MarkGuestWrite).
+    [[nodiscard]] bool Reached(u64 target, bool on_engine, std::memory_order order) const;
     /// After the back published consumption or finished its idle hook.
     void NotifyFront() {
         if (front_waiting.load(std::memory_order_seq_cst)) {
@@ -1113,6 +1131,13 @@ private:
     /// Must be 0: uses of GPURender's objects on the back, and of the back's on GPURender
     /// outside a lent call.
     std::atomic<u64> owner_on_e{};
+    /// EDEN_NX2_RENDER_WAITS_E=1 (needs EDEN_NX2_RENDER_PLAYED=1), set before the threads start.
+    bool waits_e{};
+    /// The newest packet that writes game memory on GPURender without a lend: its position + 1,
+    /// 0 for none. The back stores it before a "consumed" past that entry.
+    std::atomic<u64> guest_write_op{};
+    /// Front waits on the back's position that ended before GPURender got there.
+    std::atomic<u64> engine_early{};
     std::atomic<u64> owner_on_r{};
     void NoteOwner(bool on_render, const char* where, const std::source_location& site);
     bool render_terminal_draw{};

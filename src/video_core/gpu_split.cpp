@@ -220,6 +220,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         const char* const arena_switch = std::getenv("EDEN_NX2_BUFFER_ARENA");
         const bool arena = arena_switch != nullptr && arena_switch[0] == '1';
         render_unlend = render_owns && arena && unlend_wanted;
+        // EDEN_NX2_RENDER_WAITS_E=1: the front's game memory and list waits read the back's
+        // position (Fritchii 347d15c12).
+        const char* const waits_switch = std::getenv("EDEN_NX2_RENDER_WAITS_E");
+        const bool waits_wanted = waits_switch != nullptr && waits_switch[0] == '1';
+        waits_e = waits_wanted && two_positions;
+        if (waits_wanted && !waits_e) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_WAITS_E needs EDEN_NX2_RENDER_PLAYED=1: ignored");
+        }
+        guest_write_op.store(0, std::memory_order_relaxed);
+        engine_early.store(0, std::memory_order_relaxed);
         if (unlend_wanted && !render_unlend) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_UNLEND needs EDEN_NX2_RENDER_OWNS=1 and "
                                 "EDEN_NX2_BUFFER_ARENA=1: ignored");
@@ -248,10 +258,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         render_thread = std::jthread([this] { RenderLoop(); });
         LOG_INFO(HW_GPU,
                  "GPU render follower: enabled, polls {} us before parking, {}, front waits "
-                 "for {}{}",
+                 "for {}{}{}",
                  spin_time.count(),
                  ahead ? "posts ahead of unplayed packets" : "one packet at a time",
                  two_positions ? "GPURender's position" : "the back's position",
+                 waits_e ? " (the back's for game memory and lists)" : "",
                  render_unlend ? ", owns the renderer state (warm direct draws unlent)"
                  : render_owns ? ", owns the renderer state (the back lends every call)"
                                : "");
@@ -277,6 +288,7 @@ void GpuSplit::Stop() {
         render_thread.join();
         render_follower.reset();
         two_positions = false;
+        waits_e = false;
         render_owns = false;
         if (render_unlend && fast_draw_restore) {
             Nx2FastDraw::g_enabled.store(true, std::memory_order_relaxed);
@@ -384,8 +396,9 @@ void GpuSplit::Publish() {
 
 void GpuSplit::Drain(DrainSite site) {
     FlushState();
+    const bool on_engine = UsesEngine(site);
     consumed_cache = FrontPosition(std::memory_order_acquire);
-    if (consumed_cache == write_position && BackQuiet()) {
+    if (Reached(write_position, on_engine, std::memory_order_acquire) && BackQuiet()) {
         return;
     }
     Publish();
@@ -398,8 +411,11 @@ void GpuSplit::Drain(DrainSite site) {
     bool hook_asked = false;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = FrontPosition(std::memory_order_acquire);
-        if (consumed_cache == write_position) {
+        if (Reached(write_position, on_engine, std::memory_order_acquire)) {
             if (BackQuiet()) {
+                if (consumed_cache != write_position) {
+                    engine_early.fetch_add(1, std::memory_order_relaxed);
+                }
                 publish_every = 8;
                 Nx2Profile::AddDrain(site, start);
                 return;
@@ -411,11 +427,11 @@ void GpuSplit::Drain(DrainSite site) {
             if (spins < 16384) {
                 Pause();
             } else {
-                SleepForBack(write_position, true);
+                SleepForBack(write_position, true, on_engine);
             }
             continue;
         }
-        Backoff(spins, write_position);
+        Backoff(spins, write_position, on_engine);
     }
 }
 
@@ -749,8 +765,9 @@ bool GpuSplit::WaitForSyncedWriters() {
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     FlushState();
+    const bool on_engine = UsesEngine(site);
     consumed_cache = FrontPosition(std::memory_order_acquire);
-    if (consumed_cache >= target) {
+    if (Reached(target, on_engine, std::memory_order_acquire)) {
         return false;
     }
     Nx2Profile::Scope scope{Nx2Profile::Zone::WriterWait};
@@ -773,15 +790,18 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     for (u32 spins = 0;; ++spins) {
         consumed_cache = FrontPosition(std::memory_order_acquire);
         if (past_release && !release_ran) {
-            if (consumed_cache < release) {
-                Backoff(spins, release);
+            if (!Reached(release, on_engine, std::memory_order_acquire)) {
+                Backoff(spins, release, on_engine);
                 continue;
             }
             release_ran = Clock::now();
             wait_target.store(target, std::memory_order_seq_cst);
             spins = 0;
         }
-        if (consumed_cache >= target) {
+        if (Reached(target, on_engine, std::memory_order_acquire)) {
+            if (consumed_cache < target) {
+                engine_early.fetch_add(1, std::memory_order_relaxed);
+            }
             wait_target.store(~u64{0}, std::memory_order_relaxed);
             Nx2Profile::AddDrain(site, start);
             if (release != 0) {
@@ -798,19 +818,54 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
             }
             return true;
         }
-        Backoff(spins, target);
+        Backoff(spins, target, on_engine);
     }
 }
 
-void GpuSplit::Backoff(u32 spins, u64 target) {
+bool GpuSplit::SiteOnEngine(DrainSite site) noexcept {
+    switch (site) {
+    case DrainSite::MacroDmaRead:
+    case DrainSite::MacroDmaWrites:
+    case DrainSite::SemaphoreFlush:
+    case DrainSite::ListWriters:
+    case DrainSite::ListCopies:
+    case DrainSite::ListSync:
+    case DrainSite::ListFlush:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool GpuSplit::Reached(u64 target, bool on_engine, std::memory_order order) const {
+    if (!on_engine) {
+        return FrontPosition(order) >= target;
+    }
+    // The back ran `target`, and GPURender played the newest guest write op from before it. The
+    // mark is read after "consumed": an op in an entry the back ran is in it. A newer mark (at
+    // `target` or later) may hide an older one: then GPURender's position.
+    if (consumed.load(order) < target) {
+        return false;
+    }
+    const u64 mark = guest_write_op.load(std::memory_order_acquire);
+    if (mark == 0) {
+        return true;
+    }
+    if (mark - 1 < target) {
+        return played.load(order) > mark - 1;
+    }
+    return played.load(order) >= target;
+}
+
+void GpuSplit::Backoff(u32 spins, u64 target, bool on_engine) {
     if (spins < 16384) {
         Pause();
         return;
     }
-    SleepForBack(target);
+    SleepForBack(target, false, on_engine);
 }
 
-void GpuSplit::SleepForBack(u64 target, bool wait_for_idle) {
+void GpuSplit::SleepForBack(u64 target, bool wait_for_idle, bool on_engine) {
     if (!back_running.load(std::memory_order_acquire)) {
         std::this_thread::yield();
         return;
@@ -820,7 +875,7 @@ void GpuSplit::SleepForBack(u64 target, bool wait_for_idle) {
     front_waiting.store(true, std::memory_order_seq_cst);
     const u32 seen = front_wake.load(std::memory_order_seq_cst);
     if (back_running.load(std::memory_order_seq_cst) &&
-        (FrontPosition(std::memory_order_seq_cst) < target ||
+        (!Reached(target, on_engine, std::memory_order_seq_cst) ||
          (wait_for_idle && !back_quiet.load(std::memory_order_seq_cst)))) {
         front_wake.wait(seen, std::memory_order_seq_cst);
     }
@@ -1181,6 +1236,12 @@ void GpuSplit::RenderLoop() {
                                   : std::string{});
     join_sites.Log("joins");
     lend_sites.Log("lends");
+    if (waits_e) {
+        LOG_INFO(HW_GPU,
+                 "GPU render follower: {} front waits on the back's position ended before "
+                 "GPURender got there",
+                 engine_early.load(std::memory_order_relaxed));
+    }
     if (render_unlend) {
         LogUnlend();
     }
