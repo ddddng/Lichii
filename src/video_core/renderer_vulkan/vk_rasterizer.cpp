@@ -597,14 +597,19 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         });
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) {
-            auto* const owner = static_cast<Scheduler*>(argument);
+            auto* const rasterizer = static_cast<RasterizerVulkan*>(argument);
+            Scheduler* const owner = &rasterizer->scheduler;
             if (VideoCommon::GpuSplit::LendsToRender()) [[unlikely]] {
+                if (rasterizer->PostRenderOp(VideoCommon::GpuSplit::PostedOp::IdleHook,
+                                             [owner] { owner->FlushDeferred(); })) {
+                    return;
+                }
                 VideoCommon::GpuSplit::Get().LendRender([owner] { owner->FlushDeferred(); });
                 return;
             }
             owner->FlushDeferred();
         },
-        &scheduler);
+        this);
     VideoCommon::GpuSplit::Get().SetLendHooks(&LendEnter, &LendLeave, this);
     VideoCommon::GpuSplit::Get().SetRenderFollowerSupported(
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
@@ -1673,6 +1678,23 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
     }
 }
 } // Anonymous namespace
+
+template <typename Op>
+bool RasterizerVulkan::PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Posts(kind) || maxwell3d == nullptr || !maxwell3d->render_view_writes) {
+        return false;
+    }
+    split.PostOp(kind, [this, engine = maxwell3d, op = std::forward<Op>(op)]() mutable {
+        auto* const flags =
+            state_tracker.SwapFlags(&engine->render_view_writes->View().dirty.flags);
+        SCOPE_EXIT {
+            state_tracker.SwapFlags(flags);
+        };
+        op();
+    });
+    return true;
+}
 
 struct RasterizerVulkan::UnlentDraw {
     RasterizerVulkan* rasterizer;

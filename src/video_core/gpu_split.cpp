@@ -229,6 +229,19 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_WAITS_E needs EDEN_NX2_RENDER_PLAYED=1: ignored");
         }
         guest_write_op.store(0, std::memory_order_relaxed);
+        // Render follower port, step 8: posted render ops, one switch each.
+        static constexpr std::array<const char*, static_cast<size_t>(PostedOp::Count)>
+            post_switches{"EDEN_NX2_RENDER_POST_IDLE_HOOK"};
+        for (size_t op = 0; op < posts.size(); ++op) {
+            const char* const value = std::getenv(post_switches[op]);
+            const bool wanted = value != nullptr && value[0] == '1';
+            posts[op] = wanted && render_unlend;
+            posted[op] = 0;
+            if (wanted && !render_unlend) {
+                LOG_WARNING(HW_GPU, "{} needs EDEN_NX2_RENDER_UNLEND=1: ignored",
+                            post_switches[op]);
+            }
+        }
         engine_early.store(0, std::memory_order_relaxed);
         if (unlend_wanted && !render_unlend) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_UNLEND needs EDEN_NX2_RENDER_OWNS=1 and "
@@ -290,6 +303,7 @@ void GpuSplit::Stop() {
         two_positions = false;
         waits_e = false;
         render_owns = false;
+        posts = {};
         if (render_unlend && fast_draw_restore) {
             Nx2FastDraw::g_enabled.store(true, std::memory_order_relaxed);
         }
@@ -1245,6 +1259,10 @@ void GpuSplit::RenderLoop() {
     if (render_unlend) {
         LogUnlend();
     }
+    if (std::ranges::any_of(posts, [](bool on) { return on; })) {
+        LOG_INFO(HW_GPU, "GPU render posted ops: {} idle hooks",
+                 posted[static_cast<size_t>(PostedOp::IdleHook)]);
+    }
 }
 
 void GpuSplit::NotePools(GPUVAddr tic, u64 tic_size, GPUVAddr tsc, u64 tsc_size) {
@@ -1385,7 +1403,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 // The front may already see everything consumed: Drain() waits for back_quiet
                 // too, so the deferred submit can't overlap whatever the front does next.
                 if (!back_quiet.load(std::memory_order_relaxed)) {
-                    WaitRender();
+                    if (!Posts(PostedOp::IdleHook)) {
+                        WaitRender();
+                    }
                     if (idle_hook != nullptr) {
                         idle_hook(idle_argument);
                     }
@@ -1429,7 +1449,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
-                WaitRender();
+                if (!Posts(PostedOp::IdleHook)) {
+                    WaitRender();
+                }
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }

@@ -224,6 +224,10 @@ private:
     /// EDEN_NX2_RENDER_UNLEND, on the back: resolves the pipeline and the buffer half of a warm
     /// direct draw and posts the rest to GPURender. False when the draw has to be lent instead.
     bool TryUnlendDraw(bool is_indexed, u32 instance_count);
+    /// The back: posts `op` to GPURender with the state tracker on the view's flags (its submits
+    /// invalidate those, LendEnter hands them to the engine). False when `kind` is not posted.
+    template <typename Op>
+    bool PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& op);
     /// GPURender: records an unlent draw from its view of the channel's registers.
     void PlayUnlentDraw(UnlentDraw& draw);
     /// Around each lent call (GpuSplit::SetLendHooks): the engine takes the flags GPURender's

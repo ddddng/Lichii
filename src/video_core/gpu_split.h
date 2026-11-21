@@ -279,6 +279,31 @@ public:
     void MarkGuestWrite() {
         guest_write_op.store(back_entry_start + 1, std::memory_order_release);
     }
+    /// Render ops the back posts to GPURender instead of lending them, each behind its switch
+    /// (render follower port, step 8; they need EDEN_NX2_RENDER_UNLEND=1 for the view's flags).
+    enum class PostedOp : u8 {
+        IdleHook, ///< EDEN_NX2_RENDER_POST_IDLE_HOOK: the back's idle hook (FlushDeferred)
+        Count,
+    };
+    [[nodiscard]] bool Posts(PostedOp op) const {
+        return on_back_thread && posts[static_cast<size_t>(op)];
+    }
+    /// The back: GPURender runs `op` at its place in the stream while the back goes on. It runs
+    /// outside a lent call, with the ring position it was posted at (TrackFencedWrite).
+    template <typename Op>
+    void PostOp(PostedOp kind, Op&& op) {
+        ++posted[static_cast<size_t>(kind)];
+        const u64 position = back_entry_start;
+        if (render_follower->Post(position, [position, op = std::forward<Op>(op)]() mutable {
+                SetPlayingPosition(position);
+                SCOPE_EXIT {
+                    SetPlayingPosition(~u64{0});
+                };
+                op();
+            })) {
+            CheckRenderLocks();
+        }
+    }
     /// The back: posts an unlent draw to GPURender.
     template <typename Packet>
     void PostUnlent(Packet&& packet) {
@@ -1105,6 +1130,8 @@ private:
     /// EDEN_NX2_RENDER_UNLEND=1 (needs the owner switch), set before the back and GPURender start.
     bool render_unlend{};
     bool fast_draw_restore{};
+    std::array<bool, static_cast<size_t>(PostedOp::Count)> posts{};
+    std::array<u64, static_cast<size_t>(PostedOp::Count)> posted{};
     struct UnlendCounts {
         u64 unlent{};
         std::array<u64, static_cast<size_t>(UnlendReason::Count)> lent{};
