@@ -481,6 +481,19 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Whether DownloadMemory(device_addr, size) would download nothing: no deferred CPU read
+    /// ranges, and no GPU-modified range on the pages it visits.
+    [[nodiscard]] bool DownloadsNothing(DAddr device_addr, u64 size) {
+        if constexpr (USE_MEMORY_MAPS) {
+            if (download_cpu_read_ranges) {
+                return false;
+            }
+        }
+        const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
+        const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
+        return !IsRegionGpuModified(begin, end - begin);
+    }
+
     /// Whether every byte the bound compute storage and texture buffers would mark GPU-written
     /// for this dispatch already holds GPU writes. Call before the bindings are made (and mark).
     [[nodiscard]] bool ComputeWritesHoldGpuData();

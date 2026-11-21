@@ -257,6 +257,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
+        const char* const flush_switch = std::getenv("EDEN_NX2_RENDER_FLUSH_E");
+        const bool flush_wanted = flush_switch != nullptr && flush_switch[0] == '1';
+        flush_e = flush_wanted && render_unlend;
+        flushes_answered = {};
+        flushes_lent = {};
+        flushes_verified = 0;
+        flushes_wrong = 0;
+        if (flush_wanted && !flush_e) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_FLUSH_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
+        }
         if (posts[static_cast<size_t>(PostedOp::Invalidation)] && !inval_e) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_POST_INVAL needs EDEN_NX2_RENDER_INVAL_E=1: ignored");
@@ -330,6 +340,7 @@ void GpuSplit::Stop() {
         }
         render_unlend = false;
         inval_e = false;
+        flush_e = false;
     }
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
@@ -1327,6 +1338,18 @@ void GpuSplit::RenderLoop() {
                  count(InvalSite::Draw), count(InvalSite::Gather), count(InvalSite::Region),
                  count(InvalSite::Texture), count(InvalSite::Shader), count(InvalSite::Query),
                  count(InvalSite::GpuWritten), count(InvalSite::Recheck));
+    }
+    if (flush_e) {
+        LOG_INFO(
+            HW_GPU,
+            "GPU render flushes on the back: FlushRegion {} answered, {} lent; "
+            "MustFlushRegion {} answered, {} lent; {} answers checked by a lend, must be 0: {} "
+            "found GPU-modified",
+            flushes_answered[static_cast<size_t>(FlushSite::Flush)],
+            flushes_lent[static_cast<size_t>(FlushSite::Flush)],
+            flushes_answered[static_cast<size_t>(FlushSite::MustFlush)],
+            flushes_lent[static_cast<size_t>(FlushSite::MustFlush)], flushes_verified,
+            flushes_wrong);
     }
 }
 

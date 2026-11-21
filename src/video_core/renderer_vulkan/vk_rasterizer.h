@@ -575,6 +575,10 @@ private:
     /// The back (EDEN_NX2_RENDER_POST_CONDITIONAL): a dynamic render enable may have set host
     /// conditional rendering since the last end it posted.
     bool host_conditional_may_be_set{true};
+    /// The back (EDEN_NX2_RENDER_FLUSH_E): flush answers given without a lend, for the sampled
+    /// check (EDEN_NX2_RENDER_VERIFY_EVERY).
+    u64 back_flush_answers{};
+    void VerifyBackFlushAnswer(DAddr addr, u64 size, VideoCommon::CacheType which);
 
     void InvalidateCachedWrites(std::span<const std::pair<DAddr, std::size_t>> sequences,
                                 bool constant_buffer_data, bool buffer_half_only);

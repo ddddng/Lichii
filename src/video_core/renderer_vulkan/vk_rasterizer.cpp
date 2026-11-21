@@ -1681,6 +1681,16 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 }
 } // Anonymous namespace
 
+/// EDEN_NX2_RENDER_VERIFY_EVERY: one in this many unlent draws, and back flush answers, is
+/// checked against GPURender's own answer.
+static u64 RenderVerifyEvery() {
+    static const u64 every = [] {
+        const char* const value = std::getenv("EDEN_NX2_RENDER_VERIFY_EVERY");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+    }();
+    return every;
+}
+
 template <typename Op>
 bool RasterizerVulkan::PostRenderOp(VideoCommon::GpuSplit::PostedOp kind, Op&& op) {
     auto& split = VideoCommon::GpuSplit::Get();
@@ -1861,11 +1871,8 @@ bool RasterizerVulkan::TryUnlendDraw(bool is_indexed, u32 instance_count) {
         }
         return lend(Reason::Mesh);
     }
-    static const u64 verify_every = [] {
-        const char* const value = std::getenv("EDEN_NX2_RENDER_VERIFY_EVERY");
-        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
-    }();
-    if (verify_every != 0 && ++unlend_candidates % verify_every == 0) {
+    if (const u64 verify_every = RenderVerifyEvery();
+        verify_every != 0 && ++unlend_candidates % verify_every == 0) {
         split.NoteUnlendVerify();
         unlend_verify_draw = true;
         return lend(Reason::Verify);
@@ -3336,6 +3343,39 @@ void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pa
 }
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    using VideoCommon::CacheType;
+    using VideoCommon::GpuSplit;
+    if (GpuSplit::FlushesOnBack()) {
+        // EDEN_NX2_RENDER_FLUSH_E: the back gathers CPU writes itself, as before a posted fence,
+        // and lends only a flush with work to do. Images: GPURender played every packet (read
+        // before the relaxed filter, which it only ever sets) and none was registered there.
+        // Buffers: the back's own cache. Reports: as FlushQueryResults.
+        auto& split = GpuSplit::Get();
+        bool clean = true;
+        if (addr != 0 && size != 0) {
+            if (True(which & (CacheType::TextureCache | CacheType::BufferCache))) {
+                gpu.InvalidateGPUCache();
+            }
+            if (True(which & CacheType::TextureCache)) {
+                clean = !split.Guarding() && !texture_cache.page_filter.Any(addr, size);
+            }
+            if (clean && True(which & CacheType::BufferCache)) {
+                clean = !buffer_cache_runtime.Nx2Slots().Owes(addr, size);
+                if (clean) {
+                    std::scoped_lock lock{buffer_cache.mutex};
+                    clean = buffer_cache.DownloadsNothing(addr, size);
+                }
+            }
+            if (clean && True(which & CacheType::QueryCache)) {
+                clean = !query_cache.page_filter.Any(addr, size);
+            }
+        }
+        split.NoteFlushOnBack(GpuSplit::FlushSite::Flush, clean);
+        if (clean) {
+            VerifyBackFlushAnswer(addr, size, which);
+            return;
+        }
+    }
     RENDER_LEND(FlushRegion(addr, size, which))
     if (addr == 0 || size == 0) {
         return;
@@ -3427,6 +3467,34 @@ void RasterizerVulkan::FinishReport(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    using VideoCommon::CacheType;
+    using VideoCommon::GpuSplit;
+    if (GpuSplit::FlushesOnBack()) {
+        // EDEN_NX2_RENDER_FLUSH_E: the buffer verdict is the back's own cache; an image verdict
+        // is lent unless GPURender played every packet and no image was registered there.
+        auto& split = GpuSplit::Get();
+        if (True(which & CacheType::BufferCache)) {
+            bool modified = buffer_cache_runtime.Nx2Slots().Owes(addr, size);
+            if (!modified && (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
+                              Tegra::Nx2MayBeGpuWritten(addr, size))) {
+                std::scoped_lock lock{buffer_cache.mutex};
+                modified = buffer_cache.IsRegionGpuModified(addr, size);
+            }
+            if (modified) {
+                split.NoteFlushOnBack(GpuSplit::FlushSite::MustFlush, true);
+                return true;
+            }
+        }
+        const bool answered = !Settings::IsGPULevelHigh() ||
+                              False(which & CacheType::TextureCache) ||
+                              (!split.Guarding() && !texture_cache.page_filter.Any(addr, size));
+        split.NoteFlushOnBack(GpuSplit::FlushSite::MustFlush, answered);
+        if (answered) {
+            VerifyBackFlushAnswer(
+                addr, size, Settings::IsGPULevelHigh() ? which : which & ~CacheType::TextureCache);
+            return false;
+        }
+    }
     RENDER_LEND_RESULT(MustFlushRegion(addr, size, which))
     // GPU-written list words owed there land in guest memory at the flush (Nx2ListIndirect).
     if (True(which & VideoCommon::CacheType::BufferCache) &&
@@ -3451,6 +3519,27 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
         return texture_cache.IsRegionGpuModified(addr, size);
     }
     return false;
+}
+
+void RasterizerVulkan::VerifyBackFlushAnswer(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    using VideoCommon::CacheType;
+    const u64 every = RenderVerifyEvery();
+    if (every == 0 || ++back_flush_answers % every != 0) {
+        return;
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    bool modified = false;
+    split.LendRender([&] {
+        if (True(which & CacheType::TextureCache)) {
+            std::scoped_lock lock{texture_cache.mutex};
+            modified |= texture_cache.IsRegionGpuModified(addr, size);
+        }
+        if (True(which & CacheType::BufferCache)) {
+            std::scoped_lock lock{buffer_cache.mutex};
+            modified |= buffer_cache.IsRegionGpuModified(addr, size);
+        }
+    });
+    split.NoteFlushVerified(modified);
 }
 
 bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {

@@ -329,6 +329,20 @@ public:
     [[nodiscard]] static bool InvalidatesOnBack() {
         return on_back_thread && instance.inval_e;
     }
+    /// EDEN_NX2_RENDER_FLUSH_E (needs EDEN_NX2_RENDER_UNLEND=1): the back answers FlushRegion and
+    /// MustFlushRegion where its buffer cache and the caches' page filters decide them.
+    [[nodiscard]] static bool FlushesOnBack() {
+        return on_back_thread && instance.flush_e;
+    }
+    enum class FlushSite : u8 { Flush, MustFlush, Count };
+    void NoteFlushOnBack(FlushSite site, bool answered) {
+        ++(answered ? flushes_answered : flushes_lent)[static_cast<size_t>(site)];
+    }
+    /// A sampled check of a flush answer: GPURender found the region GPU-modified (must be 0).
+    void NoteFlushVerified(bool modified) {
+        ++flushes_verified;
+        flushes_wrong += modified ? 1 : 0;
+    }
     void NoteInvalidation(InvalSite site) {
         ++invalidations[static_cast<size_t>(site)];
     }
@@ -1199,6 +1213,11 @@ private:
     u64 query_flushes_skipped{};
     std::atomic<u64> posted_reports_moved{};
     bool inval_e{};
+    bool flush_e{};
+    std::array<u64, static_cast<size_t>(FlushSite::Count)> flushes_answered{};
+    std::array<u64, static_cast<size_t>(FlushSite::Count)> flushes_lent{};
+    u64 flushes_verified{};
+    u64 flushes_wrong{};
     std::array<std::atomic<u64>, static_cast<size_t>(Unparked::Count)> unparked{};
     std::array<u64, static_cast<size_t>(InvalSite::Count)> invalidations{};
     struct UnlendCounts {
