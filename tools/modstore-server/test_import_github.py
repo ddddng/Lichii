@@ -1,10 +1,11 @@
 import hashlib
 import json
-from io import BytesIO
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import import_github as gh
@@ -18,9 +19,10 @@ PATCH = f"@nsobid-{SHORT.lower()}\r\n".encode() + b"@enabled\n00000000 00000000\
 CREDIT_PATH = f"titles/{TITLE}/Example Game.txt"
 
 
-def inert_zip(files):
+def inert_zip(files, comment=b""):
     out = BytesIO()
     with zipfile.ZipFile(out, "w") as archive:
+        archive.comment = comment
         for path, contents in files.items():
             archive.writestr(path, contents)
     return out.getvalue()
@@ -63,6 +65,27 @@ class ParseTests(unittest.TestCase):
             with self.subTest(data=data):
                 self.assertIsNone(gh.pchtxt_build(data))
 
+    def test_pchtxt_requires_a_live_record_in_an_enabled_block(self):
+        header = b"@nsobid-" + SHORT.encode() + b"\r\n"
+        for body, eligible in (
+            (b"@stop\n@enabled\n00000000 00000000", False),
+            (b"@enabled\n@stop\n00000000 00000000", False),
+            (b"@enabled\n@disabled\n00000000 00000000", False),
+            (b"00000000 00000000\n@enabled", False),
+            (b"@enabled\n00000000 prose\n00000000 'unclosed\n00000000 ''\n00000000 A", False),
+            (b"@enabled\n00000000 00000000\n@disabled\n@stop", True),
+            (b" \t@ENABLED // option\r0xA\tAB CD# comment\r@STOP", True),
+            (b"@enable option\n0xA'# / \\'text' / comment\n@stop", True),
+            (b"@enabled\n@s\nA AB", True),
+        ):
+            with self.subTest(body=body):
+                snap = SnapshotFixture("Example/kenji", {
+                    f"Example Game/{TITLE}/60 FPS/exefs/1.0.0.pchtxt": header + body,
+                })
+                row, = gh.kenji(snap, gh.Counter())
+                self.assertEqual(row.builds, {SHORT.ljust(64, "0"): "unknown"})
+                self.assertEqual(bool(row.payloads[SHORT.ljust(64, "0")]), eligible)
+
     def test_kenji_coalesces_versions_without_blending_variants(self):
         root = f"Example Game/{TITLE}"
         snap = SnapshotFixture("Example/kenji", {
@@ -83,6 +106,57 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(len(snap.blobs_read), 4)
         self.assertIsNone(rows[0].payloads[SHORT.ljust(64, "0")])
         self.assertIsNotNone(rows[1].payloads[SHORT.ljust(64, "0")])
+
+    def test_kenji_loose_patch_keeps_build_evidence_but_needs_no_sidecars(self):
+        root = f"Example Game/{TITLE}"
+        for sidecar in ("exefs/main.npdm", "romfs/nested/data", "cheats/1.txt",
+                        "romfs_ext/file", "exefs/extra.pchtxt"):
+            with self.subTest(sidecar=sidecar):
+                snap = SnapshotFixture("Example/kenji", {
+                    f"{root}/60 FPS/exefs/1.0.0.pchtxt": PATCH,
+                    f"{root}/60 FPS/{sidecar}": b"INERT_SIDECAR",
+                    f"{root}/30 FPS/exefs/1.0.0.pchtxt": PATCH,
+                })
+                rows = {r.name: r for r in gh.kenji(snap, gh.Counter())}
+                self.assertEqual(rows["60 FPS"].payloads, {SHORT.ljust(64, "0"): None})
+                self.assertIsNotNone(rows["30 FPS"].payloads[SHORT.ljust(64, "0")])
+
+    def test_single_zip_variant_must_match_the_outer_name(self):
+        for parse, path in (
+            (gh.kenji, f"Example Game/{TITLE}/60 FPS.zip"),
+            (gh.stevens, f"Example Game/[{TITLE}]/60 FPS/patch.zip"),
+        ):
+            for member, eligible in (
+                ("[30 FPS]/exefs/1.0.0.pchtxt", False),
+                ("[60fps v1.0.0]/exefs/1.0.0.pchtxt", True),
+                ("exefs/1.0.0.pchtxt", True),
+            ):
+                with self.subTest(source=parse.__name__, member=member):
+                    snap = SnapshotFixture("Example/mods", {path: inert_zip({member: PATCH})})
+                    row, = parse(snap, gh.Counter())
+                    self.assertEqual(row.name, "60 FPS")
+                    self.assertEqual(row.builds, {SHORT.ljust(64, "0"): "unknown"})
+                    self.assertEqual(bool(row.payloads[SHORT.ljust(64, "0")]), eligible)
+
+    def test_unassigned_zip_components_and_archive_comments_keep_builds_link_only(self):
+        for parse, path in (
+            (gh.fl4sh, f"Example Game [{TITLE}].zip"),
+            (gh.kenji, f"Example Game/{TITLE}/60 FPS.zip"),
+        ):
+            for sidecars, comment in (
+                ({"exefs/main.npdm": b"INERT_SIDECAR"}, b""),
+                ({"romfs/nested/data": b"INERT_SIDECAR"}, b""),
+                ({}, b"INERT_COMMENT"),
+            ):
+                with self.subTest(source=parse.__name__, sidecars=sidecars, comment=comment):
+                    member = "[60 FPS]/exefs/1.0.0.pchtxt"
+                    snap = SnapshotFixture("Example/mods", {
+                        path: inert_zip({member: PATCH, **sidecars}, comment=comment),
+                    })
+                    row, = parse(snap, gh.Counter())
+                    self.assertEqual(row.name, "60 FPS")
+                    self.assertEqual(row.builds, {SHORT.ljust(64, "0"): "unknown"})
+                    self.assertEqual(row.payloads, {SHORT.ljust(64, "0"): None})
 
     def test_fl4sh_variant_builds_stay_with_their_own_zip_paths(self):
         path = f"Example Game [US][{TITLE.lower()}][mods].zip"
@@ -236,8 +310,49 @@ class ParseTests(unittest.TestCase):
                                    "assets restricted by third-party tool terms": 3})
         self.assertTrue(all(not any(row.payloads.values()) for row in rows))
 
+    def test_root_readme_policy_applies_without_overriding_game_metadata(self):
+        title_root = f"Example Game/[{TITLE}]"
+        for parse, files in (
+            (gh.kenji, {f"Example Game/{TITLE}/60 FPS/exefs/1.0.0.pchtxt": PATCH}),
+            (gh.fl4sh, {f"Example Game [{TITLE}].zip": inert_zip({
+                "[60 FPS]/exefs/1.0.0.pchtxt": PATCH,
+            })}),
+            (gh.stevens, {
+                f"{title_root}/60 FPS/patch.pchtxt": PATCH,
+                f"{title_root}/README.md": b"**Credits**: GameAuthor\n",
+            }),
+            (gh.chansey, {
+                "GAMES.md": f"[Example Game](titles/{TITLE}/Example%20Game.txt) | [{TITLE}](titles/{TITLE}) |".encode(),
+                CREDIT_PATH: b"By GameAuthor",
+                f"titles/{TITLE}/cheats/{SHORT}.txt": b"[60 FPS]\n00000000",
+            }),
+        ):
+            with self.subTest(source=parse.__name__):
+                snap = SnapshotFixture("Example/mods", files | {
+                    "readme.md": (f"**TitleID**: {SECOND}\n**Game Title**: Not the Game\n"
+                                  "**Credits**: RootAuthor\n"
+                                  "Do not download these patches using other tools.").encode(),
+                })
+                row, = parse(snap, gh.Counter())
+                self.assertEqual(row.game, "Example Game")
+                self.assertEqual(row.author, "GameAuthor" if parse in (gh.stevens, gh.chansey) else "")
+                build = SHORT if parse is gh.chansey else SHORT.ljust(64, "0")
+                self.assertEqual(row.payloads, {build: None})
+
 
 class ManifestTests(unittest.TestCase):
+    def test_manifest_stdout_is_utf8_with_non_utf8_text_stream(self):
+        manifest = {"games": [{"name": "Pokémon"}]}
+        out = BytesIO()
+        stream = TextIOWrapper(out, encoding="latin-1")
+        with (patch.object(gh, "build_manifest", return_value=(manifest, {})),
+              patch.object(gh.sys, "argv", ["import_github.py", "."]),
+              patch.object(gh.sys, "stdout", stream),
+              patch.object(gh.sys, "stderr", TextIOWrapper(BytesIO(), encoding="latin-1"))):
+            gh.main()
+            stream.flush()
+        self.assertEqual(json.loads(out.getvalue().decode("utf-8")), manifest)
+
     def test_batch_directory_preserves_whole_games_within_request_limit(self):
         with tempfile.TemporaryDirectory() as scratch:
             games = [{"title_id": key, "name": "é" * 32, "mods": []} for key in ("A", "B", "C")]
@@ -274,7 +389,7 @@ class ManifestTests(unittest.TestCase):
                 git("update-ref", "HEAD", commit)
                 return gh.Source(repo, commit, "Example")
 
-            git("init")
+            git("init", "--object-format=sha1")
             git("remote", "add", "origin", f"https://github.com/{repo}.git")
             patch = clone / f"Example Game/{TITLE}/60 FPS/exefs/1.0.0.pchtxt"
             patch.parent.mkdir(parents=True)

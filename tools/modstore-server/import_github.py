@@ -6,7 +6,7 @@ Use --batch-dir to also write admin-sized batches grouped by game.
 """
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -49,6 +49,11 @@ TITLE_DIR = re.compile(rf"(?:.+?\s+)?\[({TITLE_ID})\]", re.I | re.ASCII)
 TITLE_LABEL = re.compile(r"(?im)^\s*\**Title\s*ID\**\s*:\s*\**([0-9a-f]{16})\b")
 GAME_LABEL = re.compile(r"(?im)^\s*\*{2}(?:Game Title|Title)\**\s*:\s*([^\n]+)")
 NSOBID = re.compile(rb"@nsobid-([0-9a-f]+)", re.I)
+PCHTXT_TOKEN = re.compile(rb"""\\.|["'/#]""")
+PCHTXT_RECORD = re.compile(
+    rb"""(?:0x)?[0-9a-f]+(?:[ \t]*(?:"(?:\\.|[^"\\])+"|'(?:\\.|[^'\\])+')"""
+    rb"""|(?:[ \t]+[0-9a-f]+)*[ \t]+[0-9a-f]{2,})""", re.I,
+)
 SWITCH_TWO = re.compile(r"\b(?:switch[ _-]*2|nx2|nsw2|sw2)\b", re.I)
 SCARLET_VIOLET = {"0100A3D008C5C000": "pokemon scarlet", "01008F6008C5E000": "pokemon violet"}
 HARDWARE_ONLY = re.compile(r"\b(?:IPS|not emulat\w*|only for switch|real hardware only)\b", re.I)
@@ -59,6 +64,7 @@ CHEAT_ROW = re.compile(
 )
 HANDLE = re.compile(r"@?([\w][\w.\-’']{0,35})", re.ASCII)
 PATCH_EXTENSIONS = {".zip", ".pchtxt", ".ips", ".ips32"}
+INSTALL_SCOPES = {"exefs", "cheats", "romfs", "romfs_ext", "romfslite"}
 ZIP_VERSION = re.compile(r"(?i)(?<!\w)(?:v\.?\d+(?:\.\d+)+[a-z]?|\d+(?:\.\d+){2,}(?=\s*\]?$))(?!\w)")
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_ZIP_BYTES = 64 * 1024 * 1024
@@ -195,14 +201,33 @@ def safe_path(path):
             and not any(unicodedata.category(c).startswith("C") for c in path))
 
 
+def pchtxt_lines(data):
+    for line in re.split(rb"[\r\n]+", data):
+        quote = None
+        for match in PCHTXT_TOKEN.finditer(line):
+            token = match[0]
+            if token in (b'"', b"'"):
+                if quote is None:
+                    quote = token
+                elif token == quote:
+                    quote = None
+            elif quote is None and token in (b"/", b"#"):
+                line = line[:match.start()]
+                break
+        line = line.strip()
+        if len(line) > 2 and line.startswith(b"@"):
+            yield line[1:2].lower(), line
+        elif line:
+            yield b"", line
+
+
 def pchtxt_build(data):
     headers = []
-    for line in re.split(rb"[\r\n]+", data):
-        line = line.lstrip()
-        if line.lower().startswith(b"@s"):
+    for directive, line in pchtxt_lines(data):
+        if directive == b"s":
             break
-        if line.lower().startswith(b"@n"):
-            headers.append(NSOBID.fullmatch(re.split(rb"[/#]", line, 1)[0].rstrip()))
+        if directive == b"n":
+            headers.append(NSOBID.fullmatch(line))
     if len(headers) != 1 or headers[0] is None:
         return None
     build = headers[0][1].decode("ascii").upper()
@@ -234,12 +259,33 @@ def loose_pchtxt(snap, path, row, omissions, allowed=True):
 
 
 def has_patch_records(data):
-    return re.search(rb"(?im)^\s*@enabled\b", data) and re.search(rb"(?im)^\s*[0-9a-f]{6,8}[ \t]+\S", data)
+    if b"\0" not in data:
+        enabled = False
+        for directive, line in pchtxt_lines(data):
+            if directive == b"s":
+                break
+            if directive in (b"e", b"d"):
+                enabled = directive == b"e"
+            elif enabled and not directive and PCHTXT_RECORD.fullmatch(line):
+                return True
+    return False
 
 
 def add_archive_builds(row, records, allowed=True):
     for build, target, payload in records:
         row.add_build(build, target, payload if allowed else None)
+
+
+def root_allows_downloads(snap, omissions):
+    try:
+        restricted = any(PROHIBITION.search(snap.text(path)) for path in snap.files
+                         if path.lower() == "readme.md")
+    except (ImportFailure, UnicodeError):
+        omissions["unreadable root README"] += 1
+        return False
+    if restricted:
+        omissions["repository restricts third-party tools"] += 1
+    return not restricted
 
 
 def kind_for(name):
@@ -324,9 +370,8 @@ def zip_variants(snap, path, omissions, outer_name=None, *, bracketed=False):
                 omissions["unreadable ZIPs"] += 1
                 return {}
             duplicates = Counter(info.filename for info in members)
-            clean_archive = safe_path(path)
+            clean_archive = not comment and safe_path(path)
             buckets = {}
-            browse_only = set()
             for info in members:
                 if info.is_dir():
                     continue
@@ -343,6 +388,8 @@ def zip_variants(snap, path, omissions, outer_name=None, *, bracketed=False):
                     if "\\" in info.filename or any(part in ("", ".", "..") for part in path_parts):
                         continue
                 filename = path_parts[-1]
+                folders = [part.lower() for part in path_parts[:-1]]
+                component = not INSTALL_SCOPES.isdisjoint(folders)
                 if (re.match(r"(?i)^(?:readme|licen[cs]e|copying|(?:mods?\s+)?instructions?)\b", filename)
                         and info.file_size <= MAX_PATCH_BYTES):
                     try:
@@ -350,32 +397,36 @@ def zip_variants(snap, path, omissions, outer_name=None, *, bracketed=False):
                             clean_archive &= not PROHIBITION.search(metadata_text(note.read(MAX_PATCH_BYTES + 1)))
                     except (OSError, RuntimeError, zipfile.BadZipFile, NotImplementedError, UnicodeError, zlib.error):
                         clean_archive = False
+                if not component:
                     continue
-                if len(path_parts) == 2 and outer_name:
-                    name, label, scope = outer_name, "", path_parts[0].lower()
-                elif len(path_parts) >= 3 and (not bracketed or path_parts[0].startswith("[")):
+                if len(folders) == 1 and outer_name:
+                    name, label, scope = outer_name, "", folders[0]
+                elif (len(folders) >= 2 and folders[0] not in INSTALL_SCOPES
+                      and folders[1] in INSTALL_SCOPES and (not bracketed or path_parts[0].startswith("["))):
                     label = path_parts[0]
                     if not clean(label) or SWITCH_TWO.search(label) or HARDWARE_ONLY.search(label):
                         continue
                     name = display_variant(ZIP_VERSION.sub("", label).replace("][", " ")
                                            .replace("[", "").replace("]", ""))
-                    scope = path_parts[1].lower()
+                    scope = folders[1]
                 else:
+                    clean_archive = False
                     continue
-                if not name or scope not in ("exefs", "cheats", "romfs"):
+                if not name:
+                    clean_archive = False
                     continue
-                if scope == "romfs" or filename in ("main.npdm", "subsdk3", "subsdk9"):
-                    browse_only.add(name)
-                buckets.setdefault((name, label), []).append((info, scope, filename, len(path_parts) <= 3))
+                buckets.setdefault((name, label), []).append((info, scope, filename, len(folders) <= 2))
+            labeled = any(label for _, label in buckets)
+            clean_archive &= not labeled or all(label for _, label in buckets)
             sha256 = hashlib.sha256(data).hexdigest() if clean_archive and buckets else ""
-            for (name, _), members in buckets.items():
-                records = variants.setdefault(name, [])
+            for (name, label), members in buckets.items():
+                records = []
                 standalone = clean_archive and (len(members) == 1 or all(
                     scope == "exefs" and leaf and ZIP_PATCH_VERSION.fullmatch(filename)
                     for _, scope, filename, leaf in members
                 ))
                 for info, scope, filename, leaf in members:
-                    if not leaf or scope == "romfs":
+                    if not leaf or scope not in ("exefs", "cheats"):
                         continue
                     build = cheat_build(filename) if scope == "cheats" else None
                     is_patch = scope == "exefs" and filename.lower().endswith(".pchtxt")
@@ -408,14 +459,27 @@ def zip_variants(snap, path, omissions, outer_name=None, *, bracketed=False):
                             tag = selected[0] if len(selected) == 1 else ""
                         payload = Payload(path, len(data), sha256, "cheat", info.filename, tag) if tag else None
                         records.append((build, "main", payload))
+                if records or ((label or not labeled) and any(
+                    scope == "romfs" or filename in ("main.npdm", "subsdk3", "subsdk9")
+                    for _, scope, filename, _ in members
+                )):
+                    variants.setdefault(name, []).extend(records)
     except (OSError, RuntimeError, zipfile.BadZipFile, ValueError, zlib.error):
         omissions["unreadable ZIPs"] += 1
         return {}
-    return {name: records for name, records in variants.items() if records or name in browse_only}
+    return variants
 
 
 def kenji(snap, omissions):
     rows = {}
+    allowed = root_allows_downloads(snap, omissions)
+    components = defaultdict(list)
+    for path in snap.files:
+        parts = path.split("/")
+        for i in range(3, len(parts) - 1):
+            if parts[i].lower() in INSTALL_SCOPES:
+                components[tuple(parts[:i])].append(parts[i:])
+                break
     for path in snap.files:
         parts = path.split("/")
         ext = Path(parts[-1]).suffix.lower()
@@ -436,11 +500,17 @@ def kenji(snap, omissions):
         if not row:
             continue
         if ext == ".pchtxt":
-            loose_pchtxt(snap, path, row, omissions)
+            siblings = components.get(tuple(parts[:-2]), ())
+            standalone = bool(siblings) and (len(siblings) == 1 or all(
+                len(item) == 2 and item[0].lower() == "exefs" and ZIP_PATCH_VERSION.fullmatch(item[1])
+                for item in siblings
+            ))
+            loose_pchtxt(snap, path, row, omissions, allowed and standalone)
         else:
             variants = zip_variants(snap, path, omissions, name)
             if len(variants) == 1:
-                add_archive_builds(row, next(iter(variants.values())))
+                variant, builds = next(iter(variants.items()))
+                add_archive_builds(row, builds, allowed and variant.casefold() == name.casefold())
             else:
                 omissions["ZIPs without resolved variants"] += 1
     return rows.values()
@@ -448,6 +518,7 @@ def kenji(snap, omissions):
 
 def fl4sh(snap, omissions):
     rows = {}
+    allowed = root_allows_downloads(snap, omissions)
     for path in snap.files:
         if not path.lower().endswith(".zip"):
             continue
@@ -471,7 +542,7 @@ def fl4sh(snap, omissions):
         for name, builds in variants.items():
             kind = "graphics" if name == "Emulator mod pack" else kind_for(name)
             row = add_variant(rows, omissions, title, game, name, kind)
-            add_archive_builds(row, builds)
+            add_archive_builds(row, builds, allowed)
     return rows.values()
 
 
@@ -503,6 +574,7 @@ def cheat_tag(tag):
 
 def chansey(snap, omissions):
     rows = {}
+    allowed = root_allows_downloads(snap, omissions)
     cheats = {}
     for path in snap.files:
         match = re.fullmatch(rf"titles/({TITLE_ID})/cheats/([^/]+)", path, re.I | re.ASCII)
@@ -545,7 +617,7 @@ def chansey(snap, omissions):
                     if (classified := cheat_tag(tag))]
             if not tags:
                 omissions["cheat files without supported tags"] += 1
-            sha256 = hashlib.sha256(data).hexdigest() if tags and safe_path(cheat_path) else ""
+            sha256 = hashlib.sha256(data).hexdigest() if allowed and tags and safe_path(cheat_path) else ""
             for (name, kind), tag, usable in tags:
                 key = (title, name.casefold())
                 row = rows.setdefault(key, Listing(title, clean(game), name, kind, ", ".join(authors), 1))
@@ -622,6 +694,7 @@ def stevens_variant(tail):
 
 def stevens(snap, omissions):
     rows = {}
+    root_allowed = root_allows_downloads(snap, omissions)
     readmes = {
         tuple(path.split("/")[:-1]): snap.text(path)
         for path in snap.files if "/" in path and path.split("/")[-1].lower() == "readme.md"
@@ -675,22 +748,23 @@ def stevens(snap, omissions):
         if not name and not variants:
             omissions["unresolved variant"] += 1
             continue
-        if name == "Mods Dynamic FPS":
-            name = "Dynamic FPS BETA"
         documented_name = next((m[1].strip("* ") for doc in documents if (m := GAME_LABEL.search(doc))), "")
         if documented_name:
             game = clean(documented_name)
         if parts[0] == "Sonic x Shadow Generations":
             game += " (Shadow)" if title == "01005EA01C0FC000" else " (Sonic)"
+        allowed = root_allowed and not any(PROHIBITION.search(doc) for doc in documents)
+        if not allowed:
+            omissions["assets restricted by third-party tool terms"] += 1
+        outer_name = "Dynamic FPS BETA" if name == "Mods Dynamic FPS" else name
         if not variants:
-            variants = {name: []}
+            variants = {outer_name: []}
             if ext == ".zip":
                 omissions["ZIPs without resolved variants"] += 1
         elif len(variants) == 1 and name:
-            variants = {name: next(iter(variants.values()))}
-        allowed = not any(PROHIBITION.search(doc) for doc in documents)
-        if not allowed:
-            omissions["assets restricted by third-party tool terms"] += 1
+            variant, builds = next(iter(variants.items()))
+            allowed &= variant.casefold() in {name.casefold(), outer_name.casefold()}
+            variants = {outer_name: builds}
         for variant, builds in variants.items():
             author = next((credit for doc in documents if (credit := readme_credits(doc, variant))), "")
             if title == "01003AE01AA76000":
@@ -795,7 +869,7 @@ def main():
     except (ImportFailure, UnicodeError, ValueError, OSError) as error:
         parser.exit(1, f"import failed: {error}\n")
     print(json.dumps(stats, ensure_ascii=False, indent=2), file=sys.stderr)
-    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    sys.stdout.buffer.write((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":
