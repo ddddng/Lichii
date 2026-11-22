@@ -32,17 +32,28 @@ const float PREDICTOR_COST = 0.01;
 // outweigh the rest of the block.
 const float TAP_LIMIT = 0.1;
 
-// 5x5 blocks: 3x3 ones match the wrong offset on pixel art and other fine, repeating detail.
+// 5x5 blocks: 3x3 ones match the wrong offset on pixel art and other fine, repeating detail. Each
+// block is compared without its mean, so fades and menus darkening the scene don't make the search
+// pick arbitrary offsets.
 float current_block[25];
+float current_mean;
 
 float Cost(ivec2 p, ivec2 d, ivec2 last) {
-    float sum = 0.0;
+    float previous_block[25];
+    float previous_mean = 0.0;
     int i = 0;
     for (int y = -2; y <= 2; ++y) {
         for (int x = -2; x <= 2; ++x) {
             const ivec2 coord = clamp(p + d + ivec2(x, y), ivec2(0), last);
-            sum += min(abs(current_block[i++] - texelFetch(PreviousLuma, coord, 0).r), TAP_LIMIT);
+            previous_block[i] = texelFetch(PreviousLuma, coord, 0).r;
+            previous_mean += previous_block[i++];
         }
+    }
+    previous_mean /= 25.0;
+    float sum = 0.0;
+    for (i = 0; i < 25; ++i) {
+        sum += min(abs((current_block[i] - current_mean) - (previous_block[i] - previous_mean)),
+                   TAP_LIMIT);
     }
     return sum;
 }
@@ -60,6 +71,12 @@ void main() {
             current_block[i++] = texelFetch(CurrentLuma, coord, 0).r;
         }
     }
+
+    current_mean = 0.0;
+    for (int j = 0; j < 25; ++j) {
+        current_mean += current_block[j];
+    }
+    current_mean /= 25.0;
 
     ivec2 best = ivec2(0);
     float best_cost = Cost(p, best, last);
