@@ -2900,8 +2900,15 @@ bool RasterizerVulkan::TryUnlendClear(u32 layer_count) {
             .view = maxwell3d->render_view_writes->Pack(*maxwell3d, true),
             .layer_count = layer_count,
         };
-        // The packet raised the forwarded flags: GPURender consumes them on the view.
-        maxwell3d->dirty.flags &= ~View::Forwarded();
+        // The packet raised the forwarded flags: GPURender consumes them on the view. Shaders
+        // stays: the back's next pipeline lookup consumes it (ShaderCache::RefreshStages), and a
+        // clear runs none, so dropping it kept the previous draw's shaders.
+        static const View::Flags taken = [] {
+            View::Flags flags = View::Forwarded();
+            flags.reset(VideoCommon::Dirty::Shaders);
+            return flags;
+        }();
+        maxwell3d->dirty.flags &= ~taken;
         split.PostUnlent(std::move(clear), VideoCommon::GpuSplit::UnlentKind::Clear);
     }
     if (gpu.HasSyncRequests()) {
