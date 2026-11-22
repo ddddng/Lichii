@@ -5839,7 +5839,7 @@ void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.storage_written_levels = 0;
     SetModificationTick(slot_images, image, ++modification_tick);
-    if (image.info.maxwell_gob_layout) {
+    if (!image.info.native_tiling) {
         for (ImageId other : image.overlapping_images) {
             InvalidateXc2NativeLutViews(slot_images[other]);
         }

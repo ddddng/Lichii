@@ -462,4 +462,12 @@ TEST_CASE("Cached XC2 native LUT selection is invalidated by a conflicting write
         CHECK_FALSE(Access::HasCachedView(cache, tic));
         CHECK(Access::DescriptorRevision(cache) > revision);
     }
+    SECTION("A GPU write to another non-native overlap also invalidates the native view") {
+        maxwell.maxwell_gob_layout = false;
+        const auto other = Access::Insert(cache, maxwell, gpu_addr, cpu_addr);
+        Access::LinkOverlap(cache, target, other);
+        cache.MarkModification(other);
+        CHECK_FALSE(Access::HasCachedView(cache, tic));
+        CHECK(Access::DescriptorRevision(cache) > revision);
+    }
 }
