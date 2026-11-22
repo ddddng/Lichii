@@ -3502,6 +3502,10 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     const VkBuffer src_buffer = buffer;
     const VkImage vk_image = *original_image;
     const VkImageAspectFlags vk_aspect_mask = aspect_mask;
+    const bool compact = True(flags & ImageFlagBits::CompactLayers);
+    if (compact) {
+        runtime->TransitionImageLayout(*this);
+    }
     const bool was_initialized = std::exchange(initialized, true);
 
     scheduler->Record([src_buffer, vk_image, vk_aspect_mask, was_initialized,

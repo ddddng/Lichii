@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 
@@ -105,7 +106,7 @@ TEST_CASE("The oversized BC6H array is rejected or backed without sparse residen
     Vulkan::MemoryAllocator allocator(*device);
     Vulkan::StateTracker tracker;
     Vulkan::Scheduler scheduler(*device, tracker);
-    Vulkan::StagingBufferPool staging(*device, allocator, scheduler);
+    Vulkan::StagingBufferPool staging(*device, allocator, scheduler, nullptr, 8);
     Vulkan::DescriptorPool descriptors(*device, scheduler);
     Vulkan::BlitImageHelper blit(*device, scheduler, tracker, descriptors);
     Vulkan::RenderPassCache render_passes(*device);
@@ -143,6 +144,9 @@ TEST_CASE("The oversized BC6H array is rejected or backed without sparse residen
     REQUIRE_FALSE(True(compact.flags & VideoCommon::ImageFlagBits::Unbacked));
     REQUIRE(compact.MemoryBlock().size > 0);
     CHECK(compact.host_level_offset >= 3);
+    if (const char* expected = std::getenv("LICHII_TEST_COMPACT_BC6H_MIP")) {
+        CHECK(compact.host_level_offset == std::strtoul(expected, nullptr, 10));
+    }
     CHECK(compact.guest_size_bytes == 0x16ad80000);
     const auto last_layer = compact.TryFindBase(address + 67ULL * info.layer_stride);
     REQUIRE(last_layer.has_value());
