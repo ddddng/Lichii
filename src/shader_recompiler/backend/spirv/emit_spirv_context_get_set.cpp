@@ -523,11 +523,24 @@ void EmitSetFragDepth(EmitContext& ctx, Id value) {
     if (ctx.runtime_info.quantize_frag_depth_d24) {
         // Two passes that compute the same depth a few float ULPs apart store the same D24 value
         // on the guest, so an equal depth test between them passes there; keep that on the host.
+        // Fixed-function depth stays a float, so FragCoord.z passes through unrounded to keep
+        // matching it.
+        const Id f32{ctx.F32[1]};
         const Id max_unorm{ctx.Const(16777215.0f)};
-        const Id clamped{ctx.OpNMin(ctx.F32[1], ctx.OpNMax(ctx.F32[1], depth, ctx.f32_zero_value),
-                                    ctx.Const(1.0f))};
-        const Id scaled{ctx.OpRoundEven(ctx.F32[1], ctx.OpFMul(ctx.F32[1], clamped, max_unorm))};
-        depth = ctx.OpFDiv(ctx.F32[1], scaled, max_unorm);
+        const Id half{ctx.Const(0.5f)};
+        const Id one{ctx.Const(1.0f)};
+        const Id clamped{ctx.OpNMin(f32, ctx.OpNMax(f32, depth, ctx.f32_zero_value), one)};
+        // The product can round to the wrong side of a half; the fused error picks the neighbour.
+        const Id guess{ctx.OpRoundEven(f32, ctx.OpFMul(f32, clamped, max_unorm))};
+        const Id error{ctx.OpFma(f32, clamped, max_unorm, ctx.OpFNegate(f32, guess))};
+        const Id step{ctx.OpSelect(f32, ctx.OpFOrdGreaterThan(ctx.U1, error, half), one,
+                                   ctx.OpSelect(f32, ctx.OpFOrdLessThan(ctx.U1, error,
+                                                                         ctx.OpFNegate(f32, half)),
+                                                ctx.OpFNegate(f32, one), ctx.f32_zero_value))};
+        const Id rounded{ctx.OpFDiv(f32, ctx.OpFAdd(f32, guess, step), max_unorm)};
+        const Id frag_z{ctx.OpLoad(f32, ctx.OpAccessChain(ctx.input_f32, ctx.input_position,
+                                                          ctx.Const(2u)))};
+        depth = ctx.OpSelect(f32, ctx.OpFOrdEqual(ctx.U1, depth, frag_z), depth, rounded);
     }
     ctx.OpStore(ctx.frag_depth, depth);
 }

@@ -42,7 +42,7 @@ size_t CountRoundEven(const std::vector<u32>& code) {
     return count;
 }
 
-std::vector<u32> EmitFragDepth(bool quantize) {
+std::vector<u32> EmitFragDepth(bool quantize, bool from_frag_coord) {
     Shader::ObjectPool<IR::Inst> pool;
     IR::Block block{pool};
     IR::Program program;
@@ -52,8 +52,12 @@ std::vector<u32> EmitFragDepth(bool quantize) {
     program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
                            {{}, IR::AbstractSyntaxNode::Type::Return}};
     IR::IREmitter ir{block};
-    ir.SetFragDepth(ir.GetAttribute(IR::Attribute::PositionZ));
-    program.info.loads.Set(IR::Attribute::PositionZ, true);
+    if (from_frag_coord) {
+        ir.SetFragDepth(ir.GetAttribute(IR::Attribute::PositionZ));
+        program.info.loads.Set(IR::Attribute::PositionZ, true);
+    } else {
+        ir.SetFragDepth(ir.Imm32(0.25f));
+    }
     program.info.stores_frag_depth = true;
     Shader::Profile profile{};
     profile.supported_spirv = 0x00010300;
@@ -66,6 +70,10 @@ std::vector<u32> EmitFragDepth(bool quantize) {
 
 TEST_CASE("SPIR-V FragDepth is rounded to D24 only when the host emulates D24",
           "[video_core][spirv][frag_depth_d24]") {
-    CHECK(CountRoundEven(EmitFragDepth(false)) == 0);
-    CHECK(CountRoundEven(EmitFragDepth(true)) == 1);
+    for (const bool from_frag_coord : {false, true}) {
+        CAPTURE(from_frag_coord);
+        CHECK(CountRoundEven(EmitFragDepth(false, from_frag_coord)) == 0);
+        // Without a FragCoord load of its own the shader still declares FragCoord to compare.
+        CHECK(CountRoundEven(EmitFragDepth(true, from_frag_coord)) == 1);
+    }
 }
