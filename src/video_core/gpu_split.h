@@ -1293,6 +1293,9 @@ private:
     [[nodiscard]] u64 FrontPosition(std::memory_order order) const {
         return two_positions ? played.load(order) : consumed.load(order);
     }
+    [[nodiscard]] bool Reached(u64 target, bool on_engine, std::memory_order order) const {
+        return on_engine ? ReachedOnEngine(target, order) : FrontPosition(order) >= target;
+    }
     /// The back after storing "consumed", GPURender after each packet: raises "played".
     void RaisePlayed();
 

@@ -1035,8 +1035,7 @@ void GpuSplit::SleepForBack(u64 target, bool wait_for_idle, bool on_engine) {
     front_waiting.store(true, std::memory_order_seq_cst);
     const u32 seen = front_wake.load(std::memory_order_seq_cst);
     if (back_running.load(std::memory_order_seq_cst) &&
-        ((on_engine ? !ReachedOnEngine(target, std::memory_order_seq_cst)
-                    : FrontPosition(std::memory_order_seq_cst) < target) ||
+        (!Reached(target, on_engine, std::memory_order_seq_cst) ||
          (wait_for_idle && !back_quiet.load(std::memory_order_seq_cst)))) {
         front_wake.wait(seen, std::memory_order_seq_cst);
     }
