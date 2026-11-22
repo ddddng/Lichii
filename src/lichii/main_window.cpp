@@ -41,18 +41,21 @@
 #include "install_dialog.h"
 
 #include "bootmanager.h"
-#include "loading_screen.h"
-#include "qt_common/util/vk.h"
-#include "ryujinx_dialog.h"
-#include "set_play_time_dialog.h"
-#include "util/util.h"
+#include "lichii/bug_report_dialog.h"
 #include "lichii/game/game_list.h"
 #include "lichii/mod_store/mod_store_dialog.h"
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/spotlight/launcher.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/whats_new_dialog.h"
-#include "lichii/bug_report_dialog.h"
+#include "loading_screen.h"
+#include "qt_common/util/vk.h"
+#include "ryujinx_dialog.h"
+#include "set_play_time_dialog.h"
+#include "util/util.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #ifdef LICHII_NX_TOOLS
 #include "lichii/nx_tools.h"
@@ -111,6 +114,7 @@
 #include <QSet>
 #include <QShortcut>
 #include <QStatusBar>
+#include <QVBoxLayout>
 #include <QtConcurrentRun>
 
 #ifdef __APPLE__
@@ -1070,8 +1074,9 @@ void MainWindow::WebBrowserOpenWebPage(const std::string& main_url,
         const auto scale_ratio = devicePixelRatioF();
         web_applet->resize(layout.screen.GetWidth() / scale_ratio,
                            layout.screen.GetHeight() / scale_ratio);
-        web_applet->move(layout.screen.left / scale_ratio,
-                         (layout.screen.top / scale_ratio) + menuBar()->height());
+        const QPoint origin = ui->horizontalLayout->parentWidget()->mapTo(this, QPoint{});
+        web_applet->move(origin + QPoint(layout.screen.left / scale_ratio,
+                                        layout.screen.top / scale_ratio));
         web_applet->setZoomFactor(static_cast<qreal>(layout.screen.GetWidth() / scale_ratio) /
                                   static_cast<qreal>(Layout::ScreenUndocked::Width));
 
@@ -1174,13 +1179,46 @@ void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
 
+    auto* content = new QWidget(ui->centralwidget);
+    delete ui->horizontalLayout;
+    ui->horizontalLayout = new QHBoxLayout(content);
+    ui->horizontalLayout->setContentsMargins(0, 0, 0, 0);
+    ui->horizontalLayout->setSpacing(0);
+    auto* frame = new QVBoxLayout(ui->centralwidget);
+    frame->setContentsMargins(0, 0, 0, 0);
+    frame->setSpacing(0);
+    running_title_bar = new Spotlight::RunningTitleBar(ui->centralwidget);
+    frame->addWidget(running_title_bar);
+    frame->addWidget(content, 1);
+
     game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
                              *QtCommon::system, this);
-    ui->horizontalLayout->addWidget(game_list);
-
     game_list_placeholder = new GameListPlaceholder(this);
-    ui->horizontalLayout->addWidget(game_list_placeholder);
-    game_list_placeholder->setVisible(false);
+    ui->menu_View->removeAction(ui->action_Show_Filter_Bar);
+    ui->action_Show_Filter_Bar->setCheckable(false);
+    launcher = new Spotlight::Launcher(this, game_list, game_list_placeholder, running_title_bar,
+                                       *play_time_manager,
+                                       {.load_file = ui->action_Load_File,
+                                        .load_folder = ui->action_Load_Folder,
+                                        .install = ui->action_Install_File_NAND,
+                                        .settings = ui->action_Configure,
+                                        .search = ui->action_Show_Filter_Bar,
+                                        .grid = ui->action_Grid_View,
+                                        .list = ui->action_Tree_View,
+                                        .tools = ui->menu_Tools,
+                                        .multiplayer = ui->menu_Multiplayer,
+                                        .help = ui->menu_Help},
+                                       content);
+    ui->horizontalLayout->addWidget(launcher);
+    connect(launcher, &Spotlight::Launcher::RescanRequested, this, &MainWindow::OnGameListRefresh);
+    connect(game_list, &GameList::OpenGameModsRequested, this,
+            [this](u64 title_id, const std::string& file_name) {
+                QSet<QString> store_toggled;
+                if (OpenModStore(this, title_id, file_name, store_toggled) ||
+                    !store_toggled.isEmpty()) {
+                    OnGameListRefresh();
+                }
+            });
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -1728,7 +1766,7 @@ void MainWindow::SetDefaultUIGeometry() {
 }
 
 void MainWindow::RestoreUIState() {
-    setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+    setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
     restoreGeometry(UISettings::values.geometry);
     // Work-around because the games list isn't supposed to be full screen
     if (isFullScreen()) {
@@ -1746,9 +1784,6 @@ void MainWindow::RestoreUIState() {
     ui->action_Fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
 
     ui->action_Enable_Overlay_Applet->setChecked(Settings::values.enable_overlay.GetValue());
-
-    ui->action_Show_Filter_Bar->setChecked(UISettings::values.show_filter_bar.GetValue());
-    game_list->SetFilterVisible(ui->action_Show_Filter_Bar->isChecked());
 
     ui->action_Show_Status_Bar->setChecked(UISettings::values.show_status_bar.GetValue());
     statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
@@ -1902,7 +1937,7 @@ void MainWindow::ConnectMenuEvents() {
     // View
     connect_menu(ui->action_Fullscreen, &MainWindow::ToggleFullscreen);
     connect_menu(ui->action_Single_Window_Mode, &MainWindow::ToggleWindowMode);
-    connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnToggleFilterBar);
+    connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnFocusLibrarySearch);
     connect_menu(ui->action_Show_Status_Bar, &MainWindow::OnToggleStatusBar);
     connect_menu(ui->action_Show_Performance_Overlay, &MainWindow::OnTogglePerfOverlay);
 #ifdef HAS_RESHADE
@@ -2711,8 +2746,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // Update the GUI
     UpdateStatusButtons();
     if (ui->action_Single_Window_Mode->isChecked()) {
-        game_list->hide();
-        game_list_placeholder->hide();
+        launcher->SetInlineEmulation(true);
     }
     status_bar_update_timer.start(500);
     renderer_status_button->setDisabled(true);
@@ -2760,6 +2794,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (auto custom_title = QtCommon::Game::ReadCustomTitle(title_id); !custom_title.empty()) {
         title_name = std::move(custom_title);
     }
+    const QString windowed_title = QString::fromStdString(title_name);
     const bool is_64bit = QtCommon::system->Kernel().ApplicationProcess()->Is64Bit();
     const auto instruction_set_suffix = is_64bit ? tr("(64-bit)") : tr("(32-bit)");
     title_name = tr("%1 %2", "%1 is the title name. %2 indicates if the title is 64-bit or 32-bit")
@@ -2768,6 +2803,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     LOG_INFO(Frontend, "Booting game: {:016X} | {} | {}", title_id, title_name, title_version);
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
+    running_title_bar->SetGameTitle(windowed_title);
 
     loading_screen->Prepare(QtCommon::system->GetAppLoader());
     loading_screen->show();
@@ -3037,12 +3073,7 @@ void MainWindow::OnEmulationStopped() {
     render_window->hide();
     loading_screen->hide();
     loading_screen->Clear();
-    if (game_list->IsEmpty()) {
-        game_list_placeholder->show();
-    } else {
-        game_list->show();
-    }
-    game_list->SetFilterFocus();
+    launcher->SetInlineEmulation(false);
     tas_label->clear();
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
@@ -3140,6 +3171,7 @@ void MainWindow::StoreRecentFile(const QString& filename) {
 }
 
 void MainWindow::UpdateRecentFiles() {
+    game_list->RefreshLibraryOrder();
     const int num_recent_files =
         (std::min)(static_cast<int>(UISettings::values.recent_files.size()), max_recent_files_item);
 
@@ -3616,11 +3648,8 @@ void MainWindow::OnGameListAddDirectory() {
 }
 
 void MainWindow::OnGameListShowList(bool show) {
-    if (emulation_running && ui->action_Single_Window_Mode->isChecked())
-        return;
-    game_list->setVisible(show);
-    game_list_placeholder->setVisible(!show);
-};
+    launcher->SetLibraryAvailable(show);
+}
 
 void MainWindow::OnGameListOpenPerGameProperties(u64 title_id, const std::string& file) {
     {
@@ -4232,7 +4261,10 @@ void MainWindow::ShowFullscreen() {
     if (ui->action_Single_Window_Mode->isChecked()) {
         UISettings::values.geometry = saveGeometry();
 
-        ui->menubar->hide();
+        launcher->SetInlineFullscreen(true);
+        if constexpr (!Spotlight::ClientFrame) {
+            ui->menubar->hide();
+        }
         statusBar()->hide();
 
         show_fullscreen(this);
@@ -4249,21 +4281,24 @@ void MainWindow::HideFullscreen() {
             restoreGeometry(UISettings::values.geometry);
         } else {
             hide();
-            setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+            setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
             restoreGeometry(UISettings::values.geometry);
             raise();
             show();
         }
 
         statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
-        ui->menubar->show();
+        launcher->SetInlineFullscreen(false);
+        if constexpr (!Spotlight::ClientFrame) {
+            ui->menubar->show();
+        }
     } else {
         if (UsingExclusiveFullscreen()) {
             render_window->showNormal();
             render_window->restoreGeometry(UISettings::values.renderwindow_geometry);
         } else {
             render_window->hide();
-            render_window->setWindowFlags(windowFlags() & ~Qt::FramelessWindowHint);
+            render_window->setWindowFlag(Qt::FramelessWindowHint, false);
             render_window->restoreGeometry(UISettings::values.renderwindow_geometry);
             render_window->raise();
             render_window->show();
@@ -4280,7 +4315,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->setFocus();
-            game_list->hide();
+            launcher->SetInlineEmulation(true);
         }
 
     } else {
@@ -4291,7 +4326,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->RestoreGeometry();
-            game_list->show();
+            launcher->SetInlineEmulation(false);
         }
     }
 }
@@ -4313,8 +4348,9 @@ void MainWindow::ResetWindowSize(u32 width, u32 height) {
     }
     const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
     const auto status_bar_height = (single_window && show_status_bar) ? statusBar()->height() : 0;
-    const auto menu_bar_height = single_window ? menuBar()->height() : 0;
-    const auto extra_height = menu_bar_height + status_bar_height;
+    const auto menu_bar_height = single_window && menuBar()->isVisible() ? menuBar()->height() : 0;
+    const auto title_bar_height = running_title_bar->isVisible() ? running_title_bar->height() : 0;
+    const auto extra_height = menu_bar_height + title_bar_height + status_bar_height;
 
     auto* current_screen = this->screen();
     if (!current_screen) {
@@ -5161,12 +5197,8 @@ void MainWindow::OnDataDialog() {
     OnGameListRefresh();
 }
 
-void MainWindow::OnToggleFilterBar() {
-    game_list->SetFilterVisible(ui->action_Show_Filter_Bar->isChecked());
-    if (ui->action_Show_Filter_Bar->isChecked())
-        game_list->SetFilterFocus();
-    else
-        game_list->ClearFilter();
+void MainWindow::OnFocusLibrarySearch() {
+    game_list->SetFilterFocus();
 }
 
 void MainWindow::OnToggleStatusBar() {
@@ -6085,6 +6117,7 @@ void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view
     if (title_name.empty()) {
         setWindowTitle(QString::fromStdString(window_title));
     } else {
+        running_title_bar->SetGameTitle(QString::fromUtf8(title_name.data(), title_name.size()));
         const auto run_title = [window_title, title_name, title_version, gpu_vendor]() {
             if (title_version.empty()) {
                 return fmt::format("{} | {} | {}", window_title, title_name, gpu_vendor);
@@ -6468,7 +6501,6 @@ void MainWindow::UpdateUISettings() {
     UISettings::values.state = saveState();
     UISettings::values.single_window_mode = ui->action_Single_Window_Mode->isChecked();
     UISettings::values.fullscreen = ui->action_Fullscreen->isChecked();
-    UISettings::values.show_filter_bar = ui->action_Show_Filter_Bar->isChecked();
     UISettings::values.show_status_bar = ui->action_Show_Status_Bar->isChecked();
     UISettings::values.show_perf_overlay = ui->action_Show_Performance_Overlay->isChecked();
 
@@ -6828,16 +6860,11 @@ void MainWindow::RequestGameExit() {
     QtCommon::system->GetAppletManager().RequestExit();
 }
 
-void MainWindow::filterBarSetChecked(bool state) {
-    ui->action_Show_Filter_Bar->setChecked(state);
-    emit(OnToggleFilterBar());
-}
-
 static void AdjustLinkColor() {
     QPalette new_pal(qApp->palette());
 
     if (UISettings::values.theme == "lichii")
-        new_pal.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
+        new_pal.setColor(QPalette::Link, Spotlight::Color::AccentLight());
     else if (UISettings::IsDarkTheme())
         new_pal.setColor(QPalette::Link, QColor(0, 190, 255, 255));
     else
@@ -6850,35 +6877,31 @@ static void AdjustLinkColor() {
 // Lichii Dark styles most widgets through its stylesheet; the palette covers what Qt draws
 // without one: item view text, disabled text, links and the native parts of dialogs.
 static QPalette LichiiPalette() {
+    using namespace Spotlight::Color;
     QPalette palette;
-    const QColor window(0x17, 0x18, 0x1b);
-    const QColor surface(0x20, 0x21, 0x25);
-    const QColor text(0xec, 0xec, 0xef);
-    const QColor disabled(0x55, 0x57, 0x5d);
-    const QColor accent(0xf0, 0x38, 0x6b);
-    palette.setColor(QPalette::Window, window);
-    palette.setColor(QPalette::WindowText, text);
-    palette.setColor(QPalette::Base, window);
-    palette.setColor(QPalette::AlternateBase, QColor(0x1b, 0x1c, 0x20));
-    palette.setColor(QPalette::ToolTipBase, QColor(0x23, 0x24, 0x29));
-    palette.setColor(QPalette::ToolTipText, text);
-    palette.setColor(QPalette::PlaceholderText, QColor(0x6f, 0x71, 0x78));
-    palette.setColor(QPalette::Text, text);
-    palette.setColor(QPalette::Button, surface);
-    palette.setColor(QPalette::ButtonText, text);
-    palette.setColor(QPalette::BrightText, Qt::white);
-    palette.setColor(QPalette::Light, QColor(0x34, 0x36, 0x3c));
-    palette.setColor(QPalette::Midlight, QColor(0x2a, 0x2c, 0x31));
-    palette.setColor(QPalette::Mid, QColor(0x23, 0x24, 0x29));
-    palette.setColor(QPalette::Dark, QColor(0x14, 0x15, 0x18));
+    palette.setColor(QPalette::Window, Window());
+    palette.setColor(QPalette::WindowText, Text());
+    palette.setColor(QPalette::Base, PanelDeep());
+    palette.setColor(QPalette::AlternateBase, Panel());
+    palette.setColor(QPalette::ToolTipBase, Panel());
+    palette.setColor(QPalette::ToolTipText, Text());
+    palette.setColor(QPalette::PlaceholderText, TextMuted());
+    palette.setColor(QPalette::Text, Text());
+    palette.setColor(QPalette::Button, Control());
+    palette.setColor(QPalette::ButtonText, Text());
+    palette.setColor(QPalette::BrightText, Text());
+    palette.setColor(QPalette::Light, Stroke());
+    palette.setColor(QPalette::Midlight, Fill());
+    palette.setColor(QPalette::Mid, Panel());
+    palette.setColor(QPalette::Dark, PanelDeep());
     palette.setColor(QPalette::Shadow, Qt::black);
-    palette.setColor(QPalette::Highlight, accent);
-    palette.setColor(QPalette::HighlightedText, Qt::white);
-    palette.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
-    palette.setColor(QPalette::LinkVisited, QColor(0xd4, 0x2c, 0x5a));
-    palette.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
-    palette.setColor(QPalette::Disabled, QPalette::Text, disabled);
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
+    palette.setColor(QPalette::Highlight, Accent());
+    palette.setColor(QPalette::HighlightedText, OnAccent());
+    palette.setColor(QPalette::Link, AccentLight());
+    palette.setColor(QPalette::LinkVisited, Accent());
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, TextFaint());
+    palette.setColor(QPalette::Disabled, QPalette::Text, TextFaint());
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, TextFaint());
     return palette;
 }
 
@@ -6954,12 +6977,15 @@ void MainWindow::UpdateUITheme() {
     if (current_theme.isEmpty())
         current_theme = default_theme;
 
+    static const QFont default_font = qApp->font();
     static bool lichii_palette = false;
     if (current_theme == QStringLiteral("lichii")) {
         qApp->setPalette(LichiiPalette());
+        qApp->setFont(Spotlight::Font(13));
         lichii_palette = true;
     } else if (lichii_palette) {
         qApp->setPalette(QPalette());
+        qApp->setFont(default_font);
         lichii_palette = false;
     }
 
