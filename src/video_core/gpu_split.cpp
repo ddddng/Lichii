@@ -1619,6 +1619,13 @@ void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
         if (((written - packet) & StampSeqMask) < (StampSeqMask >> 1)) {
             const u64 tag = stamp >> StampTagShift;
             reads_ahead_by[tag].fetch_add(1, std::memory_order_relaxed);
+            // The guest CPU wrote these bytes before the back gathered them, at no place in the
+            // stream: with one thread the image made here would read them as well. And nothing is
+            // lost: the back missed this image's registration, so the image holds the write and
+            // the page filter sends later ones to it. Counted apart, not as reads ahead.
+            if (tag == static_cast<u64>(Writer::Gather)) {
+                return;
+            }
             if (unlend.reads_ahead.fetch_add(1, std::memory_order_relaxed) < 8) {
                 u64 idle = 0;
                 for (const auto& post : idle_posts) {
@@ -1657,12 +1664,17 @@ void GpuSplit::LogUnlend() const {
     }
     std::string ahead;
     for (size_t tag = 0; tag < reads_ahead_by.size(); ++tag) {
-        if (const u64 count = reads_ahead_by[tag].load(std::memory_order_relaxed); count != 0) {
+        if (const u64 count = reads_ahead_by[tag].load(std::memory_order_relaxed);
+            count != 0 && tag != static_cast<size_t>(Writer::Gather)) {
             ahead += fmt::format(" {}:{}", WriterName(tag), count);
         }
     }
-    LOG_INFO(HW_GPU, "GPU render unlend: texture reads ahead by writer:{}",
-             ahead.empty() ? " none" : ahead);
+    LOG_INFO(
+        HW_GPU,
+        "GPU render unlend: texture reads ahead by writer:{}; {} reads of guest CPU writes the "
+        "back gathered after the draw (CPU writes have no place in the stream)",
+        ahead.empty() ? " none" : ahead,
+        reads_ahead_by[static_cast<size_t>(Writer::Gather)].load(std::memory_order_relaxed));
     LOG_INFO(HW_GPU,
              "GPU render unlend: {} draws unlent, {} lent (by reason:{}); {} lookup lends, {} "
              "stream write drains, {} GPURender flushes without the back's half, {} unlent draws "
