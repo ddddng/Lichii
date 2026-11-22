@@ -536,8 +536,13 @@ void EmitSetFragDepth(EmitContext& ctx, Id value) {
         const Id guess{ctx.OpRoundEven(f32, ctx.OpFMul(f32, clamped, max_unorm))};
         const Id scaled{ctx.OpFMul(f32, clamped, ctx.Const(16777216.0f))};
         const Id residual{ctx.OpFSub(f32, scaled, guess)};
-        const Id up{ctx.OpFOrdGreaterThan(ctx.U1, ctx.OpFSub(f32, residual, half), clamped)};
-        const Id down{ctx.OpFOrdLessThan(ctx.U1, ctx.OpFAdd(f32, residual, half), clamped)};
+        const Id residual_up{ctx.OpFSub(f32, residual, half)};
+        const Id residual_down{ctx.OpFAdd(f32, residual, half)};
+        for (const Id exact : {residual, residual_up, residual_down}) {
+            ctx.Decorate(exact, spv::Decoration::NoContraction);
+        }
+        const Id up{ctx.OpFOrdGreaterThan(ctx.U1, residual_up, clamped)};
+        const Id down{ctx.OpFOrdLessThan(ctx.U1, residual_down, clamped)};
         const Id step{ctx.OpSelect(f32, up, one,
                                    ctx.OpSelect(f32, down, ctx.OpFNegate(f32, one),
                                                 ctx.f32_zero_value))};
