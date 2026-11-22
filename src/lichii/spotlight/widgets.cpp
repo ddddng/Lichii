@@ -3,10 +3,12 @@
 
 #include "lichii/spotlight/widgets.h"
 
+#include <QGraphicsOpacityEffect>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPropertyAnimation>
 
 #include "lichii/spotlight/theme.h"
 
@@ -19,7 +21,86 @@ void FillRounded(QPainter& painter, const QRectF& rect, qreal radius, const QCol
     painter.setBrush(fill);
     painter.drawRoundedRect(stroke.isValid() ? rect.adjusted(0.5, 0.5, -0.5, -0.5) : rect, radius, radius);
 }
+
+QColor Mix(const QColor& from, const QColor& to, qreal t) {
+    return QColor::fromRgbF(from.redF() + (to.redF() - from.redF()) * t,
+                            from.greenF() + (to.greenF() - from.greenF()) * t,
+                            from.blueF() + (to.blueF() - from.blueF()) * t,
+                            from.alphaF() + (to.alphaF() - from.alphaF()) * t);
+}
+
+class ShowFade final : public QObject {
+public:
+    ShowFade(QWidget* window, int duration_) : QObject(window), duration(duration_) {
+        window->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::Show) {
+            auto* window = static_cast<QWidget*>(watched);
+            window->setWindowOpacity(0);
+            auto* animation = new QPropertyAnimation(window, "windowOpacity", window);
+            animation->setDuration(duration);
+            animation->setStartValue(0.0);
+            animation->setEndValue(1.0);
+            animation->setEasingCurve(QEasingCurve::OutCubic);
+            animation->start(QAbstractAnimation::DeleteWhenStopped);
+        }
+        return false;
+    }
+
+private:
+    int duration;
+};
 } // namespace
+
+void FadeIn(QWidget* widget, int duration) {
+    if (!widget->isVisible() || widget->graphicsEffect() != nullptr) {
+        return;
+    }
+    auto* effect = new QGraphicsOpacityEffect(widget);
+    effect->setOpacity(0);
+    widget->setGraphicsEffect(effect);
+    auto* animation = new QPropertyAnimation(effect, "opacity", widget);
+    animation->setDuration(duration);
+    animation->setStartValue(0.0);
+    animation->setEndValue(1.0);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    QObject::connect(
+        animation, &QAbstractAnimation::finished, widget,
+        [widget, effect] {
+            if (widget->graphicsEffect() == effect) {
+                widget->setGraphicsEffect(nullptr);
+            }
+        },
+        Qt::QueuedConnection);
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void FadeInOnShow(QWidget* window, int duration) {
+    new ShowFade(window, duration);
+}
+
+HoverFade::HoverFade(QWidget* owner) {
+    animation.setDuration(Motion::Hover);
+    animation.setEasingCurve(QEasingCurve::OutCubic);
+    animation.setStartValue(0.0);
+    animation.setEndValue(0.0);
+    QObject::connect(&animation, &QVariantAnimation::valueChanged, owner,
+                     qOverload<>(&QWidget::update));
+}
+
+void HoverFade::SetHovered(bool hovered) {
+    animation.stop();
+    animation.setStartValue(Value());
+    animation.setEndValue(hovered ? 1.0 : 0.0);
+    animation.start();
+}
+
+qreal HoverFade::Value() const {
+    return animation.currentValue().toReal();
+}
 
 CircleButton::CircleButton(QString icon, int diameter_, QWidget* parent)
     : QAbstractButton(parent), icon_name(std::move(icon)), diameter(diameter_) {
@@ -40,9 +121,9 @@ QSize CircleButton::sizeHint() const {
 void CircleButton::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    const QColor fill = isDown() || isChecked() ? Color::Stroke()
-                        : hovered               ? Color::ControlHover()
-                                                : Color::Control();
+    const QColor fill = isDown() || isChecked()
+                            ? Color::Stroke()
+                            : Mix(Color::Control(), Color::ControlHover(), hover.Value());
     FillRounded(painter, rect(), diameter / 2.0, fill, hasFocus() ? Color::Accent() : Color::Stroke());
     const int icon = diameter >= 36 ? 20 : 16;
     const QPixmap pixmap = IconPixmap(icon_name, icon, isEnabled() ? Color::Text() : Color::TextFaint(),
@@ -51,13 +132,11 @@ void CircleButton::paintEvent(QPaintEvent*) {
 }
 
 void CircleButton::enterEvent(QEnterEvent*) {
-    hovered = true;
-    update();
+    hover.SetHovered(true);
 }
 
 void CircleButton::leaveEvent(QEvent*) {
-    hovered = false;
-    update();
+    hover.SetHovered(false);
 }
 
 PillButton::PillButton(const QString& text, QString icon, Kind kind_, int height_, QWidget* parent)
@@ -91,15 +170,16 @@ void PillButton::paintEvent(QPaintEvent*) {
     QColor fill, stroke, ink;
     switch (kind) {
     case Kind::Accent:
-        fill = hovered ? Color::AccentLight() : Color::Accent();
+        fill = Mix(Color::Accent(), Color::AccentLight(), hover.Value());
         ink = Color::OnAccent();
         break;
     case Kind::Light:
-        fill = hovered ? QColor(0xf2, 0xf3, 0xf7) : Color::Text();
+        fill = Mix(Color::Text(), QColor(0xf2, 0xf3, 0xf7), hover.Value());
         ink = Color::OnLight();
         break;
     case Kind::Control:
-        fill = hovered ? Color::ControlHover() : height == 26 ? Color::Fill() : Color::Control();
+        fill = Mix(height == 26 ? Color::Fill() : Color::Control(), Color::ControlHover(),
+                   hover.Value());
         if (height != 26) {
             stroke = Color::Stroke();
         }
@@ -132,13 +212,11 @@ void PillButton::paintEvent(QPaintEvent*) {
 }
 
 void PillButton::enterEvent(QEnterEvent*) {
-    hovered = true;
-    update();
+    hover.SetHovered(true);
 }
 
 void PillButton::leaveEvent(QEvent*) {
-    hovered = false;
-    update();
+    hover.SetHovered(false);
 }
 
 SegmentedControl::SegmentedControl(QStringList options_, Kind kind_, int height_, QWidget* parent)
@@ -147,6 +225,9 @@ SegmentedControl::SegmentedControl(QStringList options_, Kind kind_, int height_
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
     setFixedHeight(height);
+    slide.setDuration(Motion::Slide);
+    slide.setEasingCurve(QEasingCurve::OutCubic);
+    connect(&slide, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
     SetOptions(std::move(options_));
 }
 
@@ -163,7 +244,14 @@ void SegmentedControl::SetCurrentIndex(int index) {
     if (index < 0 || index >= options.size() || index == current) {
         return;
     }
+    const QRectF from = SelectionRect();
     current = index;
+    slide.stop();
+    if (isVisible()) {
+        slide.setStartValue(from);
+        slide.setEndValue(QRectF(SegmentRect(current)));
+        slide.start();
+    }
     update();
     emit CurrentChanged(index);
 }
@@ -195,6 +283,11 @@ QRect SegmentedControl::SegmentRect(int index) const {
     return {};
 }
 
+QRectF SegmentedControl::SelectionRect() const {
+    return slide.state() == QAbstractAnimation::Running ? slide.currentValue().toRectF()
+                                                        : QRectF(SegmentRect(current));
+}
+
 int SegmentedControl::SegmentAt(const QPoint& point) const {
     for (int i = 0; i < options.size(); ++i) {
         if (SegmentRect(i).contains(point)) {
@@ -210,13 +303,16 @@ void SegmentedControl::paintEvent(QPaintEvent*) {
     const QRect frame(0, 0, sizeHint().width(), height);
     FillRounded(painter, frame, height / 2.0, kind == Kind::Light ? Color::Control() : Color::Fill(),
                 kind == Kind::Light ? Color::Stroke() : QColor{});
+    if (!options.isEmpty()) {
+        const QRectF selection = SelectionRect();
+        FillRounded(painter, selection, selection.height() / 2.0,
+                    kind == Kind::Light ? Color::Text() : Color::Accent());
+    }
     for (int i = 0; i < options.size(); ++i) {
         const QRect segment = SegmentRect(i);
         const bool selected = i == current;
         QColor ink = Color::Text();
         if (selected) {
-            FillRounded(painter, segment, segment.height() / 2.0,
-                        kind == Kind::Light ? Color::Text() : Color::Accent());
             ink = kind == Kind::Light ? Color::OnLight() : Color::OnAccent();
         } else if (i == hovered && enabled[i]) {
             FillRounded(painter, segment, segment.height() / 2.0, Color::Fill());
@@ -275,6 +371,17 @@ ToggleSwitch::ToggleSwitch(QWidget* parent) : QAbstractButton(parent) {
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::TabFocus);
     setFixedSize(sizeHint());
+    knob.setDuration(Motion::Slide);
+    knob.setEasingCurve(QEasingCurve::OutCubic);
+    connect(&knob, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+}
+
+void ToggleSwitch::nextCheckState() {
+    knob.stop();
+    knob.setStartValue(isChecked() ? 1.0 : 0.0);
+    knob.setEndValue(isChecked() ? 0.0 : 1.0);
+    QAbstractButton::nextCheckState();
+    knob.start();
 }
 
 QSize ToggleSwitch::sizeHint() const {
@@ -284,16 +391,19 @@ QSize ToggleSwitch::sizeHint() const {
 void ToggleSwitch::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    QColor track = isChecked() ? Color::Accent() : Color::ControlHover();
+    const qreal on = knob.state() == QAbstractAnimation::Running ? knob.currentValue().toReal()
+                     : isChecked()                                ? 1.0
+                                                                  : 0.0;
+    QColor track = Mix(Color::ControlHover(), Color::Accent(), on);
     if (!isEnabled()) {
         track.setAlphaF(track.alphaF() * 0.4f);
     }
     FillRounded(painter, rect(), height() / 2.0, track, hasFocus() ? Color::Text() : QColor{});
-    const int knob = height() - 6;
-    const int x = isChecked() ? width() - knob - 3 : 3;
+    const int diameter = height() - 6;
+    const qreal x = 3 + (width() - diameter - 6) * on;
     painter.setPen(Qt::NoPen);
     painter.setBrush(isEnabled() ? Color::Text() : Color::TextMuted());
-    painter.drawEllipse(QRect(x, 3, knob, knob));
+    painter.drawEllipse(QRectF(x, 3, diameter, diameter));
 }
 
 KeyCap::KeyCap(QString text_, QWidget* parent) : QWidget(parent), text(std::move(text_)) {

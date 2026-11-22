@@ -51,6 +51,7 @@
 #include "lichii/main_window.h"
 #include "lichii/shader_warm_dialog.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 #include "lichii/util/controller_navigation.h"
 #include "lichii/util/icon_search.h"
 #include "lichii/util/util.h"
@@ -385,6 +386,7 @@ void GameList::SetFilterText(const QString& text) {
 void GameList::SetPlatform(Lichii::LibraryPlatform new_platform) {
     platform = new_platform;
     ApplyFilter();
+    Spotlight::FadeIn(m_currentView);
 }
 
 void GameList::SetLibrarySort(Lichii::LibrarySort sort) {
@@ -537,6 +539,7 @@ void GameList::ResetViewMode() {
     carousel_view->setEnabled(false);
 
     m_currentView->setVisible(true);
+    Spotlight::FadeIn(m_currentView);
     const int side_margin = newTreeMode ? 36 : 0;
     layout->setContentsMargins(side_margin, 0, side_margin, 0);
     // MainWindow switches the view right after starting the first populate; keep it disabled

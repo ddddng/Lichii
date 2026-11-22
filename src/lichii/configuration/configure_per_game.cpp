@@ -357,6 +357,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
 
     ui->setupUi(this);
+    Spotlight::FadeInOnShow(this);
 
     setFocusPolicy(Qt::ClickFocus);
     setWindowTitle(tr("Game Settings"));

@@ -184,6 +184,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     Settings::SetConfiguringGlobal(true);
 
     ui->setupUi(this);
+    Spotlight::FadeInOnShow(this);
 
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);

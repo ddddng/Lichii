@@ -6,10 +6,34 @@
 #include <QAbstractButton>
 #include <QColor>
 #include <QStringList>
+#include <QVariantAnimation>
 #include <QWidget>
 
 // Controls shared by the Spotlight screens. Each paints itself from Spotlight's tokens.
 namespace Spotlight {
+
+/// Durations in ms shared by Spotlight transitions; every one eases out.
+namespace Motion {
+inline constexpr int Hover = 120;
+inline constexpr int Slide = 180;
+inline constexpr int Fade = 160;
+} // namespace Motion
+
+/// Fades a shown widget in, such as a page that just replaced another.
+void FadeIn(QWidget* widget, int duration = Motion::Fade);
+/// Fades a top-level window in every time it is shown.
+void FadeInOnShow(QWidget* window, int duration = Motion::Fade);
+
+/// A 0..1 value that follows the pointer entering and leaving a control.
+class HoverFade {
+public:
+    explicit HoverFade(QWidget* owner);
+    void SetHovered(bool hovered);
+    qreal Value() const;
+
+private:
+    QVariantAnimation animation;
+};
 
 /// A round icon button: the top bar's +, settings and ⋯, the hero's ⋯.
 class CircleButton : public QAbstractButton {
@@ -27,7 +51,7 @@ protected:
 private:
     QString icon_name;
     int diameter;
-    bool hovered = false;
+    HoverFade hover{this};
 };
 
 /// A rounded text button with an optional leading icon.
@@ -51,7 +75,7 @@ private:
     Kind kind;
     QColor foreground;
     int height;
-    bool hovered = false;
+    HoverFade hover{this};
 };
 
 /// Mutually exclusive options in one pill: All / Switch 2 / Switch 1, Auto / Low / Mid / High.
@@ -81,6 +105,7 @@ protected:
 
 private:
     QRect SegmentRect(int index) const;
+    QRectF SelectionRect() const;
     int SegmentAt(const QPoint& point) const;
 
     QStringList options;
@@ -89,6 +114,7 @@ private:
     int height;
     int current = 0;
     int hovered = -1;
+    QVariantAnimation slide;
 };
 
 /// The on/off switch of settings rows.
@@ -100,6 +126,10 @@ public:
 
 protected:
     void paintEvent(QPaintEvent*) override;
+    void nextCheckState() override;
+
+private:
+    QVariantAnimation knob;
 };
 
 /// A keyboard shortcut chip such as "Ctrl F".

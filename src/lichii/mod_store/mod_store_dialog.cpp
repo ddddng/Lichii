@@ -380,6 +380,7 @@ public:
         : QDialog(parent), context(std::move(ctx)), client(context.base_url, this) {
         setObjectName(QStringLiteral("spotlightModStore"));
         setWindowTitle(tr("Mod Store"));
+        Spotlight::FadeInOnShow(this);
         setFont(Spotlight::Font(13, QFont::Normal));
         resize(1280, 800);
         setMinimumSize(950, 520);
@@ -482,6 +483,8 @@ public:
         root->addWidget(header);
 
         pages = new QStackedWidget(this);
+        connect(pages, &QStackedWidget::currentChanged, this,
+                [this] { Spotlight::FadeIn(pages->currentWidget()); });
         pages->setObjectName(QStringLiteral("storeContents"));
         BuildBrowsePage();
         BuildInstalledPage();

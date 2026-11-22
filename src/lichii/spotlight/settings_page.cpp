@@ -570,13 +570,17 @@ void SettingsPage::SetCategory(int category) {
     if (filtering && categories[category].button->isHidden()) {
         search->clear();
     }
-    if (current_category != -1 && current_category != category) {
+    const bool switching = current_category != -1 && current_category != category;
+    if (switching) {
         categories[current_category].panel->hide();
         categories[current_category].button->setChecked(false);
     }
     current_category = category;
     const auto& entry = categories[category];
     entry.panel->show();
+    if (switching) {
+        FadeIn(entry.panel);
+    }
     entry.button->setChecked(true);
     heading->setText(entry.page_title);
     subtitle->setText(entry.subtitle);

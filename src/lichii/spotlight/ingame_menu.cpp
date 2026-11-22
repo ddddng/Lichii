@@ -119,6 +119,7 @@ InGameMenu::InGameMenu(const Actions& actions, QWidget* parent)
       popup_actions{actions.pause,   actions.restart,    actions.stop,
                     actions.capture, actions.fullscreen, actions.settings} {
     setAttribute(Qt::WA_TranslucentBackground);
+    FadeInOnShow(this, Motion::Hover);
     setFocusPolicy(Qt::StrongFocus);
     scroll = new MenuPanel(this);
     scroll->setFrameShape(QFrame::NoFrame);
