@@ -4116,7 +4116,15 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
             const ImageBase& image = slot_images[native_id];
             if (image.first_written_frame != 0 && image.gpu_addr == image_gpu_addr &&
                 image.info.format == info.format && image.info.size == info.size &&
-                image.IsSafeGpuCopy()) {
+                image.IsSafeGpuCopy() && False(image.flags & ImageFlagBits::GuestReplacedContents) &&
+                std::ranges::none_of(image.overlapping_images, [&](ImageId other_id) {
+                    const ImageBase& other = slot_images[other_id];
+                    return !other.info.native_tiling &&
+                           other.modification_tick > image.modification_tick &&
+                           True(other.flags & ImageFlagBits::GpuModified) &&
+                           False(other.flags & (ImageFlagBits::Remapped |
+                                                ImageFlagBits::GuestReplacedContents));
+                })) {
                 image_id = native_id;
             }
         }
