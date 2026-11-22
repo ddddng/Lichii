@@ -79,6 +79,9 @@ struct Profile {
     /// vertex and mesh shaders that already use every register, so it keeps the chain.
     bool select_global_memory_buffer{};
     bool route_single_candidates{};
+    /// With select_global_memory_buffer, every stage searches the bound buffers inline at each
+    /// access instead of calling one non-inlined search (EDEN_NX2_NV_INLINE_LOOKUP=1).
+    bool inline_global_memory_search{};
 
     bool warp_size_potentially_larger_than_guest{};
 

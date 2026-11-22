@@ -688,6 +688,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsStorageTexelBufferArrayNonUniformIndexingSupported(),
         .select_global_memory_buffer = driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
                                        device.IsNonUniformStorageBufferPointerSupported(),
+        .inline_global_memory_search = std::getenv("EDEN_NX2_NV_INLINE_LOOKUP") != nullptr,
 
         .warp_size_potentially_larger_than_guest = device.IsWarpSizePotentiallyBiggerThanGuest(),
 
@@ -734,6 +735,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     if (profile.has_broken_mesh_user_sgprs) {
         LOG_INFO(Render_Vulkan, "RADV before 26.2.5: native mesh shaders read the grid size to "
                                 "avoid the stale mesh user SGPR hang");
+    }
+    if (profile.select_global_memory_buffer) {
+        LOG_INFO(Render_Vulkan, "Global memory accesses search the bound buffers {}",
+                 profile.inline_global_memory_search
+                     ? "inline in every stage (EDEN_NX2_NV_INLINE_LOOKUP)"
+                     : "through one non-inlined function outside task and mesh programs");
     }
 
     host_info = Shader::HostTranslateInfo{
