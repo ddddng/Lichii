@@ -1816,7 +1816,15 @@ std::optional<SubresourceBase> FindSubresource(const ImageInfo& candidate, const
     if (!IsBlockLinearSizeCompatible(existing, candidate, base->level, 0, strict_size)) {
         return std::nullopt;
     }
-    // TODO: compare block sizes
+    if (True(options & RelaxedOptions::RequireBlockLayout)) {
+        const LevelInfo existing_layout = MakeLevelInfo(existing);
+        const LevelInfo candidate_layout = MakeLevelInfo(candidate);
+        if (existing.format != candidate.format ||
+            TileShift(existing_layout, base->level) != TileShift(candidate_layout, 0) ||
+            NumGobs(existing_layout, base->level) != NumGobs(candidate_layout, 0)) {
+            return std::nullopt;
+        }
+    }
     return base;
 }
 

@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/util.h"
 
@@ -111,4 +112,28 @@ TEST_CASE("A blit surface is narrowed only for a forward span into the padding",
     REQUIRE(VideoCommon::PaddedBlitWidth(surface, -4, 8) == 16);
     REQUIRE(VideoCommon::PaddedBlitWidth(surface, 0, 16) == 16);
     REQUIRE(VideoCommon::PaddedBlitWidth(surface, 0, 20) == 16);
+}
+
+TEST_CASE("Padded blit matching requires the selected mip's GOB layout",
+          "[video_core][texture_cache]") {
+    using VideoCommon::FindSubresource;
+    using VideoCommon::ImageBase;
+    using VideoCommon::RelaxedOptions;
+    constexpr GPUVAddr address = 0x10000;
+    ImageInfo parent = Depth(PixelFormat::A8B8G8R8_UNORM, 64, 80);
+    parent.resources.levels = 2;
+    const ImageBase cached(parent, address, 0);
+    const GPUVAddr mip_address = address + cached.mip_level_offsets[1];
+
+    ImageInfo surface = Depth(parent.format, 32, 40);
+    surface.block.height = 3;
+    const auto match = FindSubresource(surface, cached, mip_address,
+                                       RelaxedOptions::RequireBlockLayout, false, true);
+    REQUIRE(match);
+    REQUIRE(match->level == 1);
+
+    surface.block.height = 0;
+    REQUIRE(FindSubresource(surface, cached, mip_address, RelaxedOptions{}, false, true));
+    REQUIRE_FALSE(FindSubresource(surface, cached, mip_address, RelaxedOptions::RequireBlockLayout,
+                                  false, true));
 }

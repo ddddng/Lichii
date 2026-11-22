@@ -5064,8 +5064,7 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
         }
         ImageInfo narrow = info;
         narrow.size.width = width;
-        const ImageId id = FindImage(narrow, addr, RelaxedOptions{});
-        return id && slot_images[id].info.format == info.format ? id : ImageId{};
+        return FindImage(narrow, addr, RelaxedOptions::RequireBlockLayout);
     };
     do {
         has_deleted_images = false;
