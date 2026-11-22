@@ -2,13 +2,46 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPublicListIndependentOfDetailAndAssetLimits(t *testing.T) {
+	api := newTestAPI(t)
+	pub := api.store.publicHandler()
+	for range cap(catalogDetailSlots) {
+		catalogDetailSlots <- struct{}{}
+	}
+	for range cap(api.store.assetTransfers) {
+		api.store.assetTransfers <- struct{}{}
+	}
+	defer func() {
+		for range cap(catalogDetailSlots) {
+			<-catalogDetailSlots
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, route := range []string{"/api/v1/games", "/api/v1/mods"} {
+		w := httptest.NewRecorder()
+		pub.ServeHTTP(w, httptest.NewRequestWithContext(ctx, "GET", route, nil))
+		if w.Code != http.StatusOK || w.Header().Get("ETag") == "" {
+			t.Fatalf("blocked list %s got %d %v", route, w.Code, w.Header())
+		}
+	}
+	for _, route := range []string{"/api/v1/mods/test/preview", "/api/v1/mods/test/versions/v1/download"} {
+		w := catalogRequest(pub, "GET", route)
+		if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("saturated asset %s got %d %v", route, w.Code, w.Header())
+		}
+	}
+}
 
 func checkCatalogPage[T comparable](t *testing.T, got []T, next *int, want []T, wantNext int) {
 	t.Helper()

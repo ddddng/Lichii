@@ -78,7 +78,7 @@ func TestCatalogResponseHTTP(t *testing.T) {
 		status   int
 	}{
 		{"", "", 200},
-		{"x-gzip", "", 200},
+		{"x-gzip, identity;q=0", "gzip", 200},
 		{"*;q=0.7", "gzip", 200},
 		{"gzip;q=0, *;q=1", "", 200},
 		{"gzip;q=0.4, identity;q=0.8", "", 200},

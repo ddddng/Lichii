@@ -83,11 +83,12 @@ func publicMod(targets string) string {
 }
 
 type store struct {
-	db        *sql.DB
-	assets    string
-	responses catalogResponses
-	view      atomic.Pointer[catalogView]
-	viewMu    sync.Mutex
+	db             *sql.DB
+	assets         string
+	assetTransfers chan struct{}
+	responses      catalogResponses
+	view           atomic.Pointer[catalogView]
+	viewMu         sync.Mutex
 }
 
 func openStore(dir string) (*store, error) {
@@ -110,7 +111,7 @@ func openStore(dir string) (*store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &store{db: db, assets: assets}, nil
+	return &store{db: db, assets: assets, assetTransfers: make(chan struct{}, 32)}, nil
 }
 
 type game struct {

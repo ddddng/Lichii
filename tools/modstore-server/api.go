@@ -76,16 +76,29 @@ func (s *store) publicHandler() http.Handler {
 }
 
 func (s *store) registerReads(mux *http.ServeMux, prefix string, admin bool) {
-	jsonRead := func(route string, handle endpoint) {
+	jsonRead := func(route string, handle endpoint, slots chan struct{}) {
 		var handler http.Handler = handle
 		if !admin {
-			handler = s.responses.wrap(handler)
+			handler = s.responses.wrapWithSlots(handler, slots)
 		}
 		mux.Handle("GET "+prefix+route, handler)
 	}
+	assetRead := func(route string, handle endpoint) {
+		mux.Handle("GET "+prefix+route, endpoint(func(w http.ResponseWriter, r *http.Request) error {
+			if !admin {
+				select {
+				case s.assetTransfers <- struct{}{}:
+					defer func() { <-s.assetTransfers }()
+				default:
+					return problem{503, "server_busy", "too many concurrent asset requests"}
+				}
+			}
+			return handle(w, r)
+		}))
+	}
 	jsonRead("/mods", func(w http.ResponseWriter, r *http.Request) error {
 		return s.listMods(w, r, admin)
-	})
+	}, catalogFillSlots)
 	jsonRead("/mods/{id}", func(w http.ResponseWriter, r *http.Request) error {
 		detail, err := s.detail(r.Context(), r.PathValue("id"), admin, catalogTargets(w, r, admin))
 		if err != nil {
@@ -93,8 +106,8 @@ func (s *store) registerReads(mux *http.ServeMux, prefix string, admin bool) {
 		}
 		reply(w, 200, detail)
 		return nil
-	})
-	mux.Handle("GET "+prefix+"/mods/{id}/preview", endpoint(func(w http.ResponseWriter, r *http.Request) error {
+	}, catalogDetailSlots)
+	assetRead("/mods/{id}/preview", func(w http.ResponseWriter, r *http.Request) error {
 		id := r.PathValue("id")
 		query := `SELECT m.preview_sha, m.preview_type FROM mods m WHERE m.id=? AND m.preview_sha IS NOT NULL
 		    AND NOT EXISTS (SELECT 1 FROM github WHERE mod_id=m.id)`
@@ -102,8 +115,8 @@ func (s *store) registerReads(mux *http.ServeMux, prefix string, admin bool) {
 			query += " AND " + publicMod("catalog_targets")
 		}
 		return s.serveAsset(w, r, s.db.QueryRowContext(r.Context(), query, id), "")
-	}))
-	mux.Handle("GET "+prefix+"/mods/{id}/versions/{version}/download", endpoint(func(w http.ResponseWriter, r *http.Request) error {
+	})
+	assetRead("/mods/{id}/versions/{version}/download", func(w http.ResponseWriter, r *http.Request) error {
 		id, ver := r.PathValue("id"), r.PathValue("version")
 		query := `SELECT v.sha256, 'application/zip' FROM versions v JOIN mods m ON m.id=v.mod_id
 		    WHERE m.id=? AND v.id=? AND NOT EXISTS (SELECT 1 FROM github WHERE mod_id=m.id)`
@@ -111,7 +124,7 @@ func (s *store) registerReads(mux *http.ServeMux, prefix string, admin bool) {
 			query += " AND m.status='approved' AND v.status='approved'"
 		}
 		return s.serveAsset(w, r, s.db.QueryRowContext(r.Context(), query, id, ver), id+"-"+ver+".zip")
-	}))
+	})
 }
 
 const githubFeatureHeader = "X-Lichii-Catalog-Features"

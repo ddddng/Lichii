@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -121,6 +123,31 @@ func adminRequest(args []string) error {
 	return nil
 }
 
+func lockCatalog(dir string) (func(), error) {
+	path, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return nil, err
+	}
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(path, "service-lock.sqlite3")),
+		RawQuery: "_txlock=immediate"}
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("lock catalog directory (stop the running service before seeding): %w", err)
+	}
+	return func() {
+		_ = tx.Rollback()
+		_ = db.Close()
+	}, nil
+}
+
 func run(args []string) error {
 	command := "serve"
 	if len(args) != 0 {
@@ -162,6 +189,11 @@ func run(args []string) error {
 		if dir == "" {
 			dir = "data"
 		}
+		release, err := lockCatalog(dir)
+		if err != nil {
+			return err
+		}
+		defer release()
 		s, err := openStore(dir)
 		if err != nil {
 			return err

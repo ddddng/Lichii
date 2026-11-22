@@ -56,6 +56,7 @@ type catalogResponses struct {
 }
 
 var catalogFillSlots = make(chan struct{}, 8)
+var catalogDetailSlots = make(chan struct{}, 4)
 
 var catalogCompressors = func() chan *gzip.Writer {
 	pool := make(chan *gzip.Writer, 2)
@@ -79,6 +80,10 @@ func (c *catalogResponses) invalidate() {
 }
 
 func (c *catalogResponses) wrap(next http.Handler) http.Handler {
+	return c.wrapWithSlots(next, catalogFillSlots)
+}
+
+func (c *catalogResponses) wrapWithSlots(next http.Handler, slots chan struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			next.ServeHTTP(w, r)
@@ -116,7 +121,7 @@ func (c *catalogResponses) wrap(next http.Handler) http.Handler {
 			c.pending[key] = done
 			c.mu.Unlock()
 
-			response, current := c.fill(w, r, next, key, generation, done)
+			response, current := c.fill(w, r, next, key, generation, done, slots)
 			if response == nil || r.Context().Err() != nil {
 				return
 			}
@@ -128,7 +133,7 @@ func (c *catalogResponses) wrap(next http.Handler) http.Handler {
 	})
 }
 
-func (c *catalogResponses) fill(w http.ResponseWriter, r *http.Request, next http.Handler, key catalogResponseKey, generation, done chan struct{}) (response *catalogResponse, current bool) {
+func (c *catalogResponses) fill(w http.ResponseWriter, r *http.Request, next http.Handler, key catalogResponseKey, generation, done, slots chan struct{}) (response *catalogResponse, current bool) {
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -141,7 +146,7 @@ func (c *catalogResponses) fill(w http.ResponseWriter, r *http.Request, next htt
 			}
 		}
 	}()
-	return captureCatalogResponse(w, r, next), false
+	return captureCatalogResponse(w, r, next, slots), false
 }
 
 func (c *catalogResponses) insert(key catalogResponseKey, response *catalogResponse) {
@@ -227,10 +232,10 @@ func (w *catalogCapture) send() {
 	w.body = nil
 }
 
-func captureCatalogResponse(w http.ResponseWriter, r *http.Request, next http.Handler) *catalogResponse {
+func captureCatalogResponse(w http.ResponseWriter, r *http.Request, next http.Handler, slots chan struct{}) *catalogResponse {
 	select {
-	case catalogFillSlots <- struct{}{}:
-		defer func() { <-catalogFillSlots }()
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
 	case <-r.Context().Done():
 		return nil
 	}
@@ -370,8 +375,8 @@ func catalogGzip(values []string) (useGzip, acceptable bool) {
 				}
 			}
 			switch strings.ToLower(strings.TrimSpace(name)) {
-			case "gzip":
-				gzipQ = q
+			case "gzip", "x-gzip":
+				gzipQ = max(gzipQ, q)
 			case "identity":
 				identityQ = q
 			case "*":
