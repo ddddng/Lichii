@@ -3624,6 +3624,21 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         RefreshSparseTiles(image);
         return;
     }
+    if (True(image.flags & ImageFlagBits::CompactLayers)) {
+        std::vector<u32> layers;
+        for (u32 layer = 0; layer < static_cast<u32>(image.info.resources.layers); ++layer) {
+            if (image.dirty_layers.empty() ||
+                ((image.dirty_layers[layer / 64] >> (layer % 64)) & 1) != 0) {
+                layers.push_back(layer);
+            }
+        }
+        image.dirty_layers.clear();
+        if (!layers.empty()) {
+            UploadLayers(image, layers);
+            runtime.InsertUploadMemoryBarrier();
+        }
+        return;
+    }
     if (!image.dirty_layers.empty() && UploadWrittenLayers(image)) {
         runtime.InsertUploadMemoryBarrier();
         return;
@@ -3770,6 +3785,9 @@ bool TextureCache<P>::UploadsByLayer(const ImageBase& image) const noexcept {
     if constexpr (requires { &Runtime::AccelerateImageUploadLayers; }) {
         if (True(image.flags & ImageFlagBits::SparseLayers)) {
             return true;
+        }
+        if (True(image.flags & ImageFlagBits::CompactLayers)) {
+            return False(image.flags & ImageFlagBits::NonContiguous);
         }
         return True(image.flags & ImageFlagBits::AcceleratedUpload) &&
                image.info.type == ImageType::e2D && image.info.resources.layers > 1 &&
@@ -3946,8 +3964,13 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
         // At most 32 MiB of layers per staging buffer, as UploadInChunks: all of a sparse array's
         // bound layers at once took a 128 MiB one an 8 GB laptop had no memory for (#262).
         constexpr u64 ChunkBytes = 32_MiB;
+        const bool compact = True(image.flags & ImageFlagBits::CompactLayers);
+        const u32 first_level = compact ? image.host_level_offset : 0;
+        const size_t mip_offset =
+            compact ? FullUploadSwizzles(image.info)[first_level].buffer_offset : 0;
+        const size_t upload_stride = image.info.layer_stride - mip_offset;
         const size_t chunk_layers = static_cast<size_t>(
-            (std::max<u64>)(1, ChunkBytes / (std::max<u64>)(image.info.layer_stride, 1)));
+            (std::max<u64>)(1, ChunkBytes / (std::max<u64>)(upload_stride, 1)));
         if (layers.size() > chunk_layers) {
             for (size_t first = 0; first < layers.size(); first += chunk_layers) {
                 UploadLayers(image, layers.subspan(first, (std::min)(chunk_layers,
@@ -3959,17 +3982,29 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
             // Plain formats: each layer unswizzled on its own into its layer of the image.
             ImageInfo layer_info = image.info;
             layer_info.resources.layers = 1;
-            const size_t layer_size = CalculateUnswizzledSizeBytes(layer_info);
+            if (compact) {
+                layer_info.resources.levels =
+                    HostMipLevelCount(layer_info.size.width, layer_info.size.height, 1,
+                                      layer_info.resources.levels);
+            }
+            ImageInfo host_info = layer_info;
+            if (compact) {
+                host_info.size.width = (std::max)(host_info.size.width >> first_level, 1U);
+                host_info.size.height = (std::max)(host_info.size.height >> first_level, 1U);
+                host_info.resources.levels -= static_cast<s32>(first_level);
+            }
+            const size_t layer_size = CalculateUnswizzledSizeBytes(host_info);
             auto staging = runtime.UploadStagingBuffer(layer_size * layers.size());
             std::vector<BufferImageCopy> copies;
             for (size_t i = 0; i < layers.size(); ++i) {
-                const GPUVAddr layer_addr = image.gpu_addr + u64{layers[i]} * image.info.layer_stride;
+                const GPUVAddr layer_addr =
+                    image.gpu_addr + u64{layers[i]} * image.info.layer_stride + mip_offset;
                 Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead>
-                    swizzle_data(*gpu_memory, layer_addr, image.info.layer_stride,
-                                 &swizzle_data_buffer);
+                    swizzle_data(*gpu_memory, layer_addr, upload_stride, &swizzle_data_buffer);
                 auto layer_copies =
                     UnswizzleImage(*gpu_memory, layer_addr, layer_info, swizzle_data,
-                                   staging.mapped_span.subspan(i * layer_size, layer_size));
+                                   staging.mapped_span.subspan(i * layer_size, layer_size),
+                                   nullptr, first_level);
                 for (BufferImageCopy copy : layer_copies) {
                     copy.buffer_offset += i * layer_size;
                     copy.image_subresource.base_layer = static_cast<s32>(layers[i]);
@@ -3978,7 +4013,7 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
             }
             image.UploadMemory(staging, copies);
             ++images_uploaded;
-            uploaded_bytes += u64{image.info.layer_stride} * layers.size();
+            uploaded_bytes += u64{upload_stride} * layers.size();
             ++layer_uploads;
             return;
         }
@@ -4108,7 +4143,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
         const ImageViewInfo view_info(config, 0);
         return slot_image_views.insert(runtime, info, view_info, config.Address());
     }
-    const u32 layer_offset = config.BaseLayer() * info.layer_stride;
+    const u64 layer_offset = u64{config.BaseLayer()} * info.layer_stride;
     const GPUVAddr image_gpu_addr = config.Address() - layer_offset;
     ImageId image_id{};
     const bool xc2_lut =
@@ -4229,7 +4264,7 @@ ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
 
 template <class P>
 bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
-    if (!image.info.rescaleable) {
+    if (!image.info.rescaleable || True(image.flags & ImageFlagBits::CompactLayers)) {
         return false;
     }
     if constexpr (requires { runtime.GetMaxScaledExtent(); }) {
@@ -4326,7 +4361,7 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
     const u64 down_shift = static_cast<u64>(Settings::values.resolution_info.down_shift +
                                             Settings::values.resolution_info.down_shift);
     const u64 image_size_bytes =
-        static_cast<u64>((std::max)(image.guest_size_bytes, image.unswizzled_size_bytes));
+        (std::max<u64>)(image.guest_size_bytes, image.unswizzled_size_bytes);
     const u64 tentative_size = (image_size_bytes * scale_up) >> down_shift;
     const u64 fitted_size = Common::AlignUp(tentative_size, 1024);
     return fitted_size;
@@ -4343,7 +4378,12 @@ u64 TextureCache<P>::ImageMemoryBytes(const Image& image) const {
         }
         return 0;
     }
-    u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
+    if constexpr (requires { image.MemoryBlock(); }) {
+        if (True(image.flags & ImageFlagBits::CompactLayers)) {
+            return image.MemoryBlock().size;
+        }
+    }
+    u64 tentative_size = (std::max<u64>)(image.guest_size_bytes, image.unswizzled_size_bytes);
     if ((IsPixelFormatASTC(image.info.format) &&
          True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
         True(image.flags & ImageFlagBits::Converted)) {
@@ -4763,6 +4803,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
     Image& new_image = slot_images[new_image_id];
+    if (can_rescale && True(new_image.flags & ImageFlagBits::CompactLayers)) {
+        can_rescale = false;
+        for (const auto& copy : join_copies_to_do) {
+            ScaleDown(slot_images[copy.id]);
+        }
+    }
 
     new_image.allocation_tick = frame_tick;
     {
@@ -4857,7 +4903,9 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             return nullptr;
         }
         const Image& overlap = slot_images[copy.id];
-        if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples) {
+        if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples ||
+            (True((overlap.flags | new_image.flags) & ImageFlagBits::CompactLayers) &&
+             overlap.info.format != new_image.info.format)) {
             return nullptr;
         }
         const auto alias_pointer = join_alias_indices.find(copy.id);
@@ -4875,7 +4923,9 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // host mip 1 is 5 px, the copy 4).
     size_t first_copy = 0;
     bool copied_whole = false;
-    for (size_t index = join_copies_to_do.size(); !can_rescale && index-- > 0;) {
+    const bool can_replace_upload =
+        !can_rescale && False(new_image.flags & ImageFlagBits::CompactLayers);
+    for (size_t index = join_copies_to_do.size(); can_replace_upload && index-- > 0;) {
         const AliasedImage* const aliased = alias_copy(join_copies_to_do[index]);
         if (aliased != nullptr &&
             CopiesWriteWholeImage(new_image, slot_images[aliased->id], aliased->copies)) {
@@ -4887,7 +4937,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // The copies from overlaps the GPU wrote can each write a part of it, together all of it:
     // Mario Kart World renders each layer of its shadow map and colour arrays as a target of its
     // own, then samples the array, and the upload under those copies took 13-31 ms an array.
-    if (!can_rescale && !copied_whole && new_info.num_samples == 1) {
+    if (can_replace_upload && !copied_whole && new_info.num_samples == 1) {
         std::vector<u8> written(
             static_cast<size_t>(new_info.resources.levels * new_info.resources.layers));
         for (const JoinCopy& copy : join_copies_to_do) {
@@ -5032,6 +5082,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     }
     const ImageBase& src_image = slot_images[src_id];
     const ImageBase& dst_image = slot_images[dst_id];
+    if (True((src_image.flags | dst_image.flags) & ImageFlagBits::CompactLayers)) {
+        return std::nullopt;
+    }
     const bool native_bgr = runtime.HasNativeBgr();
     if (GetFormatType(dst_info.format) != GetFormatType(dst_image.info.format) ||
         GetFormatType(src_info.format) != GetFormatType(src_image.info.format) ||
@@ -5046,6 +5099,10 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
             dst_id = FindOrInsertImage(dst_info, dst_addr, RelaxedOptions{});
         } while (has_deleted_images);
         if (!src_id || !dst_id) {
+            return std::nullopt;
+        }
+        if (True((slot_images[src_id].flags | slot_images[dst_id].flags) &
+                 ImageFlagBits::CompactLayers)) {
             return std::nullopt;
         }
     }
@@ -5066,7 +5123,7 @@ ImageId TextureCache<P>::FindDMAImage(const ImageInfo& info, GPUVAddr gpu_addr) 
     ImageId image_id{};
     boost::container::small_vector<ImageId, 8> image_ids;
     const auto lambda = [&](ImageId existing_image_id, ImageBase& existing_image) {
-        if (True(existing_image.flags & ImageFlagBits::Remapped)) {
+        if (True(existing_image.flags & (ImageFlagBits::Remapped | ImageFlagBits::CompactLayers))) {
             return false;
         }
         if (info.type == ImageType::Linear || existing_image.info.type == ImageType::Linear)
@@ -5201,6 +5258,9 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return ImageViewId{};
     }
     Image& image = slot_images[image_id];
+    if (True(image.flags & ImageFlagBits::CompactLayers)) {
+        return ImageViewId{};
+    }
     const ImageViewType view_type = RenderTargetImageViewType(info);
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {
@@ -6004,6 +6064,10 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
     Image& src = slot_images[src_id];
     if (True(dst.flags & ImageFlagBits::UnwrittenSparse) ||
         True(src.flags & ImageFlagBits::UnwrittenSparse)) {
+        return;
+    }
+    if (True((src.flags | dst.flags) & ImageFlagBits::CompactLayers) &&
+        src.info.format != dst.info.format) {
         return;
     }
     if (dst.info.astc_opaque != src.info.astc_opaque) {
