@@ -68,7 +68,8 @@ CHEAT_FILE = re.compile(rf"({HEX}{{16}})\.txt", re.I | re.ASCII)
 CHEAT_TAG = re.compile(r"\[([^\[\]{}]{1,160})\]")
 CHEAT_CODES = re.compile(r"[0-9A-Fa-f]{8}(?:[ \t]+[0-9A-Fa-f]{8})*")
 CHEAT_DEPENDENCY = re.compile(
-    r"\b(?:master|enabler|required|requires|(?:enable|activate)\b.*\bfirst|must (?:enable|activate)|for use with)\b",
+    r"\b(?:master|enabler|required|requires|(?:enable|activate)\b.*\bfirst|must (?:enable|activate)"
+    r"|for use with)\b|^\s*must\s+be\s+on\b",
     re.I,
 )
 PROHIBITION = re.compile(
@@ -273,32 +274,28 @@ def cheat_build(filename):
 def cheat_sections(data):
     sections = {}
     current = ""
-    blocked = False
+    blocked = data.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf"))
     try:
         text = metadata_text(data)
     except UnicodeError:
         return {}
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        blocked = True
-    for line in text.splitlines():
-        line = line.strip()
+    for line in re.split(r"[\r\n]", text):
+        line = line.strip(" \t\v\f")
         if not line:
             continue
         if match := CHEAT_TAG.fullmatch(line):
             current = match[1]
-            if current in sections:
-                sections[current] = None
-            else:
-                sections[current] = False
-            blocked |= CHEAT_DEPENDENCY.search(current) is not None
-        elif line.startswith(("{", "[")) or not current:
+            blocked |= (current in sections or not current.strip() or "\ufffd" in current
+                        or len(current.encode("utf-16-le")) > 320
+                        or any(unicodedata.category(c).startswith("C") for c in current)
+                        or CHEAT_DEPENDENCY.search(current) is not None)
+            sections[current] = 0
+        elif not current or not CHEAT_CODES.fullmatch(line):
             blocked = True
-            current = ""
-        elif sections[current] is not None:
-            sections[current] = True if CHEAT_CODES.fullmatch(line) else None
-    return {name: valid is True and not blocked and len(name.encode("utf-16-le")) <= 320
-                  and not any(unicodedata.category(c).startswith("C") for c in name)
-            for name, valid in sections.items()}
+        else:
+            sections[current] += len(line.split())
+            blocked |= sections[current] > 0x100
+    return {name: count > 0 and not blocked for name, count in sections.items()}
 
 
 def zip_variants(snap, path, omissions, outer_name=None, *, bracketed=False):

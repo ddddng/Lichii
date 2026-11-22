@@ -191,6 +191,23 @@ class ParseTests(unittest.TestCase):
                      "x/" + "é" * 256):
             self.assertFalse(gh.safe_path(path))
 
+    def test_cheat_download_requires_the_entire_file_to_pass_validation(self):
+        selected = b"[60 FPS]\n00000000\n"
+        for unrelated in (
+            b"[Notes]\nprose, not an opcode",
+            b"[Notes]\n00000000\n[Notes]\n00000000",
+            b"[Notes]\n" + b"00000000 " * 256 + b"00000000",
+            b"[ ]\n00000000",
+            "[Notes\ufffd]\n00000000".encode(),
+            b"[Must Be On additional codes]\n00000000",
+            b"[Notes]\n00000000\v00000000",
+        ):
+            with self.subTest(unrelated=unrelated[:70]):
+                self.assertFalse(gh.cheat_sections(selected + unrelated)["60 FPS"])
+        self.assertEqual(gh.cheat_sections(b"\xef\xbb\xbf" + selected), {"60 FPS": False})
+        self.assertEqual(gh.cheat_sections(selected + b"[Notes]\r\n"),
+                         {"60 FPS": True, "Notes": False})
+
     def test_stevens_nearest_documented_title_variant_and_credit(self):
         root = f"Example Game/US [{TITLE}]"
         bad = f"Conflicting Game/[{SECOND}]"
