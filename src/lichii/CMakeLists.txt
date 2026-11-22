@@ -259,6 +259,10 @@ add_executable(lichii
     deps_dialog.cpp deps_dialog.h deps_dialog.ui
 
     spotlight/theme.cpp spotlight/theme.h
+    spotlight/hero.cpp spotlight/hero.h
+    spotlight/launcher.cpp spotlight/launcher.h
+    spotlight/library_header.cpp spotlight/library_header.h
+    spotlight/top_bar.cpp spotlight/top_bar.h
     spotlight/widgets.cpp spotlight/widgets.h
 
     data_dialog.h data_dialog.cpp data_dialog.ui

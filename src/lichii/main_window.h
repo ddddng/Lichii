@@ -144,6 +144,11 @@ namespace Ui {
 class MainWindow;
 }
 
+namespace Spotlight {
+class Launcher;
+class RunningTitleBar;
+} // namespace Spotlight
+
 enum class EmulatedDirectoryTarget {
     NAND,
     SDMC,
@@ -182,7 +187,6 @@ class MainWindow : public QMainWindow {
     static const int max_recent_files_item = 10;
 
 public:
-    void filterBarSetChecked(bool state);
     void UpdateUITheme();
     explicit MainWindow(bool has_broken_vulkan);
     ~MainWindow() override;
@@ -433,7 +437,7 @@ private slots:
     void OnApplyRecommendedSettings();
     void OnRestorePreviousSettings();
     void OnDataDialog();
-    void OnToggleFilterBar();
+    void OnFocusLibrarySearch();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
 #ifdef HAS_RESHADE
@@ -578,6 +582,8 @@ private:
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
+    Spotlight::Launcher* launcher = nullptr;
+    Spotlight::RunningTitleBar* running_title_bar = nullptr;
     LoadingScreen* loading_screen = nullptr;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
