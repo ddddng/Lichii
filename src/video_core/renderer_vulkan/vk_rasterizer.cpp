@@ -3824,7 +3824,8 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         const u64 size = wide ? 16 : 4;
         auto& split = GpuSplit::Get();
         split.GuardStreamWrite(gpu_addr, size);
-        split.StampWrite(*device, size);
+        split.StampWrite(*device, size, GpuSplit::Writer::Payload,
+                         GpuSplit::SparseWrite(gpu_addr, size));
         VideoCommon::Nx2FastDraw::NoteSync();
         // A read download still to land there is finished on GPURender.
         const bool lent = VideoCore::ReadDownloadsMayCover(*device, size);
@@ -4448,7 +4449,7 @@ bool RasterizerVulkan::BackTakesInvalidation(std::span<const std::pair<DAddr, Si
         // GPURender registers images while the back goes on: stamp, fence, look again. Either
         // this sees its registration, or its upload sees the stamp (CheckRenderRead, must be 0).
         for (const auto& [addr, size] : ranges) {
-            split.StampWrite(addr, size);
+            split.StampWrite(addr, size, VideoCommon::GpuSplit::Writer::Gather);
         }
         std::atomic_thread_fence(std::memory_order_seq_cst);
         first = hit();

@@ -48,6 +48,14 @@ constexpr size_t StampSlots = size_t{1} << 16;
 constexpr u64 StampPageBits = 12;
 constexpr u64 StampSeqBits = 24;
 constexpr u64 StampSeqMask = (u64{1} << StampSeqBits) - 1;
+constexpr u64 StampPageMask = (u64{1} << 32) - 1;
+constexpr u64 StampTagShift = 60;
+
+const char* WriterName(u64 writer) {
+    static constexpr std::array<const char*, 5> names{
+        "word write", "block write", "constant buffer data", "payload release", "CPU write gather"};
+    return writer < names.size() ? names[writer] : "unknown";
+}
 
 size_t StampSlot(u64 page) {
     return static_cast<size_t>((page ^ (page >> 16) ^ (page >> 32)) & (StampSlots - 1));
@@ -378,6 +386,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         unlend.owed_table_reads = 0;
         unlend.reads_ahead.store(0, std::memory_order_relaxed);
         unlend.frees_ahead.store(0, std::memory_order_relaxed);
+        for (auto& count : reads_ahead_by) {
+            count.store(0, std::memory_order_relaxed);
+        }
         pool_ranges = {};
         if (render_unlend) {
             if (!stamps) {
@@ -1577,11 +1588,32 @@ void GpuSplit::GuardPools(GPUVAddr gpu_addr, u64 size) {
     }
 }
 
-void GpuSplit::Stamp(DAddr device_addr, u64 size) {
+bool GpuSplit::SparseWrite(GPUVAddr gpu_addr, u64 size) {
+    const GPUVAddr end = gpu_addr + (std::max)(size, u64{1});
+    if (end <= Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+        gpu_addr >= Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
+        return false;
+    }
+    std::scoped_lock lock{Tegra::g_nx2_sparse_state_mutex};
+    auto it = Tegra::g_nx2_sparse_state.upper_bound(gpu_addr);
+    if (it != Tegra::g_nx2_sparse_state.begin()) {
+        --it;
+    }
+    for (; it != Tegra::g_nx2_sparse_state.end() && it->first < end; ++it) {
+        if (gpu_addr < it->first + it->second.size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void GpuSplit::Stamp(DAddr device_addr, u64 size, Writer writer, bool sparse) {
     const u64 seq = render_follower->Pushed() & StampSeqMask;
+    const u64 tag = ((static_cast<u64>(writer) << 1) | (sparse ? 1 : 0)) << StampTagShift;
     for (u64 page = device_addr >> StampPageBits;
          page <= (device_addr + (std::max)(size, u64{1}) - 1) >> StampPageBits; ++page) {
-        stamps[StampSlot(page)].store((page << StampSeqBits) | seq, std::memory_order_release);
+        stamps[StampSlot(page)].store(tag | (page << StampSeqBits) | seq,
+                                      std::memory_order_release);
     }
 }
 
@@ -1596,15 +1628,29 @@ void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
     for (u64 page = device_addr >> StampPageBits; page <= (device_addr + size - 1) >> StampPageBits;
          ++page) {
         const u64 stamp = stamps[StampSlot(page)].load(std::memory_order_acquire);
-        if ((stamp >> StampSeqBits) != page) {
+        if (((stamp >> StampSeqBits) & StampPageMask) != page) {
             continue;
         }
-        if ((((stamp & StampSeqMask) - packet) & StampSeqMask) < (StampSeqMask >> 1)) {
+        const u64 written = stamp & StampSeqMask;
+        if (((written - packet) & StampSeqMask) < (StampSeqMask >> 1)) {
+            const u64 tag = stamp >> StampTagShift;
+            reads_ahead_by[tag].fetch_add(1, std::memory_order_relaxed);
             if (unlend.reads_ahead.fetch_add(1, std::memory_order_relaxed) < 8) {
+                u64 idle = 0;
+                for (const auto& post : idle_posts) {
+                    const u64 at = post.load(std::memory_order_relaxed) & StampSeqMask;
+                    if (((at - packet) & StampSeqMask) <= ((written - packet) & StampSeqMask) &&
+                        at != 0) {
+                        idle = at;
+                    }
+                }
                 LOG_ERROR(HW_GPU,
                           "GPU render unlend: GPURender read {:#x}+{:#x} for packet {}, which the "
-                          "back wrote after it posted the packet",
-                          device_addr, size, packet);
+                          "back wrote after it posted packet {} ({}{}); posted wait for idle or "
+                          "fence between them: {}",
+                          device_addr, size, packet, written, WriterName(tag >> 1),
+                          (tag & 1) != 0 ? ", sparse" : "",
+                          idle != 0 ? fmt::format("packet {}", idle) : std::string{"none"});
             }
             return;
         }
@@ -1626,6 +1672,15 @@ void GpuSplit::LogUnlend() const {
             lent += fmt::format(" {}:{}", names[i], unlend.lent[i]);
         }
     }
+    std::string ahead;
+    for (size_t tag = 0; tag < reads_ahead_by.size(); ++tag) {
+        if (const u64 count = reads_ahead_by[tag].load(std::memory_order_relaxed); count != 0) {
+            ahead += fmt::format(" {}{}:{}", WriterName(tag >> 1),
+                                 (tag & 1) != 0 ? " (sparse)" : "", count);
+        }
+    }
+    LOG_INFO(HW_GPU, "GPU render unlend: texture reads ahead by writer:{}",
+             ahead.empty() ? " none" : ahead);
     LOG_INFO(HW_GPU,
              "GPU render unlend: {} draws unlent, {} lent (by reason:{}); {} lookup lends, {} "
              "stream write drains, {} GPURender flushes without the back's half, {} unlent draws "

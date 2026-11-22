@@ -558,6 +558,11 @@ public:
             })) {
             CheckRenderLocks();
         }
+        if (kind == PostedOp::WaitForIdle || kind == PostedOp::Fence ||
+            kind == PostedOp::SignalFence || kind == PostedOp::FenceReport) {
+            idle_posts[idle_post_count++ % idle_posts.size()].store(render_follower->Pushed(),
+                                                                    std::memory_order_relaxed);
+        }
     }
     enum class UnlentKind : u8 { Draw, Clear, Dispatch };
     /// The back: posts an unlent draw, clear or dispatch to GPURender.
@@ -584,11 +589,16 @@ public:
             GuardPools(gpu_addr, size);
         }
     }
-    void StampWrite(DAddr device_addr, u64 size) {
+    /// The back's direct guest writes, by path, as CheckRenderRead names them.
+    enum class Writer : u8 { Word, Block, ConstantData, Payload, Gather, Count };
+    void StampWrite(DAddr device_addr, u64 size, Writer writer, bool sparse = false) {
         if (Guarding()) [[unlikely]] {
-            Stamp(device_addr, size);
+            Stamp(device_addr, size, writer, sparse);
         }
     }
+    /// The back, with GPURender behind: whether [gpu_addr, +size) touches a Switch 2 sparse
+    /// region.
+    [[nodiscard]] static bool SparseWrite(GPUVAddr gpu_addr, u64 size);
     /// GPURender reading guest memory for an unlent draw (image uploads): bytes the back wrote
     /// after it posted the draw are counted (texture reads ahead, must be 0; Fritchii c389ff6cb).
     void CheckRenderRead(DAddr device_addr, u64 size);
@@ -1497,7 +1507,12 @@ private:
     };
     std::array<PoolRange, 4> pool_ranges{};
     void GuardPools(GPUVAddr gpu_addr, u64 size);
-    void Stamp(DAddr device_addr, u64 size);
+    void Stamp(DAddr device_addr, u64 size, Writer writer, bool sparse);
+    /// Texture reads ahead by the writer of the stamp, and whether it wrote sparse memory.
+    std::array<std::atomic<u64>, static_cast<size_t>(Writer::Count) * 2> reads_ahead_by{};
+    /// The packets of the last posted waits for idle and fences, for CheckRenderRead's report.
+    std::array<std::atomic<u64>, 64> idle_posts{};
+    u64 idle_post_count{};
     /// Device page and the back's packet count when it wrote there (CheckRenderRead), hashed.
     std::unique_ptr<std::atomic<u64>[]> stamps;
     void LogUnlend() const;
