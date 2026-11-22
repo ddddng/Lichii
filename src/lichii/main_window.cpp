@@ -1526,7 +1526,7 @@ void MainWindow::InitializeWidgets() {
             [this] { ingame_bar->OpenQuickControls(quick_controls); });
     connect(ingame_bar, &Spotlight::InGameBar::MenuRequested, this, &MainWindow::ToggleInGameMenu);
     auto* shaders = ingame_bar->Shaders();
-    connect(shaders, &Spotlight::ShaderChip::AboutToOpen, this, [this, shaders] {
+    connect(shaders, &Spotlight::ShaderChip::AboutToOpen, this, [shaders] {
         const u64 program = QtCommon::system->GetApplicationProcessProgramID();
         shaders->SetPrecompile(program != 0, program != 0 && ShaderWarmRequested(program));
     });

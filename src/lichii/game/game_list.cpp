@@ -218,8 +218,8 @@ protected:
                                                      : left.row() > right.row();
         }
         if (recent_first) {
-            const auto& recent = UISettings::values.recent_files;
-            const auto rank = [&recent](const QModelIndex& item) {
+            const auto rank = [](const QModelIndex& item) {
+                const auto& recent = UISettings::values.recent_files;
                 const qsizetype row =
                     recent.indexOf(item.data(GameListItemPath::FullPathRole).toString());
                 return row < 0 ? recent.size() : row;

@@ -301,7 +301,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
     auto* view = ui_tab.get();
     auto* options = settings_page->AddSection(general);
     auto* language = view->findChild<QComboBox*>(QStringLiteral("language_combobox"));
-    const auto locale_name = [this](const QString& name) {
+    const auto locale_name = [](const QString& name) {
         return name.startsWith(QChar::fromLatin1('<')) ? tr("System language") : name;
     };
     auto* locale_description = SettingsPage::AddRow(
@@ -327,7 +327,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
     const QStringList looks{tr("Dark"), tr("Light")};
     auto* look =
         new Spotlight::SegmentedControl(looks, Spotlight::SegmentedControl::Kind::Accent, 36);
-    const auto sync_theme = [look, theme, dark_index, light_index, looks, this] {
+    const auto sync_theme = [look, theme, dark_index, light_index, looks] {
         const QSignalBlocker blocker(look);
         const int selected = theme->currentIndex() == dark_index    ? 0
                              : theme->currentIndex() == light_index ? 1
@@ -407,7 +407,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
             const int index = device_combo ? device_combo->currentIndex() : -1;
             return index >= 0 && std::cmp_less(index, devices.size()) ? &devices[index] : nullptr;
         };
-        const auto sync_gpu = [cards, selected_gpu, this] {
+        const auto sync_gpu = [cards, selected_gpu] {
             const auto* gpu = selected_gpu();
             cards[0]->SetSuggestion(
                 gpu ? QString::fromStdString(gpu->name) : tr("No GPU identified"),
@@ -428,7 +428,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
             card->setEnabled(can_apply);
         }
         presets_control->setEnabled(can_apply);
-        const auto sync_preset = [=, this] {
+        const auto sync_preset = [=] {
             const int selected = Spotlight::PerformancePresetIndex({
                 static_cast<Settings::ResolutionSetup>(res_combo->currentData().toUInt()),
                 static_cast<Settings::ScalingFilter>(filter_combo->currentData().toUInt()),
@@ -661,7 +661,7 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
         connect(type, &QComboBox::currentTextChanged, controller, &QLabel::setText);
         detail->addWidget(controller);
         auto* connected_text = SettingsPage::Text({}, 12, 500, true);
-        const auto sync_state = [connected_text, state, this] {
+        const auto sync_state = [connected_text, state] {
             connected_text->setText(state->isChecked() ? tr("Connected") : tr("Disconnected"));
         };
         sync_state();
@@ -704,7 +704,7 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
     auto* count = SettingsPage::Text({}, 13, 500, true);
     count->setWordWrap(true);
     picker_layout->addWidget(count);
-    const auto sync_count = [this, connected, count] {
+    const auto sync_count = [connected, count] {
         const int active = std::count_if(connected.cbegin(), connected.cend(),
                                          [](const auto* player) { return player->isChecked(); });
         count->setText(tr("Connected controllers: %1").arg(active));
