@@ -4594,6 +4594,10 @@ void MainWindow::OnConfigure() {
     UpdateStatusButtons();
     controller_dialog->refreshConfiguration();
     QtCommon::system->ApplySettings();
+
+    if (configure_dialog.ReopenRequested()) {
+        QTimer::singleShot(0, this, &MainWindow::OnConfigure);
+    }
 }
 
 void MainWindow::OnConfigureTas() {

@@ -259,6 +259,8 @@ void ConfigureDialog::OnLanguageChanged(const QString& locale) {
     emit LanguageChanged(locale);
     UISettings::values.is_game_list_reload_pending = true;
     ApplyConfiguration();
+    reopen_requested = true;
+    accept();
 }
 
 void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& devices) {
@@ -722,10 +724,20 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
                          QStringLiteral("hand-pointing"), Tints::Lavender(),
                          SettingsPage::BindToggle(motion));
     auto* vibration = input_tab->findChild<QPushButton*>(QStringLiteral("vibrationButton"));
+    auto* vibration_group = input_tab->findChild<QGroupBox*>(QStringLiteral("vibrationGroup"));
     auto* configure_vibration = SettingsPage::Manage(tr("Configure"));
+    configure_vibration->setEnabled(vibration_group->isChecked());
+    connect(vibration_group, &QGroupBox::toggled, configure_vibration, &QWidget::setEnabled);
     connect(configure_vibration, &QAbstractButton::clicked, vibration, &QPushButton::click);
+    auto* vibration_controls = new QWidget;
+    vibration_controls->setProperty("spotlightTransparent", true);
+    auto* vibration_layout = new QHBoxLayout(vibration_controls);
+    vibration_layout->setContentsMargins(0, 0, 0, 0);
+    vibration_layout->setSpacing(12);
+    vibration_layout->addWidget(configure_vibration);
+    vibration_layout->addWidget(SettingsPage::BindToggle(vibration_group));
     SettingsPage::AddRow(controllers, tr("Vibration"), tr("Adjust rumble strength per controller"),
-                         QStringLiteral("vibrate"), Tints::Gold(), configure_vibration);
+                         QStringLiteral("vibrate"), Tints::Gold(), vibration_controls);
 
     auto* docked = input_tab->findChild<QRadioButton*>(QStringLiteral("radioDocked"));
     auto* handheld = input_tab->findChild<QRadioButton*>(QStringLiteral("radioUndocked"));
