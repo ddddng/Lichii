@@ -69,6 +69,11 @@ public:
     /// Drop the controller edits that were not applied; the Controls tab changes them live.
     void RestoreInputConfiguration();
 
+    /// A new interface language was applied: the dialog closed to be opened again translated.
+    bool ReopenRequested() const {
+        return reopen_requested;
+    }
+
 private slots:
     void OnLanguageChanged(const QString& locale);
 
@@ -115,4 +120,5 @@ private:
     QVBoxLayout* folders_layout = nullptr;
     QLabel* folder_summary = nullptr;
     bool game_dirs_changed = false;
+    bool reopen_requested = false;
 };
