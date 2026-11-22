@@ -4834,6 +4834,23 @@ bool MainWindow::OpenModStore(QWidget* parent, u64 initial_title_id, const std::
         return result;
     };
 
+    QList<ModStore::LibraryGame> library_games;
+    const auto* const library = game_list->GetModel();
+    for (const auto& game :
+         library->match(library->index(0, 0), GameListItem::TypeRole,
+                        QVariant::fromValue(GameListItemType::Game), -1,
+                        Qt::MatchExactly | Qt::MatchRecursive)) {
+        const auto id = game.data(GameListItemPath::ProgramIdRole).toULongLong();
+        if (id != 0) {
+            library_games.append({.title_id = QString::fromStdString(fmt::format("{:016X}", id)),
+                                  .name = game.data(GameListItemPath::TitleRole).toString(),
+                                  .icon = QIcon(game.data(Qt::DecorationRole).value<QPixmap>())});
+        }
+    }
+    std::ranges::sort(library_games, [](const auto& a, const auto& b) {
+        return a.name.localeAwareCompare(b.name) < 0;
+    });
+
     return ModStore::ShowDialog(
         parent, {.base_url = QString::fromStdString(UISettings::values.mod_store_api_url.GetValue()),
                  .initial_title_id =
@@ -4863,7 +4880,8 @@ bool MainWindow::OpenModStore(QWidget* parent, u64 initial_title_id, const std::
                          store_toggled.insert(addon);
                      }
                      return true;
-                 }});
+                 },
+                 .library_games = std::move(library_games)});
 }
 
 void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_name) {
