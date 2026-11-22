@@ -530,13 +530,17 @@ void EmitSetFragDepth(EmitContext& ctx, Id value) {
         const Id half{ctx.Const(0.5f)};
         const Id one{ctx.Const(1.0f)};
         const Id clamped{ctx.OpNMin(f32, ctx.OpNMax(f32, depth, ctx.f32_zero_value), one)};
-        // The product can round to the wrong side of a half; the fused error picks the neighbour.
+        // The product can round to the wrong side of a half. d * (2^24 - 1) - guess is
+        // (d * 2^24 - guess) - d, where the first part and its sum with +-0.5 are exact, so
+        // comparing that against d picks the nearest code without relying on fma fusion.
         const Id guess{ctx.OpRoundEven(f32, ctx.OpFMul(f32, clamped, max_unorm))};
-        const Id error{ctx.OpFma(f32, clamped, max_unorm, ctx.OpFNegate(f32, guess))};
-        const Id step{ctx.OpSelect(f32, ctx.OpFOrdGreaterThan(ctx.U1, error, half), one,
-                                   ctx.OpSelect(f32, ctx.OpFOrdLessThan(ctx.U1, error,
-                                                                         ctx.OpFNegate(f32, half)),
-                                                ctx.OpFNegate(f32, one), ctx.f32_zero_value))};
+        const Id scaled{ctx.OpFMul(f32, clamped, ctx.Const(16777216.0f))};
+        const Id residual{ctx.OpFSub(f32, scaled, guess)};
+        const Id up{ctx.OpFOrdGreaterThan(ctx.U1, ctx.OpFSub(f32, residual, half), clamped)};
+        const Id down{ctx.OpFOrdLessThan(ctx.U1, ctx.OpFAdd(f32, residual, half), clamped)};
+        const Id step{ctx.OpSelect(f32, up, one,
+                                   ctx.OpSelect(f32, down, ctx.OpFNegate(f32, one),
+                                                ctx.f32_zero_value))};
         const Id rounded{ctx.OpFDiv(f32, ctx.OpFAdd(f32, guess, step), max_unorm)};
         const Id frag_z{ctx.OpLoad(f32, ctx.OpAccessChain(ctx.input_f32, ctx.input_position,
                                                           ctx.Const(2u)))};
