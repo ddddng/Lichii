@@ -120,6 +120,8 @@ public:
     static constexpr int FileTypeRole = SortRole + 4;
     /// True when the picture comes from the game or its custom artwork, not the default art.
     static constexpr int HasIconRole = SortRole + 5;
+    /// True when the game's main.npdm says it is a Switch 2 program.
+    static constexpr int Switch2Role = SortRole + 6;
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
