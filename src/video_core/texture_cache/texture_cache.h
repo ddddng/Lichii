@@ -4078,13 +4078,49 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
         }
     }
     const TICEntry config = TextureViewHeader(raw_config, native);
-    const ImageInfo info(config);
+    ImageInfo info(config);
     if (info.type == ImageType::Buffer) {
         const ImageViewInfo view_info(config, 0);
         return slot_image_views.insert(runtime, info, view_info, config.Address());
     }
     const u32 layer_offset = config.BaseLayer() * info.layer_stride;
     const GPUVAddr image_gpu_addr = config.Address() - layer_offset;
+    if (native && config.IsBlockLinear() && config.load_store_hint != 0 &&
+        !info.maxwell_gob_layout && Settings::GetCurrentProgramID() == 0x0400E95004038001ULL) {
+        static const char mode = [] {
+            const char* const value = std::getenv("EDEN_NX2_XC2_GOB_TEST");
+            return value ? value[0] : '1';
+        }();
+        const bool lut = info.type == ImageType::e3D && info.format == PixelFormat::A8B8G8R8_UNORM &&
+                         info.size.width == 16 && info.size.height == 16 && info.size.depth == 16;
+        const bool ui = info.type == ImageType::e2D && info.resources.layers == 1 &&
+                        (info.format == PixelFormat::R8_UNORM ||
+                         info.format == PixelFormat::BC3_UNORM ||
+                         info.format == PixelFormat::BC3_SRGB || IsPixelFormatASTC(info.format));
+        if (lut && (mode == '1' || mode == 'l')) {
+            const ImageId image_id = FindImage(info, image_gpu_addr, RelaxedOptions{});
+            info.maxwell_gob_layout = true;
+            if (image_id) {
+                const ImageBase& image = slot_images[image_id];
+                if (image.first_written_frame != 0 && image.gpu_addr == image_gpu_addr &&
+                    image.info.format == info.format && image.info.size == info.size &&
+                    True(image.flags & ImageFlagBits::GpuModified) &&
+                    False(image.flags & ImageFlagBits::CpuModified)) {
+                    info.maxwell_gob_layout = false;
+                }
+            }
+        } else if (ui && (mode == '1' || mode == 'u')) {
+            info.maxwell_gob_layout = true;
+        }
+        if (info.maxwell_gob_layout) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 48) {
+                LOG_INFO(HW_GPU, "XC2 Maxwell GOB test: {} at {:#x}, {}x{}x{}",
+                         info.format, image_gpu_addr, info.size.width, info.size.height,
+                         info.size.depth);
+            }
+        }
+    }
     const ImageId image_id = FindOrInsertImage(info, image_gpu_addr, RelaxedOptions{}, &retry);
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
