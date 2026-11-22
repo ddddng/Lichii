@@ -228,9 +228,11 @@ void Layer::CreateRawImage(const Device& device, const Tegra::FramebufferConfig&
         return;
     }
     const auto format = GetFormat(framebuffer);
-    raw_images[image_index] =
+    auto image =
         CreateWrappedImage(memory_allocator, {framebuffer.width, framebuffer.height}, format);
-    raw_image_views[image_index] = CreateWrappedImageView(device, raw_images[image_index], format);
+    auto view = CreateWrappedImageView(device, image, format);
+    raw_images[image_index] = std::move(image);
+    raw_image_views[image_index] = std::move(view);
 }
 
 void Layer::RefreshResources(const Device& device, const Tegra::FramebufferConfig& framebuffer) {
