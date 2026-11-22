@@ -515,13 +515,21 @@ void EmitSetSampleMask(EmitContext& ctx, Id value) {
 }
 
 void EmitSetFragDepth(EmitContext& ctx, Id value) {
-    if (!ctx.runtime_info.convert_depth_mode || ctx.profile.support_native_ndc) {
-        ctx.OpStore(ctx.frag_depth, value);
-        return;
+    Id depth{value};
+    if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
+        const Id unit{ctx.Const(0.5f)};
+        depth = ctx.OpFma(ctx.F32[1], depth, unit, unit);
     }
-    const Id unit{ctx.Const(0.5f)};
-    const Id new_depth{ctx.OpFma(ctx.F32[1], value, unit, unit)};
-    ctx.OpStore(ctx.frag_depth, new_depth);
+    if (ctx.runtime_info.quantize_frag_depth_d24) {
+        // Two passes that compute the same depth a few float ULPs apart store the same D24 value
+        // on the guest, so an equal depth test between them passes there; keep that on the host.
+        const Id max_unorm{ctx.Const(16777215.0f)};
+        const Id clamped{ctx.OpNMin(ctx.F32[1], ctx.OpNMax(ctx.F32[1], depth, ctx.f32_zero_value),
+                                    ctx.Const(1.0f))};
+        const Id scaled{ctx.OpRoundEven(ctx.F32[1], ctx.OpFMul(ctx.F32[1], clamped, max_unorm))};
+        depth = ctx.OpFDiv(ctx.F32[1], scaled, max_unorm);
+    }
+    ctx.OpStore(ctx.frag_depth, depth);
 }
 
 void EmitGetZFlag(EmitContext&) {
