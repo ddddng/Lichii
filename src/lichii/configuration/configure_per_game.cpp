@@ -432,7 +432,11 @@ void ConfigurePerGame::BuildSettings() {
     const int overview = settings_page->AddCategory(
         tr("Overview"), tr("Only what you change here differs from global"),
         QStringLiteral("house"), Color::Accent());
-    const bool is_switch_2 = (title_id >> 56) == 0x04;
+    const bool is_switch_2 =
+        Core::FindSwitch2Program(Core::GetGameFileFromPath(system.GetFilesystem(),
+                                                           Common::FS::PathToUTF8String(file_path)),
+                                 title_id, 0)
+            .has_value();
     const int graphics = settings_page->AddCategory(
         tr("Graphics"), tr("Only what you change here differs from global"),
         QStringLiteral("monitor"), Tints::Green(),
@@ -475,7 +479,7 @@ void ConfigurePerGame::BuildSettings() {
     identity->addWidget(game_banner_summary);
     auto* details = new QHBoxLayout;
     details->setSpacing(8);
-    if (is_switch_2 || (title_id >> 56) == 0x01) {
+    if (title_id != 0) {
         details->addWidget(SettingsPage::Badge(is_switch_2 ? tr("Switch 2") : tr("Switch 1"),
                                                is_switch_2 ? Color::Accent() : Color::Text(),
                                                is_switch_2 ? Color::OnAccent() : Color::OnLight()));
