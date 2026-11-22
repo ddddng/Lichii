@@ -591,14 +591,11 @@ public:
     }
     /// The back's direct guest writes, by path, as CheckRenderRead names them.
     enum class Writer : u8 { Word, Block, ConstantData, Payload, Gather, Count };
-    void StampWrite(DAddr device_addr, u64 size, Writer writer, bool sparse = false) {
+    void StampWrite(DAddr device_addr, u64 size, Writer writer) {
         if (Guarding()) [[unlikely]] {
-            Stamp(device_addr, size, writer, sparse);
+            Stamp(device_addr, size, writer);
         }
     }
-    /// The back, with GPURender behind: whether [gpu_addr, +size) touches a Switch 2 sparse
-    /// region.
-    [[nodiscard]] static bool SparseWrite(GPUVAddr gpu_addr, u64 size);
     /// GPURender reading guest memory for an unlent draw (image uploads): bytes the back wrote
     /// after it posted the draw are counted (texture reads ahead, must be 0; Fritchii c389ff6cb).
     void CheckRenderRead(DAddr device_addr, u64 size);
@@ -1507,9 +1504,9 @@ private:
     };
     std::array<PoolRange, 4> pool_ranges{};
     void GuardPools(GPUVAddr gpu_addr, u64 size);
-    void Stamp(DAddr device_addr, u64 size, Writer writer, bool sparse);
+    void Stamp(DAddr device_addr, u64 size, Writer writer);
     /// Texture reads ahead by the writer of the stamp, and whether it wrote sparse memory.
-    std::array<std::atomic<u64>, static_cast<size_t>(Writer::Count) * 2> reads_ahead_by{};
+    std::array<std::atomic<u64>, static_cast<size_t>(Writer::Count)> reads_ahead_by{};
     /// The packets of the last posted waits for idle and fences, for CheckRenderRead's report.
     std::array<std::atomic<u64>, 64> idle_posts{};
     u64 idle_post_count{};

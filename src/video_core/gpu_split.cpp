@@ -43,13 +43,16 @@ namespace VideoCommon {
 
 namespace {
 
-// CheckRenderRead's stamps: a device page and the low bits of the back's packet count, hashed.
+// CheckRenderRead's stamps, hashed by page: the writer, the device page and the low 36 bits of
+// the back's packet count (24 bits wrapped after 16.7M packets, and a page stamped at boot read
+// ahead of GPURender once it was 8.4M packets old).
 constexpr size_t StampSlots = size_t{1} << 16;
 constexpr u64 StampPageBits = 12;
-constexpr u64 StampSeqBits = 24;
+constexpr u64 StampSeqBits = 36;
 constexpr u64 StampSeqMask = (u64{1} << StampSeqBits) - 1;
-constexpr u64 StampPageMask = (u64{1} << 32) - 1;
+constexpr u64 StampPageMask = (u64{1} << 24) - 1;
 constexpr u64 StampTagShift = 60;
+static_assert(Tegra::MaxwellDeviceTraits::device_virtual_bits - StampPageBits <= 24);
 
 const char* WriterName(u64 writer) {
     static constexpr std::array<const char*, 5> names{
@@ -1588,28 +1591,9 @@ void GpuSplit::GuardPools(GPUVAddr gpu_addr, u64 size) {
     }
 }
 
-bool GpuSplit::SparseWrite(GPUVAddr gpu_addr, u64 size) {
-    const GPUVAddr end = gpu_addr + (std::max)(size, u64{1});
-    if (end <= Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) ||
-        gpu_addr >= Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
-        return false;
-    }
-    std::scoped_lock lock{Tegra::g_nx2_sparse_state_mutex};
-    auto it = Tegra::g_nx2_sparse_state.upper_bound(gpu_addr);
-    if (it != Tegra::g_nx2_sparse_state.begin()) {
-        --it;
-    }
-    for (; it != Tegra::g_nx2_sparse_state.end() && it->first < end; ++it) {
-        if (gpu_addr < it->first + it->second.size) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void GpuSplit::Stamp(DAddr device_addr, u64 size, Writer writer, bool sparse) {
+void GpuSplit::Stamp(DAddr device_addr, u64 size, Writer writer) {
     const u64 seq = render_follower->Pushed() & StampSeqMask;
-    const u64 tag = ((static_cast<u64>(writer) << 1) | (sparse ? 1 : 0)) << StampTagShift;
+    const u64 tag = static_cast<u64>(writer) << StampTagShift;
     for (u64 page = device_addr >> StampPageBits;
          page <= (device_addr + (std::max)(size, u64{1}) - 1) >> StampPageBits; ++page) {
         stamps[StampSlot(page)].store(tag | (page << StampSeqBits) | seq,
@@ -1646,10 +1630,9 @@ void GpuSplit::CheckRenderRead(DAddr device_addr, u64 size) {
                 }
                 LOG_ERROR(HW_GPU,
                           "GPU render unlend: GPURender read {:#x}+{:#x} for packet {}, which the "
-                          "back wrote after it posted packet {} ({}{}); posted wait for idle or "
+                          "back wrote after it posted packet {} ({}); posted wait for idle or "
                           "fence between them: {}",
-                          device_addr, size, packet, written, WriterName(tag >> 1),
-                          (tag & 1) != 0 ? ", sparse" : "",
+                          device_addr, size, packet, written, WriterName(tag),
                           idle != 0 ? fmt::format("packet {}", idle) : std::string{"none"});
             }
             return;
@@ -1675,8 +1658,7 @@ void GpuSplit::LogUnlend() const {
     std::string ahead;
     for (size_t tag = 0; tag < reads_ahead_by.size(); ++tag) {
         if (const u64 count = reads_ahead_by[tag].load(std::memory_order_relaxed); count != 0) {
-            ahead += fmt::format(" {}{}:{}", WriterName(tag >> 1),
-                                 (tag & 1) != 0 ? " (sparse)" : "", count);
+            ahead += fmt::format(" {}:{}", WriterName(tag), count);
         }
     }
     LOG_INFO(HW_GPU, "GPU render unlend: texture reads ahead by writer:{}",

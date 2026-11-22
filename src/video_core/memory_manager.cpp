@@ -353,8 +353,7 @@ void MemoryManager::Write(GPUVAddr addr, T data) {
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Guarding()) [[unlikely]] {
         split.GuardStreamWrite(addr, sizeof(T));
         if (const auto address = GpuToCpuAddress(addr)) {
-            split.StampWrite(*address, sizeof(T), VideoCommon::GpuSplit::Writer::Word,
-                             VideoCommon::GpuSplit::SparseWrite(addr, sizeof(T)));
+            split.StampWrite(*address, sizeof(T), VideoCommon::GpuSplit::Writer::Word);
         }
     }
     // A download for a guest read not yet in guest memory would land over this write later.
@@ -589,14 +588,13 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     Tegra::Nx2BackSparseWrite(gpu_dest_addr, size, src_buffer);
     auto& split = VideoCommon::GpuSplit::Get();
     split.GuardStreamWrite(gpu_dest_addr, size);
-    const bool sparse = split.Guarding() && VideoCommon::GpuSplit::SparseWrite(gpu_dest_addr, size);
     auto just_advance = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset, std::size_t copy_amount) {
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(page_table[page_index]) << cpu_page_bits) + offset;
         FinishReadsBefore(dev_addr_base, copy_amount, unsafe);
-        split.StampWrite(dev_addr_base, copy_amount, VideoCommon::GpuSplit::Writer::Block, sparse);
+        split.StampWrite(dev_addr_base, copy_amount, VideoCommon::GpuSplit::Writer::Block);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
         }
@@ -614,7 +612,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset;
         FinishReadsBefore(dev_addr_base, copy_amount, unsafe);
-        split.StampWrite(dev_addr_base, copy_amount, VideoCommon::GpuSplit::Writer::Block, sparse);
+        split.StampWrite(dev_addr_base, copy_amount, VideoCommon::GpuSplit::Writer::Block);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
         }

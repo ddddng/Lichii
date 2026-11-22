@@ -3824,8 +3824,7 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         const u64 size = wide ? 16 : 4;
         auto& split = GpuSplit::Get();
         split.GuardStreamWrite(gpu_addr, size);
-        split.StampWrite(*device, size, GpuSplit::Writer::Payload,
-                         GpuSplit::SparseWrite(gpu_addr, size));
+        split.StampWrite(*device, size, GpuSplit::Writer::Payload);
         VideoCommon::Nx2FastDraw::NoteSync();
         // A read download still to land there is finished on GPURender.
         const bool lent = VideoCore::ReadDownloadsMayCover(*device, size);
