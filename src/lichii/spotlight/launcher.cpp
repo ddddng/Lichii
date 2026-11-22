@@ -267,7 +267,7 @@ void Launcher::UpdateSelection(const QModelIndex& game, int count) {
                 QFileInfo(game.data(GameListItemPath::FullPathRole).toString()).completeBaseName();
         }
         const u64 id = game.data(GameListItemPath::ProgramIdRole).toULongLong();
-        hero->SetGame(title, Lichii::PlatformForProgram(id), playtime.GetPlayTime(id));
+        hero->SetGame(title, Lichii::PlatformOf(game), playtime.GetPlayTime(id));
     } else {
         hero->SetEmpty(library_available, count == 0 && !games->IsPopulating());
     }

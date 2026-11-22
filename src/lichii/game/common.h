@@ -16,11 +16,12 @@ namespace Lichii {
 enum class LibraryPlatform { All, Switch2, Switch1 };
 enum class LibrarySort { Recent, Name, PlayTime, Size };
 
-inline LibraryPlatform PlatformForProgram(qulonglong id) {
-    if (id == 0) {
+inline LibraryPlatform PlatformOf(const QModelIndex& game) {
+    if (game.data(GameListItemPath::ProgramIdRole).toULongLong() == 0) {
         return LibraryPlatform::All;
     }
-    return (id >> 56) == 0x04 ? LibraryPlatform::Switch2 : LibraryPlatform::Switch1;
+    return game.data(GameListItemPath::Switch2Role).toBool() ? LibraryPlatform::Switch2
+                                                             : LibraryPlatform::Switch1;
 }
 
 inline void CopyLibraryGames(QStandardItemModel& destination, const QStandardItemModel& library) {

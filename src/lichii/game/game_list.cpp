@@ -191,9 +191,8 @@ protected:
         const QModelIndex item = library->index(row, 0, parent);
         switch (item.data(GameListItem::TypeRole).value<GameListItemType>()) {
         case GameListItemType::Game: {
-            const u64 id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
             return (platform_filter == Lichii::LibraryPlatform::All ||
-                    platform_filter == Lichii::PlatformForProgram(id)) &&
+                    platform_filter == Lichii::PlatformOf(item)) &&
                    Lichii::FilterMatches(query, library->itemFromIndex(item));
         }
         case GameListItemType::Favorites:
