@@ -4100,14 +4100,31 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
         }
     }
     const TICEntry config = TextureViewHeader(raw_config, native);
-    const ImageInfo info(config);
+    ImageInfo info(config);
     if (info.type == ImageType::Buffer) {
         const ImageViewInfo view_info(config, 0);
         return slot_image_views.insert(runtime, info, view_info, config.Address());
     }
     const u32 layer_offset = config.BaseLayer() * info.layer_stride;
     const GPUVAddr image_gpu_addr = config.Address() - layer_offset;
-    const ImageId image_id = FindOrInsertImage(info, image_gpu_addr, RelaxedOptions{}, &retry);
+    ImageId image_id{};
+    if (native && info.type == ImageType::e3D && info.format == PixelFormat::A8B8G8R8_UNORM &&
+        info.size == Extent3D{16, 16, 16} && info.resources.levels == 1 && info.num_samples == 1 &&
+        config.IsBlockLinear() && config.load_store_hint != 0 && config.BaseLayer() == 0 &&
+        Settings::GetCurrentProgramID() == 0x0400E95004038001ULL) {
+        if (const ImageId native_id = FindImage(info, image_gpu_addr, RelaxedOptions{}); native_id) {
+            const ImageBase& image = slot_images[native_id];
+            if (image.first_written_frame != 0 && image.gpu_addr == image_gpu_addr &&
+                image.info.format == info.format && image.info.size == info.size &&
+                image.IsSafeGpuCopy()) {
+                image_id = native_id;
+            }
+        }
+        info.maxwell_gob_layout = !image_id;
+    }
+    if (!image_id) {
+        image_id = FindOrInsertImage(info, image_gpu_addr, RelaxedOptions{}, &retry);
+    }
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
     }
