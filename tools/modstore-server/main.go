@@ -38,6 +38,9 @@ func tokenFromEnv() (string, error) {
 }
 
 func serve(s *store, publicAddr, token string) error {
+	if _, err := s.catalog(context.Background()); err != nil {
+		return fmt.Errorf("load catalog: %w", err)
+	}
 	public, err := net.Listen("tcp4", publicAddr)
 	if err != nil {
 		return err
@@ -48,19 +51,8 @@ func serve(s *store, publicAddr, token string) error {
 		return err
 	}
 	defer admin.Close()
-	sem := make(chan struct{}, 32)
 	publicHandler := s.publicHandler()
-	limited := responseHeaders(endpoint(func(w http.ResponseWriter, r *http.Request) error {
-		select {
-		case sem <- struct{}{}:
-			defer func() { <-sem }()
-		default:
-			return problem{503, "server_busy", "too many concurrent requests"}
-		}
-		publicHandler.ServeHTTP(w, r)
-		return nil
-	}))
-	publicServer := http.Server{Handler: limited, ReadHeaderTimeout: 5 * time.Second,
+	publicServer := http.Server{Handler: publicHandler, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	adminServer := http.Server{Handler: s.adminHandler(token), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 90 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 15 * time.Second, MaxHeaderBytes: 16 << 10}

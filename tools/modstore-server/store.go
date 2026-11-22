@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -81,8 +83,11 @@ func publicMod(targets string) string {
 }
 
 type store struct {
-	db     *sql.DB
-	assets string
+	db        *sql.DB
+	assets    string
+	responses catalogResponses
+	view      atomic.Pointer[catalogView]
+	viewMu    sync.Mutex
 }
 
 func openStore(dir string) (*store, error) {
@@ -100,7 +105,7 @@ func openStore(dir string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(4)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
