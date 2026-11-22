@@ -216,6 +216,7 @@ private:
     static inline thread_local u64 collect_stamp{};
     static inline thread_local u32 side_depth{};
     static inline thread_local u32 immediate_depth{};
+    static inline std::atomic<bool> checks_records{};
     static inline thread_local bool playing{};
 
     const Device& device;

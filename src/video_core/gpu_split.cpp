@@ -160,6 +160,19 @@ void GpuSplit::CheckOwner(const char* where) {
 
 GpuSplit GpuSplit::instance;
 
+bool GpuSplit::RenderThreadOn() {
+    const char* const follower = std::getenv("EDEN_NX2_RENDER_FOLLOWER");
+    return follower != nullptr ? follower[0] != '0' : Settings::values.render_thread.GetValue();
+}
+
+bool GpuSplit::RenderSwitch(const char* name) {
+    if (!RenderThreadOn()) {
+        return false;
+    }
+    const char* const value = std::getenv(name);
+    return value == nullptr || value[0] != '0';
+}
+
 void GpuSplit::MaybeStart(Core::System& system_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
@@ -195,10 +208,14 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                          std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
     ring = std::make_unique<u64[]>(RingWords);
     ++starts; // Before the back starts: its holds name entries with it (EntryTag)
-    // EDEN_NX2_RENDER_FOLLOWER=1: record warm direct draws on GPURender. Off by default: the back
-    // joined it on 99.8% of packets in OoT (#2348), so it added a wake-up per draw.
-    const char* const render = std::getenv("EDEN_NX2_RENDER_FOLLOWER");
-    const bool render_requested = render != nullptr && render[0] == '1';
+    // EDEN_NX2_RENDER_FOLLOWER: record warm direct draws on GPURender. Off by default; the
+    // render_thread setting or EDEN_NX2_RENDER_FOLLOWER=1 turns it on with every switch of the port
+    // below, <switch>=0 turns one off. EDEN_NX2_RENDER_FOLLOWER overrides the setting either way.
+    const bool render_requested = RenderSwitch("EDEN_NX2_RENDER_FOLLOWER");
+    const char* const follower_env = std::getenv("EDEN_NX2_RENDER_FOLLOWER");
+    LOG_INFO(HW_GPU, "GPU render thread: {} ({})", render_requested ? "on" : "off",
+             follower_env != nullptr ? fmt::format("EDEN_NX2_RENDER_FOLLOWER={}", follower_env)
+                                     : std::string{"setting"});
     if (render_requested && !render_follower_supported) {
         LOG_INFO(HW_GPU, "GPU render follower: unsupported on this renderer or driver");
     } else if (render_requested) {
@@ -215,26 +232,20 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         lend_sites = {};
         // EDEN_NX2_RENDER_RING=1: the back posts while earlier packets are unplayed (a ring of
         // packets); without it a post waits for the packet before it, as the single slot did.
-        const char* const ring_ahead = std::getenv("EDEN_NX2_RENDER_RING");
-        const bool ahead = ring_ahead != nullptr && ring_ahead[0] == '1';
+        const bool ahead = RenderSwitch("EDEN_NX2_RENDER_RING");
         render_lock_parks = 0;
         // EDEN_NX2_RENDER_PLAYED=1: the front's waits read GPURender's position (FrontPosition).
-        const char* const played_switch = std::getenv("EDEN_NX2_RENDER_PLAYED");
-        two_positions = played_switch != nullptr && played_switch[0] == '1';
+        two_positions = RenderSwitch("EDEN_NX2_RENDER_PLAYED");
         // EDEN_NX2_RENDER_OWNS=1: GPURender owns the scheduler, the texture cache, the guest
         // descriptor queue and the query cache; the back lends it every call into them.
-        const char* const owns = std::getenv("EDEN_NX2_RENDER_OWNS");
-        render_owns = owns != nullptr && owns[0] == '1';
+        render_owns = RenderSwitch("EDEN_NX2_RENDER_OWNS");
         // EDEN_NX2_RENDER_UNLEND=1: warm direct draws go to GPURender unlent.
-        const char* const unlend_switch = std::getenv("EDEN_NX2_RENDER_UNLEND");
-        const bool unlend_wanted = unlend_switch != nullptr && unlend_switch[0] == '1';
-        const char* const arena_switch = std::getenv("EDEN_NX2_BUFFER_ARENA");
-        const bool arena = arena_switch != nullptr && arena_switch[0] == '1';
+        const bool unlend_wanted = RenderSwitch("EDEN_NX2_RENDER_UNLEND");
+        const bool arena = RenderSwitch("EDEN_NX2_BUFFER_ARENA");
         render_unlend = render_owns && arena && unlend_wanted;
         // EDEN_NX2_RENDER_WAITS_E=1: the front's game memory and list waits read the back's
         // position (Fritchii 347d15c12).
-        const char* const waits_switch = std::getenv("EDEN_NX2_RENDER_WAITS_E");
-        const bool waits_wanted = waits_switch != nullptr && waits_switch[0] == '1';
+        const bool waits_wanted = RenderSwitch("EDEN_NX2_RENDER_WAITS_E");
         waits_e = waits_wanted && two_positions;
         if (waits_wanted && !waits_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_WAITS_E needs EDEN_NX2_RENDER_PLAYED=1: ignored");
@@ -250,8 +261,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                           "EDEN_NX2_RENDER_POST_WFI",         "EDEN_NX2_RENDER_POST_FENCE_REPORT",
                           "EDEN_NX2_RENDER_LIST_WORDS_E"};
         for (size_t op = 0; op < posts.size(); ++op) {
-            const char* const value = std::getenv(post_switches[op]);
-            const bool wanted = value != nullptr && value[0] == '1';
+            const bool wanted = RenderSwitch(post_switches[op]);
             posts[op] = wanted && render_unlend;
             posted[op] = 0;
             fences_lent = {};
@@ -262,8 +272,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         }
         list_words.snapshots = list_words.owed = list_words.lent = list_words.moved = 0;
         list_words.unmapped.store(0, std::memory_order_relaxed);
-        const char* const inval_switch = std::getenv("EDEN_NX2_RENDER_INVAL_E");
-        const bool inval_wanted = inval_switch != nullptr && inval_switch[0] == '1';
+        const bool inval_wanted = RenderSwitch("EDEN_NX2_RENDER_INVAL_E");
         inval_e = inval_wanted && render_unlend;
         invalidations = {};
         for (auto& count : unparked) {
@@ -272,8 +281,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         if (inval_wanted && !inval_e) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_INVAL_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const gather_switch = std::getenv("EDEN_NX2_RENDER_GATHER_E");
-        const bool gather_wanted = gather_switch != nullptr && gather_switch[0] == '1';
+        const bool gather_wanted = RenderSwitch("EDEN_NX2_RENDER_GATHER_E");
         gather_e = gather_wanted && inval_e && posts[static_cast<size_t>(PostedOp::Invalidation)];
         gathers.applied = gathers.lent = 0;
         gathers.off_owner.store(0, std::memory_order_relaxed);
@@ -281,24 +289,21 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_RENDER_GATHER_E needs EDEN_NX2_RENDER_INVAL_E=1 and "
                                 "EDEN_NX2_RENDER_POST_INVAL=1: ignored");
         }
-        const char* const soft_switch = std::getenv("EDEN_NX2_RENDER_SOFT_RELEASE_E");
-        const bool soft_wanted = soft_switch != nullptr && soft_switch[0] == '1';
+        const bool soft_wanted = RenderSwitch("EDEN_NX2_RENDER_SOFT_RELEASE_E");
         soft_release_e = soft_wanted && render_unlend;
         soft_releases = 0;
         if (soft_wanted && !soft_release_e) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_SOFT_RELEASE_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const payload_switch = std::getenv("EDEN_NX2_RENDER_PAYLOAD_E");
-        const bool payload_wanted = payload_switch != nullptr && payload_switch[0] == '1';
+        const bool payload_wanted = RenderSwitch("EDEN_NX2_RENDER_PAYLOAD_E");
         payload_e = payload_wanted && render_unlend;
         payloads = {};
         if (payload_wanted && !payload_e) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_PAYLOAD_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const query_sync_switch = std::getenv("EDEN_NX2_RENDER_QUERY_SYNC_E");
-        const bool query_sync_wanted = query_sync_switch != nullptr && query_sync_switch[0] == '1';
+        const bool query_sync_wanted = RenderSwitch("EDEN_NX2_RENDER_QUERY_SYNC_E");
         query_sync_e = query_sync_wanted && render_unlend;
         query_sync.collected = query_sync.targets = query_sync.payload_values = 0;
         query_sync.missing.store(0, std::memory_order_relaxed);
@@ -307,16 +312,14 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_QUERY_SYNC_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const mesh_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_MESH");
-        const bool mesh_wanted = mesh_switch != nullptr && mesh_switch[0] == '1';
+        const bool mesh_wanted = RenderSwitch("EDEN_NX2_RENDER_UNLEND_MESH");
         unlend_mesh = mesh_wanted && render_unlend;
         unlent_emulated_mesh.store(0, std::memory_order_relaxed);
         if (mesh_wanted && !unlend_mesh) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_MESH needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const clear_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_CLEAR");
-        const bool clear_wanted = clear_switch != nullptr && clear_switch[0] == '1';
+        const bool clear_wanted = RenderSwitch("EDEN_NX2_RENDER_UNLEND_CLEAR");
         unlend_clear = clear_wanted && render_unlend;
         clears.unlent = 0;
         clears.lent = {};
@@ -325,8 +328,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_CLEAR needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const dispatch_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_DISPATCH");
-        const bool dispatch_wanted = dispatch_switch != nullptr && dispatch_switch[0] == '1';
+        const bool dispatch_wanted = RenderSwitch("EDEN_NX2_RENDER_UNLEND_DISPATCH");
         unlend_dispatch = dispatch_wanted && render_unlend;
         dispatches.unlent = dispatches.indirect = dispatches.list_slots = dispatches.tails = 0;
         dispatches.lent = {};
@@ -336,8 +338,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_UNLEND_DISPATCH needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const fast_delta_switch = std::getenv("EDEN_NX2_RENDER_UNLEND_FAST_DELTA");
-        const bool fast_delta_wanted = fast_delta_switch != nullptr && fast_delta_switch[0] == '1';
+        const bool fast_delta_wanted = RenderSwitch("EDEN_NX2_RENDER_UNLEND_FAST_DELTA");
         unlend_fast_delta = fast_delta_wanted && render_unlend;
         fast_delta.kept = fast_delta.looked_up = fast_delta.differs = 0;
         fast_delta.inputs_kept.store(0, std::memory_order_relaxed);
@@ -347,9 +348,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                 HW_GPU,
                 "EDEN_NX2_RENDER_UNLEND_FAST_DELTA needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const query_flush_switch = std::getenv("EDEN_NX2_RENDER_QUERY_FLUSH_E");
-        const bool query_flush_wanted =
-            query_flush_switch != nullptr && query_flush_switch[0] == '1';
+        const bool query_flush_wanted = RenderSwitch("EDEN_NX2_RENDER_QUERY_FLUSH_E");
         query_flush_e = query_flush_wanted && render_unlend;
         query_flushes_nothing_pending = 0;
         reports_landed_untracked.store(0, std::memory_order_relaxed);
@@ -359,8 +358,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
             LOG_WARNING(HW_GPU,
                         "EDEN_NX2_RENDER_QUERY_FLUSH_E needs EDEN_NX2_RENDER_UNLEND=1: ignored");
         }
-        const char* const flush_switch = std::getenv("EDEN_NX2_RENDER_FLUSH_E");
-        const bool flush_wanted = flush_switch != nullptr && flush_switch[0] == '1';
+        const bool flush_wanted = RenderSwitch("EDEN_NX2_RENDER_FLUSH_E");
         flush_e = flush_wanted && render_unlend;
         flushes_answered = {};
         flushes_lent = {};

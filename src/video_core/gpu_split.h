@@ -670,6 +670,11 @@ public:
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
     /// Vulkan). Called by the front between commands.
     void MaybeStart(Core::System& system);
+    /// The render_thread setting, or EDEN_NX2_RENDER_FOLLOWER over it either way when set.
+    [[nodiscard]] static bool RenderThreadOn();
+    /// A render follower switch (EDEN_NX2_RENDER_*, EDEN_NX2_BUFFER_ARENA): on unless set to 0,
+    /// and every one is off while the render thread is off (RenderThreadOn).
+    [[nodiscard]] static bool RenderSwitch(const char* name);
     void Stop();
 
     void SetRenderFollowerSupported(bool supported) {

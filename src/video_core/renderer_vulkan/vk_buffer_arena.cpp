@@ -41,6 +41,7 @@ using HandleArray = boost::container::static_vector<VkBuffer, VideoCommon::NUM_V
 
 BufferArena::BufferArena(const Device& device_, Scheduler& scheduler_)
     : device{device_}, scheduler{scheduler_}, enabled{Enabled()} {
+    checks_records.store(enabled, std::memory_order_relaxed);
     if (enabled) {
         LOG_INFO(Render_Vulkan, "EDEN_NX2_BUFFER_ARENA: buffer commands queued by value");
     }
@@ -67,11 +68,7 @@ BufferArena::~BufferArena() {
 }
 
 bool BufferArena::Enabled() {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_BUFFER_ARENA");
-        return value != nullptr && value[0] == '1';
-    }();
-    return enabled;
+    return VideoCommon::GpuSplit::RenderSwitch("EDEN_NX2_BUFFER_ARENA");
 }
 
 template <typename Body, typename E>
@@ -231,7 +228,8 @@ void BufferArena::TickFrame() {
 }
 
 void BufferArena::CheckRecord(const char* where, std::source_location location) {
-    if (side_depth == 0 || playing || immediate_depth != 0 || !Enabled()) {
+    if (side_depth == 0 || playing || immediate_depth != 0 ||
+        !checks_records.load(std::memory_order_relaxed)) {
         return;
     }
     if (outside_records.fetch_add(1, std::memory_order_relaxed) < 16) {

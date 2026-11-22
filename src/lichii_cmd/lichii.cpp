@@ -489,6 +489,7 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 
 /// GPU trace replay (docs/nx2/gpu-trace.md):
 ///   eden-cli --replay <trace> --out <dir> [--frames N] [--device N] [--gpu-accuracy low|high]
+///                     [--render-thread on|off]
 ///                     [--record <trace> --record-from <present> --record-presents N]
 ///   eden-cli --gpu-trace-sample <trace>: writes the synthetic trace.
 ///   eden-cli --gpu-trace-sample-draws <trace>: writes the synthetic trace of 3D draws.
@@ -529,6 +530,8 @@ static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
             Settings::values.gpu_accuracy.SetValue(std::string_view{argv[++i]} == "low"
                                                        ? Settings::GpuAccuracy::Low
                                                        : Settings::GpuAccuracy::High);
+        } else if (argument == "--render-thread" && has_value) {
+            Settings::values.render_thread.SetValue(std::string_view{argv[++i]} != "off");
         } else if (options.trace.empty()) {
             options.trace = Common::FS::ToU8String(argv[i]);
         } else {
@@ -538,7 +541,7 @@ static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
     }
     if (options.trace.empty() || options.out.empty()) {
         fmt::print(stderr, "usage: --replay <trace> --out <dir> [--frames N] [--device N] "
-                           "[--gpu-accuracy low|high]\n");
+                           "[--gpu-accuracy low|high] [--render-thread on|off]\n");
         return false;
     }
     std::string error;
