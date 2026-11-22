@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QAbstractButton>
+#include <QColor>
 #include <QStringList>
 #include <QWidget>
 
@@ -37,6 +38,7 @@ public:
     explicit PillButton(const QString& text, QString icon = {}, Kind kind = Kind::Control,
                         int height = 36, QWidget* parent = nullptr);
     void SetKind(Kind kind);
+    void SetForegroundColor(const QColor& color);
     QSize sizeHint() const override;
 
 protected:
@@ -47,6 +49,7 @@ protected:
 private:
     QString icon_name;
     Kind kind;
+    QColor foreground;
     int height;
     bool hovered = false;
 };

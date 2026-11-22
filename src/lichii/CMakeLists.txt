@@ -192,7 +192,6 @@ add_executable(lichii
     install_dialog.h
     loading_screen.cpp
     loading_screen.h
-    loading_screen.ui
 
     main.cpp
     nx2_switches.h
@@ -265,6 +264,10 @@ add_executable(lichii
     spotlight/settings_page.cpp spotlight/settings_page.h
     spotlight/top_bar.cpp spotlight/top_bar.h
     spotlight/widgets.cpp spotlight/widgets.h
+    spotlight/fullscreen_hint.cpp spotlight/fullscreen_hint.h
+    spotlight/ingame_bar.cpp spotlight/ingame_bar.h
+    spotlight/ingame_menu.cpp spotlight/ingame_menu.h
+    spotlight/shader_chip.cpp spotlight/shader_chip.h
 
     data_dialog.h data_dialog.cpp data_dialog.ui
     data_widget.ui

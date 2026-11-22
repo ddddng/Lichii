@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QHash>
 #include <QPainter>
+#include <QPainterPath>
 
 namespace Spotlight {
 
@@ -68,6 +69,27 @@ QIcon Icon(QStringView name, const QColor& color, int size) {
         icon.addPixmap(IconPixmap(name, size, disabled, ratio), QIcon::Disabled);
     }
     return icon;
+}
+
+void PaintWholeIcon(QPainter& painter, const QRectF& rect, const QPixmap& icon, qreal radius) {
+    painter.save();
+    QPainterPath clip;
+    clip.addRoundedRect(rect, radius, radius);
+    painter.setClipPath(clip, Qt::IntersectClip);
+    painter.fillRect(rect, Color::Panel());
+    if (icon.isNull()) {
+        const int size = qRound(rect.width() / 2);
+        painter.drawPixmap(rect.center() - QPointF{size / 2.0, size / 2.0},
+                           IconPixmap(u"game-controller", size, Color::TextMuted(),
+                                      painter.device()->devicePixelRatioF()));
+    } else {
+        QSizeF size = icon.deviceIndependentSize();
+        size.scale(rect.size(), Qt::KeepAspectRatio);
+        painter.drawPixmap(
+            QRectF{rect.center() - QPointF{size.width() / 2, size.height() / 2}, size}, icon,
+            QRectF{icon.rect()});
+    }
+    painter.restore();
 }
 
 } // namespace Spotlight
