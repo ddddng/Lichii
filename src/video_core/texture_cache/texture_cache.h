@@ -3625,18 +3625,29 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     if (True(image.flags & ImageFlagBits::CompactLayers)) {
-        std::vector<u32> layers;
-        for (u32 layer = 0; layer < static_cast<u32>(image.info.resources.layers); ++layer) {
-            if (image.dirty_layers.empty() ||
-                ((image.dirty_layers[layer / 64] >> (layer % 64)) & 1) != 0) {
-                layers.push_back(layer);
+        const auto try_upload = [&] {
+            std::vector<u32> layers;
+            for (u32 layer = 0; layer < static_cast<u32>(image.info.resources.layers); ++layer) {
+                if (image.dirty_layers.empty() ||
+                    ((image.dirty_layers[layer / 64] >> (layer % 64)) & 1) != 0) {
+                    layers.push_back(layer);
+                }
             }
+            if (!layers.empty()) {
+                UploadLayers(image, layers);
+            }
+            image.dirty_layers.clear();
+        };
+        try {
+            try_upload();
+        } catch (const std::bad_alloc&) {
+            image.flags |= ImageFlagBits::CpuModified;
+            image.load_tick = previous_load_tick;
+            image.storage_written_levels = previous_storage_written_levels;
+            NoteHostOutOfMemory("upload", image);
+            runtime.TransitionImageLayout(image);
         }
-        image.dirty_layers.clear();
-        if (!layers.empty()) {
-            UploadLayers(image, layers);
-            runtime.InsertUploadMemoryBarrier();
-        }
+        runtime.InsertUploadMemoryBarrier();
         return;
     }
     if (!image.dirty_layers.empty() && UploadWrittenLayers(image)) {

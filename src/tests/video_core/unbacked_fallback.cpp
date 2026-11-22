@@ -92,9 +92,14 @@ TEST_CASE("The oversized BC6H array is rejected or backed without sparse residen
             continue;
         }
     }
-    if (!device || !device->IsOptimalBcnSupported() ||
-        (device->IsSparseResidencyImage2DSupported() && device->CanUseUnbackedSparseImages())) {
-        SKIP("Needs a Vulkan device with BCn and without usable unbound sparse images");
+    if (!device) {
+        SKIP("No Vulkan device");
+    }
+    if (!device->IsOptimalBcnSupported()) {
+        SKIP("No native Vulkan BCn support");
+    }
+    if (device->IsSparseResidencyImage2DSupported() && device->CanUseUnbackedSparseImages()) {
+        SKIP("Need a Vulkan device without usable unbound sparse images");
     }
 
     Vulkan::MemoryAllocator allocator(*device);
@@ -123,6 +128,7 @@ TEST_CASE("The oversized BC6H array is rejected or backed without sparse residen
     }
     struct SparseRegion {
         explicit SparseRegion(GPUVAddr addr, u64 size) : address{addr} {
+            Tegra::Nx2AddSparseSpan(address, size);
             Tegra::Nx2SparseRegionCreated(address, size, 4U << 20);
         }
         ~SparseRegion() {
