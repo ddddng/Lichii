@@ -74,9 +74,14 @@ void PillButton::SetKind(Kind kind_) {
     update();
 }
 
+void PillButton::SetForegroundColor(const QColor& color) {
+    foreground = color;
+    update();
+}
+
 QSize PillButton::sizeHint() const {
-    const int icon = icon_name.isEmpty() ? 0 : (height >= 40 ? 18 : 16) + 8;
-    const int padding = height >= 40 ? 24 : 16;
+    const int icon = icon_name.isEmpty() ? 0 : height >= 40 ? 26 : height == 26 ? 20 : 24;
+    const int padding = height >= 40 ? 24 : height == 26 ? 11 : 16;
     return {fontMetrics().horizontalAdvance(text()) + icon + padding * 2, height};
 }
 
@@ -94,10 +99,15 @@ void PillButton::paintEvent(QPaintEvent*) {
         ink = Color::OnLight();
         break;
     case Kind::Control:
-        fill = hovered ? Color::ControlHover() : Color::Control();
-        stroke = Color::Stroke();
+        fill = hovered ? Color::ControlHover() : height == 26 ? Color::Fill() : Color::Control();
+        if (height != 26) {
+            stroke = Color::Stroke();
+        }
         ink = Color::Text();
         break;
+    }
+    if (foreground.isValid()) {
+        ink = foreground;
     }
     if (!isEnabled()) {
         fill.setAlphaF(fill.alphaF() * 0.4f);
@@ -108,8 +118,8 @@ void PillButton::paintEvent(QPaintEvent*) {
     }
     FillRounded(painter, rect(), height / 2.0, fill, stroke);
 
-    const int icon = icon_name.isEmpty() ? 0 : (height >= 40 ? 18 : 16);
-    const int gap = icon ? 8 : 0;
+    const int icon = icon_name.isEmpty() ? 0 : height >= 40 ? 18 : height == 26 ? 14 : 16;
+    const int gap = icon ? (height == 26 ? 6 : 8) : 0;
     const int content = icon + gap + fontMetrics().horizontalAdvance(text());
     int x = (width() - content) / 2;
     if (icon) {

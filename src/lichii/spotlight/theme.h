@@ -9,6 +9,8 @@
 #include <QPixmap>
 #include <QStringView>
 
+class QPainter;
+
 // Design tokens and assets of the Spotlight launcher (Paper: Lichii Launcher Redesign, 02 · Spotlight).
 // Widgets that paint themselves read these; the Lichii stylesheet uses the same values.
 namespace Spotlight {
@@ -38,6 +40,9 @@ inline QColor Stroke() { return QColor(0xff, 0xff, 0xff, 0x2e); }
 inline QColor StrokeSubtle() { return QColor(0xff, 0xff, 0xff, 0x14); }
 inline QColor Success() { return QColor(0x3f, 0xd1, 0x8b); }
 inline QColor Warning() { return QColor(0xff, 0xc8, 0x57); }
+inline QColor Info() { return QColor(0x8f, 0xb5, 0xff); }
+inline QColor Hud() { return QColor(0x08, 0x09, 0x0d, 0xb8); }
+inline QColor HudSolid() { return QColor(0x08, 0x09, 0x0d, 0xdb); }
 } // namespace Color
 
 namespace Radius {
@@ -47,6 +52,7 @@ inline constexpr int Card = 16;
 inline constexpr int Tile = 14;
 inline constexpr int Row = 13;
 inline constexpr int KeyCap = 7;
+inline constexpr int InGamePanel = 22;
 } // namespace Radius
 
 /// Registers the bundled Lexend and Cal Sans faces. Call once before any widget is created.
@@ -64,5 +70,7 @@ QPixmap IconPixmap(QStringView name, int size, const QColor& color, qreal device
 
 /// The same icon for actions and buttons, with a dimmed variant for the disabled state.
 QIcon Icon(QStringView name, const QColor& color = Color::Text(), int size = 20);
+
+void PaintWholeIcon(QPainter& painter, const QRectF& rect, const QPixmap& icon, qreal radius);
 
 } // namespace Spotlight
