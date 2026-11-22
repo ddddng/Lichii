@@ -13,6 +13,7 @@
 
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
@@ -20,6 +21,8 @@
 #include <QGridLayout>
 #include <QHash>
 #include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -820,10 +823,17 @@ private:
             int first_unknown = -1;
             for (const auto& build : selected->github->builds) {
                 const auto match = MatchGitHubBuild(identity, build);
-                const auto version = build.download
-                                         ? build.id.toLower() + u'-' +
-                                               QString::fromLatin1(build.download->sha256.toHex())
-                                         : QString{};
+                QString version;
+                if (build.download) {
+                    const auto& download = *build.download;
+                    const QJsonArray selection{QString::fromLatin1(download.sha256.toHex()),
+                                               static_cast<int>(download.patch.kind),
+                                               download.patch.member, download.patch.tag};
+                    const auto fingerprint = QCryptographicHash::hash(
+                        QJsonDocument(selection).toJson(QJsonDocument::Compact),
+                        QCryptographicHash::Sha256);
+                    version = build.id.toLower() + u'-' + QString::fromLatin1(fingerprint.toHex());
+                }
                 offer_list.append({build, version, match, build.download.has_value()});
                 const auto display = build.id.size() == 16
                                          ? build.id

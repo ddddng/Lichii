@@ -608,12 +608,11 @@ bool IsPatchMember(const ZipEntry& entry, const GitHubPatch& patch, const QStrin
     if (patch.kind == GitHubPatchKind::Pchtxt) {
         return extension.compare(u"pchtxt", Qt::CaseInsensitive) == 0;
     }
-    const bool cheat = patch.kind == GitHubPatchKind::Cheat;
-    const bool matching_extension =
-        cheat ? extension.compare(u"txt", Qt::CaseInsensitive) == 0
-              : extension.compare(u"ips", Qt::CaseInsensitive) == 0 ||
-                    extension.compare(u"ips32", Qt::CaseInsensitive) == 0;
-    return matching_extension && NormalizedBuildId(filename.left(dot), cheat) == build_id;
+    if (patch.kind == GitHubPatchKind::Cheat) {
+        return extension.compare(u"txt", Qt::CaseInsensitive) == 0 &&
+               NormalizedBuildId(filename.left(dot), true) == build_id;
+    }
+    return MatchesGitHubIpsFilename(filename, build_id);
 }
 
 bool ReadPatchMember(QuaZip& zip, const QList<ZipEntry>& entries, const GitHubPatch& patch,
@@ -661,7 +660,6 @@ bool MatchesPchtxt(QByteArrayView patch, const QString& build_id) {
         return false;
     }
     bool matched = false;
-    bool stopped = false;
     while (!bytes.empty()) {
         const auto raw_line = TakePatchLine(bytes);
         const auto line = TrimPatchLine(raw_line.substr(0, raw_line.find_first_of("/#")));
@@ -669,12 +667,12 @@ bool MatchesPchtxt(QByteArrayView patch, const QString& build_id) {
             continue;
         }
         if (line[1] == 's' || line[1] == 'S') {
-            stopped = true;
+            break;
         }
         if (line[1] != 'n' && line[1] != 'N') {
             continue;
         }
-        if (matched || stopped || line.size() <= 8 || line.size() > 8 + 64) {
+        if (matched || line.size() <= 8 || line.size() > 8 + 64) {
             return false;
         }
         const QString directive = QString::fromLatin1(line.data(), line.size());
@@ -725,11 +723,6 @@ bool IsIps(QByteArrayView bytes, bool require_ips32) {
         }
     }
     return false;
-}
-
-bool IsCheatTag(const QString& tag) {
-    static const QRegularExpression forbidden(u"[\\p{Cc}\\p{Cf}\\p{Cs}\\x{fffd}\\[\\]{}]"_s);
-    return tag.size() <= 160 && !tag.trimmed().isEmpty() && !tag.contains(forbidden);
 }
 
 bool ScopeCheat(QByteArray& patch, const QString& tag) {
@@ -871,6 +864,19 @@ QString InstallPreparedMod(const QString& root, const QString& title, const QStr
 }
 
 } // namespace
+
+bool IsCheatTag(const QString& tag) {
+    static const QRegularExpression forbidden(u"[\\p{Cc}\\p{Cf}\\p{Cs}\\x{fffd}\\[\\]{}]"_s);
+    return tag.size() <= 160 && !tag.trimmed().isEmpty() && !tag.contains(forbidden);
+}
+
+bool MatchesGitHubIpsFilename(const QString& filename, QStringView build_id) {
+    static const QRegularExpression ips_id{u"\\A[0-9A-F]{16,64}\\z"_s};
+    const auto stem = filename.section(u'.', 0, 0).toUpper();
+    return (filename.endsWith(u".ips"_s, Qt::CaseInsensitive) ||
+            filename.endsWith(u".ips32"_s, Qt::CaseInsensitive)) &&
+           ips_id.match(stem).hasMatch() && stem.leftJustified(64, u'0') == build_id;
+}
 
 QString InstallMod(const QString& root, const QString& title_id, const QString& mod_id,
                    const QString& name, const QString& version, const QString& archive_path,

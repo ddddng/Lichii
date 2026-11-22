@@ -366,24 +366,18 @@ std::optional<GitHubDownload> ParseGitHubDownload(const QJsonObject& row,
     GitHubPatchKind patch_kind;
     if (kind == u"pchtxt" && id.size() == 64 && has_suffix(u".pchtxt")) {
         patch_kind = GitHubPatchKind::Pchtxt;
-    } else if (kind == u"ips" && id.size() == 64 && (has_suffix(u".ips") || has_suffix(u".ips32"))) {
-        const auto stem = leaf.section(u'/', -1).section(u'.', 0, 0).toUpper();
-        static const QRegularExpression ips_id{u"\\A[0-9A-F]{16,64}\\z"_s};
-        if (!ips_id.match(stem).hasMatch() || stem.leftJustified(64, u'0') != id) {
-            return std::nullopt;
-        }
+    } else if (kind == u"ips" && id.size() == 64 &&
+               MatchesGitHubIpsFilename(leaf.section(u'/', -1), id)) {
         patch_kind = GitHubPatchKind::Ips;
-    } else if (kind == u"cheat" && id.size() == 16 && has_suffix(u".txt") &&
+    } else if (kind == u"cheat" && id.size() == 16 && (!archive || !tag.isUndefined()) &&
+               has_suffix(u".txt") &&
                leaf.section(u'/', -1).chopped(4).compare(id, Qt::CaseInsensitive) == 0) {
         patch_kind = GitHubPatchKind::Cheat;
     } else {
         return std::nullopt;
     }
     const QString tag_text = tag.toString();
-    if (!tag.isUndefined() &&
-        (patch_kind != GitHubPatchKind::Cheat || !IsText(tag_text, 160) ||
-         tag_text.contains(u'[') || tag_text.contains(u']') ||
-         tag_text.contains(u'{') || tag_text.contains(u'}'))) {
+    if (!tag.isUndefined() && (patch_kind != GitHubPatchKind::Cheat || !IsCheatTag(tag_text))) {
         return std::nullopt;
     }
     const auto size = row.value("size_bytes"_L1).toInteger(-1);

@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 )
 
 var githubIDPattern = regexp.MustCompile(`^gh-[a-z0-9][a-z0-9-]{0,59}$`)
@@ -131,9 +133,17 @@ func validGitHubDownload(build githubBuild, d githubDownload) bool {
 	if d.SizeBytes > limit {
 		return false
 	}
-	if tag := d.Tag.value; tag != nil &&
-		(d.Kind != "cheat" || !validText(*tag, 160, false) || strings.ContainsAny(*tag, "[]{}")) {
-		return false
+	if tag := d.Tag.value; tag != nil {
+		if d.Kind != "cheat" || !validText(*tag, 160, false) || strings.ContainsAny(*tag, "[]{}") {
+			return false
+		}
+		units := 0
+		for _, r := range *tag {
+			units += utf16.RuneLen(r)
+			if units > 160 || r == unicode.ReplacementChar || unicode.Is(unicode.Cf, r) {
+				return false
+			}
+		}
 	}
 	switch d.Kind {
 	case "pchtxt":
@@ -143,7 +153,8 @@ func validGitHubDownload(build githubBuild, d githubDownload) bool {
 		return (extension == ".ips" || extension == ".ips32") &&
 			githubIPSBuildPattern.MatchString(stem) && stem+strings.Repeat("0", 64-len(stem)) == build.ID
 	case "cheat":
-		return len(build.ID) == 16 && build.Target == "main" && strings.EqualFold(path.Base(payload), build.ID+".txt")
+		return len(build.ID) == 16 && build.Target == "main" && (d.Member.value == nil || d.Tag.value != nil) &&
+			strings.EqualFold(path.Base(payload), build.ID+".txt")
 	default:
 		return false
 	}

@@ -346,6 +346,9 @@ func TestGitHubPinnedDownloadMetadata(t *testing.T) {
 		{"tag", "60 [FPS]", true},
 		{"tag", "60\tFPS", true},
 		{"tag", strings.Repeat("a", 161), true},
+		{"tag", strings.Repeat("𐌀", 81), true},
+		{"tag", "60\u200b FPS", true},
+		{"tag", "60\ufffd FPS", true},
 		{"tag", "", true},
 		{"tag", nil, true},
 		{"url", "https://example.org/file.pchtxt", false},
@@ -372,6 +375,11 @@ func TestGitHubPinnedDownloadMetadata(t *testing.T) {
 	api.put("/github", withDownloads(direct, nil), 400)
 	api.put("/github", withDownloads(nil, projection), 400)
 	api.put("/github", strings.Replace(withDownloads(projection, nil), `"target":"main"`, `"target":"unknown"`, 1), 400)
+	untaggedZIP := map[string]any{
+		"path": projection["path"], "size_bytes": projection["size_bytes"], "sha256": digest,
+		"kind": "cheat", "member": projection["member"],
+	}
+	api.put("/github", withDownloads(untaggedZIP, nil), 400)
 	cheat := map[string]any{"path": "cheats/1234567890abcdef.TxT", "size_bytes": 1, "sha256": digest, "kind": "cheat"}
 	api.put("/github", withDownloads(cheat, nil), 200)
 	cheat["path"] = "cheats/1234567890abcdfe.txt"

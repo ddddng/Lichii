@@ -145,8 +145,9 @@ An optional `download` object provides a Git blob's relative `path`, exact
 or `cheat`. The desktop downloads directly from
 `https://raw.githubusercontent.com/<repository>/<commit>/<path>` without
 redirects, checks the length and SHA-256, and validates the selected patch.
-An optional `member` names one file within a pinned ZIP. An optional `tag`
-names one cheat section. No other files or sections are installed. The ZIP
+An optional `member` names one file within a pinned ZIP. A `tag` names one
+cheat section and is required for ZIP cheats. Raw cheats without a tag must
+contain exactly one section. No other files or sections are installed. The ZIP
 limit is 64 MiB, and the raw or selected patch limit is 2 MiB. The desktop
 stages the patch under `exefs` or `cheats` in its store-owned add-on.
 Missing download metadata leaves a build link-only. Known main build

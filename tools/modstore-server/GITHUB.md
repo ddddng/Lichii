@@ -45,26 +45,59 @@ GitHub, or execute scripts from the clones.
 
 ```sh
 scratch="$HOME/.capy/work/github-catalog"
-python3 -I tools/modstore-server/import_github.py "$scratch/clones" \
-  --batch-dir "$scratch/batches.next" \
-  > "$scratch/manifest.next.json" 2> "$scratch/import.log"
+review_dir=$(mktemp -d "$scratch/run.XXXXXXXX") &&
+	python3 -I tools/modstore-server/import_github.py "$scratch/clones" \
+		--batch-dir "$review_dir/batches" \
+		> "$review_dir/manifest.json" 2> "$review_dir/import.log" &&
+	printf 'Review run: %s\n' "$review_dir"
 ```
 
-Review the manifest and the omission counts before publishing it. If Git
-does not have a reviewed commit, fetch that exact commit rather than
+If the import fails, check `import.log` in the run directory and do not
+publish any of its batches. After a successful import, review `manifest.json`
+and the omission counts in `import.log` from the printed run directory.
+If Git does not have a reviewed commit, fetch that exact commit rather than
 substituting a branch tip. Reusing the clones makes the import repeatable
 without API requests.
 
-Deploy a server that supports the GitHub endpoint. From its Compose
-directory, publish the reviewed metadata through the private admin
-listener:
+Deploy a server that supports the GitHub endpoint. Set `run` to the absolute
+path of the successful, reviewed run directory on the deployment host. From
+the server's Compose directory, publish through the private admin listener:
 
 ```sh
-for batch in "$scratch"/batches.next/github-*.json; do
-  sudo docker compose exec -T modstore /modstore admin \
-    PUT /admin/v1/github application/json < "$batch" || break
-done
+(
+	run=/absolute/path/to/reviewed/run
+	resume_batch=
+	export LC_ALL=C
+	set -- "$run"/batches/github-*.json
+	if [ ! -f "${1:-}" ]; then
+		printf 'No publish batches in %s\n' "$run/batches" >&2
+		exit 1
+	fi
+	for batch in "$@"; do
+		if [ -n "$resume_batch" ]; then
+			[ "${batch##*/}" = "$resume_batch" ] || continue
+			resume_batch=
+		fi
+		sudo docker compose exec -T modstore /modstore admin \
+			PUT /admin/v1/github application/json < "$batch" || {
+			status=$?
+			printf 'Failed to publish %s\n' "$batch" >&2
+			exit "$status"
+		}
+	done
+	if [ -n "$resume_batch" ]; then
+		printf 'Batch %s not found in %s\n' "$resume_batch" "$run/batches" >&2
+		exit 1
+	fi
+)
 ```
+
+If an upload fails, the loop prints the failed batch path and returns
+nonzero. Earlier batches stay published. To retry the same reviewed files
+after fixing the failure, rerun the loop with the same `run` and set
+`resume_batch` to the failed filename, such as `github-002.json`.
+The loop skips the earlier batches. If the metadata needs a change, build
+and review a new run instead.
 
 The import keeps moderation decisions and does not remove omitted entries.
 If an author removes a source or asks for removal, reject the listing through
