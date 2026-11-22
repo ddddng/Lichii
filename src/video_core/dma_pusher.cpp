@@ -928,15 +928,12 @@ void DmaPusher::ResolveSplitMethod(GPUVAddr entry_address, bool park) {
                                              &ParkedMethod::resume_address);
     const bool can_park =
         park || (continued != parked_methods.end() && dma_state.method < MacroRegistersStart);
-    if (dma_state.method_count != 0 && (entry_address == split_method_end || !can_park)) {
-        return;
-    }
     std::optional<ParkedMethod> resume;
     if (continued != parked_methods.end()) {
         resume = *continued;
         parked_methods.erase(continued);
     }
-    if (dma_state.method_count != 0) {
+    if (can_park && dma_state.method_count != 0 && entry_address != split_method_end) {
         if (parked_methods.size() == MaxParkedMethods) {
             static std::atomic<u32> reported{};
             if (reported.fetch_add(1) < 8) {
@@ -959,7 +956,7 @@ void DmaPusher::ResolveSplitMethod(GPUVAddr entry_address, bool park) {
         dma_state.method_count = 0;
         dma_increment_once = false;
     }
-    if (resume) {
+    if (resume && dma_state.method_count == 0) {
         dma_state.method = resume->method;
         dma_state.subchannel = resume->subchannel;
         dma_state.method_count = resume->method_count;
