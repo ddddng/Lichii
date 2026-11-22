@@ -258,6 +258,9 @@ add_executable(lichii
 
     deps_dialog.cpp deps_dialog.h deps_dialog.ui
 
+    spotlight/theme.cpp spotlight/theme.h
+    spotlight/widgets.cpp spotlight/widgets.h
+
     data_dialog.h data_dialog.cpp data_dialog.ui
     data_widget.ui
     ryujinx_dialog.h ryujinx_dialog.cpp ryujinx_dialog.ui
