@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include "common/container/unordered_map.h"
@@ -42,6 +43,8 @@ public:
 
     u64 MemoryRead(u64 vaddr, size_t size) override;
     Dynarmic::A64::Vector MemoryRead128(u64 vaddr) override;
+    bool ShouldTraceScalarRead(u64 pc) const override;
+    void TraceScalarRead(u64 vaddr, u64 value, u64 site) override;
     std::optional<u32> MemoryReadCode(u64 vaddr) override;
     void InstructionSynchronizationBarrierRaised() override {
         last_code_addr = u64(-1); //reset back, force refetch
@@ -77,6 +80,14 @@ public:
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};
     static constexpr u64 MinimumRunCycles = 10000U;
+
+private:
+    struct FfrTraceRead {
+        u64 tls, site, address, value;
+    };
+    std::array<FfrTraceRead, 96> m_ffr_reads{};
+    size_t m_ffr_read_count{};
+    bool m_ffr_trace_done{};
 };
 
 class ArmDynarmic64 final : public ArmInterface {

@@ -89,6 +89,18 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
     // The address is base + disp with the Add folded in here (A64 fold_address_offsets).
     std::optional<s32> disp = args[1].IsImmediate() ? std::nullopt : code.FoldedAddressDisp(args[1].GetInst());
 
+#ifdef TRACE_A64_SCALAR_READS
+    u64 trace_site = 0;
+    if constexpr (bitsize == 32 || bitsize == 64) {
+        if (conf.trace_scalar_reads) {
+            const u64 pc = A64::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetU64()}}.PC();
+            if (conf.callbacks->ShouldTraceScalarRead(pc)) {
+                trace_site = pc | (bitsize == 64 ? 1 : 0);
+            }
+        }
+    }
+#endif
+
     if (!conf.page_table && !fastmem_marker) {
         // Neither fastmem nor page table: Use callbacks
         if constexpr (bitsize == 128) {
@@ -103,7 +115,15 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
             }
             code.mov(code.ABI_PARAM3.cvt32(), bitsize / CHAR_BIT);
             if (ordered) code.mfence();
-            Devirtualize<callback>(conf.callbacks).EmitCall(code);
+#ifdef TRACE_A64_SCALAR_READS
+            if (trace_site) {
+                code.mov(code.ABI_PARAM4, trace_site);
+                Devirtualize<&A64::UserCallbacks::ReadAndTraceScalar>(conf.callbacks).EmitCall(code);
+            } else
+#endif
+            {
+                Devirtualize<callback>(conf.callbacks).EmitCall(code);
+            }
             code.ZeroExtendFrom(bitsize, code.ABI_RETURN);
         }
         EmitCheckMemoryAbort(ctx, inst);
@@ -180,6 +200,24 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
         });
     }
     code.L(*end);
+
+#ifdef TRACE_A64_SCALAR_READS
+    if (trace_site) {
+        code.pushfq();
+        ABI_PushCallerSaveRegistersAndAdjustStack(code);
+        code.push(vaddr);
+        code.push(Xbyak::Reg64{value_idx});
+        code.pop(code.ABI_PARAM3);
+        code.pop(code.ABI_PARAM2);
+        if (disp) {
+            code.lea(code.ABI_PARAM2, code.ptr[code.ABI_PARAM2 + FoldedDisp(*disp)]);
+        }
+        code.mov(code.ABI_PARAM4, trace_site);
+        Devirtualize<&A64::UserCallbacks::TraceScalarRead>(conf.callbacks).EmitCall(code);
+        ABI_PopCallerSaveRegistersAndAdjustStack(code);
+        code.popfq();
+    }
+#endif
 
     if constexpr (bitsize == 128) {
         ctx.reg_alloc.DefineValue(code, inst, Xbyak::Xmm{value_idx});

@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
 #endif
@@ -86,6 +87,53 @@ u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
 Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
     CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Read);
     return {m_memory.Read64(vaddr), m_memory.Read64(vaddr + 8)};
+}
+
+bool DynarmicCallbacks64::ShouldTraceScalarRead(u64 pc) const {
+    const u64 base = m_process->GetFfrFaultTraceBase();
+    return base != 0 && pc >= base + 0x164D800 && pc < base + 0x164DA30;
+}
+
+void DynarmicCallbacks64::TraceScalarRead(u64 vaddr, u64 value, u64 site) {
+    if (m_ffr_trace_done) {
+        return;
+    }
+    m_ffr_reads[m_ffr_read_count++ % m_ffr_reads.size()] = {m_tpidrro_el0, site, vaddr, value};
+    if ((vaddr & 0xffffffffffffULL) != 0x104 || (site & 1) != 0) {
+        return;
+    }
+    m_ffr_trace_done = true;
+    if (!m_process->TakeFfrFaultTrace()) {
+        return;
+    }
+
+    const u64 base = m_process->GetFfrFaultTraceBase();
+    const auto& jit = *m_parent.m_jit;
+    LOG_ERROR(Core_ARM, "FFR fault trace: exact main+{:#x} read32 @ {:#x}, core={} tls={:#x} LR={:#x} SP={:#x}",
+              site - base, vaddr, m_parent.m_core_index, m_tpidrro_el0, jit.GetRegister(30), jit.GetSP());
+    const size_t first = m_ffr_read_count - std::min(m_ffr_read_count, m_ffr_reads.size());
+    for (size_t i = first; i < m_ffr_read_count; ++i) {
+        const auto& read = m_ffr_reads[i % m_ffr_reads.size()];
+        if (read.tls == m_tpidrro_el0) {
+            LOG_ERROR(Core_ARM, "FFR load: main+{:#x} read{} @ {:#x} -> {:#x}",
+                      (read.site & ~u64{1}) - base, (read.site & 1) ? 64 : 32, read.address, read.value);
+        }
+    }
+    for (u64 offset = 0x164D800; offset < 0x164DA30; offset += 16 * sizeof(u32)) {
+        std::string words;
+        for (u64 at = offset; at < std::min<u64>(offset + 16 * sizeof(u32), 0x164DA30);
+             at += sizeof(u32)) {
+            const auto* ptr = m_memory.GetPointerSilent(base + at);
+            if (!ptr) {
+                words += " ????????";
+                continue;
+            }
+            u32 instruction;
+            std::memcpy(&instruction, ptr, sizeof(instruction));
+            words += fmt::format(" {:08x}", instruction);
+        }
+        LOG_ERROR(Core_ARM, "FFR text: main+{:#x}:{}", offset, words);
+    }
 }
 
 std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
@@ -350,6 +398,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 
     // Callbacks
     config.callbacks = std::addressof(*m_cb);
+#if defined(ARCHITECTURE_x86_64)
+    config.trace_scalar_reads = page_table && m_cb->m_process->GetProgramId() == 0x0100606026F12000ULL &&
+                                std::getenv("EDEN_NX2_FFR_FAULT_TRACE");
+#endif
 
     // Memory
     if (page_table) {

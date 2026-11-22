@@ -97,6 +97,14 @@ struct UserCallbacks {
     // Reads through these callbacks may not be aligned.
     virtual std::uint64_t MemoryRead(VAddr vaddr, std::size_t size) = 0;
     virtual Vector MemoryRead128(VAddr vaddr) = 0;
+    virtual bool ShouldTraceScalarRead(VAddr /*pc*/) const { return false; }
+    virtual void TraceScalarRead(VAddr /*vaddr*/, std::uint64_t /*value*/,
+                                 VAddr /*site*/) {}
+    std::uint64_t ReadAndTraceScalar(VAddr vaddr, std::size_t size, VAddr site) {
+        const auto value = MemoryRead(vaddr, size);
+        TraceScalarRead(vaddr, value, site);
+        return value;
+    }
 
     // Writes through these callbacks may not be aligned.
     virtual void MemoryWrite(VAddr vaddr, std::uint64_t value, std::size_t size) = 0;
@@ -141,6 +149,7 @@ struct UserConfig {
     std::optional<std::uintptr_t> fastmem_pointer = std::nullopt;
 
     UserCallbacks* callbacks;
+    bool trace_scalar_reads = false;
 
     ExclusiveMonitor* global_monitor = nullptr;
 

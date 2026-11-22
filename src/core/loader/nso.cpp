@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <span>
@@ -524,6 +525,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
+#if defined(ARCHITECTURE_x86_64)
+    if (name == "main" && process.GetProgramId() == 0x0100606026F12000ULL &&
+        std::getenv("EDEN_NX2_FFR_FAULT_TRACE") &&
+        nso_header.build_id ==
+            Common::AsArray("84E182F72EE1DA4F477804BD05B54C1500000000000000000000000000000000")) {
+        process.SetFfrFaultTraceBase(load_base);
+        LOG_INFO(Loader, "FFR fault trace armed at main={:#x}", load_base);
+    }
+#endif
     if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
         process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);
         process.SetMkwFrameModeAddress(

@@ -293,7 +293,9 @@ void A64EmitX64::GenFastmemFallbacks() {
 }
 
 #define Axx A64
+#define TRACE_A64_SCALAR_READS
 #include "dynarmic/backend/x64/emit_x64_memory.cpp.inc"
+#undef TRACE_A64_SCALAR_READS
 #undef Axx
 
 void A64EmitX64::EmitA64ReadMemory8(A64EmitContext& ctx, IR::Inst* inst) {

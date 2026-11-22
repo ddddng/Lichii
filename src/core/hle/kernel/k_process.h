@@ -124,6 +124,8 @@ private:
     std::atomic<u64> m_mkw_frame_mode_address{};
     std::atomic<u64> m_frame_interval_address{};
     std::atomic<u64> m_frame_interval_source_address{};
+    std::atomic<u64> m_ffr_fault_trace_base{};
+    std::atomic_bool m_ffr_fault_trace_dumped{};
     std::atomic<s64> m_num_process_switches{};
     std::atomic<s64> m_num_thread_switches{};
     std::atomic<s64> m_num_fpu_switches{};
@@ -212,6 +214,18 @@ public:
 
     void SetMkwFrameModeAddress(u64 address) {
         m_mkw_frame_mode_address.store(address, std::memory_order_relaxed);
+    }
+
+    u64 GetFfrFaultTraceBase() const {
+        return m_ffr_fault_trace_base.load(std::memory_order_relaxed);
+    }
+
+    void SetFfrFaultTraceBase(u64 base) {
+        m_ffr_fault_trace_base.store(base, std::memory_order_relaxed);
+    }
+
+    bool TakeFfrFaultTrace() {
+        return !m_ffr_fault_trace_dumped.exchange(true, std::memory_order_relaxed);
     }
 
     /// Hyrule Warriors' frame interval global (see nx2_frame_interval.h), or 0 when not found.
