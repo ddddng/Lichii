@@ -4467,6 +4467,7 @@ void MainWindow::OnConfigure() {
     const u64 old_nextendo_pid = nextendo_pid();
 
     Settings::SetConfiguringGlobal(true);
+    UISettings::values.fullscreen = ui->action_Fullscreen->isChecked();
     ConfigureDialog configure_dialog(this, hotkey_registry, input_subsystem.get(),
                                      vk_device_records, *QtCommon::system,
                                      !multiplayer_state->IsHostingPublicRoom());
@@ -4474,6 +4475,10 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnLanguageChanged);
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
+    connect(&configure_dialog, &ConfigureDialog::OpenGameFolderRequested, this,
+            &MainWindow::OnGameListOpenDirectory);
+    connect(&configure_dialog, &ConfigureDialog::FullscreenOnStartChanged,
+            ui->action_Fullscreen, &QAction::setChecked);
 
     const auto result = configure_dialog.exec();
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
@@ -4923,6 +4928,9 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     // Artwork saved here wins over a SteamGridDB lookup still running for the game.
     connect(&dialog, &ConfigurePerGame::CustomArtworkChanged, game_list,
             &GameList::OnCustomArtworkChanged);
+    connect(&dialog, &ConfigurePerGame::OpenSaveDataRequested, this, [this, title_id, file_name] {
+        OnGameListOpenFolder(title_id, GameListOpenTarget::SaveData, file_name);
+    });
     connect(&dialog, &ConfigurePerGame::BrowseModsRequested, this, [&] {
         QSet<QString> store_toggled;
         const bool changed = OpenModStore(&dialog, title_id, file_name, store_toggled);
