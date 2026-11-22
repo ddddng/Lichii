@@ -212,6 +212,9 @@ bool RealVfsFilesystem::RenameFileLocked(const std::string& old_path, const std:
         DetachReferenceLocked(destination);
     }
     if (source != cache.end()) {
+#ifndef _WIN32
+        CloseReferenceLocked(*source->second.reference);
+#endif
         auto entry = cache.extract(source);
         entry.key() = new_path;
         entry.mapped().reference->path = new_path;

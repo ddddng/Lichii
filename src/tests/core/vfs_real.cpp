@@ -56,6 +56,12 @@ TEST_CASE("Real VFS can rename a file while its reference is live", "[core][vfs]
     const auto renamed = fs.OpenFile(new_path);
     REQUIRE(renamed);
     CHECK(renamed == ghost);
+    CHECK(renamed->GetSize() == 1);
+    CHECK(renamed->ReadAllBytes() == std::vector<u8>{0x42});
+    const auto replacement = fs.CreateFile(old_path);
+    REQUIRE(replacement);
+    REQUIRE(replacement->Resize(2));
+    CHECK(renamed->GetSize() == 1);
     CHECK(renamed->ReadByte(0) == 0x42);
 }
 
