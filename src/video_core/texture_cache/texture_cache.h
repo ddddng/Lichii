@@ -2514,6 +2514,7 @@ template <class P>
 void TextureCache<P>::MarkImageWritten(ImageId image_id, Image& image, DAddr cpu_addr,
                                        size_t size) {
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+    InvalidateXc2NativeLutViews(image);
     if (image.info.native_tiling && True(image.flags & ImageFlagBits::GpuModified) &&
         HasGuestRange(image) && False(image.flags & ImageFlagBits::NonContiguous) &&
         cpu_addr <= image.cpu_addr && image.cpu_addr_end - cpu_addr <= size) {
@@ -4113,7 +4114,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
         config.IsBlockLinear() && config.load_store_hint != 0 && config.BaseLayer() == 0 &&
         Settings::GetCurrentProgramID() == 0x0400E95004038001ULL) {
         if (const ImageId native_id = FindImage(info, image_gpu_addr, RelaxedOptions{}); native_id) {
-            const ImageBase& image = slot_images[native_id];
+            ImageBase& image = slot_images[native_id];
             if (image.first_written_frame != 0 && image.gpu_addr == image_gpu_addr &&
                 image.info.format == info.format && image.info.size == info.size &&
                 image.IsSafeGpuCopy() && False(image.flags & ImageFlagBits::GuestReplacedContents) &&
@@ -4126,6 +4127,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
                                                 ImageFlagBits::GuestReplacedContents));
                 })) {
                 image_id = native_id;
+                image.xc2_native_lut_view = true;
             }
         }
         info.maxwell_gob_layout = !image_id;
@@ -5797,6 +5799,21 @@ void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> rem
 }
 
 template <class P>
+void TextureCache<P>::InvalidateXc2NativeLutViews(ImageBase& image) {
+    if (!image.xc2_native_lut_view) {
+        return;
+    }
+    image.xc2_native_lut_view = false;
+    RemoveImageViewReferences(image.image_view_ids);
+    for (size_t channel : active_channel_ids) {
+        auto& info = channel_storage[channel];
+        info.graphics_image_table.Invalidate();
+        info.compute_image_table.Invalidate();
+    }
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+}
+
+template <class P>
 void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_views) {
     runtime.FlushDeferredClear();
     auto it = framebuffers.begin();
@@ -5822,6 +5839,11 @@ void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.storage_written_levels = 0;
     SetModificationTick(slot_images, image, ++modification_tick);
+    if (image.info.maxwell_gob_layout) {
+        for (ImageId other : image.overlapping_images) {
+            InvalidateXc2NativeLutViews(slot_images[other]);
+        }
+    }
 }
 
 template <class P>
