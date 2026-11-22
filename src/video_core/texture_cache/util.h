@@ -39,7 +39,7 @@ struct OverlapResult {
     SubresourceExtent resources;
 };
 
-[[nodiscard]] u32 CalculateGuestSizeInBytes(const ImageInfo& info) noexcept;
+[[nodiscard]] u64 CalculateGuestSizeInBytes(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept;
 
@@ -114,7 +114,7 @@ void PrefaultGuestMemory(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, si
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const u8> input, std::span<u8> output,
-    Tegra::Texture::UnswizzleWorker* worker = nullptr);
+    Tegra::Texture::UnswizzleWorker* worker = nullptr, u32 first_level = 0);
 
 /// For a single-layer 2D block-linear image of 1x1-texel blocks: the host sparse blocks
 /// (tile_width x tile_height texels) that the guest byte ranges (offset, size) touch, merged into
