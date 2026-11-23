@@ -75,6 +75,8 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
     ShowNextendoProfiles();
     RetranslateUI();
     this->SetConfiguration();
+    connect(ui->network_interface, &QComboBox::activated, this,
+            [this] { network_interface_chosen = true; });
 
     ui->nextendo_group->setVisible(!per_game);
     // Global settings: per-game configuration doesn't offer them.
@@ -149,7 +151,9 @@ ConfigureNetwork::~ConfigureNetwork() {
 }
 
 void ConfigureNetwork::ApplyConfiguration() {
-    Settings::values.network_interface = ui->network_interface->currentText().toStdString();
+    if (network_interface_chosen) {
+        Settings::values.network_interface = ui->network_interface->currentText().toStdString();
+    }
     Settings::values.airplane_mode = ui->airplane_mode->isChecked();
     Settings::values.lan_play = ui->lan_play->isChecked();
     if (!per_game) {

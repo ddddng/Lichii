@@ -55,6 +55,7 @@ private:
     std::unique_ptr<Ui::ConfigureNetwork> ui;
     std::stop_source nextendo_stop;
     bool nextendo_signing_in{};
+    bool network_interface_chosen{};
     std::optional<Common::Nextendo::OnlineStatus> nextendo_online;
     struct NextendoProfileEntry {
         Common::UUID uuid;

@@ -328,6 +328,7 @@ std::pair<bool, QString> ConfigureHotkeys::IsUsedControllerKey(const QString& ke
 }
 
 void ConfigureHotkeys::ApplyConfiguration(HotkeyRegistry& registry) {
+    bool changed = false;
     for (int key_id = 0; key_id < model->rowCount(); key_id++) {
         const QStandardItem* parent = model->item(key_id, 0);
         for (int key_column_id = 0; key_column_id < parent->rowCount(); key_column_id++) {
@@ -341,14 +342,23 @@ void ConfigureHotkeys::ApplyConfiguration(HotkeyRegistry& registry) {
                 for (auto& [action_name, hotkey] : sub_actions) {
                     if (action_name != action->data().toString().toStdString())
                         continue;
-                    hotkey.keyseq = QKeySequence(keyseq->text());
-                    hotkey.controller_keyseq = controller_keyseq->text().toStdString();
+                    const QKeySequence new_keyseq(keyseq->text());
+                    const auto new_controller_keyseq = controller_keyseq->text().toStdString();
+                    if (hotkey.keyseq == new_keyseq &&
+                        hotkey.controller_keyseq == new_controller_keyseq) {
+                        continue;
+                    }
+                    hotkey.keyseq = new_keyseq;
+                    hotkey.controller_keyseq = new_controller_keyseq;
+                    changed = true;
                 }
             }
         }
     }
 
-    registry.SaveHotkeys();
+    if (changed) {
+        registry.SaveHotkeys();
+    }
 }
 
 void ConfigureHotkeys::RestoreDefaults() {
