@@ -13,6 +13,7 @@
 #include <QAbstractSlider>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDir>
 #include <QFontMetrics>
 #include <QFileDialog>
@@ -24,6 +25,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
@@ -33,6 +35,7 @@
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -347,6 +350,165 @@ private:
     int focused = 0;
 };
 
+class ProfileCard final : public QAbstractButton {
+public:
+    ProfileCard(const QString& name, const QPixmap& avatar_, bool current_, QColor tint_)
+        : avatar{avatar_}, tint{tint_}, current{current_} {
+        setText(name);
+        setFixedSize(150, 156);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_Hover);
+        setAccessibleName(current ? tr("%1, playing as").arg(name) : tr("Switch to %1").arg(name));
+    }
+
+    std::function<void(const QPoint&)> menu;
+
+protected:
+    void contextMenuEvent(QContextMenuEvent* event) override {
+        if (menu) {
+            menu(event->globalPos());
+        }
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool add = avatar.isNull() && !tint.isValid();
+        const QRectF frame = QRectF(rect()).adjusted(1, 1, -1, -1);
+        painter.setBrush(add ? QColor(Qt::transparent)
+                         : underMouse() || hasFocus() ? Color::Fill()
+                                                      : Color::FillFaint());
+        painter.setPen(current ? QPen(Color::Accent(), 2)
+                       : hasFocus() ? QPen(Color::Text(), 1)
+                       : QPen(add ? Color::Stroke() : QColor(0xff, 0xff, 0xff, 0x14), 1));
+        painter.drawRoundedRect(frame, 18, 18);
+        const QRectF circle(43, 16, 64, 64);
+        if (add) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(Color::Stroke(), 2, Qt::DashLine));
+            painter.drawEllipse(circle.adjusted(1, 1, -1, -1));
+            painter.drawPixmap(QRectF(circle.center() - QPointF(10, 10), QSizeF(20, 20)),
+                               Spotlight::IconPixmap(u"plus", 20, Color::TextSecondary(),
+                                                     devicePixelRatioF()),
+                               QRectF());
+        } else {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(tint);
+            painter.drawEllipse(circle);
+            painter.save();
+            QPainterPath clip;
+            clip.addEllipse(circle);
+            painter.setClipPath(clip);
+            painter.drawPixmap(circle.toRect(), avatar);
+            painter.restore();
+            if (current) {
+                painter.setBrush(Qt::NoBrush);
+                painter.setPen(QPen(Color::Accent(), 3));
+                painter.drawEllipse(circle.adjusted(1.5, 1.5, -1.5, -1.5));
+            }
+        }
+        painter.setFont(Spotlight::Font(14, 600));
+        painter.setPen(add ? Color::TextSecondary() : Color::Text());
+        const QRect name_rect(8, 90, width() - 16, 18);
+        painter.drawText(name_rect, Qt::AlignCenter,
+                         QFontMetrics(painter.font()).elidedText(text(), Qt::ElideRight,
+                                                                 name_rect.width()));
+        if (add) {
+            return;
+        }
+        if (current) {
+            const QString label = tr("Playing as");
+            painter.setFont(Spotlight::Font(11, 600));
+            const int badge_width = QFontMetrics(painter.font()).horizontalAdvance(label) + 18;
+            const QRectF badge((width() - badge_width) / 2.0, 118, badge_width, 22);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Color::Accent());
+            painter.drawRoundedRect(badge, 11, 11);
+            painter.setPen(Color::OnAccent());
+            painter.drawText(badge, Qt::AlignCenter, label);
+        } else {
+            painter.setFont(Spotlight::Font(12, 600));
+            painter.setPen(Color::TextSecondary());
+            painter.drawText(QRect(8, 118, width() - 16, 22), Qt::AlignCenter, tr("Switch to"));
+        }
+    }
+
+private:
+    QPixmap avatar;
+    QColor tint;
+    bool current;
+};
+
+class FlowRow final : public QWidget {
+public:
+    FlowRow() {
+        setProperty("spotlightTransparent", true);
+        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+    }
+
+    void Clear() {
+        for (auto* child : findChildren<QWidget*>(Qt::FindDirectChildrenOnly)) {
+            child->hide();
+            child->deleteLater();
+        }
+        items.clear();
+    }
+
+    void Add(QWidget* item) {
+        item->setParent(this);
+        item->show();
+        items.append(item);
+        Arrange(width());
+        updateGeometry();
+    }
+
+    bool hasHeightForWidth() const override {
+        return true;
+    }
+
+    int heightForWidth(int available) const override {
+        return Arrange(available, false);
+    }
+
+    QSize sizeHint() const override {
+        return {400, heightForWidth(width() > 0 ? width() : 640)};
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        Arrange(width());
+    }
+
+private:
+    int Arrange(int available, bool place = true) const {
+        constexpr int padding = 16;
+        constexpr int gap = 12;
+        int x = padding;
+        int y = padding;
+        int line = 0;
+        for (auto* item : items) {
+            const QSize size = item->size();
+            if (x > padding && x + size.width() > available - padding) {
+                x = padding;
+                y += line + gap;
+                line = 0;
+            }
+            if (place) {
+                item->move(x, y);
+            }
+            x += size.width() + gap;
+            line = std::max(line, size.height());
+        }
+        return y + line + padding;
+    }
+
+    QList<QWidget*> items;
+};
+
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
@@ -489,16 +651,16 @@ void ConfigureDialog::BuildSettings() {
         tr("Graphics"), tr("Preset first; everything else follows it unless you change it"),
         QStringLiteral("monitor"), Tints::Gold());
     const int audio = settings_page->AddCategory(
-        tr("Audio"), tr("Choose where game audio plays and how loud it is"),
+        tr("Audio"), tr("What you hear and where it plays"),
         QStringLiteral("speaker-high"), Tints::Blue());
     const int controls = settings_page->AddCategory(
         tr("Controls"), tr("One controller per player; hotkeys work with keyboard and pad"),
         QStringLiteral("game-controller"), Tints::Lavender());
     const int system_page = settings_page->AddCategory(
-        tr("System"), tr("Choose the emulated console's language, region and storage"),
+        tr("System"), tr("The console your games think they run on"),
         QStringLiteral("cpu"), Color::Accent());
     const int multiplayer = settings_page->AddCategory(
-        tr("Multiplayer"), tr("Configure local networking and online services"),
+        tr("Multiplayer"), tr("Local wireless, LAN and online play"),
         QStringLiteral("users"), Tints::Green());
     const int shortcuts =
         settings_page->AddCategory(tr("Shortcuts"), tr("Edit keyboard and controller shortcuts"),
@@ -510,45 +672,90 @@ void ConfigureDialog::BuildSettings() {
     settings_page->SetBuilder(library, [this, library] { BuildLibrary(library); });
     settings_page->SetBuilder(graphics, [this, graphics] { BuildGraphics(graphics); });
     settings_page->SetBuilder(audio, [this, audio] {
+        auto& values = Settings::values;
         auto* output = settings_page->AddSection(audio, tr("Output"));
-        AddSettingRow(output, audio_tab.get(), Settings::values.volume, tr("Volume"),
-                      tr("Game audio level"), QStringLiteral("speaker-high"), Tints::Blue());
-        AddSettingRow(output, audio_tab.get(), Settings::values.sink_id, tr("Audio engine"),
-                      tr("Backend for game audio"), QStringLiteral("sliders-horizontal"),
-                      Tints::Lavender());
-        AddSettingRow(output, audio_tab.get(), Settings::values.audio_output_device_id,
-                      tr("Output device"), tr("Speaker or headphone destination"),
-                      QStringLiteral("speaker-high"), Tints::Gold());
+        if (auto* device = SettingsPage::Editor(audio_tab.get(), values.audio_output_device_id);
+            device && device->combobox) {
+            auto* detail = SettingsPage::AddRow(output, tr("Output device"), {},
+                                                QStringLiteral("speaker-high"), Tints::Blue(),
+                                                SettingsPage::BindSetting(device));
+            const auto describe = [detail, combo = device->combobox] {
+                detail->setText(combo->currentText());
+                detail->setVisible(!combo->currentText().isEmpty());
+            };
+            describe();
+            connect(device->combobox, &QComboBox::currentIndexChanged, detail, describe);
+        }
+        AddSettingRow(output, audio_tab.get(), values.volume, tr("Volume"),
+                      tr("Every game; a game can set its own"), QStringLiteral("speaker-high"),
+                      Tints::Blue());
+        AddSettingRow(output, audio_tab.get(), values.audio_muted, tr("Mute"), {},
+                      QStringLiteral("speaker-x"), Color::Accent());
+        settings_page->AddBlock(
+            audio,
+            SettingsPage::Note(tr("Output engine, surround mode and muting in the background are "
+                                  "under Advanced.")),
+            tr("Output engine"));
     });
     settings_page->SetBuilder(controls,
                               [this, controls, shortcuts] { BuildControls(controls, shortcuts); });
-    settings_page->SetBuilder(system_page, [this, system_page] {
-        auto* console = settings_page->AddSection(system_page, tr("Console"));
-        AddSettingRow(console, system_tab.get(), Settings::values.language_index,
-                      tr("System language"), tr("Language reported to games"),
-                      QStringLiteral("translate"), Tints::Blue());
-        AddSettingRow(console, system_tab.get(), Settings::values.region_index, tr("Region"),
-                      tr("Region reported to games"), QStringLiteral("globe"), Color::Accent());
-        const int profiles = settings_page->AddSubPage(
-            system_page, tr("Profiles"), tr("Local console users; games start as the current one"));
-        settings_page->SetBuilder(profiles, [this, profiles] { BuildProfiles(profiles); });
-        auto* profile = SettingsPage::Manage(tr("Manage"));
-        connect(profile, &QAbstractButton::clicked, settings_page,
-                [this, profiles] { settings_page->SetCategory(profiles); });
-        SettingsPage::AddRow(console, tr("Profiles"), tr("Manage local console profiles"),
-                             QStringLiteral("user"), Tints::Lavender(), profile);
-    });
+    settings_page->SetBuilder(system_page, [this, system_page] { BuildSystem(system_page); });
     settings_page->SetBuilder(multiplayer, [this, multiplayer] {
-        auto* networking = settings_page->AddSection(multiplayer, tr("Local network"));
-        SettingsPage::AddRow(networking, tr("Network interface"),
-                             tr("Connection to use for multiplayer"), QStringLiteral("wifi-high"),
-                             Tints::Blue(),
-                             SettingsPage::BindCombo(network_tab->findChild<QComboBox*>(
-                                 QStringLiteral("network_interface"))));
-        SettingsPage::AddRow(networking, tr("LAN play"), tr("Enable local network play"),
-                             QStringLiteral("users"), Tints::Green(),
-                             SettingsPage::BindToggle(
-                                 network_tab->findChild<QCheckBox*>(QStringLiteral("lan_play"))));
+        auto* connection = settings_page->AddSection(multiplayer, tr("Connection"));
+        for (const auto& [name, title, detail, icon, tint] :
+             std::initializer_list<std::tuple<const char*, QString, QString, QString, QColor>>{
+                 {"lan_play", tr("LAN play"), tr("Find players on your network and in rooms"),
+                  QStringLiteral("wifi-high"), Tints::Green()},
+                 {"airplane_mode", tr("Airplane mode"), tr("Games see no network at all"),
+                  QStringLiteral("airplane"), Tints::Blue()},
+                 {"nextendo_enabled", tr("Play online through Nextendo"),
+                  tr("A community service for online play"), QStringLiteral("globe"),
+                  Color::Accent()},
+             }) {
+            if (auto* source = network_tab->findChild<QCheckBox*>(QLatin1String(name))) {
+                SettingsPage::AddRow(connection, title, detail, icon, tint,
+                                     SettingsPage::BindToggle(source));
+            }
+        }
+        auto* status = network_tab->findChild<QLabel*>(QStringLiteral("nextendo_status"));
+        auto* profile = network_tab->findChild<QComboBox*>(QStringLiteral("nextendo_profile"));
+        auto* sign_in = network_tab->findChild<QPushButton*>(QStringLiteral("nextendo_sign_in"));
+        auto* sign_out = network_tab->findChild<QPushButton*>(QStringLiteral("nextendo_sign_out"));
+        if (status == nullptr || profile == nullptr || sign_in == nullptr || sign_out == nullptr) {
+            return;
+        }
+        auto* account = settings_page->AddSection(multiplayer, tr("Nextendo account"));
+        auto* buttons = new QWidget;
+        buttons->setProperty("spotlightTransparent", true);
+        auto* buttons_layout = new QHBoxLayout(buttons);
+        buttons_layout->setContentsMargins(0, 0, 0, 0);
+        buttons_layout->setSpacing(8);
+        auto* sign_in_proxy = SettingsPage::BindButton(sign_in, tr("Sign in"));
+        auto* sign_out_proxy = SettingsPage::BindButton(sign_out, tr("Sign out"));
+        buttons_layout->addWidget(sign_in_proxy);
+        buttons_layout->addWidget(sign_out_proxy);
+        auto* detail = SettingsPage::AddRow(account, tr("Nextendo account"), {},
+                                            QStringLiteral("user"), Color::Accent(), buttons);
+        const auto refresh = [detail, status, profile, sign_out, sign_in_proxy, sign_out_proxy] {
+            detail->setText(profile->currentText().isEmpty()
+                                ? status->text()
+                                : tr("%1 Linked to local profile %2.")
+                                      .arg(status->text(), profile->currentText()));
+            detail->show();
+            sign_in_proxy->setVisible(!sign_out->isEnabled());
+            sign_out_proxy->setVisible(sign_out->isEnabled());
+        };
+        refresh();
+        auto* watcher = new QTimer(detail);
+        watcher->setInterval(500);
+        connect(watcher, &QTimer::timeout, detail, refresh);
+        watcher->start();
+        connect(profile, &QComboBox::currentIndexChanged, detail, refresh);
+        settings_page->AddBlock(
+            multiplayer,
+            SettingsPage::Note(tr("Network adapter, custom servers, lobby token and the Mod Store "
+                                  "address are under Advanced.")),
+            tr("Network adapter"));
     });
 
     for (const auto& [category, widget, name] :
@@ -574,6 +781,69 @@ void ConfigureDialog::BuildSettings() {
     profile_tab->hide();
     input_tab->hide();
     settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::BuildSystem(int system_page) {
+    auto* console = settings_page->AddSection(system_page, tr("Console"));
+    AddSettingRow(console, system_tab.get(), Settings::values.language_index, tr("Language"),
+                  tr("The language games use"), QStringLiteral("translate"), Tints::Blue());
+    AddSettingRow(console, system_tab.get(), Settings::values.region_index, tr("Region"), {},
+                  QStringLiteral("globe"), Tints::Green());
+    const int profiles = settings_page->AddSubPage(
+        system_page, tr("Profiles"), tr("Local console users; games start as the current one"));
+    settings_page->SetBuilder(profiles, [this, profiles] { BuildProfiles(profiles); });
+    auto* manage = SettingsPage::Manage(tr("Manage"));
+    connect(manage, &QAbstractButton::clicked, settings_page,
+            [this, profiles] { settings_page->SetCategory(profiles); });
+    auto* cards_section = settings_page->AddSection(system_page, tr("Profiles"), false, manage);
+    auto* cards = new FlowRow;
+    cards_section->addWidget(cards);
+    const auto rebuild = [this, cards] {
+        cards->Clear();
+        auto* model = profile_tab->Model();
+        const int current = Settings::values.current_user.GetValue();
+        static const std::array tints{QColor(0xff, 0xb4, 0xc8), QColor(0xb9, 0xe8, 0xcf),
+                                      QColor(0xc9, 0xd8, 0xff), QColor(0xff, 0xe0, 0xa8)};
+        for (int row = 0; row < model->rowCount(); ++row) {
+            const QStandardItem* user = model->item(row);
+            const QString name = user->text().section(QChar::fromLatin1('\n'), 0, 0);
+            auto* card = new ProfileCard(name, user->icon().pixmap(64, 64), row == current,
+                                         tints[static_cast<std::size_t>(row) % tints.size()]);
+            card->menu = [this, card, row](const QPoint& at) {
+                auto* menu = new QMenu(card);
+                menu->setAttribute(Qt::WA_DeleteOnClose);
+                menu->addAction(tr("Edit name and picture"), this,
+                                [this, row] { profile_tab->EditUserAt(row); });
+                menu->addAction(tr("Delete"), this,
+                                [this, row] { profile_tab->ConfirmDeleteUserAt(row); });
+                menu->popup(at);
+            };
+            connect(card, &QAbstractButton::clicked, this, [this, card, row, current] {
+                if (row == current) {
+                    card->menu(card->mapToGlobal(QPoint(0, card->height())));
+                } else {
+                    profile_tab->SelectUserAt(row);
+                }
+            });
+            cards->Add(card);
+        }
+        if (profile_tab->CanAddUser()) {
+            auto* add = new ProfileCard(tr("New profile"), {}, false, {});
+            add->setAccessibleName(tr("New profile"));
+            connect(add, &QAbstractButton::clicked, this, [this] { profile_tab->AddUser(); });
+            cards->Add(add);
+        }
+    };
+    rebuild();
+    auto* model = profile_tab->Model();
+    connect(model, &QAbstractItemModel::rowsInserted, cards, rebuild);
+    connect(model, &QAbstractItemModel::rowsRemoved, cards, rebuild);
+    connect(model, &QAbstractItemModel::dataChanged, cards, rebuild);
+    connect(profile_tab.get(), &ConfigureProfileManager::CurrentUserChanged, cards, rebuild);
+    settings_page->AddBlock(
+        system_page,
+        SettingsPage::Note(tr("Manage profiles to edit names and avatars or delete a profile.")),
+        tr("Manage profiles"));
 }
 
 void ConfigureDialog::BuildProfiles(int profiles) {
@@ -1118,7 +1388,7 @@ void ConfigureDialog::BuildGraphics(int graphics) {
     }
     AddSettingRow(smooth, gfx, values.hdr_mode, tr("HDR output"),
                   tr("Unavailable without an HDR-capable display and Vulkan."),
-                  QStringLiteral("sparkle"), Tints::Gold());
+                  QStringLiteral("sun"), Tints::Gold());
     start_fullscreen = new Spotlight::ToggleSwitch;
     start_fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
     start_fullscreen->setEnabled(!system.IsPoweredOn());
