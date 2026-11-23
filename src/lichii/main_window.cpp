@@ -1513,8 +1513,7 @@ void MainWindow::InitializeWidgets() {
                     Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", name)),
                     ControllerKeys(name)};
                 keys.removeAll(QString{});
-                action->setText(action->text().section(QLatin1Char('\t'), 0, 0) +
-                                QLatin1Char('\t') + keys.join(QStringLiteral(" · ")));
+                action->setProperty("spotlightHint", keys.join(QStringLiteral(" · ")));
             }
         });
     };
@@ -1605,6 +1604,12 @@ void MainWindow::InitializeWidgets() {
                                   Spotlight::Icon(u"lightning", Spotlight::Color::MenuInk(), 16));
     emulation_menu->addSeparator();
     emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
+    show_hotkeys(emulation_menu, {{ui->action_Pause, "Continue/Pause Emulation"},
+                                  {ui->action_Restart, "Restart Emulation"},
+                                  {ui->action_Stop, "Stop Emulation"},
+                                  {ui->action_Fullscreen, "Fullscreen"},
+                                  {ui->action_Capture_Screenshot, "Capture Screenshot"},
+                                  {ui->action_Load_Amiibo, "Load/Remove Amiibo"}});
     running_title_bar->AddMenu(tr("Emulation"), emulation_menu);
     const auto add_panel = [this](const QString& name, Spotlight::InGamePopover* panel) {
         auto* button = running_title_bar->AddPanelButton(name);
@@ -1624,6 +1629,9 @@ void MainWindow::InitializeWidgets() {
     view_menu->addSeparator();
     view_menu->AddSharedMenu(session, Spotlight::Icon(u"info", Spotlight::Color::MenuInk(), 16));
     view_menu->addAction(refresh_action);
+    show_hotkeys(view_menu, {{ui->action_Show_Performance_Overlay, "Toggle Performance Overlay"},
+                             {ingame_menu_action, "In-game Menu"},
+                             {ui->action_Show_Status_Bar, "Toggle Status Bar"}});
     running_title_bar->AddMenu(tr("View"), view_menu);
     connect(ingame_bar, &Spotlight::InGameBar::ExpandRequested, ui->action_Show_Status_Bar,
             &QAction::trigger);
@@ -6840,9 +6848,7 @@ void MainWindow::UpdateVolumeUI() {
     const bool muted = Settings::values.audio_muted.GetValue();
     const QSignalBlocker blocker(volume_slider);
     volume_slider->setValue(value);
-    const QString mute_hint = mute_action->text().section(QLatin1Char('\t'), 1);
-    mute_action->setText((muted ? tr("Unmute") : tr("Mute")) +
-                         (mute_hint.isEmpty() ? QString{} : QLatin1Char('\t') + mute_hint));
+    mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
     mute_action->setChecked(muted);
     ingame_menu->SetVolume(value, muted);
     audio_panel->SetVolume(value, muted);

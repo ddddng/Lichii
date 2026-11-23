@@ -19,6 +19,9 @@ namespace {
 constexpr char PanelIcon[] = "spotlightIcon";
 
 QString HintOf(const QAction* action) {
+    if (const QString hint = action->property("spotlightHint").toString(); !hint.isEmpty()) {
+        return hint;
+    }
     const QString hint = action->text().section(QLatin1Char('\t'), 1);
     if (!hint.isEmpty()) {
         return hint;

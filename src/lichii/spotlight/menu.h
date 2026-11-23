@@ -12,7 +12,8 @@ namespace Spotlight {
 
 /// A menu for the menu panel of the design (context-menu.jsx). InstallMenuStyle paints every menu
 /// that way: 36 px rows, a 16 px icon column, shortcut hints and submenu carets on the right. A
-/// "\t" in an action's text separates its hint.
+/// "\t" in an action's text separates its hint, and a "spotlightHint"
+/// property replaces it.
 class Menu : public QMenu {
 public:
     explicit Menu(QWidget* parent = nullptr);
