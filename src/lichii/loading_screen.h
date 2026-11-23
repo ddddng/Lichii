@@ -4,8 +4,9 @@
 #pragma once
 
 #include <chrono>
-#include <memory>
 #include <QPixmap>
+#include <QTimer>
+#include <QVariantAnimation>
 #include <QWidget>
 
 namespace Loader {
@@ -14,11 +15,8 @@ class AppLoader;
 namespace VideoCore {
 enum class LoadCallbackStage;
 }
-namespace Spotlight {
-class PillButton;
-}
+class QAbstractButton;
 class QAction;
-class QPropertyAnimation;
 
 class LoadingScreen : public QWidget {
     Q_OBJECT
@@ -49,15 +47,18 @@ private:
     std::size_t current = 0;
     std::size_t total = 0;
     QPixmap icon;
+    QPixmap art;
     QPixmap backdrop;
     QString title;
     QString version;
     QString estimate;
     bool switch2 = false;
-    Spotlight::PillButton* skip_button = nullptr;
-    Spotlight::PillButton* cancel_button = nullptr;
+    bool precompile_requested = false;
+    QAbstractButton* skip_button = nullptr;
+    QAbstractButton* cancel_button = nullptr;
     QAction* cancel_action = nullptr;
-    std::unique_ptr<QPropertyAnimation> fadeout_animation;
+    QTimer repaint;
+    QVariantAnimation fade;
     std::chrono::steady_clock::time_point slow_shader_start{};
     std::chrono::steady_clock::time_point previous_time{};
     std::size_t slow_shader_first_value = 0;

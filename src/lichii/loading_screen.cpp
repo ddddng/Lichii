@@ -5,12 +5,11 @@
 
 #include <algorithm>
 #include <array>
+#include <QAbstractButton>
 #include <QAction>
-#include <QGraphicsOpacityEffect>
 #include <QLinearGradient>
 #include <QLocale>
 #include <QPainter>
-#include <QPropertyAnimation>
 
 #include "common/settings.h"
 #include "core/frontend/framebuffer_layout.h"
@@ -26,36 +25,105 @@ namespace {
 using VideoCore::LoadCallbackStage;
 using namespace Spotlight;
 
+QColor Secondary() {
+    return QColor(0xff, 0xff, 0xff, 0xb8);
+}
+
+class LoadingButton final : public QAbstractButton {
+public:
+    LoadingButton(const QString& text, QString icon, bool accent, QWidget* parent)
+        : QAbstractButton(parent), icon_name(std::move(icon)), accent(accent) {
+        setText(text);
+        setFixedHeight(42);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::TabFocus);
+    }
+
+    void SetHint(QString text) {
+        hint = std::move(text);
+        resize(sizeHint());
+        update();
+    }
+
+    QSize sizeHint() const override {
+        int width = 18 + 16 + 8 + QFontMetrics(Font(14, 600)).horizontalAdvance(text()) + 18;
+        if (!hint.isEmpty()) {
+            width += 8 + QFontMetrics(Font(12)).horizontalAdvance(hint);
+        }
+        return {width, 42};
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool hovered = underMouse() || isDown();
+        QColor fill = accent ? (hovered ? Color::AccentLight() : Color::Accent())
+                             : QColor(0xff, 0xff, 0xff, hovered ? 0x33 : 0x24);
+        QColor ink = accent ? Color::OnAccent() : Color::Text();
+        if (!isEnabled()) {
+            fill.setAlphaF(fill.alphaF() * 0.4f);
+            ink.setAlphaF(0.45f);
+        }
+        painter.setPen(hasFocus() ? QPen(Color::Text()) : Qt::NoPen);
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 21, 21);
+        painter.drawPixmap(18, 13, IconPixmap(icon_name, 16, ink, devicePixelRatioF()));
+        painter.setFont(Font(14, 600));
+        painter.setPen(ink);
+        const int label = painter.fontMetrics().horizontalAdvance(text());
+        painter.drawText(QRect{42, 0, label + 1, height()}, Qt::AlignVCenter, text());
+        if (!hint.isEmpty()) {
+            painter.setFont(Font(12));
+            painter.setPen(Secondary());
+            painter.drawText(QRect{50 + label, 0, width() - 50 - label, height()},
+                             Qt::AlignVCenter, hint);
+        }
+    }
+
+    void enterEvent(QEnterEvent*) override {
+        update();
+    }
+    void leaveEvent(QEvent*) override {
+        update();
+    }
+
+private:
+    QString icon_name;
+    QString hint;
+    bool accent;
+};
+
 } // namespace
 
 LoadingScreen::LoadingScreen(QWidget* parent) : QWidget(parent), stage(LoadCallbackStage::Prepare) {
     setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
 
-    auto* opacity = new QGraphicsOpacityEffect(this);
-    opacity->setOpacity(1);
-    setGraphicsEffect(opacity);
-    fadeout_animation = std::make_unique<QPropertyAnimation>(opacity, "opacity");
-    fadeout_animation->setDuration(300);
-    fadeout_animation->setStartValue(1);
-    fadeout_animation->setEndValue(0);
-    connect(fadeout_animation.get(), &QPropertyAnimation::finished, this, [this, opacity] {
+    repaint.setSingleShot(true);
+    repaint.setInterval(33);
+    connect(&repaint, &QTimer::timeout, this, qOverload<>(&QWidget::update));
+
+    fade.setDuration(Motion::Fade);
+    fade.setStartValue(1.0);
+    fade.setEndValue(0.0);
+    fade.setEasingCurve(QEasingCurve::OutCubic);
+    connect(&fade, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+    connect(&fade, &QVariantAnimation::finished, this, [this] {
         hide();
-        opacity->setOpacity(1);
         emit Hidden();
     });
 
-    skip_button = new PillButton(tr("Start anyway"), QStringLiteral("play-fill"),
-                                 PillButton::Kind::Accent, 42, this);
-    skip_button->setToolTip(
-        tr("Starts the game now. The remaining shaders are precached on a later launch."));
-    skip_button->hide();
+    auto* skip = new LoadingButton(tr("Start anyway"), QStringLiteral("play-fill"), true, this);
+    skip->setToolTip(tr("Start anyway: starts the game now. Shaders not precached yet are "
+                        "precached on a later launch."));
+    skip->hide();
+    skip_button = skip;
     connect(skip_button, &QAbstractButton::clicked, this, [this] {
         VideoCommon::ShaderWarm::RequestSkipWarm();
         skip_button->setEnabled(false);
     });
 
-    cancel_button =
-        new PillButton(tr("Cancel"), QStringLiteral("x"), PillButton::Kind::Control, 42, this);
+    cancel_button = new LoadingButton(tr("Cancel"), QStringLiteral("x"), false, this);
     cancel_button->hide();
 }
 
@@ -64,9 +132,8 @@ LoadingScreen::~LoadingScreen() = default;
 void LoadingScreen::SetCancelAction(QAction* action) {
     cancel_action = action;
     const auto update_cancel = [this] {
-        const auto shortcut = cancel_action->shortcut().toString(QKeySequence::NativeText);
-        cancel_button->setText(shortcut.isEmpty() ? tr("Cancel") : tr("Cancel  %1").arg(shortcut));
-        cancel_button->setVisible(cancel_action->isEnabled());
+        static_cast<LoadingButton*>(cancel_button)->SetHint(KeyText(cancel_action->shortcut()));
+        cancel_button->setVisible(cancel_action->isEnabled() && fade.state() != QAbstractAnimation::Running);
         LayoutButtons();
     };
     connect(action, &QAction::changed, this, update_cancel);
@@ -75,9 +142,9 @@ void LoadingScreen::SetCancelAction(QAction* action) {
 }
 
 void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QString game_version) {
-    fadeout_animation->stop();
-    static_cast<QGraphicsOpacityEffect*>(graphicsEffect())->setOpacity(1);
+    fade.stop();
     icon = {};
+    precompile_requested = false;
     u64 program_id = 0;
     if (loader.ReadProgramId(program_id) == Loader::ResultStatus::Success && program_id != 0) {
         const auto image = QtCommon::Game::ReadCustomArtwork(program_id);
@@ -87,12 +154,13 @@ void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QStri
         if (game_title.isEmpty()) {
             game_title = QString::fromStdString(QtCommon::Game::ReadCustomTitle(program_id));
         }
+        precompile_requested = VideoCommon::ShaderWarm::WarmRequested(
+            VideoCommon::ShaderWarm::ComputeWarmPath(program_id));
     }
     std::vector<u8> image;
     if (icon.isNull() && loader.ReadIcon(image) == Loader::ResultStatus::Success) {
         icon.loadFromData(image.data(), static_cast<uint>(image.size()));
     }
-    UpdateBackdrop();
     if (game_title.isEmpty()) {
         std::string metadata;
         loader.ReadTitle(metadata);
@@ -108,12 +176,15 @@ void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QStri
     switch2 = Settings::CurrentProgramIsSwitch2();
     previous_time = {};
     slow_shader_start = {};
+    UpdateBackdrop();
     OnLoadProgress(LoadCallbackStage::Prepare, 0, 0);
 }
 
 void LoadingScreen::Clear() {
-    fadeout_animation->stop();
+    fade.stop();
+    repaint.stop();
     icon = {};
+    art = {};
     backdrop = {};
     title.clear();
     version.clear();
@@ -121,13 +192,19 @@ void LoadingScreen::Clear() {
 
 void LoadingScreen::OnLoadComplete() {
     OnLoadProgress(LoadCallbackStage::Complete, 0, 0);
-    fadeout_animation->start();
+    if (!isVisible()) {
+        return;
+    }
+    skip_button->hide();
+    cancel_button->hide();
+    fade.start();
 }
 
 void LoadingScreen::OnLoadProgress(LoadCallbackStage next, std::size_t value, std::size_t target) {
     using namespace std::chrono;
     const auto now = steady_clock::now();
-    if (next != stage) {
+    const bool stage_changed = next != stage;
+    if (stage_changed) {
         stage = next;
         slow_shader_start = {};
         skip_button->setVisible(stage == LoadCallbackStage::Warm);
@@ -157,7 +234,12 @@ void LoadingScreen::OnLoadProgress(LoadCallbackStage next, std::size_t value, st
         }
     }
     previous_time = now;
-    update();
+    if (stage_changed) {
+        repaint.stop();
+        update();
+    } else if (!repaint.isActive()) {
+        repaint.start();
+    }
 }
 
 QRect LoadingScreen::ContentRect() const {
@@ -188,55 +270,74 @@ void LoadingScreen::resizeEvent(QResizeEvent* event) {
 }
 
 void LoadingScreen::UpdateBackdrop() {
-    if (icon.isNull() || size().isEmpty()) {
-        backdrop = {};
+    if (size().isEmpty()) {
         return;
     }
+    const qreal ratio = devicePixelRatioF();
+    const int art_size = ContentRect().height();
+    art = icon.isNull() ? QPixmap{}
+                        : icon.scaled(QSize{art_size, art_size} * ratio, Qt::KeepAspectRatio,
+                                      Qt::SmoothTransformation);
+    art.setDevicePixelRatio(ratio);
 
+    backdrop = QPixmap(size() * ratio);
+    backdrop.setDevicePixelRatio(ratio);
+    backdrop.fill(Color::Scrim());
+    if (icon.isNull()) {
+        return;
+    }
     auto cover = icon.deviceIndependentSize();
     cover.scale(size(), Qt::KeepAspectRatioByExpanding);
     cover *= 2;
     const QPointF center{width() * 0.65, height() * 0.5};
-    const QRectF art{center - QPointF{cover.width() / 2, cover.height() / 2}, cover};
-    backdrop = QPixmap(size().scaled(16, 16, Qt::KeepAspectRatio));
-    backdrop.fill(Color::Scrim());
+    const QRectF placement{center - QPointF{cover.width() / 2, cover.height() / 2}, cover};
+    QPixmap blur(size().scaled(16, 16, Qt::KeepAspectRatio));
+    blur.fill(Color::Scrim());
+    {
+        QPainter painter(&blur);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.scale(qreal(blur.width()) / width(), qreal(blur.height()) / height());
+        painter.drawPixmap(placement, icon, QRectF(icon.rect()));
+    }
+
     QPainter painter(&backdrop);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.scale(qreal(backdrop.width()) / width(), qreal(backdrop.height()) / height());
-    painter.drawPixmap(art, icon, QRectF(icon.rect()));
+    painter.drawPixmap(rect(), blur);
+    auto shade = Color::Scrim();
+    QLinearGradient horizontal(0, 0, width(), 0);
+    shade.setAlpha(0xf5);
+    horizontal.setColorAt(0, shade);
+    shade.setAlpha(0xe0);
+    horizontal.setColorAt(0.4, shade);
+    shade.setAlpha(0x73);
+    horizontal.setColorAt(0.75, shade);
+    shade.setAlpha(0x8c);
+    horizontal.setColorAt(1, shade);
+    painter.fillRect(rect(), horizontal);
+    QLinearGradient vertical(0, 0, 0, height());
+    shade.setAlpha(0);
+    vertical.setColorAt(0.5, shade);
+    shade.setAlpha(0xf2);
+    vertical.setColorAt(1, shade);
+    painter.fillRect(rect(), vertical);
 }
 
 void LoadingScreen::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
-    painter.fillRect(rect(), Color::Scrim());
-    if (!backdrop.isNull()) {
-        painter.drawPixmap(rect(), backdrop);
-
-        auto shade = Color::Scrim();
-        QLinearGradient horizontal(0, 0, width(), 0);
-        shade.setAlpha(245);
-        horizontal.setColorAt(0, shade);
-        shade.setAlpha(224);
-        horizontal.setColorAt(0.4, shade);
-        shade.setAlpha(115);
-        horizontal.setColorAt(0.75, shade);
-        shade.setAlpha(140);
-        horizontal.setColorAt(1, shade);
-        painter.fillRect(rect(), horizontal);
-
-        QLinearGradient vertical(0, 0, 0, height());
-        shade.setAlpha(0);
-        vertical.setColorAt(0.5, shade);
-        shade.setAlpha(242);
-        vertical.setColorAt(1, shade);
-        painter.fillRect(rect(), vertical);
+    painter.setRenderHint(QPainter::Antialiasing);
+    if (fade.state() == QAbstractAnimation::Running) {
+        painter.setOpacity(fade.currentValue().toReal());
+    }
+    if (backdrop.isNull()) {
+        painter.fillRect(rect(), Color::Scrim());
+    } else {
+        painter.drawPixmap(0, 0, backdrop);
     }
 
     const QRect content = ContentRect();
     const int margin = std::min(64, width() / 18);
-    const int art = content.height();
-    PaintWholeIcon(painter, QRect{margin, content.top(), art, art}, icon, 22);
+    const int art_size = content.height();
+    PaintWholeIcon(painter, QRect{margin, content.top(), art_size, art_size}, art, 22);
 
     painter.translate(content.topLeft());
     const int available = content.width();
@@ -246,6 +347,7 @@ void LoadingScreen::paintEvent(QPaintEvent*) {
         painter.setFont(font);
         painter.drawText(area, alignment | Qt::AlignVCenter,
                          painter.fontMetrics().elidedText(text, Qt::ElideRight, area.width()));
+        return painter.fontMetrics().horizontalAdvance(text);
     };
 
     const QString platform = switch2 ? tr("Switch 2") : tr("Switch 1");
@@ -257,7 +359,7 @@ void LoadingScreen::paintEvent(QPaintEvent*) {
     draw_line(QRectF{0, 0, qreal(badge), 24}, platform, badge_font,
               switch2 ? Color::OnAccent() : Color::Text(), Qt::AlignHCenter);
     draw_line(QRectF{qreal(badge + 8), 0, qreal(available - badge - 8), 24}, version, Font(13),
-              Color::TextSecondary());
+              Secondary());
     draw_line(QRectF{0, 30, qreal(available), 48}, title, DisplayFont(40), Color::Text());
 
     const bool warm = stage == LoadCallbackStage::Warm;
@@ -267,51 +369,61 @@ void LoadingScreen::paintEvent(QPaintEvent*) {
     const std::array steps{tr("Loading…"), warm ? tr("Precaching shaders") : tr("Loading Shaders"),
                            tr("Launching…")};
     for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
-        const qreal y = 88 + 30 * i;
+        const qreal y = 90 + 32 * i;
         const QRectF marker{0, y + 4, 22, 22};
-        painter.setPen(i == active ? QPen(Color::Accent(), 2) : Qt::NoPen);
-        painter.setBrush(i < active    ? Color::Accent()
-                         : i == active ? Qt::NoBrush
-                                       : QBrush(Color::Control()));
-        painter.drawEllipse(marker.adjusted(1, 1, -1, -1));
         if (i < active) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Color::Accent());
+            painter.drawEllipse(marker);
             painter.drawPixmap(QPointF{4, y + 8},
                                IconPixmap(u"check", 14, Color::OnAccent(), devicePixelRatioF()));
         } else if (i == active) {
+            painter.setPen(QPen(Color::Accent(), 2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(marker.adjusted(1, 1, -1, -1));
             painter.setPen(Qt::NoPen);
             painter.setBrush(Color::Accent());
             painter.drawEllipse(marker.center(), 4, 4);
+        } else {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0xff, 0xff, 0xff, 0x24));
+            painter.drawEllipse(marker);
         }
-        QString step = steps[i];
+        const int label = draw_line(QRectF{32, y, qreal(available - 32), 30}, steps[i],
+                                    Font(14, i == active ? 600 : 500),
+                                    i <= active ? Color::Text() : Secondary());
         if (i == 1 && total > 0) {
-            step = tr("%1  %2 / %3")
-                       .arg(step, locale().toString(static_cast<qulonglong>(current)),
-                            locale().toString(static_cast<qulonglong>(total)));
+            draw_line(QRectF{qreal(42 + label), y, qreal(available - 42 - label), 30},
+                      tr("%1 / %2")
+                          .arg(locale().toString(static_cast<qulonglong>(current)),
+                               locale().toString(static_cast<qulonglong>(total))),
+                      Font(13), Secondary());
         }
-        draw_line(QRectF{32, y, qreal(available - 32), 30}, step, Font(14, i == active ? 600 : 500),
-                  i <= active ? Color::Text() : Color::TextSecondary());
     }
 
     if (total > 0 || stage == LoadCallbackStage::Complete) {
         const qreal track = std::min(440, available);
         const qreal progress = total > 0 ? static_cast<qreal>(current) / total : 1.0;
         painter.setPen(Qt::NoPen);
-        painter.setBrush(Color::Control());
+        painter.setBrush(QColor(0xff, 0xff, 0xff, 0x33));
         painter.drawRoundedRect(QRectF{0, 196, track, 8}, 4, 4);
         painter.setBrush(Color::Accent());
-        painter.drawRoundedRect(QRectF{0, 196, track * progress, 8}, 4, 4);
-        draw_line(QRectF{0, 211, 56, 20}, tr("%1%").arg(qRound(progress * 100)), Font(13, 700),
+        painter.drawRoundedRect(QRectF{0, 196, std::round(track * progress), 8}, 4, 4);
+        draw_line(QRectF{0, 212, 56, 17}, tr("%1%").arg(qRound(progress * 100)), Font(13, 700),
                   Color::Text());
-        draw_line(QRectF{56, 211, track - 56, 20}, estimate, Font(13), Color::TextSecondary(),
+        draw_line(QRectF{56, 212, track - 56, 17}, estimate, Font(13), Secondary(),
                   Qt::AlignRight);
     }
 
-    painter.setFont(Font(12));
-    painter.setPen(Color::TextSecondary());
     const QString note =
-        warm ? tr("Start anyway: the remaining shaders will be precached on a later launch.")
-             : tr("The first launch after a driver update may take longer.");
-    painter.drawPixmap(QPointF{0, 305},
-                       IconPixmap(u"info", 14, Color::TextSecondary(), devicePixelRatioF()));
-    painter.drawText(QRect{22, 304, available - 22, 40}, Qt::TextWordWrap, note);
+        !warm                  ? tr("First launch after a driver update takes longer")
+        : precompile_requested ? tr("Precompile All Shaders is on for this game · right-click it "
+                                    "in the library to turn off")
+                               : tr("Precache Shaders is on in Graphics settings");
+    painter.drawPixmap(QPointF{0, 311}, IconPixmap(warm ? u"cpu" : u"info", 16,
+                                                   QColor(0xff, 0xff, 0xff, 0xb8),
+                                                   devicePixelRatioF()));
+    painter.setFont(Font(12));
+    painter.setPen(Secondary());
+    painter.drawText(QRect{24, 311, available - 24, 40}, Qt::TextWordWrap, note);
 }
