@@ -369,9 +369,9 @@ void GameList::OnPopulate() {
     first_result = QModelIndex{};
     result_count = 0;
     emit LibraryChanged({}, 0);
-    const bool view_focused = m_currentView->hasFocus();
+    const bool view_focused = window()->focusWidget() == m_currentView;
     m_currentView->setEnabled(false);
-    focus_fallback = view_focused ? QApplication::focusWidget() : nullptr;
+    focus_fallback = view_focused ? window()->focusWidget() : nullptr;
 
     switch (game_list_mode) {
     case Settings::GameListMode::TreeView:
@@ -600,7 +600,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     m_populating = false;
     m_currentView->setEnabled(true);
     ApplyFilter();
-    if (focus_fallback && QApplication::focusWidget() == focus_fallback) {
+    if (focus_fallback && window()->focusWidget() == focus_fallback) {
         m_currentView->setFocus();
     }
     focus_fallback = nullptr;
@@ -1283,6 +1283,10 @@ void GameList::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange) {
         RetranslateUI();
     } else if (event->type() == QEvent::EnabledChange) {
+        const QWidget* focus = window()->focusWidget();
+        if (isEnabled() && (!focus || !focus->isVisible())) {
+            m_currentView->setFocus();
+        }
         emit LibraryEnabledChanged(isEnabled());
     }
 

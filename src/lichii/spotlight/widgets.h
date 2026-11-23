@@ -23,6 +23,8 @@ inline constexpr int Fade = 160;
 void FadeIn(QWidget* widget, int duration = Motion::Fade);
 /// Fades a top-level window in every time it is shown.
 void FadeInOnShow(QWidget* window, int duration = Motion::Fade);
+/// Whether the user moved focus to `widget` with the keyboard, so it shows a focus ring.
+bool HasKeyboardFocus(const QWidget* widget);
 
 /// A 0..1 value that follows the pointer entering and leaving a control.
 class HoverFade {

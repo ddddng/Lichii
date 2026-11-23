@@ -13,6 +13,7 @@
 #include "lichii/spotlight/library_header.h"
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 namespace Spotlight {
 
@@ -35,7 +36,7 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(hasFocus() ? Color::Accent() : Color::Stroke());
+        painter.setPen(HasKeyboardFocus(this) ? Color::Accent() : Color::Stroke());
         painter.setBrush(underMouse() ? Color::ControlHover() : Color::Control());
         painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 17, 17);
         painter.drawPixmap(12, 9,

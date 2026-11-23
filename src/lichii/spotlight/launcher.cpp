@@ -199,6 +199,9 @@ void Launcher::SetLibraryAvailable(bool available) {
 void Launcher::SetInlineEmulation(bool running) {
     inline_emulation = running;
     temporary_menu = false;
+    if (running && isAncestorOf(owner->focusWidget())) {
+        owner->focusWidget()->clearFocus();
+    }
     setVisible(!running);
     UpdateChrome();
 }
