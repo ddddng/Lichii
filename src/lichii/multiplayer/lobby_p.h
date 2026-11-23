@@ -12,6 +12,7 @@
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include "common/common_types.h"
+#include "lichii/spotlight/theme.h"
 
 namespace Column {
 enum List {
@@ -43,8 +44,9 @@ public:
 
     QVariant data(int role) const override {
         if (role == Qt::DecorationRole) {
-            bool has_password = data(PasswordRole).toBool();
-            return has_password ? QIcon::fromTheme(QStringLiteral("lock")).pixmap(16) : QIcon();
+            static const QIcon lock =
+                Spotlight::Icon(u"lock-simple", Spotlight::Color::Warning(), 15);
+            return data(PasswordRole).toBool() ? lock : QIcon();
         }
         if (role != Qt::DisplayRole) {
             return LobbyItem::data(role);
