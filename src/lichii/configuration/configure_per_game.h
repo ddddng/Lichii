@@ -179,6 +179,8 @@ private:
     QLabel* update_summary = nullptr;
     QList<QLabel*> mods_summaries;
     QVBoxLayout* store_rows = nullptr;
+    QLabel* store_header = nullptr;
+    QLabel* own_header = nullptr;
     QVBoxLayout* own_rows = nullptr;
     QVBoxLayout* content_rows = nullptr;
     bool addons_queued = false;

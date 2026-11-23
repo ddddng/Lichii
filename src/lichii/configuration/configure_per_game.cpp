@@ -89,6 +89,7 @@
 #include "lichii/configuration/configure_per_game_addons.h"
 #include "lichii/configuration/configure_system.h"
 #include "lichii/configuration/iidb_artwork_dialog.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
@@ -421,21 +422,24 @@ QWidget* Footnote(const QString& text) {
     return line;
 }
 
-/// A 36 px pill with a leading icon (Paper: secondary action, 13/600 text, 18 side padding).
+/// A pill with an optional leading icon (Paper: secondary action, 36 px, 13/600 text, 18 side
+/// padding; 30 px rows use 12 px text).
 class ActionPill final : public QAbstractButton {
 public:
-    ActionPill(const QString& text, QString icon_, QColor fill_, QColor ink_)
-        : icon{std::move(icon_)}, fill{fill_}, ink{ink_} {
+    ActionPill(const QString& text, QString icon_, QColor fill_, QColor ink_, QColor stroke_ = {},
+               int height_ = 36)
+        : icon{std::move(icon_)}, fill{fill_}, ink{ink_}, stroke{stroke_}, pill_height{height_} {
         setText(text);
-        setFont(Spotlight::Font(13, 600));
+        setFont(Spotlight::Font(pill_height < 36 ? 12 : 13, 600));
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
-        setFixedHeight(36);
+        setFixedHeight(pill_height);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
 
     QSize sizeHint() const override {
-        return {fontMetrics().horizontalAdvance(text()) + 36 + (icon.isEmpty() ? 0 : 24), 36};
+        return {fontMetrics().horizontalAdvance(text()) + 36 + (icon.isEmpty() ? 0 : 24),
+                pill_height};
     }
 
 protected:
@@ -449,9 +453,9 @@ protected:
         }
         const QColor foreground = enabled ? ink : QColor(0xff, 0xff, 0xff, 0x59);
         const QRectF bounds = QRectF(rect()).adjusted(1, 1, -1, -1);
-        painter.setPen(Spotlight::HasKeyboardFocus(this)
-                           ? QPen(Spotlight::Color::Accent(), 2)
-                           : QPen(Qt::NoPen));
+        painter.setPen(Spotlight::HasKeyboardFocus(this) ? QPen(Spotlight::Color::Accent(), 2)
+                       : stroke.isValid() && enabled    ? QPen(stroke, 1)
+                                                        : QPen(Qt::NoPen));
         painter.setBrush(background);
         painter.drawRoundedRect(bounds, bounds.height() / 2, bounds.height() / 2);
         const int content = fontMetrics().horizontalAdvance(text()) + (icon.isEmpty() ? 0 : 24);
@@ -480,6 +484,8 @@ private:
     QString icon;
     QColor fill;
     QColor ink;
+    QColor stroke;
+    int pill_height;
     QPixmap glyph;
     bool glyph_enabled = false;
 };
@@ -1450,45 +1456,80 @@ void ConfigurePerGame::AddPresetRow(QVBoxLayout* section) {
 
 void ConfigurePerGame::BuildAddons(int mods, int updates) {
     using Spotlight::SettingsPage;
+    namespace Color = Spotlight::Color;
     if (store_rows != nullptr) {
         return;
     }
-    update_summary = SettingsPage::AddRow(settings_page->AddSection(updates), tr("Game version"),
-                                          tr("Review installed content"), QStringLiteral("info"),
-                                          Spotlight::SettingsColor::Lavender(), nullptr);
-    store_rows = settings_page->AddSection(mods, tr("From the Mod Store"));
-    own_rows = settings_page->AddSection(mods, tr("Your own files"));
+    update_summary = new QLabel;
+    auto* version_pill = new RoundedBox(Color::Control(), Qt::transparent, 11);
+    version_pill->setFixedHeight(22);
+    auto* pill_layout = new QHBoxLayout(version_pill);
+    pill_layout->setContentsMargins(9, 0, 9, 0);
+    update_summary->setFont(Spotlight::Font(11, 600));
+    Spotlight::SetTextColor(update_summary, Color::Text());
+    pill_layout->addWidget(update_summary);
+    const QString name = original_title.empty() ? ui->display_name->text()
+                                                : QString::fromStdString(original_title);
+    SettingsPage::AddRow(settings_page->AddSection(updates, tr("Game version")), name,
+                         tr("Currently detected version"), QStringLiteral("info"),
+                         Spotlight::SettingsColor::Lavender(), version_pill);
+    content_rows = settings_page->AddSection(updates, tr("Installed"));
+    auto* updates_note = new QLabel(tr("If there are no updates or DLC installed, use the game's "
+                                       "Library menu to install content."));
+    settings_page->AddBlock(updates, NoteStrip(updates_note, NoteKind::Info), updates_note->text());
 
     auto* actions = new QWidget;
     actions->setProperty("spotlightTransparent", true);
     auto* actions_layout = new QHBoxLayout(actions);
-    actions_layout->setContentsMargins(0, 4, 0, 0);
-    actions_layout->setSpacing(14);
-    auto* browse =
-        new Spotlight::PillButton(tr("Browse the Mod Store"), QStringLiteral("storefront"),
-                                  Spotlight::PillButton::Kind::Accent, 38);
-    connect(browse, &QAbstractButton::clicked, this, &ConfigurePerGame::BrowseModsRequested);
-    actions_layout->addWidget(browse);
-    actions_layout->addWidget(
-        SettingsPage::Text(tr("Installed mods are available offline."), 13, 500, true));
-    actions_layout->addStretch();
-    auto* add_folder = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("folder-open"));
+    actions_layout->setContentsMargins(0, 0, 0, 0);
+    actions_layout->setSpacing(10);
+    auto* add_folder =
+        new ActionPill(tr("Add folder"), QStringLiteral("folder-open"), Color::Fill(), Color::Text());
     connect(add_folder, &QAbstractButton::clicked, addons_tab.get(),
             &ConfigurePerGameAddons::InstallModFolder);
     actions_layout->addWidget(add_folder);
-    auto* add_zip = new Spotlight::PillButton(tr("Add ZIP"), QStringLiteral("archive"));
+    auto* add_zip =
+        new ActionPill(tr("Add ZIP"), QStringLiteral("archive"), Color::Fill(), Color::Text());
     connect(add_zip, &QAbstractButton::clicked, addons_tab.get(),
             &ConfigurePerGameAddons::InstallModZip);
     actions_layout->addWidget(add_zip);
+    actions_layout->addStretch();
+    auto* browse = new ActionPill(tr("Browse the Mod Store"), QStringLiteral("storefront"),
+                                  Color::Control(), Color::Text(), Color::Stroke());
+    connect(browse, &QAbstractButton::clicked, this, &ConfigurePerGame::BrowseModsRequested);
+    actions_layout->addWidget(browse);
     settings_page->AddBlock(mods, actions, tr("Browse the Mod Store"));
 
-    content_rows = settings_page->AddSection(updates, tr("Installed"));
+    const auto add_group = [this, mods](QLabel*& header) {
+        auto* group = new QWidget;
+        group->setProperty("spotlightTransparent", true);
+        auto* layout = new QVBoxLayout(group);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(8);
+        header = SettingsPage::Text({}, 15, 600);
+        header->setContentsMargins(6, 0, 6, 0);
+        layout->addWidget(header);
+        auto* card = new RoundedBox(Color::FillFaint(), Color::StrokeSubtle(), 18);
+        auto* rows = new QVBoxLayout(card);
+        rows->setContentsMargins(0, 0, 0, 0);
+        rows->setSpacing(0);
+        layout->addWidget(card);
+        settings_page->AddBlock(mods, group, {});
+        return rows;
+    };
+    store_rows = add_group(store_header);
+    own_rows = add_group(own_header);
+    settings_page->AddBlock(mods,
+                            Footnote(tr("Removing a mod asks for confirmation. Installed updates "
+                                        "and DLC are managed separately.")),
+                            {});
     UpdateSpotlightIdentity();
     RebuildAddons();
 }
 
 void ConfigurePerGame::RebuildAddons() {
     using Spotlight::SettingsPage;
+    namespace Color = Spotlight::Color;
     namespace Tints = Spotlight::SettingsColor;
     for (auto* rows : {store_rows, own_rows, content_rows}) {
         while (auto* item = rows->takeAt(0)) {
@@ -1507,6 +1548,52 @@ void ConfigurePerGame::RebuildAddons() {
         store.insert(mod.id, std::move(mod));
     }
 
+    const auto add_row = [](QVBoxLayout* rows, QWidget* leading, const QString& title,
+                            const QString& detail, QWidget* trailing) {
+        if (rows->count() > 0) {
+            auto* divider = new QWidget;
+            divider->setProperty("spotlightTransparent", true);
+            auto* divider_layout = new QHBoxLayout(divider);
+            divider_layout->setContentsMargins(18, 0, 18, 0);
+            auto* line = new RoundedBox(QColor(0xff, 0xff, 0xff, 0x12), Qt::transparent, 0);
+            line->setFixedHeight(1);
+            divider_layout->addWidget(line);
+            rows->addWidget(divider);
+        }
+        auto* row = new QWidget;
+        row->setProperty("spotlightTransparent", true);
+        row->setProperty("searchText", QString(title + QLatin1Char('\n') + detail));
+        row->setMinimumHeight(56);
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(14, 8, 16, 8);
+        layout->setSpacing(12);
+        if (leading != nullptr) {
+            layout->addWidget(leading, 0, Qt::AlignVCenter);
+        }
+        auto* copy = new QVBoxLayout;
+        copy->setSpacing(2);
+        copy->addWidget(SettingsPage::Text(title, 14, 600));
+        if (!detail.isEmpty()) {
+            copy->addWidget(SettingsPage::Text(detail, 12, 400, true));
+        }
+        layout->addLayout(copy, 1);
+        layout->addWidget(trailing, 0, Qt::AlignVCenter);
+        rows->addWidget(row);
+    };
+    const auto add_empty = [](QVBoxLayout* rows, const QString& title, const QString& text) {
+        auto* empty = new QWidget;
+        empty->setProperty("spotlightTransparent", true);
+        auto* layout = new QVBoxLayout(empty);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(12);
+        auto* heading = new QLabel(title);
+        heading->setFont(Spotlight::DisplayFont(18));
+        Spotlight::SetTextColor(heading, Color::Text());
+        layout->addWidget(heading);
+        layout->addWidget(NoteStrip(new QLabel(text), NoteKind::Info));
+        rows->addWidget(empty);
+    };
+
     auto* model = addons_tab->Model();
     int store_count = 0;
     int own_count = 0;
@@ -1515,16 +1602,12 @@ void ConfigurePerGame::RebuildAddons() {
         const QString version = model->item(row, 1) ? model->item(row, 1)->text() : QString{};
         const QString location =
             item->data(ConfigurePerGameAddons::PATCH_LOCATION).toString();
-        const bool is_mod = item->data(ConfigurePerGameAddons::PATCH_TYPE).toInt() ==
-                            static_cast<int>(FileSys::PatchType::Mod);
+        const auto type =
+            static_cast<FileSys::PatchType>(item->data(ConfigurePerGameAddons::PATCH_TYPE).toInt());
 
-        auto* control = new QWidget;
-        control->setProperty("spotlightTransparent", true);
-        auto* control_layout = new QHBoxLayout(control);
-        control_layout->setContentsMargins(0, 0, 0, 0);
-        control_layout->setSpacing(10);
+        Spotlight::ToggleSwitch* toggle = nullptr;
         if (item->isCheckable()) {
-            auto* toggle = new Spotlight::ToggleSwitch;
+            toggle = new Spotlight::ToggleSwitch;
             toggle->setChecked(item->checkState() == Qt::Checked);
             toggle->setAccessibleName(item->text());
             connect(toggle, &QAbstractButton::toggled, this, [item](bool on) {
@@ -1537,139 +1620,128 @@ void ConfigurePerGame::RebuildAddons() {
                             toggle->setChecked(item->checkState() == Qt::Checked);
                         }
                     });
-            control_layout->addWidget(toggle);
+        }
+
+        if (type != FileSys::PatchType::Mod) {
+            const bool embedded = !item->isCheckable() && type == FileSys::PatchType::Update;
+            const QString title = embedded ? tr("Embedded Update (NUP)") : item->text();
+            const QString detail =
+                embedded ? tr("An update inside the game file cannot be disabled.")
+                : type == FileSys::PatchType::DLC
+                    ? tr("Installed")
+                    : (version.isEmpty() ? item->toolTip() : tr("v%1").arg(version));
+            QWidget* control = toggle;
+            if (embedded) {
+                control = SmallBadge(tr("Embedded"), Color::Control(), Color::Text());
+            }
+            SettingsPage::AddRow(content_rows, title, detail,
+                                 embedded ? QStringLiteral("archive")
+                                 : type == FileSys::PatchType::DLC
+                                     ? QStringLiteral("puzzle-piece")
+                                     : QStringLiteral("arrow-circle-up"),
+                                 Tints::Lavender(), control, item->toolTip());
+            continue;
+        }
+
+        auto* trailing = new QWidget;
+        trailing->setProperty("spotlightTransparent", true);
+        auto* trailing_layout = new QHBoxLayout(trailing);
+        trailing_layout->setContentsMargins(0, 0, 0, 0);
+        trailing_layout->setSpacing(10);
+        auto* leading = new QWidget;
+        leading->setProperty("spotlightTransparent", true);
+        auto* leading_layout = new QHBoxLayout(leading);
+        leading_layout->setContentsMargins(0, 0, 0, 0);
+        leading_layout->setSpacing(12);
+        if (toggle != nullptr) {
+            leading_layout->addWidget(toggle);
+        }
+        const auto found = store.constFind(item->text());
+        const bool from_store = found != store.cend();
+        if (from_store) {
+            if (found->verified == false) {
+                trailing_layout->addWidget(SmallBadge(tr("Unverified"),
+                                                      QColor(0xff, 0xd3, 0x7a, 0x2e),
+                                                      QColor(0xff, 0xd3, 0x7a)));
+            }
+            if (found->update_available == true) {
+                auto* update =
+                    new ActionPill(tr("Update"), {}, Color::Control(), Color::Text(), {}, 30);
+                connect(update, &QAbstractButton::clicked, this,
+                        &ConfigurePerGame::BrowseModsRequested);
+                trailing_layout->addWidget(update);
+            }
+            auto* tile = new RoundedBox(Color::Fill(), Qt::transparent, 10);
+            tile->setFixedSize(32, 32);
+            auto* tile_layout = new QHBoxLayout(tile);
+            tile_layout->setContentsMargins(0, 0, 0, 0);
+            auto* glyph = new QLabel;
+            glyph->setPixmap(Spotlight::IconPixmap(QStringLiteral("puzzle-piece"), 16,
+                                                   Color::Text(), tile->devicePixelRatioF()));
+            tile_layout->addWidget(glyph, 0, Qt::AlignCenter);
+            leading_layout->addWidget(tile);
+        } else if (version.contains(QStringLiteral("Cheats"), Qt::CaseInsensitive)) {
+            auto* glyph = new QLabel;
+            glyph->setPixmap(Spotlight::IconPixmap(QStringLiteral("key"), 16,
+                                                   Color::TextSecondary(),
+                                                   leading->devicePixelRatioF()));
+            leading_layout->addWidget(glyph);
         }
         if (!location.isEmpty()) {
             auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
             more->setAccessibleName(tr("More for %1").arg(item->text()));
-            auto* menu = new QMenu(more);
-            menu->addAction(tr("Open folder"), this, [location] {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(location));
-            });
-            menu->addAction(tr("Remove"), this, [this, item] {
-                addons_tab->AddonDeleteRequested({item->index()});
-            });
+            more->setFocusPolicy(Qt::StrongFocus);
+            auto* menu = new Spotlight::Menu(more);
+            menu->addAction(tr("Local mod actions"))->setEnabled(false);
+            menu->addAction(Spotlight::Icon(u"folder-open", Color::MenuInk(), 16), tr("Open folder"),
+                            this, [location] {
+                                QDesktopServices::openUrl(QUrl::fromLocalFile(location));
+                            });
+            auto* remove = menu->addAction(Spotlight::Icon(u"trash", Color::AccentLight(), 16),
+                                           tr("Remove"), this, [this, item] {
+                                               addons_tab->AddonDeleteRequested({item->index()});
+                                           });
+            remove->setProperty("spotlightDestructive", true);
             connect(more, &QAbstractButton::clicked, menu,
-                    [menu, more] { menu->popup(more->mapToGlobal(QPoint(0, more->height()))); });
-            control_layout->addWidget(more);
+                    [menu, more] {
+                        menu->popup(more->mapToGlobal(
+                            QPoint(more->width() - menu->sizeHint().width(), more->height() + 6)));
+                    });
+            trailing_layout->addWidget(more);
         }
 
-        if (!is_mod) {
-            const QString detail =
-                version.isEmpty() ? item->toolTip() : tr("Version %1").arg(version);
-            SettingsPage::AddRow(content_rows, item->text(), detail,
-                                 QStringLiteral("download-simple"), Tints::Lavender(), control,
-                                 item->toolTip());
-            continue;
-        }
-        if (const auto found = store.constFind(item->text()); found != store.cend()) {
+        if (from_store) {
             ++store_count;
-            if (found->update_available == true) {
-                auto* update = new Spotlight::PillButton(tr("Update"),
-                                                         QStringLiteral("arrow-circle-up"),
-                                                         Spotlight::PillButton::Kind::Accent, 30);
-                connect(update, &QAbstractButton::clicked, this,
-                        &ConfigurePerGame::BrowseModsRequested);
-                control_layout->insertWidget(0, update);
-                auto* badge = SettingsPage::Badge(tr("Update"), Spotlight::Color::Accent(),
-                                                  Spotlight::Color::OnAccent());
-                badge->setObjectName(QStringLiteral("titleBadge"));
-                badge->setFixedHeight(20);
-                badge->setParent(control);
+            QStringList facts{tr("Mod Store")};
+            if (!found->version.isEmpty()) {
+                facts << tr("v%1").arg(found->version);
             }
-
-            QStringList facts;
             if (!found->author.isEmpty()) {
                 facts << tr("by %1").arg(found->author);
             }
-            if (found->file_date.isValid()) {
-                const QDate date = found->file_date.toLocalTime().date();
-                const QString format = date.year() == QDate::currentDate().year()
-                                           ? QStringLiteral("MMM d")
-                                           : QStringLiteral("MMM d, yyyy");
-                facts << tr("file from %1").arg(QLocale().toString(date, format));
-            }
-            if (facts.isEmpty() && !found->version.isEmpty()) {
-                facts << tr("Version %1").arg(found->version);
-            }
-            auto* line = new QWidget(control);
-            line->setObjectName(QStringLiteral("detailLine"));
-            line->setProperty("spotlightTransparent", true);
-            auto* line_layout = new QHBoxLayout(line);
-            line_layout->setContentsMargins(0, 0, 0, 0);
-            line_layout->setSpacing(12);
-            if (!facts.isEmpty()) {
-                line_layout->addWidget(
-                    SettingsPage::Text(facts.join(QStringLiteral(" · ")), 12, 400, true));
-            }
-            const auto add_fact = [line, line_layout](const QString& icon, const QString& text,
-                                                      const QColor& color, int weight) {
-                auto* glyph = new QLabel;
-                glyph->setPixmap(Spotlight::IconPixmap(icon, 14, color, line->devicePixelRatioF()));
-                auto* label = SettingsPage::Text(text, 12, weight);
-                label->setStyleSheet(
-                    QStringLiteral("QLabel { background: transparent; color: %1; }")
-                        .arg(color.name(QColor::HexArgb)));
-                auto* fact = new QHBoxLayout;
-                fact->setSpacing(5);
-                fact->addWidget(glyph);
-                fact->addWidget(label);
-                line_layout->addLayout(fact);
-            };
-            if (found->source) {
-                add_fact(QStringLiteral("globe"), ModStore::SourceName(*found->source),
-                         Spotlight::Color::TextSecondary(), 500);
-            }
-            if (found->verified == false) {
-                add_fact(QStringLiteral("warning-circle"), tr("Unverified"),
-                         Spotlight::Color::Warning(), 600);
-            }
-            line_layout->addStretch();
-
-            QPixmap thumbnail(found->thumbnail_path);
-            if (thumbnail.isNull()) {
-                thumbnail = QPixmap(192, 108);
-                thumbnail.fill(Spotlight::Color::Fill());
-                QPainter painter(&thumbnail);
-                painter.drawPixmap(72, 30,
-                                   Spotlight::IconPixmap(QStringLiteral("storefront"), 48,
-                                                         Spotlight::Color::TextMuted(), 1));
-            }
-            SettingsPage::AddRow(store_rows, found->name, {}, QStringLiteral("storefront"),
-                                 Tints::Blue(), control, facts.join(QStringLiteral(" · ")),
-                                 thumbnail);
+            add_row(store_rows, leading, found->name, facts.join(QStringLiteral(" · ")), trailing);
             continue;
         }
         ++own_count;
-        const bool cheats = version.contains(QStringLiteral("Cheats"), Qt::CaseInsensitive);
         const QString path =
             location.isEmpty() ? QString{} : QDir(load_dir).relativeFilePath(location);
-        const QString detail = version.isEmpty() || path.isEmpty()
-                                   ? version + path
-                                   : tr("%1 · %2").arg(version, path);
-        SettingsPage::AddRow(own_rows, item->text(), detail,
-                             cheats ? QStringLiteral("key") : QStringLiteral("folder"),
-                             cheats ? Tints::Gold() : Tints::Green(), control, item->toolTip());
+        add_row(own_rows, leading, item->text(),
+                version.isEmpty() || path.isEmpty() ? version + path
+                                                    : tr("%1 · %2").arg(version, path),
+                trailing);
     }
 
-    const auto section_label = [](QVBoxLayout* rows) {
-        return static_cast<QLabel*>(
-            rows->parentWidget()->parentWidget()->layout()->itemAt(0)->widget());
-    };
-    section_label(store_rows)->setText(tr("From the Mod Store · %1").arg(store_count));
-    auto* store_section = store_rows->parentWidget()->parentWidget();
-    store_section->setProperty("sourceVisible", store_count > 0);
-    store_section->setVisible(store_count > 0);
-    section_label(own_rows)->setText(tr("Your own files · %1").arg(own_count));
+    store_header->setText(tr("From the Mod Store · %1").arg(store_count));
+    auto* store_group = store_header->parentWidget();
+    store_group->setProperty("sourceVisible", store_count > 0);
+    store_group->setVisible(store_count > 0);
+    own_header->setText(tr("Your own files · %1").arg(own_count));
     if (own_count == 0) {
-        SettingsPage::AddRow(own_rows, tr("No mods yet"),
-                             tr("Add a folder or ZIP, or browse the Mod Store"),
-                             QStringLiteral("puzzle-piece"), Tints::Blue(), nullptr);
+        add_empty(own_rows, tr("No mods yet"), tr("Add a folder or ZIP, or browse the Mod Store."));
     }
     if (content_rows->isEmpty()) {
-        SettingsPage::AddRow(content_rows, tr("No updates or DLC"),
-                             tr("Install them from the game's menu in the library"),
-                             QStringLiteral("download-simple"), Tints::Lavender(), nullptr);
+        add_empty(content_rows, tr("No updates or DLC"),
+                  tr("Install them using the game's Library menu."));
     }
     UpdateModsSummary();
 }
@@ -1708,8 +1780,7 @@ void ConfigurePerGame::UpdateSpotlightIdentity() {
                                      ? shown_version + id
                                      : tr("%1 · %2").arg(shown_version, id));
     if (update_summary != nullptr) {
-        update_summary->setText(version.isEmpty() ? tr("Review installed content")
-                                                  : tr("Game version %1").arg(version));
+        update_summary->setText(version.isEmpty() ? tr("Unknown") : tr("v%1").arg(version));
     }
 }
 
