@@ -3,6 +3,7 @@
 
 #include "data_dialog.h"
 #include "frontend_common/data_manager.h"
+#include "lichii/spotlight/theme.h"
 #include "qt_common/qt_string_lookup.h"
 #include "qt_common/util/content.h"
 #include "ui_data_dialog.h"
@@ -48,10 +49,10 @@ DataWidget::DataWidget(FrontendCommon::DataManager::DataDir data_dir,
 
     ui->tooltip->setText(QtCommon::StringLookup::Lookup(tooltip));
 
-    ui->clear->setIcon(QIcon::fromTheme(QStringLiteral("user-trash")));
-    ui->open->setIcon(QIcon::fromTheme(QStringLiteral("folder")));
-    ui->upload->setIcon(QIcon::fromTheme(QStringLiteral("upload")));
-    ui->download->setIcon(QIcon::fromTheme(QStringLiteral("download")));
+    ui->clear->setIcon(Spotlight::Icon(u"trash", Spotlight::Color::Accent()));
+    ui->open->setIcon(Spotlight::Icon(u"folder-open"));
+    ui->upload->setIcon(Spotlight::Icon(u"upload-simple"));
+    ui->download->setIcon(Spotlight::Icon(u"download-simple"));
 
     connect(ui->clear, &QPushButton::clicked, this, &DataWidget::clear);
     connect(ui->open, &QPushButton::clicked, this, &DataWidget::open);

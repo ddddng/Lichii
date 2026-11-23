@@ -274,6 +274,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/monitor@2x.png</file>
         <file>icons/monitor_active.png</file>
         <file>icons/monitor_active@2x.png</file>
+        <file>icons/msgbox_critical.png</file>
+        <file>icons/msgbox_critical@2x.png</file>
+        <file>icons/msgbox_information.png</file>
+        <file>icons/msgbox_information@2x.png</file>
+        <file>icons/msgbox_question.png</file>
+        <file>icons/msgbox_question@2x.png</file>
+        <file>icons/msgbox_warning.png</file>
+        <file>icons/msgbox_warning@2x.png</file>
         <file>icons/puzzle.png</file>
         <file>icons/puzzle@2x.png</file>
         <file>icons/puzzle_active.png</file>

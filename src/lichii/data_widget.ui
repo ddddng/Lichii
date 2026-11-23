@@ -62,8 +62,8 @@
        </property>
        <property name="minimumSize">
         <size>
-         <width>52</width>
-         <height>47</height>
+         <width>44</width>
+         <height>44</height>
         </size>
        </property>
        <property name="toolTip">
@@ -71,10 +71,12 @@
        </property>
        <property name="styleSheet">
         <string notr="true">QPushButton {
-max-width: 50px;
-max-height: 45px;
-min-width: 50px;
-min-height: 45px;
+max-width: 44px;
+max-height: 44px;
+min-width: 44px;
+min-height: 44px;
+border-radius: 22px;
+padding: 0;
 }</string>
        </property>
        <property name="text">
@@ -82,8 +84,8 @@ min-height: 45px;
        </property>
        <property name="iconSize">
         <size>
-         <width>28</width>
-         <height>28</height>
+         <width>20</width>
+         <height>20</height>
         </size>
        </property>
       </widget>
@@ -98,8 +100,8 @@ min-height: 45px;
        </property>
        <property name="minimumSize">
         <size>
-         <width>52</width>
-         <height>47</height>
+         <width>44</width>
+         <height>44</height>
         </size>
        </property>
        <property name="toolTip">
@@ -107,10 +109,12 @@ min-height: 45px;
        </property>
        <property name="styleSheet">
         <string notr="true">QPushButton {
-max-width: 50px;
-max-height: 45px;
-min-width: 50px;
-min-height: 45px;
+max-width: 44px;
+max-height: 44px;
+min-width: 44px;
+min-height: 44px;
+border-radius: 22px;
+padding: 0;
 }</string>
        </property>
        <property name="text">
@@ -118,8 +122,8 @@ min-height: 45px;
        </property>
        <property name="iconSize">
         <size>
-         <width>28</width>
-         <height>28</height>
+         <width>20</width>
+         <height>20</height>
         </size>
        </property>
       </widget>
@@ -134,8 +138,8 @@ min-height: 45px;
        </property>
        <property name="minimumSize">
         <size>
-         <width>52</width>
-         <height>47</height>
+         <width>44</width>
+         <height>44</height>
         </size>
        </property>
        <property name="toolTip">
@@ -143,10 +147,12 @@ min-height: 45px;
        </property>
        <property name="styleSheet">
         <string notr="true">QPushButton {
-max-width: 50px;
-max-height: 45px;
-min-width: 50px;
-min-height: 45px;
+max-width: 44px;
+max-height: 44px;
+min-width: 44px;
+min-height: 44px;
+border-radius: 22px;
+padding: 0;
 }</string>
        </property>
        <property name="text">
@@ -154,8 +160,8 @@ min-height: 45px;
        </property>
        <property name="iconSize">
         <size>
-         <width>28</width>
-         <height>28</height>
+         <width>20</width>
+         <height>20</height>
         </size>
        </property>
       </widget>
@@ -170,8 +176,8 @@ min-height: 45px;
        </property>
        <property name="minimumSize">
         <size>
-         <width>52</width>
-         <height>47</height>
+         <width>44</width>
+         <height>44</height>
         </size>
        </property>
        <property name="toolTip">
@@ -179,10 +185,12 @@ min-height: 45px;
        </property>
        <property name="styleSheet">
         <string notr="true">QPushButton {
-max-width: 50px;
-max-height: 45px;
-min-width: 50px;
-min-height: 45px;
+max-width: 44px;
+max-height: 44px;
+min-width: 44px;
+min-height: 44px;
+border-radius: 22px;
+padding: 0;
 }</string>
        </property>
        <property name="text">
@@ -190,8 +198,8 @@ min-height: 45px;
        </property>
        <property name="iconSize">
         <size>
-         <width>28</width>
-         <height>28</height>
+         <width>20</width>
+         <height>20</height>
         </size>
        </property>
       </widget>
