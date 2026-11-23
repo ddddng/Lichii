@@ -149,4 +149,10 @@ TEST_CASE("BSD keeps TCP sockets on loopback in airplane mode", "[sockets][ipc]"
     const Reply bind_outside = call(13, std::array{other}, outside, 0);
     CHECK(bind_outside.ret == -1);
     CHECK(bind_outside.bsd_errno == AddrNotAvail);
+
+    // A listener the guest never bound takes a loopback port, not a wildcard one.
+    REQUIRE(call(18, std::array{other, 1u}, {}, 0).ret == 0);
+    REQUIRE(call(16, std::array{other}, {}, 0x80).ret == 0);
+    CHECK(std::equal(out_bytes + 4, out_bytes + 8, std::array<u8, 4>{127, 0, 0, 1}.begin()));
+    CHECK((out_bytes[2] | out_bytes[3]) != 0);
 }

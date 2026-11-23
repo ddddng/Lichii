@@ -1835,16 +1835,17 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
         return Errno::INVAL;
     }
     auto target = Translate(guest_target);
-    if (LoopbackOnly(descriptor->is_connection_based) &&
-        !Network::LocalRedirect::IsLoopback(target)) {
-        return Errno::NETUNREACH;
-    }
     if (descriptor->is_connection_based) {
         if (const auto routed =
                 Nextendo::RouteGamesync(system.GetApplicationProcessProgramID(), target)) {
             LOG_INFO(Service, "Nextendo: Gamesync fd={} routed to port {}", fd, routed->portno);
             target = *routed;
         }
+    }
+    // Checked on the address the socket would reach, which a host redirect moves off loopback.
+    if (LoopbackOnly(descriptor->is_connection_based) &&
+        !Network::LocalRedirect::IsLoopback(Network::LocalRedirect::ConnectTarget(target))) {
+        return Errno::NETUNREACH;
     }
 
     const Errno result = Translate(descriptor->socket->Connect(target));
@@ -1889,6 +1890,21 @@ Errno BSD_USA::ListenImpl(s32 fd, s32 backlog) {
     const auto descriptor = CopyDescriptor(fd);
     if (!descriptor) {
         return Errno::BADF;
+    }
+    if (LoopbackOnly(descriptor->is_connection_based)) {
+        // The host would bind an unbound listener to the wildcard address.
+        const auto [name, name_errno] = descriptor->socket->GetSockName();
+        if (name_errno != Network::Errno::SUCCESS || name.portno == 0) {
+            Network::SockAddrIn loopback{.family = Network::Domain::INET, .ip = {127, 0, 0, 1}};
+            if (descriptor->domain == Domain::INET6) {
+                loopback = {.family = Network::Domain::INET6};
+                loopback.ip6[15] = 1;
+            }
+            if (const auto bind_errno = descriptor->socket->Bind(loopback);
+                bind_errno != Network::Errno::SUCCESS) {
+                return Translate(bind_errno);
+            }
+        }
     }
     return Translate(descriptor->socket->Listen(backlog));
 }
