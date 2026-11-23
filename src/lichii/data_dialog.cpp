@@ -19,7 +19,8 @@
 
 #include <applets/qt_profile_select.h>
 
-DataDialog::DataDialog(QWidget* parent) : QDialog(parent), ui(std::make_unique<Ui::DataDialog>()) {
+DataDialog::DataDialog(QWidget* parent)
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::DataDialog>()) {
     ui->setupUi(this);
 
     // TODO: Should we make this a single widget that pulls data from a model?

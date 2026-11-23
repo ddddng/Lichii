@@ -45,16 +45,55 @@ inline QColor Warning() { return QColor(0xff, 0xc8, 0x57); }
 inline QColor Info() { return QColor(0x8f, 0xb5, 0xff); }
 inline QColor Hud() { return QColor(0x08, 0x09, 0x0d, 0xb8); }
 inline QColor HudSolid() { return QColor(0x08, 0x09, 0x0d, 0xdb); }
+inline QColor Divider() {
+    return QColor(0xff, 0xff, 0xff, 0x12);
+}
+inline QColor Field() {
+    return QColor(0xff, 0xff, 0xff, 0x0f);
+}
+inline QColor Dialog() {
+    return QColor(0x14, 0x16, 0x20, 0xf2);
+}
+inline QColor DialogSolid() {
+    return QColor(0x14, 0x16, 0x20);
+}
+inline QColor MenuPanel() {
+    return QColor(0x18, 0x1a, 0x24, 0xfa);
+}
+inline QColor MenuStroke() {
+    return QColor(0xff, 0xff, 0xff, 0x1f);
+}
+inline QColor Shadow() {
+    return QColor(0x00, 0x00, 0x00, 0x73);
+}
+inline QColor Destructive() {
+    return QColor(0xff, 0x5c, 0x6c);
+}
 } // namespace Color
 
+// Surface levels, back to front, as Paper stacks them:
+//   Window          #0b0c10  the window and page backgrounds
+//   PanelDeep       #0f1016  side bars and footers
+//   Panel           #12131a  raised panels, tooltips
+//   FillFaint + StrokeSubtle  cards and group boxes (5% white, 8% stroke)
+//   Fill            8% white  controls, icon tiles, rows
+//   Control + Stroke 12% white, 18% stroke: outlined controls (combo boxes, secondary buttons)
+//   Dialog / MenuPanel        floating cards and menus over everything
+// Each level's radius comes from Radius below.
 namespace Radius {
-inline constexpr int Pill = 20;
-inline constexpr int CircleButton = 19;
-inline constexpr int Card = 16;
-inline constexpr int Tile = 14;
-inline constexpr int Row = 13;
-inline constexpr int KeyCap = 7;
-inline constexpr int InGamePanel = 22;
+inline constexpr int Track = 3;   // 6 px progress tracks and scroll bar handles
+inline constexpr int KeyCap = 7;  // 24 px chips, key caps and check boxes
+inline constexpr int Small = 10;  // 36 px menu and list rows, tooltips
+inline constexpr int Field = 12;  // multi-line fields, compact 34 px chips
+inline constexpr int Row = 13;    // 40-44 px rows and icon tiles
+inline constexpr int Tile = 14;   // library tiles, 56 px rows, windows
+inline constexpr int Panel = 16;  // menus, popovers, HUD panels, focused card rows
+inline constexpr int Card = 20;   // settings cards and group boxes
+inline constexpr int Dialog = 26; // dialog cards
+/// Buttons, fields and segmented controls are pills: half their height.
+constexpr qreal Pill(qreal height) {
+    return height / 2;
+}
 } // namespace Radius
 
 /// Registers the bundled Lexend and Cal Sans faces. Call once before any widget is created.

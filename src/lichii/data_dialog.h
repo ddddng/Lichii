@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include <QDialog>
 #include "frontend_common/data_manager.h"
+#include "lichii/spotlight/dialog.h"
 #include "qt_common/qt_string_lookup.h"
 
 #include "ui_data_widget.h"
@@ -13,7 +13,7 @@ namespace Ui {
 class DataDialog;
 }
 
-class DataDialog : public QDialog {
+class DataDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

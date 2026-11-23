@@ -8,7 +8,9 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-class MigrationDialog : public QDialog {
+#include "lichii/spotlight/dialog.h"
+
+class MigrationDialog : public Spotlight::Dialog {
     Q_OBJECT
 public:
     MigrationDialog(QWidget* parent = nullptr);

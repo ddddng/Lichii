@@ -4,13 +4,14 @@
 #pragma once
 
 #include <filesystem>
-#include <QDialog>
+
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class RyujinxDialog;
 }
 
-class RyujinxDialog : public QDialog {
+class RyujinxDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

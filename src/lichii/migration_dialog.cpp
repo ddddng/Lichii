@@ -9,7 +9,7 @@
 #include <QPushButton>
 #include <QStyle>
 
-MigrationDialog::MigrationDialog(QWidget* parent) : QDialog(parent) {
+MigrationDialog::MigrationDialog(QWidget* parent) : Spotlight::Dialog(parent) {
     QVBoxLayout* layout = new QVBoxLayout(this);
 
     m_text = new QLabel(this);

@@ -19,7 +19,7 @@ enum {
 }
 
 ModerationDialog::ModerationDialog(QWidget* parent)
-    : QDialog(parent), ui(std::make_unique<Ui::ModerationDialog>()) {
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::ModerationDialog>()) {
     ui->setupUi(this);
 
     qRegisterMetaType<Network::Room::BanList>();

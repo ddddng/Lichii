@@ -13,7 +13,7 @@
 #include "lichii/bug_report_dialog.h"
 
 BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
-    : QDialog(parent), stop{std::make_shared<std::atomic<bool>>(false)},
+    : Spotlight::Dialog(parent), stop{std::make_shared<std::atomic<bool>>(false)},
       bundle{std::make_shared<Core::Nx2Debug::BugBundle>(
           system, Core::Nx2Debug::BugBundle::Options{.trigger = "ui"})} {
     setWindowTitle(tr("Report a Bug"));

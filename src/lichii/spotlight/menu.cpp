@@ -80,7 +80,7 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
         if (action == menu.activeAction() && enabled) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(Color::RowHover());
-            painter.drawRoundedRect(row, 10, 10);
+            painter.drawRoundedRect(row, Radius::Small, Radius::Small);
         }
         const auto visual = [&](const QRect& logical) {
             return QStyle::visualRect(direction, row, logical);

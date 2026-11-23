@@ -6,7 +6,7 @@
 #include <QVBoxLayout>
 #include "lichii/util/sequence_dialog/sequence_dialog.h"
 
-SequenceDialog::SequenceDialog(QWidget* parent) : QDialog(parent) {
+SequenceDialog::SequenceDialog(QWidget* parent) : Spotlight::Dialog(parent) {
     setWindowTitle(tr("Enter a hotkey"));
 
     key_sequence = new QKeySequenceEdit;

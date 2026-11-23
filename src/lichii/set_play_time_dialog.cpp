@@ -6,7 +6,7 @@
 #include "lichii/set_play_time_dialog.h"
 
 SetPlayTimeDialog::SetPlayTimeDialog(QWidget* parent, u64 current_play_time)
-    : QDialog(parent), ui{std::make_unique<Ui::SetPlayTimeDialog>()} {
+    : Spotlight::Dialog(parent), ui{std::make_unique<Ui::SetPlayTimeDialog>()} {
     ui->setupUi(this);
 
     ui->hoursSpinBox->setValue(

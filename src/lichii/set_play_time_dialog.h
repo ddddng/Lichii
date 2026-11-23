@@ -4,14 +4,14 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include "common/common_types.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class SetPlayTimeDialog;
 }
 
-class SetPlayTimeDialog : public QDialog {
+class SetPlayTimeDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

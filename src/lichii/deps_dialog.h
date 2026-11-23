@@ -4,15 +4,16 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include <QStyledItemDelegate>
 #include <QTableView>
+
+#include "lichii/spotlight/dialog.h"
 
 namespace Ui {
 class DepsDialog;
 }
 
-class DepsDialog : public QDialog {
+class DepsDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

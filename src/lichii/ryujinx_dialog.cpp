@@ -8,7 +8,7 @@
 
 RyujinxDialog::RyujinxDialog(std::filesystem::path lichii_path, std::filesystem::path ryujinx_path,
                              const QString& ryujinx_save_id, QWidget* parent)
-    : QDialog(parent), ui(new Ui::RyujinxDialog), m_lichii(lichii_path.make_preferred()),
+    : Spotlight::Dialog(parent), ui(new Ui::RyujinxDialog), m_lichii(lichii_path.make_preferred()),
       m_ryu(ryujinx_path.make_preferred()) {
     ui->setupUi(this);
     ui->label->setText(ui->label->text().arg(ryujinx_save_id));

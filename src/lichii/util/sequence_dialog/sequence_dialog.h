@@ -3,11 +3,11 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QKeySequenceEdit;
 
-class SequenceDialog : public QDialog {
+class SequenceDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

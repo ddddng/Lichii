@@ -13,8 +13,10 @@
 #include "ui_deps_dialog.h"
 #include "lichii/deps_dialog.h"
 
-DepsDialog::DepsDialog(QWidget* parent) : QDialog(parent), ui{std::make_unique<Ui::DepsDialog>()} {
+DepsDialog::DepsDialog(QWidget* parent)
+    : Spotlight::Dialog(parent), ui{std::make_unique<Ui::DepsDialog>()} {
     ui->setupUi(this);
+    SetTitleVisible(false);
 
     constexpr int rows = (int)Common::dep_hashes.size();
     ui->tableDeps->setRowCount(rows);

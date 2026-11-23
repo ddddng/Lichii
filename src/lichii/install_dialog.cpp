@@ -12,7 +12,8 @@
 #include "qt_common/config/uisettings.h"
 #include "lichii/install_dialog.h"
 
-InstallDialog::InstallDialog(QWidget* parent, const QStringList& files) : QDialog(parent) {
+InstallDialog::InstallDialog(QWidget* parent, const QStringList& files)
+    : Spotlight::Dialog(parent) {
     file_list = new QListWidget(this);
 
     for (const QString& file : files) {

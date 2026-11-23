@@ -54,6 +54,7 @@
 #include "lichii/spotlight/launcher.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
+#include "lichii/spotlight/style.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
@@ -268,6 +269,14 @@ static inline void ApplyWindowsTitleBarDarkMode(HWND hwnd, bool enabled) {
     if (!hwnd)
         return;
     BOOL val = enabled ? TRUE : FALSE;
+    // 33 = DWMWA_WINDOW_CORNER_PREFERENCE, 2 = DWMWCP_ROUND (Windows 11)
+    const int corners = 2;
+    DwmSetWindowAttribute(hwnd, 33, &corners, sizeof(corners));
+    // 35 = DWMWA_CAPTION_COLOR: the Lichii window colour, so the title bar matches the dialog
+    if (enabled && UISettings::values.theme == "lichii") {
+        const COLORREF caption = RGB(0x0b, 0x0c, 0x10);
+        DwmSetWindowAttribute(hwnd, 35, &caption, sizeof(caption));
+    }
     // 20 = Win11/21H2+
     if (SUCCEEDED(DwmSetWindowAttribute(hwnd, 20, &val, sizeof(val))))
         return;
@@ -7095,6 +7104,7 @@ void MainWindow::UpdateUITheme() {
 
     static const QFont default_font = qApp->font();
     static bool lichii_palette = false;
+    Spotlight::ApplyAppStyle(current_theme == QStringLiteral("lichii"));
     if (current_theme == QStringLiteral("lichii")) {
         qApp->setPalette(LichiiPalette());
         qApp->setFont(Spotlight::Font(13));

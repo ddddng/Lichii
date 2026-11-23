@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
 class QCheckBox;
 class QDialogButtonBox;
@@ -11,7 +11,7 @@ class QLabel;
 class QListWidget;
 class QVBoxLayout;
 
-class InstallDialog : public QDialog {
+class InstallDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

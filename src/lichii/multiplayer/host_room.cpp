@@ -34,7 +34,8 @@
 HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
                                std::shared_ptr<Core::AnnounceMultiplayerSession> session,
                                Core::System& system_)
-    : QDialog(parent, Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
+    : Spotlight::Dialog(parent,
+                        Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowSystemMenuHint),
       ui(std::make_unique<Ui::HostRoom>()), announce_multiplayer_session(session), system{system_} {
     ui->setupUi(this);
 

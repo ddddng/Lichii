@@ -5,12 +5,12 @@
 
 #include <atomic>
 #include <memory>
-#include <QDialog>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QString>
 
 #include "core/debugger/nx2_bug_bundle.h"
+#include "lichii/spotlight/dialog.h"
 
 class QDialogButtonBox;
 class QLabel;
@@ -23,7 +23,7 @@ class System;
 
 /// Help → Report a bug and its hotkey: captures the moment the player asked, then asks for a
 /// description and writes the bug-report bundle (docs/nx2/bug-bundle.md).
-class BugReportDialog : public QDialog {
+class BugReportDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

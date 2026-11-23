@@ -70,7 +70,8 @@ void ConfirmDialog::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), QColor(0x06, 0x07, 0x0a, 0x8c));
     painter.setPen(QPen(Color::StrokeSubtle(), 1));
     painter.setBrush(Color::Popover());
-    painter.drawRoundedRect(QRectF(card->geometry()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
+    painter.drawRoundedRect(QRectF(card->geometry()).adjusted(0.5, 0.5, -0.5, -0.5), Radius::Card,
+                            Radius::Card);
 }
 
 void ConfirmDialog::keyPressEvent(QKeyEvent* event) {

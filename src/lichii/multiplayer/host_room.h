@@ -6,13 +6,13 @@
 #pragma once
 
 #include <memory>
-#include <QDialog>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 #include <QVariant>
-#include "network/network.h"
 #include "lichii/multiplayer/chat_room.h"
 #include "lichii/multiplayer/validation.h"
+#include "lichii/spotlight/dialog.h"
+#include "network/network.h"
 
 namespace Ui {
 class HostRoom;
@@ -32,7 +32,7 @@ namespace Network::VerifyUser {
 class Backend;
 };
 
-class HostRoomWindow : public QDialog {
+class HostRoomWindow : public Spotlight::Dialog {
     Q_OBJECT
 
 public:

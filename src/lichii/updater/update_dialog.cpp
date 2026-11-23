@@ -35,7 +35,7 @@
 #undef GetSaveFileName
 
 UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
-    : QDialog(parent), ui(new Ui::UpdateDialog) {
+    : Spotlight::Dialog(parent), ui(new Ui::UpdateDialog) {
     ui->setupUi(this);
 
     ui->version->setText(

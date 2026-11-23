@@ -10,7 +10,7 @@
 #include <QVBoxLayout>
 #include "lichii/util/limitable_input_dialog.h"
 
-LimitableInputDialog::LimitableInputDialog(QWidget* parent) : QDialog{parent} {
+LimitableInputDialog::LimitableInputDialog(QWidget* parent) : Spotlight::Dialog{parent} {
     CreateUI();
     ConnectEvents();
 }

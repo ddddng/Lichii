@@ -266,10 +266,12 @@ add_executable(lichii
     spotlight/top_bar.cpp spotlight/top_bar.h
     spotlight/widgets.cpp spotlight/widgets.h
     spotlight/confirm.cpp spotlight/confirm.h
+    spotlight/dialog.cpp spotlight/dialog.h
     spotlight/fullscreen_hint.cpp spotlight/fullscreen_hint.h
     spotlight/ingame_bar.cpp spotlight/ingame_bar.h
     spotlight/ingame_menu.cpp spotlight/ingame_menu.h
     spotlight/shader_chip.cpp spotlight/shader_chip.h
+    spotlight/style.cpp spotlight/style.h
 
     data_dialog.h data_dialog.cpp data_dialog.ui
     data_widget.ui

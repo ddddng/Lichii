@@ -140,8 +140,8 @@ protected:
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(QPen(Color::Accent(), 2));
             painter.setBrush(Color::AccentSoft());
-            painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), Radius::Card,
-                                    Radius::Card);
+            painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), Radius::Panel,
+                                    Radius::Panel);
         } else if (divider && !PreviousRowHighlighted()) {
             painter.fillRect(QRect(18, 0, width() - 36, 1), QColor(0xff, 0xff, 0xff, 0x12));
         }

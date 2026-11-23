@@ -181,7 +181,7 @@ void PerformanceOverlay::paintEvent(QPaintEvent*) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::NoPen);
     painter.setBrush(Color::Hud());
-    painter.drawRoundedRect(rect(), Radius::Card, Radius::Card);
+    painter.drawRoundedRect(rect(), Radius::Panel, Radius::Panel);
 
     const auto line = [&](const QRect& area, const QString& text, const QColor& ink,
                           int pixels = 11, int weight = 500,
