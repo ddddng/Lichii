@@ -11,6 +11,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/arrow-clockwise.png</file>
         <file>spotlight/icons/arrow-counter-clockwise.png</file>
         <file>spotlight/icons/arrow-left.png</file>
+        <file>spotlight/icons/arrow-right.png</file>
         <file>spotlight/icons/arrow-square-out.png</file>
         <file>spotlight/icons/arrows-in.png</file>
         <file>spotlight/icons/arrows-out-cardinal.png</file>
@@ -25,6 +26,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/caret-up.png</file>
         <file>spotlight/icons/chat-circle.png</file>
         <file>spotlight/icons/check-circle-fill.png</file>
+        <file>spotlight/icons/check-circle.png</file>
         <file>spotlight/icons/check.png</file>
         <file>spotlight/icons/circle-fill.png</file>
         <file>spotlight/icons/circle-notch.png</file>
@@ -41,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/eye.png</file>
         <file>spotlight/icons/file.png</file>
         <file>spotlight/icons/film-strip.png</file>
+        <file>spotlight/icons/floppy-disk.png</file>
         <file>spotlight/icons/folder-open.png</file>
         <file>spotlight/icons/folder.png</file>
         <file>spotlight/icons/frame-corners.png</file>

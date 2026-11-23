@@ -262,6 +262,7 @@ add_executable(lichii
     spotlight/launcher.cpp spotlight/launcher.h
     spotlight/library_header.cpp spotlight/library_header.h
     spotlight/menu.cpp spotlight/menu.h
+    spotlight/notice.cpp spotlight/notice.h
     spotlight/nextendo_live.cpp spotlight/nextendo_live.h
     spotlight/settings_page.cpp spotlight/settings_page.h
     spotlight/settings_get_started.cpp spotlight/settings_get_started.h
@@ -276,9 +277,8 @@ add_executable(lichii
     spotlight/stopping_overlay.cpp spotlight/stopping_overlay.h
     spotlight/style.cpp spotlight/style.h
 
-    data_dialog.h data_dialog.cpp data_dialog.ui
-    data_widget.ui
-    ryujinx_dialog.h ryujinx_dialog.cpp ryujinx_dialog.ui
+    data_dialog.h data_dialog.cpp
+    ryujinx_dialog.h ryujinx_dialog.cpp
     main_window.h main_window.cpp main.ui
 
     configuration/system/new_user_dialog.h configuration/system/new_user_dialog.cpp configuration/system/new_user_dialog.ui

@@ -53,6 +53,8 @@ class CircleButton : public QAbstractButton {
 public:
     explicit CircleButton(QString icon, int diameter = 38, QWidget* parent = nullptr);
     void SetIcon(QString icon);
+    /// Draws the icon in `tint` on a fill tinted with it, such as Color::Destructive() for clear.
+    void SetTint(const QColor& tint);
     QSize sizeHint() const override;
 
 protected:
@@ -62,6 +64,7 @@ protected:
 
 private:
     QString icon_name;
+    QColor tint;
     int diameter;
     HoverFade hover{this};
 };

@@ -40,9 +40,16 @@ inline QColor Fill() { return QColor(0xff, 0xff, 0xff, 0x14); }
 inline QColor FillFaint() { return QColor(0xff, 0xff, 0xff, 0x0d); }
 inline QColor Stroke() { return QColor(0xff, 0xff, 0xff, 0x2e); }
 inline QColor StrokeSubtle() { return QColor(0xff, 0xff, 0xff, 0x14); }
-inline QColor Success() { return QColor(0x3f, 0xd1, 0x8b); }
-inline QColor Warning() { return QColor(0xff, 0xc8, 0x57); }
+inline QColor Success() {
+    return QColor(0x7e, 0xe2, 0xa8);
+}
+inline QColor Warning() {
+    return QColor(0xff, 0xd3, 0x7a);
+}
 inline QColor Info() { return QColor(0x8f, 0xb5, 0xff); }
+inline QColor Purple() {
+    return QColor(0xc9, 0xb3, 0xff);
+}
 inline QColor Hud() { return QColor(0x08, 0x09, 0x0d, 0xb8); }
 inline QColor HudSolid() { return QColor(0x08, 0x09, 0x0d, 0xdb); }
 inline QColor Divider() {
@@ -55,7 +62,10 @@ inline QColor Dialog() {
     return QColor(0x14, 0x16, 0x20, 0xf2);
 }
 inline QColor DialogSolid() {
-    return QColor(0x14, 0x16, 0x20);
+    return QColor(0x15, 0x16, 0x1e);
+}
+inline QColor DialogScrim() {
+    return QColor(0x07, 0x08, 0x0b, 0xb8);
 }
 inline QColor MenuPanel() {
     return QColor(0x18, 0x1a, 0x24, 0xfa);
@@ -67,7 +77,7 @@ inline QColor Shadow() {
     return QColor(0x00, 0x00, 0x00, 0x73);
 }
 inline QColor Destructive() {
-    return QColor(0xff, 0x5c, 0x6c);
+    return QColor(0xff, 0x8f, 0xae);
 }
 } // namespace Color
 
@@ -78,7 +88,7 @@ inline QColor Destructive() {
 //   FillFaint + StrokeSubtle  cards and group boxes (5% white, 8% stroke)
 //   Fill            8% white  controls, icon tiles, rows
 //   Control + Stroke 12% white, 18% stroke: outlined controls (combo boxes, secondary buttons)
-//   Dialog / MenuPanel        floating cards and menus over everything
+//   DialogSolid / MenuPanel   floating cards and menus over everything, dialogs over DialogScrim
 // Each level's radius comes from Radius below.
 namespace Radius {
 inline constexpr int Track = 3;   // 6 px progress tracks and scroll bar handles
@@ -88,8 +98,9 @@ inline constexpr int Field = 12;  // multi-line fields, compact 34 px chips
 inline constexpr int Row = 13;    // 40-44 px rows and icon tiles
 inline constexpr int Tile = 14;   // library tiles, 56 px rows, windows
 inline constexpr int Panel = 16;  // menus, popovers, HUD panels, focused card rows
+inline constexpr int Inset = 18;  // panels inside a dialog card
 inline constexpr int Card = 20;   // settings cards and group boxes
-inline constexpr int Dialog = 26; // dialog cards
+inline constexpr int Dialog = 22; // dialog cards and message boxes
 /// Buttons, fields and segmented controls are pills: half their height.
 constexpr qreal Pill(qreal height) {
     return height / 2;
