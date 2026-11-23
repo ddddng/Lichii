@@ -45,7 +45,9 @@ private:
 
     void Save();
     void ShowResult(const Written& written);
+    void FitHeight();
     void reject() override;
+    void showEvent(QShowEvent* event) override;
 
     std::shared_ptr<std::atomic<bool>> stop;
     std::shared_ptr<Core::Nx2Debug::BugBundle> bundle;
@@ -55,7 +57,8 @@ private:
     bool writing = false;
 
     Spotlight::Notice* status{};
-    QLabel* details{};
+    QLabel* frame_note{};
+    QLabel* dropped_note{};
     QPlainTextEdit* description{};
     QDialogButtonBox* buttons{};
     QPushButton* save{};

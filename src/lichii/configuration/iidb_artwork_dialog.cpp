@@ -19,6 +19,7 @@
 #include <QListWidget>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -120,6 +121,16 @@ QLabel* Body(const QString& text, QWidget* parent) {
     return label;
 }
 
+// Asks for its whole content, so the dialog only scrolls when the screen is too short for it.
+class FittedScrollArea final : public QScrollArea {
+public:
+    using QScrollArea::QScrollArea;
+
+    QSize sizeHint() const override {
+        return widget()->sizeHint();
+    }
+};
+
 QString CardStyle(const QString& name, int radius) {
     return QStringLiteral("#%1 { background-color: rgba(255, 255, 255, 13); "
                           "border: 1px solid rgba(255, 255, 255, 20); border-radius: %2px; }")
@@ -134,9 +145,16 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     : Spotlight::Dialog(parent), key{key_}, client{client_} {
     setWindowTitle(tr("Browse iiDB Artwork"));
     SetIcon(u"image", Spotlight::Color::Accent());
-    auto* layout = new QVBoxLayout(this);
+    auto* scroll = new FittedScrollArea(this);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(u"QScrollArea, #iidbContent { background: transparent; }"_s);
+    auto* content_widget = new QWidget(scroll);
+    content_widget->setObjectName(u"iidbContent"_s);
+    auto* layout = new QVBoxLayout(content_widget);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(14);
+    layout->setSpacing(8);
 
     auto* title_group = new QVBoxLayout;
     title_group->setSpacing(8);
@@ -321,6 +339,9 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     layout->addWidget(Body(tr("Cancel or a failed download leaves your artwork intact. Use "
                               "Artwork stages the icon; closing Game Settings saves it."),
                            this));
+    const QString catalog_credit =
+        tr("Catalog data from iiDB, adapted from the Libretro Database and its upstream sources "
+           "(No-Intro and Redump).");
     auto* credits = new QHBoxLayout;
     credits->setSpacing(12);
     const std::pair<QString, QString> sources[] = {
@@ -337,7 +358,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
         link->setFont(Spotlight::Font(13, 600));
         link->setOpenExternalLinks(true);
         link->setTextInteractionFlags(Qt::TextBrowserInteraction);
-        link->setToolTip(url);
+        link->setToolTip(url == sources[3].second ? catalog_credit : url);
         auto* icon = new QLabel(this);
         icon->setPixmap(Spotlight::IconPixmap(u"arrow-square-out", 12, Spotlight::Color::Info(),
                                               devicePixelRatioF()));
@@ -349,9 +370,6 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     }
     credits->addStretch(1);
     layout->addLayout(credits);
-    layout->addWidget(Body(tr("Catalog data from iiDB, adapted from the Libretro Database and its "
-                              "upstream sources (No-Intro and Redump)."),
-                           this));
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     use = buttons->addButton(tr("Use Artwork"), QDialogButtonBox::AcceptRole);
@@ -368,7 +386,12 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     auto* button_row = new QHBoxLayout;
     button_row->setContentsMargins(0, 6, 0, 0);
     button_row->addWidget(buttons);
-    layout->addLayout(button_row);
+    scroll->setWidget(content_widget);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    outer->addWidget(scroll, 1);
+    outer->addLayout(button_row);
 
     connect(title, &QLineEdit::textChanged, this, &ArtworkDialog::ResetSearch);
     connect(title, &QLineEdit::returnPressed, this, [this] {

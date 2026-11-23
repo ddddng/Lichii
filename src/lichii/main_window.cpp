@@ -132,6 +132,7 @@
 #include <QSet>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <QWidgetAction>
@@ -6662,19 +6663,18 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         case UpdateChecker::Failure::NotReleaseBuild:
             QMessageBox::information(
                 this, title,
-                tr("This is a test or development build (%1) without a published release tag, so "
-                   "Lichii cannot compare it with published releases. Download a release from "
-                   "GitHub to get updates.")
+                tr("This test or development build (%1) has no published release tag. Download "
+                   "a release from GitHub to get updates.")
                     .arg(QString::fromUtf8(Common::g_build_version)));
             break;
         case UpdateChecker::Failure::RateLimited:
             QMessageBox::warning(this, title,
                                  tr("GitHub is limiting requests from your network right now. "
-                                    "Please try again later."));
+                                    "Try again later."));
             break;
         case UpdateChecker::Failure::Http:
             QMessageBox::warning(this, title,
-                                 tr("GitHub answered with HTTP error %1. Please try again later.")
+                                 tr("GitHub answered with HTTP error %1. Try again later.")
                                      .arg(result.status));
             break;
         default:

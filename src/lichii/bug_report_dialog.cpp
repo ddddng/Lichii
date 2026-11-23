@@ -23,7 +23,7 @@ BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
           system, Core::Nx2Debug::BugBundle::Options{.trigger = "ui"})} {
     setWindowTitle(tr("Report a Bug"));
     SetIcon(u"bug", Spotlight::Color::Accent());
-    setFixedWidth(576);
+    SetCardWidth(505);
 
     capture = QtConcurrent::run([bundle = bundle, stop = stop] {
         try {
@@ -49,26 +49,27 @@ BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
     description->setPlaceholderText(
         tr("For example: the sky turns white after the first cutscene in world 2."));
     description->setFont(Spotlight::Font(13, 400));
-    description->setMinimumHeight(80);
-    layout->addWidget(description, 1);
+    description->setFixedHeight(82);
+    layout->addWidget(description);
 
     auto* const privacy = new Spotlight::Notice;
-    privacy->setText(tr("Send the report privately to the Lichii maintainers (the log bot's /bug "
-                        "command or a direct message), not to a public channel or issue. It "
-                        "includes a frame's game textures and shaders. User names in paths and "
-                        "online service settings are left out."));
+    privacy->setText(tr("Send the report privately to the Lichii maintainers. It includes a "
+                        "frame's game textures and shaders. User names in paths and online service "
+                        "settings are left out."));
     layout->addWidget(privacy);
 
     status = new Spotlight::Notice;
     status->hide();
     layout->addWidget(status);
-    details = new QLabel;
-    details->setWordWrap(true);
-    details->setFont(Spotlight::Font(13, 400));
-    Spotlight::SetTextColor(details, Spotlight::Color::TextSecondary());
-    details->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    details->hide();
-    layout->addWidget(details);
+    for (auto** const label : {&frame_note, &dropped_note}) {
+        *label = new QLabel;
+        (*label)->setWordWrap(true);
+        (*label)->setFont(Spotlight::Font(13, 400));
+        Spotlight::SetTextColor(*label, Spotlight::Color::TextSecondary());
+        (*label)->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        (*label)->hide();
+        layout->addWidget(*label);
+    }
 
     buttons = new QDialogButtonBox;
     save = buttons->addButton(tr("Save Report"), QDialogButtonBox::AcceptRole);
@@ -80,7 +81,7 @@ BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
     open_folder->setAutoDefault(false);
     open_folder->hide();
     auto* const button_row = new QHBoxLayout;
-    button_row->setContentsMargins(0, 6, 0, 0);
+    button_row->setContentsMargins(0, 12, 0, 0);
     button_row->addWidget(open_folder);
     button_row->addWidget(buttons, 1);
     layout->addLayout(button_row);
@@ -100,6 +101,15 @@ BugReportDialog::~BugReportDialog() {
     writer.waitForFinished();
 }
 
+void BugReportDialog::showEvent(QShowEvent* event) {
+    Spotlight::Dialog::showEvent(event);
+    FitHeight();
+}
+
+void BugReportDialog::FitHeight() {
+    resize(width(), heightForWidth(width()));
+}
+
 void BugReportDialog::StopCapture() {
     stop->store(true);
     capture.waitForFinished();
@@ -113,6 +123,7 @@ void BugReportDialog::Save() {
     status->SetTone(Spotlight::Notice::Tone::Neutral);
     status->setText(tr("Writing the report. The frame capture can take a minute in a busy scene."));
     status->show();
+    FitHeight();
     writer.setFuture(QtConcurrent::run([bundle = bundle, capture = capture,
                                         text = description->toPlainText().toStdString()] {
         Written written;
@@ -142,24 +153,21 @@ void BugReportDialog::ShowResult(const Written& written) {
     if (!written.error.isEmpty()) {
         status->SetTone(Spotlight::Notice::Tone::Error);
         status->setText(tr("The report could not be written: %1").arg(written.error));
+        FitHeight();
         return;
     }
     status->SetTone(Spotlight::Notice::Tone::Success);
     status->setText(tr("Saved %1 (%2 MiB).")
                         .arg(QString::fromStdString(written.result.path.generic_string()))
                         .arg(static_cast<double>(written.result.bytes) / (1 << 20), 0, 'f', 1));
-    QStringList omissions;
-    if (!written.result.frame_error.empty()) {
-        omissions.append(tr("No frame capture: %1")
-                             .arg(QString::fromStdString(written.result.frame_error)));
-    }
-    if (!written.result.dropped.empty()) {
-        omissions.append(tr("Left out to fit the size limit: %1")
-                             .arg(QString::number(written.result.dropped.size())));
-    }
-    details->setText(omissions.join(QStringLiteral("\n\n")));
-    details->setHidden(omissions.isEmpty());
+    frame_note->setText(
+        tr("No frame capture: %1.").arg(QString::fromStdString(written.result.frame_error)));
+    frame_note->setHidden(written.result.frame_error.empty());
+    dropped_note->setText(tr("Left out to fit the size limit: %1")
+                              .arg(QString::number(written.result.dropped.size())));
+    dropped_note->setHidden(written.result.dropped.empty());
     open_folder->show();
+    FitHeight();
 }
 
 void BugReportDialog::reject() {

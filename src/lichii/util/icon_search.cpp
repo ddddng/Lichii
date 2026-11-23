@@ -722,7 +722,7 @@ void IconSearch::Start(const QString& name, u64 title_id) {
     const std::string query = name.trimmed().toStdString();
     if (query.empty() && title_id == 0) {
         QMessageBox::information(parent_widget, tr("Find Icon"),
-                                 tr("Please enter a game name first so the icon can be found."));
+                                 tr("Enter a game name first so the icon can be found."));
         return;
     }
     last_name = name;
@@ -964,13 +964,13 @@ void IconSearch::OnFinished() {
                       .arg(SearchDeadline.count());
         break;
     case IconSearchStatus::NetworkError:
-        message = tr("Could not reach the icon sources (%1). Check your connection and try again.")
-                      .arg(QString::fromStdString(result.error));
+        LOG_WARNING(Frontend, "Could not reach the icon sources: {}", result.error);
+        message = tr("Could not reach the icon sources. Check your connection and try again.");
         break;
     case IconSearchStatus::Cancelled:
         return;
     case IconSearchStatus::InternalError:
-        message = tr("Searching for an icon failed unexpectedly: %1")
+        message = tr("Searching for an icon failed unexpectedly: %1.")
                       .arg(QString::fromStdString(result.error));
         break;
     }

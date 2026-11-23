@@ -33,6 +33,7 @@ namespace {
 constexpr char ChromeProperty[] = "spotlightChrome";
 constexpr char SubtitleProperty[] = "spotlightSubtitle";
 constexpr char TitleHiddenProperty[] = "spotlightTitleHidden";
+constexpr char CloseHiddenProperty[] = "spotlightCloseHidden";
 constexpr char IconProperty[] = "spotlightIcon";
 constexpr char IconTintProperty[] = "spotlightIconTint";
 constexpr char ToneProperty[] = "spotlightTone";
@@ -250,7 +251,7 @@ private:
     }
 
     int TextRight() const {
-        return Card().right() + 1 - Padding - (close ? CloseSize + HeaderIconGap : 0);
+        return Card().right() + 1 - Padding - (CloseShown() ? CloseSize + HeaderIconGap : 0);
     }
 
     int HeaderHeight() const {
@@ -262,10 +263,14 @@ private:
         if (!icon->isHidden()) {
             height = std::max(height, HeaderIconSize);
         }
-        if (close) {
+        if (CloseShown()) {
             height = std::max(height, CloseSize);
         }
         return height;
+    }
+
+    bool CloseShown() const {
+        return close && !dialog->property(CloseHiddenProperty).toBool();
     }
 
     void Update() {
@@ -290,6 +295,9 @@ private:
         subtitle->setHidden(subtitle->text().isEmpty());
         const QString icon_name = dialog->property(IconProperty).toString();
         icon->setHidden(icon_name.isEmpty());
+        if (close) {
+            close->setHidden(!CloseShown());
+        }
         if (!icon_name.isEmpty()) {
             icon->setPixmap(HeaderIcon(icon_name,
                                        dialog->property(IconTintProperty).value<QColor>(),
@@ -772,6 +780,10 @@ void Dialog::SetCardWidth(int width) {
 
 void Dialog::SetTitleVisible(bool visible) {
     setProperty(TitleHiddenProperty, !visible);
+}
+
+void Dialog::SetCloseVisible(bool visible) {
+    setProperty(CloseHiddenProperty, !visible);
 }
 
 void MarkSuccess(QMessageBox* box) {
