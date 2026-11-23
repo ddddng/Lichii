@@ -14,6 +14,7 @@
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -40,6 +41,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QStyle>
@@ -127,6 +129,8 @@ struct Offer {
     QString version;
     Compatibility compatibility;
     bool supported;
+    QString label;
+    QString tooltip;
 };
 
 QString ExternalVersionPrefix(qint64 id) {
@@ -1296,20 +1300,6 @@ private:
         FetchMods(0, list_epoch);
     }
 
-    static QString SourceName(const Mod& mod) {
-        switch (mod.source) {
-        case Source::GameBanana:
-            return tr("GameBanana");
-        case Source::GitHub:
-            return tr("GitHub");
-        case Source::Demo:
-            return tr("Sample");
-        case Source::Submission:
-            return tr("Lichii catalog");
-        }
-        return {};
-    }
-
     QString Byline(const Mod& mod, bool detail = false) const {
         const auto local_date = mod.updated_at.toLocalTime().date();
         const auto now = QDate::currentDate();
@@ -1405,7 +1395,7 @@ private:
                     const auto id = mod.id;
                     const auto position = static_cast<int>(cards.size());
                     auto* card =
-                        new ModCard(mod.name, Byline(mod), SourceName(mod),
+                        new ModCard(mod.name, Byline(mod), SourceName(mod.source),
                                     mod.source == Source::GameBanana ? tr("Unverified") : QString{},
                                     browse_page);
                     card->setToolTip(mod.summary);
@@ -1487,8 +1477,10 @@ private:
                 const auto id = installed.id;
                 auto* art = new PreviewImage(row, 10);
                 art->setFixedSize(96, 54);
-                if (auto* card = cards.value(id)) {
+                if (auto* card = cards.value(id); card && !card->Image().isNull()) {
                     art->SetImage(card->Image());
+                } else if (!installed.thumbnail_path.isEmpty()) {
+                    art->SetImage(QImage(installed.thumbnail_path));
                 }
                 layout->addWidget(art);
                 auto* info_column = new QVBoxLayout;
@@ -1511,10 +1503,12 @@ private:
                 meta->setSpacing(12);
                 const auto entry = catalog.constFind(id);
                 const bool known = entry != catalog.cend();
-                const bool external = known && entry->source == Source::GameBanana;
+                const auto source = known ? std::optional{entry->source} : installed.source;
+                const bool external = source == Source::GameBanana;
+                const auto author = known ? entry->author : installed.author;
                 QStringList parts;
-                if (known) {
-                    parts.append(tr("by %1").arg(entry->author));
+                if (!author.isEmpty()) {
+                    parts.append(tr("by %1").arg(author));
                 }
                 if (title.isEmpty()) {
                     parts.append(GameName(target));
@@ -1525,13 +1519,20 @@ private:
                 auto* subtitle = PlainLabel(row, false, Color::TextSecondary(), 12);
                 subtitle->setText(parts.join(QStringLiteral(" · ")));
                 meta->addWidget(subtitle);
-                if (known) {
-                    meta->addWidget(Mark(row, u"globe", SourceName(entry.value()),
+                if (source) {
+                    meta->addWidget(Mark(row, u"globe", SourceName(*source),
                                          Color::TextSecondary(), QFont::Medium, 5));
-                    if (external) {
-                        meta->addWidget(Mark(row, u"warning-circle", tr("Unverified"),
-                                             Color::Warning(), QFont::DemiBold, 4));
-                    }
+                }
+                if (known ? external : installed.verified == false) {
+                    meta->addWidget(Mark(row, u"warning-circle", tr("Unverified"),
+                                         Color::Warning(), QFont::DemiBold, 4));
+                }
+                if (installed.update_available == true) {
+                    meta->addWidget(Mark(row, u"arrow-circle-up", tr("Update"), Color::Accent(),
+                                         QFont::DemiBold, 4));
+                }
+                if (!update_checked.contains(target + u'/' + id)) {
+                    update_queue.append({target, id});
                 }
                 meta->addStretch();
                 info_column->addWidget(heading);
@@ -1574,6 +1575,7 @@ private:
             }
         }
         installed_count->setText(tr("From the Mod Store · %n", nullptr, displayed));
+        CheckInstalledUpdates();
         if (displayed == 0) {
             auto* empty = PlainLabel(panel, true, Color::TextSecondary(), 14);
             empty->setMinimumHeight(94);
@@ -1581,6 +1583,59 @@ private:
             empty->setText(tr("No installed store mods match this filter."));
             installed_list->addWidget(empty);
         }
+    }
+
+    void CheckInstalledUpdates() {
+        while (update_requests < ThumbnailConcurrency && !update_queue.isEmpty()) {
+            const auto [target, id] = update_queue.takeFirst();
+            const auto key = target + u'/' + id;
+            if (update_checked.contains(key)) {
+                continue;
+            }
+            update_checked.insert(key);
+            ++update_requests;
+            client.GetMod(id, [this, target, id](auto response) {
+                --update_requests;
+                if (const auto* mod = std::get_if<Mod>(&response)) {
+                    const auto installed = ReadInstalledMods(context.mods_root, target);
+                    const auto it = std::ranges::find(installed, id, &InstalledMod::id);
+                    if (it != installed.cend()) {
+                        const bool update = HasUpdate(*mod, target, *it);
+                        RecordUpdateCheck(context.mods_root, target, id, it->version, update);
+                        update_changed |= it->update_available.value_or(false) != update;
+                    }
+                }
+                if (update_requests == 0 && update_queue.isEmpty() && update_changed) {
+                    update_changed = false;
+                    if (installed_mode->isChecked()) {
+                        ShowInstalled();
+                    }
+                    return;
+                }
+                CheckInstalledUpdates();
+            });
+        }
+    }
+
+    QByteArray ThumbnailJpeg() const {
+        auto image = preview_images.value(0);
+        if (image.isNull()) {
+            if (const auto* card = cards.value(selected->id)) {
+                image = card->Image();
+            }
+        }
+        if (image.isNull()) {
+            return {};
+        }
+        if (image.width() > 480 || image.height() > 270) {
+            image = image.scaled(480, 270, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::WriteOnly);
+        return image.convertToFormat(QImage::Format_RGB888).save(&buffer, "JPEG", 85)
+                   ? bytes
+                   : QByteArray{};
     }
 
     static QWidget* Mark(QWidget* parent, QStringView icon, const QString& text,
@@ -1704,7 +1759,7 @@ private:
             ReadLocal();
             name->setText(selected->name);
             byline->setText(Byline(*selected, true));
-            source_info->setText(SourceName(*selected));
+            source_info->setText(SourceName(selected->source));
             source_info_row->show();
             const auto full = selected->description.trimmed();
             description_excerpt = full.section(QLatin1Char('\n'), 0, 1).simplified();
@@ -1723,7 +1778,7 @@ private:
             description_toggle->setText(tr("Show full description"));
             description_toggle->setVisible(truncated);
             description->setText(truncated ? description_excerpt : full);
-            source->setText(tr("View on %1").arg(SourceName(*selected)));
+            source->setText(tr("View on %1").arg(SourceName(selected->source)));
             source->setVisible(!selected->source_url.isEmpty());
             BuildGallery();
             BuildOffers();
@@ -1816,17 +1871,20 @@ private:
         });
     }
 
-    void BuildOffers() {
-        const auto identity =
-            selected->title_ids.contains(local_title) ? Identity(local_title) : GameIdentity{};
-        const QSignalBlocker block(release);
-        offer_list.clear();
-        release->clear();
+    struct OfferSet {
+        QList<Offer> offers;
+        int preferred{};
+    };
+
+    OfferSet OffersFor(const Mod& mod, const QString& target) {
+        const auto identity = mod.title_ids.contains(target) ? Identity(target) : GameIdentity{};
+        OfferSet set;
+        auto& offers = set.offers;
         int first_match = -1;
-        if (selected->github) {
+        if (mod.github) {
             int first_installable = -1;
             int first_unknown = -1;
-            for (const auto& build : selected->github->builds) {
+            for (const auto& build : mod.github->builds) {
                 const auto match = MatchGitHubBuild(identity, build);
                 QString version;
                 if (build.download) {
@@ -1839,17 +1897,16 @@ private:
                         QCryptographicHash::Sha256);
                     version = build.id.toLower() + u'-' + QString::fromLatin1(fingerprint.toHex());
                 }
-                offer_list.append({build, version, match, build.download.has_value()});
                 const auto display = build.id.size() == 16
                                          ? build.id
                                          : QStringLiteral("%1…%2").arg(build.id.left(12),
                                                                       build.id.right(8));
-                release->addItem(tr("%1 · %2").arg(display, CompatibilityName(match)));
-                const auto index = release->count() - 1;
-                release->setItemData(index, build.id, Qt::ToolTipRole);
+                offers.append({build, version, match, build.download.has_value(),
+                               tr("%1 · %2").arg(display, CompatibilityName(match)), build.id});
+                const auto index = static_cast<int>(offers.size()) - 1;
                 if (first_match < 0 && match == Compatibility::Match && build.download) {
                     first_match = index;
-                } else if (first_installable < 0 && CanInstall(offer_list.back())) {
+                } else if (first_installable < 0 && CanInstall(mod, target, offers.back())) {
                     first_installable = index;
                 }
                 if (first_unknown < 0 && match != Compatibility::Mismatch) {
@@ -1859,40 +1916,90 @@ private:
             if (first_match < 0) {
                 first_match = first_installable < 0 ? first_unknown : first_installable;
             }
-        } else if (selected->external) {
+        } else if (mod.external) {
             bool first_match_has_checksum = false;
-            for (const auto& file : selected->external->files) {
-                offer_list.append(
-                    {file, {}, Compatibility::Unknown,
-                     file.name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
-                         file.size_bytes <= MaxArchiveBytes});
+            for (const auto& file : mod.external->files) {
                 const auto entry =
                     tr("%1 · %2 · %3")
                         .arg(file.name, locale().formattedDataSize(file.size_bytes),
                              locale().toString(file.uploaded_at.date(), QLocale::ShortFormat));
-                release->addItem(entry);
-                release->setItemData(release->count() - 1, entry, Qt::ToolTipRole);
+                offers.append({file, {}, Compatibility::Unknown,
+                               file.name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive) &&
+                                   file.size_bytes <= MaxArchiveBytes,
+                               entry, entry});
                 if ((first_match < 0 || (!first_match_has_checksum && !file.sha256.isEmpty())) &&
-                    CanInstall(offer_list.back())) {
-                    first_match = release->count() - 1;
+                    CanInstall(mod, target, offers.back())) {
+                    first_match = static_cast<int>(offers.size()) - 1;
                     first_match_has_checksum = !file.sha256.isEmpty();
                 }
             }
         } else {
-            for (const auto& version : selected->versions) {
-                const auto match = MatchVersion(local_title, identity, version);
-                offer_list.append({version, version.id, match, true});
-                release->addItem(
-                    tr("%1 · %2 · %3")
-                        .arg(version.id, version.game_version, CompatibilityName(match)));
+            for (const auto& version : mod.versions) {
+                const auto match = MatchVersion(target, identity, version);
+                offers.append({version, version.id, match, true,
+                               tr("%1 · %2 · %3")
+                                   .arg(version.id, version.game_version, CompatibilityName(match)),
+                               {}});
                 if (first_match < 0 && match == Compatibility::Match) {
-                    first_match = release->count() - 1;
+                    first_match = static_cast<int>(offers.size()) - 1;
                 }
             }
         }
-        release->setCurrentIndex(first_match < 0 ? 0 : first_match);
+        set.preferred = std::max(first_match, 0);
+        return set;
+    }
+
+    void BuildOffers() {
+        const QSignalBlocker block(release);
+        auto set = OffersFor(*selected, local_title);
+        offer_list = std::move(set.offers);
+        release->clear();
+        for (const auto& offer : offer_list) {
+            release->addItem(offer.label);
+            if (!offer.tooltip.isEmpty()) {
+                release->setItemData(release->count() - 1, offer.tooltip, Qt::ToolTipRole);
+            }
+        }
+        release->setCurrentIndex(set.preferred);
         release->setVisible(release->count() > 1);
         UpdateOffer();
+        RecordLocalUpdate();
+    }
+
+    void RecordLocalUpdate() {
+        if (selected && local) {
+            RecordUpdateCheck(context.mods_root, local_title, local->id, local->version,
+                              HasUpdate(*selected, local_title, *local));
+        }
+    }
+
+    bool HasUpdate(const Mod& mod, const QString& target, const InstalledMod& installed) {
+        const auto set = OffersFor(mod, target);
+        if (set.offers.isEmpty()) {
+            return false;
+        }
+        const auto& offer = set.offers[set.preferred];
+        return Compare(installed, offer) == LocalState::Outdated &&
+               CanInstall(mod, target, offer) && (!mod.github || offer.supported);
+    }
+
+    enum class LocalState { Current, Reinstall, Outdated };
+
+    static LocalState Compare(const InstalledMod& installed, const Offer& offer) {
+        const auto* external = std::get_if<ExternalFile>(&offer.file);
+        if (!external) {
+            return installed.version == offer.version ? LocalState::Current : LocalState::Outdated;
+        }
+        if (!installed.version.startsWith(ExternalVersionPrefix(external->id))) {
+            return LocalState::Outdated;
+        }
+        if (external->sha256.isEmpty()) {
+            return LocalState::Reinstall;
+        }
+        const bool same = installed.sha256.isEmpty()
+                              ? installed.version == ExternalVersion(external->id, external->sha256)
+                              : installed.sha256 == external->sha256;
+        return same ? LocalState::Current : LocalState::Outdated;
     }
 
     const Offer* CurrentOffer() const {
@@ -1901,9 +2008,12 @@ private:
     }
 
     bool CanInstall(const Offer& offer) {
-        if (!selected || selected->demo || !selected->title_ids.contains(local_title) ||
-            !offer.supported || !Identity(local_title).installed ||
-            offer.compatibility == Compatibility::Mismatch) {
+        return selected && CanInstall(*selected, local_title, offer);
+    }
+
+    bool CanInstall(const Mod& mod, const QString& target, const Offer& offer) {
+        if (mod.demo || !mod.title_ids.contains(target) || !offer.supported ||
+            !Identity(target).installed || offer.compatibility == Compatibility::Mismatch) {
             return false;
         }
         if (const auto* file = std::get_if<ExternalFile>(&offer.file)) {
@@ -1956,7 +2066,7 @@ private:
             add_row(tr("License"), tr("Not declared"));
         } else if (selected->external) {
             add_row(tr("Source"),
-                    tr("%1 · %2").arg(SourceName(*selected), selected->external->category));
+                    tr("%1 · %2").arg(SourceName(selected->source), selected->external->category));
         }
         if (external) {
             add_row(tr("File"),
@@ -2041,16 +2151,9 @@ private:
         const auto* offer = CurrentOffer();
         const auto* external = offer ? std::get_if<ExternalFile>(&offer->file) : nullptr;
         const bool installed = local.has_value();
-        const bool same_file =
-            external && installed && local->version.startsWith(ExternalVersionPrefix(external->id));
-        const bool reinstall = same_file && external->sha256.isEmpty();
-        const bool current =
-            offer && installed &&
-            (external ? same_file && !reinstall &&
-                            (local->sha256.isEmpty()
-                                 ? local->version == ExternalVersion(external->id, external->sha256)
-                                 : local->sha256 == external->sha256)
-                      : local->version == offer->version);
+        const auto state = offer && installed ? Compare(*local, *offer) : LocalState::Outdated;
+        const bool reinstall = state == LocalState::Reinstall;
+        const bool current = state == LocalState::Current;
         install->setVisible(offer && !current && (!selected->github || offer->supported));
         install->setText(reinstall ? tr("Reinstall") : installed ? tr("Update") : tr("Install"));
         install->SetIcon(installed && !reinstall ? QStringLiteral("arrow-circle-up")
@@ -2177,6 +2280,13 @@ private:
         const bool unverified = external && external_file->sha256.isEmpty();
         const auto label = selected->name;
         const auto epoch = mod_epoch;
+        const InstallDetails details{
+            .author = selected->author,
+            .source = selected->source,
+            .file_date = external ? external_file->uploaded_at : selected->updated_at,
+            .verified = !unverified && chosen.compatibility == Compatibility::Match,
+            .thumbnail_jpeg = ThumbnailJpeg(),
+        };
         if ((external || patch) && !unverified && chosen.compatibility == Compatibility::Unknown &&
             QMessageBox::question(
                 this, tr("Compatibility unverified"),
@@ -2192,12 +2302,13 @@ private:
         debounce.stop();
         SetBusy(true);
         progress_note->setVisible(unverified);
-        const auto from = tr("Downloading from %1…").arg(SourceName(*selected));
+        const auto from = tr("Downloading from %1…").arg(SourceName(selected->source));
         SetProgress(tr("Starting the download…"), from, 0, true);
         const auto generation = ++install_epoch;
         const auto version = chosen.version;
         const auto file_id = external ? external_file->id : 0;
-        auto receive = [this, generation, version, file_id, label, external, patch](auto response) {
+        auto receive = [this, generation, version, file_id, label, external, patch,
+                        details](auto response) {
             if (generation != install_epoch) {
                 return;
             }
@@ -2209,7 +2320,7 @@ private:
             auto received = std::get<DownloadedFile>(std::move(response));
             auto owned = std::shared_ptr<QTemporaryFile>(std::move(received.file));
             ApplyDownloaded(owned, external ? ExternalVersion(file_id, received.sha256) : version,
-                            received.sha256, label, external, patch);
+                            received.sha256, label, external, patch, details);
         };
         auto report = [this, generation, unverified, from](qint64 received, qint64 total) {
             if (generation != install_epoch || total <= 0) {
@@ -2237,7 +2348,7 @@ private:
 
     void ApplyDownloaded(const std::shared_ptr<QTemporaryFile>& file, const QString& version,
                          const QByteArray& digest, const QString& label, bool external,
-                         const std::optional<GitHubPatch>& patch) {
+                         const std::optional<GitHubPatch>& patch, const InstallDetails& details) {
         SetProgress(patch ? tr("Checking and installing the patch…")
                           : tr("Checking the ZIP and installing the mod…"),
                     {}, 100);
@@ -2253,6 +2364,7 @@ private:
                 changed = true;
                 InstalledChanged(local_title, local_id);
                 ReadLocal();
+                RecordLocalUpdate();
             }
             FinishOperation();
             if (error.isEmpty()) {
@@ -2262,12 +2374,13 @@ private:
             }
         });
         install_task->setFuture(QtConcurrent::run([root, target, id, label, version, file, digest,
-                                                   external, patch] {
+                                                   external, patch, details] {
             if (patch) {
                 return InstallGitHubPatch(root, target, id, label, version, file->fileName(), digest,
-                                          *patch);
+                                          *patch, details);
             }
-            return InstallMod(root, target, id, label, version, file->fileName(), digest, external);
+            return InstallMod(root, target, id, label, version, file->fileName(), digest, external,
+                              details);
         }));
     }
 
@@ -2372,6 +2485,10 @@ private:
     QHash<QString, QPointer<Request>> thumbnail_requests;
     QHash<QString, GameIdentity> identities;
     QList<Offer> offer_list;
+    QList<std::pair<QString, QString>> update_queue;
+    QSet<QString> update_checked;
+    int update_requests{};
+    bool update_changed{};
     ModFilter list_filter{};
     std::optional<int> next;
     std::optional<Mod> selected;
