@@ -412,9 +412,7 @@ public:
         setAccessibleName(title);
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
-        auto policy = QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        policy.setHeightForWidth(true);
-        setSizePolicy(policy);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         setMinimumWidth(160);
     }
 
@@ -734,6 +732,8 @@ protected:
         case QEvent::Resize:
             if (watched == parentWidget()) {
                 setGeometry(parentWidget()->rect());
+            } else if (watched == browse_scroll->viewport()) {
+                FitCards();
             }
             break;
         case QEvent::Close:
@@ -900,6 +900,7 @@ private:
         list->addWidget(more, 0, Qt::AlignHCenter);
         list->addStretch();
         browse_scroll = ScrollPage(contents);
+        browse_scroll->viewport()->installEventFilter(this);
         body->addWidget(browse_scroll, 1);
         pages->insertWidget(0, browse_page);
     }
@@ -1417,6 +1418,7 @@ private:
                     }
                     catalog.insert(id, std::move(mod));
                 }
+                FitCards();
                 LoadCardThumbnails();
                 next = page.next_offset && *page.next_offset > offset ? page.next_offset
                                                                       : std::nullopt;
@@ -1430,6 +1432,15 @@ private:
                 browse_message->setVisible(catalog.isEmpty());
                 Status({});
             });
+    }
+
+    void FitCards() {
+        const int spacing = card_grid->horizontalSpacing();
+        const int width =
+            (browse_scroll->viewport()->width() - spacing * (CardColumns - 1)) / CardColumns;
+        for (auto* card : std::as_const(cards)) {
+            card->setFixedHeight(card->heightForWidth(width));
+        }
     }
 
     void FocusInstalledRow(const QString& id, const QString& target) {
@@ -1461,8 +1472,8 @@ private:
                     auto* rule = new QFrame(panel);
                     rule->setObjectName(QStringLiteral("storeRule"));
                     rule->setFixedHeight(1);
-                    rule->setContentsMargins(0, 0, 0, 0);
                     auto* inset = new QWidget(panel);
+                    inset->setObjectName(QStringLiteral("storeContents"));
                     auto* inset_layout = new QHBoxLayout(inset);
                     inset_layout->setContentsMargins(12, 0, 18, 0);
                     inset_layout->addWidget(rule);
@@ -1575,6 +1586,7 @@ private:
     static QWidget* Mark(QWidget* parent, QStringView icon, const QString& text,
                          const QColor& color, int weight, int gap) {
         auto* mark = new QWidget(parent);
+        mark->setObjectName(QStringLiteral("storeContents"));
         auto* layout = new QHBoxLayout(mark);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(gap);
