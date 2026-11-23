@@ -95,7 +95,7 @@ QString MappingStyle() {
         "QTabWidget#spotlightMapping QGroupBox QGroupBox { background: transparent; border: none;"
         " margin-top: 16px; padding: 2px; }"
         "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,20); color: #ffffff;"
-        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; padding: 0 6px;"
+        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; min-width: 52px; padding: 0 6px;"
         " font-size: 12px; font-weight: 600; }"
         "QTabWidget#spotlightMapping QPushButton:hover { background: rgba(255,255,255,46); }"
         "QTabWidget#spotlightMapping QPushButton:focus { border-color: #ff6b95; }"
@@ -1082,6 +1082,15 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
         input_tabs->setObjectName(QStringLiteral("spotlightMapping"));
         input_tabs->setStyleSheet(MappingStyle());
         input_tabs->setMinimumHeight(560);
+        const auto size_to_current = [input_tabs] {
+            for (int i = 0; i < input_tabs->count(); ++i) {
+                const auto policy = i == input_tabs->currentIndex() ? QSizePolicy::Preferred
+                                                                    : QSizePolicy::Ignored;
+                input_tabs->widget(i)->setSizePolicy(policy, policy);
+            }
+        };
+        size_to_current();
+        connect(input_tabs, &QTabWidget::currentChanged, input_tabs, size_to_current);
         settings_page->AddBlock(mapping, input_tabs, tr("Map buttons"));
     });
     settings_page->AddPage(category, pages[8], tr("Input devices"));
