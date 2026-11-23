@@ -5,6 +5,7 @@
 
 #include "lichii/spotlight/dialog.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QEvent>
@@ -193,8 +194,10 @@ protected:
             ShowScrim();
             if (!shown) {
                 shown = true;
+                keep_position = dialog->testAttribute(Qt::WA_Moved);
                 MakeRoomForChrome();
             }
+            Center();
             return false;
         case QEvent::Hide:
             delete scrim;
@@ -206,6 +209,9 @@ protected:
                 UpdateMargins();
             }
             Place();
+            if (shown) {
+                Center();
+            }
             // QProgressDialog::resizeEvent would put its widgets back where its own layout has
             // them.
             return PlaceProgress();
@@ -218,6 +224,7 @@ protected:
         case QEvent::MouseButtonPress:
             if (static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton &&
                 dialog->windowHandle()) {
+                keep_position = true;
                 dialog->windowHandle()->startSystemMove();
                 return true;
             }
@@ -348,6 +355,45 @@ private:
         painter.setPen(QPen(Color::StrokeSubtle(), 1));
         painter.setBrush(Color::DialogSolid());
         painter.drawRoundedRect(card, Radius::Dialog, Radius::Dialog);
+    }
+
+    // Centres the card, shadow excluded, over the window the dialog belongs to: its parent's window
+    // when that is shown, else the active window, else the screen. A dialog the user or its owner
+    // placed keeps its position.
+    void Center() {
+        if (keep_position || dialog->windowState() != Qt::WindowNoState) {
+            return;
+        }
+        QWidget* host = dialog->parentWidget() ? dialog->parentWidget()->window() : nullptr;
+        if (!host || !host->isVisible()) {
+            host = QApplication::activeWindow();
+        }
+        if (!host || host == dialog) {
+            const auto windows = QApplication::topLevelWidgets();
+            const auto main = std::find_if(windows.begin(), windows.end(), [this](QWidget* window) {
+                return window != dialog && window->isVisible() && window->isWindow() &&
+                       window->windowType() == Qt::Window;
+            });
+            host = main == windows.end() ? nullptr : *main;
+        }
+        const QScreen* screen = host && host != dialog ? host->screen() : dialog->screen();
+        if (!screen) {
+            return;
+        }
+        const QRect area = screen->availableGeometry();
+        QRect over = area;
+        if (host && host != dialog) {
+            over = host->property(ChromeProperty).toBool()
+                       ? host->geometry().marginsRemoved(ShadowMargins)
+                       : host->frameGeometry();
+        }
+        const QRect card = Card();
+        QPoint origin = over.center() - card.center();
+        origin.setX(std::clamp(origin.x(), area.left() - card.left(),
+                               std::max(area.left() - card.left(), area.right() - card.right())));
+        origin.setY(std::clamp(origin.y(), area.top() - card.top(),
+                               std::max(area.top() - card.top(), area.bottom() - card.bottom())));
+        dialog->move(origin);
     }
 
     void ShowScrim() {
@@ -597,6 +643,20 @@ private:
         for (auto* push : pushes) {
             push->setAutoDefault(push == chosen);
         }
+        // When No is the default, Yes is the answer that removes or overwrites something.
+        for (auto* buttons : dialog->findChildren<QDialogButtonBox*>()) {
+            if (buttons->buttonRole(chosen) != QDialogButtonBox::NoRole) {
+                continue;
+            }
+            for (auto* button : buttons->buttons()) {
+                if (buttons->buttonRole(button) == QDialogButtonBox::YesRole &&
+                    button->property("kind").isNull()) {
+                    button->setProperty("kind", QStringLiteral("destructive"));
+                    button->style()->unpolish(button);
+                    button->style()->polish(button);
+                }
+            }
+        }
     }
 
     QDialog* dialog;
@@ -610,6 +670,7 @@ private:
     QPointer<Scrim> scrim;
     bool shown = false;
     bool fitting = false;
+    bool keep_position = false;
 };
 
 // Masks a window to a rounded rectangle. A mask has hard edges, so the corner is one pixel smaller
