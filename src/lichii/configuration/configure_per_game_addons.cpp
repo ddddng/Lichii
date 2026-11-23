@@ -14,10 +14,12 @@
 #include <QHash>
 #include <QHeaderView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QString>
+#include <QStyle>
 #include <QTimer>
 #include <QTreeView>
 
@@ -252,22 +254,21 @@ void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
         return;
     }
 
-    const auto header = tr("You are about to delete the following installed mods:\n");
-    QString selected_str;
+    QStringList lines{tr("You are about to delete the following installed mods:\n").trimmed()};
     for (const QModelIndex& index : filtered) {
-        selected_str = selected_str % index.data().toString() % QStringLiteral("\n");
+        lines << index.data().toString();
     }
+    lines << tr("\nOnce deleted, these can NOT be recovered. Are you 100% sure "
+                "you want to delete them?")
+                 .trimmed();
 
-    const auto footer = tr("\nOnce deleted, these can NOT be recovered. Are you 100% sure "
-                           "you want to delete them?");
-
-    QString caption = header % selected_str % footer;
-
-    auto choice = QtCommon::Frontend::Warning(tr("Delete add-on(s)?"), caption,
-                                              QtCommon::Frontend::StandardButton::Yes |
-                                                  QtCommon::Frontend::StandardButton::No);
-
-    if (choice == QtCommon::Frontend::StandardButton::No)
+    QMessageBox prompt(QMessageBox::Warning, tr("Delete add-on(s)?"), lines.join(u'\n'),
+                       QMessageBox::Yes | QMessageBox::No, this);
+    auto* yes = prompt.button(QMessageBox::Yes);
+    yes->setProperty("kind", QStringLiteral("destructive"));
+    yes->style()->unpolish(yes);
+    yes->style()->polish(yes);
+    if (prompt.exec() != QMessageBox::Yes)
         return;
 
     for (const QModelIndex& index : filtered) {
