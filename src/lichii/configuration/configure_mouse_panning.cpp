@@ -6,13 +6,16 @@
 #include "common/settings.h"
 #include "ui_configure_mouse_panning.h"
 #include "lichii/configuration/configure_mouse_panning.h"
+#include "lichii/spotlight/theme.h"
 
 ConfigureMousePanning::ConfigureMousePanning(QWidget* parent,
                                              InputCommon::InputSubsystem* input_subsystem_,
                                              float right_stick_deadzone, float right_stick_range)
-    : QDialog(parent), input_subsystem{input_subsystem_},
+    : Spotlight::Dialog(parent), input_subsystem{input_subsystem_},
       ui(std::make_unique<Ui::ConfigureMousePanning>()) {
     ui->setupUi(this);
+    SetIcon(QStringLiteral("hand-pointing"), Spotlight::Color::Warning());
+    SetSubtitle(tr("Move the camera with the mouse"));
     SetConfiguration(right_stick_deadzone, right_stick_range);
     ConnectEvents();
 }

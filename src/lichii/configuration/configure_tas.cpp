@@ -11,11 +11,14 @@
 #include "qt_common/config/uisettings.h"
 #include "ui_configure_tas.h"
 #include "lichii/configuration/configure_tas.h"
+#include "lichii/spotlight/theme.h"
 
 ConfigureTasDialog::ConfigureTasDialog(QWidget* parent)
-    : QDialog(parent), ui(std::make_unique<Ui::ConfigureTas>()) {
+    : Spotlight::Dialog(parent), ui(std::make_unique<Ui::ConfigureTas>()) {
 
     ui->setupUi(this);
+    SetIcon(QStringLiteral("record"), Spotlight::Color::Accent());
+    SetSubtitle(tr("Tool-assisted input scripts"));
 
     setFocusPolicy(Qt::ClickFocus);
     setWindowTitle(tr("TAS Configuration"));
@@ -73,7 +76,7 @@ void ConfigureTasDialog::changeEvent(QEvent* event) {
         RetranslateUI();
     }
 
-    QDialog::changeEvent(event);
+    Spotlight::Dialog::changeEvent(event);
 }
 
 void ConfigureTasDialog::RetranslateUI() {
