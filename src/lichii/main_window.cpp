@@ -1637,7 +1637,7 @@ void MainWindow::InitializeWidgets() {
     emulation_menu->addActions(
         {ui->action_Fullscreen, ui->action_Capture_Screenshot, ui->action_Load_Amiibo});
     emulation_menu->AddSharedMenu(speed,
-                                  Spotlight::Icon(u"lightning", Spotlight::Color::MenuInk(), 16));
+                                  Spotlight::Icon(u"timer", Spotlight::Color::MenuInk(), 16));
     emulation_menu->addSeparator();
     emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
     running_title_bar->AddMenu(tr("Emulation"), emulation_menu);

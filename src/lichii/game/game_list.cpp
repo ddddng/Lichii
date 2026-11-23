@@ -939,7 +939,7 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
         return;
     }
     Spotlight::Menu blank_menu;
-    QAction* add_directory = blank_menu.addAction(MenuIcon("plus"), tr("&Add New Game Directory"));
+    QAction* add_directory = blank_menu.addAction(tr("&Add New Game Directory"));
     connect(add_directory, &QAction::triggered, this, &GameList::AddDirectory);
     blank_menu.exec(position);
 }
