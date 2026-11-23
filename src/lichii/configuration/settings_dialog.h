@@ -114,19 +114,22 @@ inline QVBoxLayout* Layout(QDialog& dialog, int width, int spacing = 20) {
     layout->setContentsMargins(padding, padding, padding, padding);
     layout->setSpacing(spacing);
     layout->setSizeConstraint(QLayout::SetMinimumSize);
+    layout->addStrut(width - 2 * padding);
     dialog.setFixedWidth(width + dialog.contentsMargins().left() +
                          dialog.contentsMargins().right());
     return layout;
 }
 
 inline QLabel* Header(QDialog& dialog, QVBoxLayout& layout, const QString& title,
-                      const QString& icon, const QString& subtitle, bool closable = true) {
+                      const QString& icon, const QString& subtitle, bool closable = true,
+                      const QColor& tint = Color::Text()) {
     auto* header = new QHBoxLayout;
     header->setSpacing(14);
-    header->addWidget(IconTile(icon, 44, 22, Radius::Tile), 0, Qt::AlignTop);
+    header->addWidget(IconTile(icon, 44, 22, Radius::Tile, tint), 0, Qt::AlignTop);
     auto* copy = new QVBoxLayout;
     copy->setSpacing(4);
     auto* heading = Text(title, 22, 400);
+    heading->setFont(DisplayFont(22));
     heading->setFixedHeight(26);
     copy->addWidget(heading);
     auto* description = Text(subtitle, 14, 400, Color::TextSecondary());
@@ -163,6 +166,7 @@ public:
         auto* copy = new QVBoxLayout;
         copy->setSpacing(6);
         auto* title = Text(heading, 20, 400);
+        title->setFont(DisplayFont(20));
         title->setWordWrap(true);
         copy->addWidget(title);
         auto* description = Text(body, 14, 400, Color::TextSecondary());

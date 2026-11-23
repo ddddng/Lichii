@@ -5,6 +5,7 @@
 #include <QKeySequenceEdit>
 #include <QLineEdit>
 #include "lichii/configuration/settings_dialog.h"
+#include "lichii/spotlight/settings_page.h"
 #include "lichii/util/sequence_dialog/sequence_dialog.h"
 
 namespace {
@@ -28,7 +29,8 @@ SequenceDialog::SequenceDialog(QWidget* parent, const QString& action)
     using namespace SettingsCard;
     auto* layout = Layout(*this, 440);
     Header(*this, *layout, tr("Enter a hotkey"), QStringLiteral("keyboard"),
-           tr("%1 · Press the new key combination").arg(action));
+           tr("%1 · Press the new key combination").arg(action), true,
+           Spotlight::SettingsColor::Gold());
 
     auto* well = new KeyWell;
     well->setFixedHeight(92);
