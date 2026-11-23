@@ -10,8 +10,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/arrow-circle-up.png</file>
         <file>spotlight/icons/arrow-clockwise.png</file>
         <file>spotlight/icons/arrow-counter-clockwise.png</file>
+        <file>spotlight/icons/arrow-down.png</file>
         <file>spotlight/icons/arrow-left.png</file>
         <file>spotlight/icons/arrow-square-out.png</file>
+        <file>spotlight/icons/arrow-up.png</file>
         <file>spotlight/icons/arrows-in.png</file>
         <file>spotlight/icons/arrows-out-cardinal.png</file>
         <file>spotlight/icons/arrows-out.png</file>

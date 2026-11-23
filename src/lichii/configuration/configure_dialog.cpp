@@ -1370,17 +1370,21 @@ void ConfigureDialog::RebuildGameFolders() {
             game_dirs_changed = true;
             RebuildGameFolders();
         };
-        menu->addAction(tr("Open location"), this,
+        const auto icon = [](QStringView name) {
+            return Spotlight::Icon(name, Spotlight::Color::MenuInk(), 16);
+        };
+        menu->addAction(icon(u"folder-open"), tr("Open location"), this,
                         [this, path] { emit OpenGameFolderRequested(path); });
-        auto* up = menu->addAction(tr("Move up"), this, [this, i, changed] {
+        auto* up = menu->addAction(icon(u"arrow-up"), tr("Move up"), this, [this, i, changed] {
             game_dirs.swapItemsAt(i, i - 1);
             changed();
         });
         up->setEnabled(i > 0);
-        auto* down = menu->addAction(tr("Move down"), this, [this, i, changed] {
-            game_dirs.swapItemsAt(i, i + 1);
-            changed();
-        });
+        auto* down =
+            menu->addAction(icon(u"arrow-down"), tr("Move down"), this, [this, i, changed] {
+                game_dirs.swapItemsAt(i, i + 1);
+                changed();
+            });
         down->setEnabled(i + 1 < game_dirs.size());
         if (!built_in) {
             auto* scan = menu->addAction(tr("Scan subfolders"));
@@ -1390,13 +1394,17 @@ void ConfigureDialog::RebuildGameFolders() {
                 game_dirs[i].deep_scan = enabled;
                 changed();
             });
-            menu->addAction(tr("Remove"), this, [this, i, changed] {
-                game_dirs.removeAt(i);
-                changed();
-            });
+            auto* remove =
+                menu->addAction(Spotlight::Icon(u"trash", Spotlight::Color::AccentLight(), 16),
+                                tr("Remove"), this, [this, i, changed] {
+                                    game_dirs.removeAt(i);
+                                    changed();
+                                });
+            remove->setProperty("spotlightDestructive", true);
         }
         connect(menu_button, &QAbstractButton::clicked, menu, [menu, menu_button] {
-            menu->popup(menu_button->mapToGlobal(QPoint(0, menu_button->height())));
+            menu->popup(menu_button->mapToGlobal(QPoint(
+                menu_button->width() - menu->sizeHint().width(), menu_button->height() + 5)));
         });
         const QString title = folder.path == "SDMC"       ? tr("SD card")
                               : folder.path == "UserNAND" ? tr("User NAND")
