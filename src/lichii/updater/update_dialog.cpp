@@ -71,6 +71,7 @@ public:
         percent->setAlignment(Qt::AlignRight);
         Spotlight::SetTextColor(percent, Spotlight::Color::TextSecondary());
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Cancel)->setAutoDefault(false);
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
         auto* layout = new QVBoxLayout(this);
@@ -114,6 +115,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
     ui->setupUi(this);
     SetIcon(u"cloud-arrow-down", Spotlight::Color::Accent());
     setFixedWidth(702);
+    resize(width(), 0);
 
     QString subtitle =
         tr("%1 is available for download.").arg(QString::fromStdString(release.title));
