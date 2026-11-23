@@ -406,6 +406,24 @@ void ConfigureHotkeys::PopupContextMenu(const QPoint& menu_location) {
     context_menu.exec(ui->hotkey_list->viewport()->mapToGlobal(menu_location));
 }
 
+void ConfigureHotkeys::RestoreAction(QModelIndex index) {
+    RestoreHotkey(index.siblingAtColumn(hotkey_column));
+    RestoreControllerHotkey(index.siblingAtColumn(controller_column));
+}
+
+bool ConfigureHotkeys::IsDefault(QModelIndex index) const {
+    const UISettings::Shortcut* hotkey =
+        DefaultHotkey(*model->itemFromIndex(index.siblingAtColumn(name_column)));
+    if (hotkey == nullptr) {
+        return true;
+    }
+    return QKeySequence(index.siblingAtColumn(hotkey_column).data().toString()) ==
+               QKeySequence::fromString(QString::fromStdString(hotkey->shortcut.keyseq),
+                                        QKeySequence::NativeText) &&
+           index.siblingAtColumn(controller_column).data().toString() ==
+               QString::fromStdString(hotkey->shortcut.controller_keyseq);
+}
+
 void ConfigureHotkeys::RestoreControllerHotkey(QModelIndex index) {
     const UISettings::Shortcut* hotkey =
         DefaultHotkey(*model->itemFromIndex(index.siblingAtColumn(name_column)));

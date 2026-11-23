@@ -112,6 +112,7 @@ private:
     void BuildLibrary(int library);
     void BuildGraphics(int graphics);
     void BuildControls(int category, int shortcuts);
+    void BuildShortcuts(int shortcuts);
     void EnsureInput();
     void AddSettingRow(QVBoxLayout* group, QWidget* page, const Settings::BasicSetting& setting,
                        const QString& title, const QString& detail, const QString& icon,

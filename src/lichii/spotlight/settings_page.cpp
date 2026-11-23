@@ -1063,7 +1063,10 @@ void SettingsPage::BuildPage(int category, Page& page) {
     QSet<QWidget*> consumed;
     const auto group = [&]() -> QVBoxLayout* {
         if (rows == nullptr) {
-            rows = AddSection(category, section_title, in_advanced);
+            rows = AddSection(category,
+                              in_advanced && section_title == page.name ? QString{}
+                                                                        : section_title,
+                              in_advanced);
             if (page.anchor == nullptr) {
                 page.anchor = rows->parentWidget()->parentWidget();
             }
@@ -1671,6 +1674,9 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     copy->addStretch();
     layout->addLayout(copy, 1);
     if (control != nullptr) {
+        if (control->metaObject() == &QWidget::staticMetaObject) {
+            control->setProperty("spotlightTransparent", true);
+        }
         if (auto* badge = control->findChild<QWidget*>(QStringLiteral("changedBadge"))) {
             title_line->addWidget(badge, 0, Qt::AlignVCenter);
         }

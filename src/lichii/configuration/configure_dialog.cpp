@@ -10,6 +10,7 @@
 #include <memory>
 #include <tuple>
 #include <utility>
+#include <QAbstractSlider>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -18,11 +19,13 @@
 #include <QLabel>
 #include <QLocale>
 #include <QMenu>
+#include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include "common/settings.h"
@@ -102,6 +105,43 @@ QString MappingStyle() {
         "QTabWidget#spotlightMapping QLabel { color: rgba(255,255,255,158);"
         " background: transparent; }");
 }
+
+class BindingButton final : public QAbstractButton {
+public:
+    explicit BindingButton(QString icon_) : icon{std::move(icon_)} {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_Hover);
+        setProperty("spotlightTransparent", true);
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(30, 5, 6, 5);
+        cap = new Spotlight::KeyCap({});
+        cap->setAttribute(Qt::WA_TransparentForMouseEvents);
+        layout->addWidget(cap);
+    }
+
+    void SetBinding(const QString& text, bool set) {
+        cap->SetText(text);
+        cap->setEnabled(set);
+        updateGeometry();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1.5) : Qt::NoPen);
+        painter.setBrush(underMouse() ? Color::Fill() : Color::FillFaint());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75), 12, 12);
+        painter.drawPixmap(9, (height() - 14) / 2,
+                           Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
+                                                 devicePixelRatioF()));
+    }
+
+private:
+    QString icon;
+    Spotlight::KeyCap* cap;
+};
 
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
@@ -327,9 +367,76 @@ void ConfigureDialog::BuildSettings() {
          }) {
         settings_page->AddPage(category, widget, name);
     }
-    settings_page->AddPage(shortcuts, hotkeys_tab.get(), tr("Hotkeys"), false);
+    settings_page->SetBuilder(shortcuts, [this, shortcuts] { BuildShortcuts(shortcuts); });
+    hotkeys_tab->hide();
     input_tab->hide();
     settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::BuildShortcuts(int shortcuts) {
+    auto* actions = new QWidget;
+    actions->setProperty("spotlightTransparent", true);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(6, 0, 0, 0);
+    actions_layout->setSpacing(10);
+    actions_layout->addWidget(SettingsPage::Text(
+        tr("Click a binding to change it; a game controller binding is pressed on the pad"), 13,
+        500, true));
+    actions_layout->addStretch();
+    auto* clear_all = new Spotlight::PillButton(tr("Clear all"), QStringLiteral("x"));
+    connect(clear_all, &QAbstractButton::clicked, this, [this] { hotkeys_tab->ClearAll(); });
+    actions_layout->addWidget(clear_all);
+    auto* restore = new Spotlight::PillButton(tr("Restore defaults"),
+                                              QStringLiteral("arrow-counter-clockwise"));
+    connect(restore, &QAbstractButton::clicked, this, [this] { hotkeys_tab->RestoreDefaults(); });
+    actions_layout->addWidget(restore);
+    settings_page->AddBlock(shortcuts, actions, tr("Clear all\nRestore defaults"));
+
+    auto* model = hotkeys_tab->Model();
+    for (int group_row = 0; group_row < model->rowCount(); ++group_row) {
+        const QStandardItem* group = model->item(group_row);
+        auto* rows = settings_page->AddSection(shortcuts, group->text());
+        for (int row = 0; row < group->rowCount(); ++row) {
+            const QPersistentModelIndex action = group->child(row)->index();
+            auto* control = new QWidget;
+            auto* layout = new QHBoxLayout(control);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(8);
+            auto* keyboard = new BindingButton(QStringLiteral("keyboard"));
+            auto* pad = new BindingButton(QStringLiteral("game-controller"));
+            auto* reset = new Spotlight::CircleButton(QStringLiteral("arrow-counter-clockwise"), 32);
+            reset->setToolTip(tr("Restore default"));
+            reset->setAccessibleName(reset->toolTip());
+            reset->setFocusPolicy(Qt::StrongFocus);
+            keyboard->setMinimumWidth(128);
+            pad->setMinimumWidth(184);
+            for (auto* button : {keyboard, pad}) {
+                layout->addWidget(button);
+            }
+            layout->addWidget(reset);
+            const auto refresh = [this, action, keyboard, pad, reset] {
+                const QString key = action.sibling(action.row(), 1).data().toString();
+                const QString button = action.sibling(action.row(), 2).data().toString();
+                keyboard->SetBinding(key.isEmpty() ? tr("Not set") : key, !key.isEmpty());
+                keyboard->setToolTip(tr("Keyboard: %1").arg(key.isEmpty() ? tr("not set") : key));
+                keyboard->setAccessibleName(keyboard->toolTip());
+                pad->SetBinding(button.isEmpty() ? tr("Not set") : button, !button.isEmpty());
+                pad->setToolTip(tr("Controller: %1").arg(button.isEmpty() ? tr("not set") : button));
+                pad->setAccessibleName(pad->toolTip());
+                reset->setVisible(!hotkeys_tab->IsDefault(action));
+            };
+            refresh();
+            connect(model, &QAbstractItemModel::dataChanged, control, refresh);
+            connect(keyboard, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 1)); });
+            connect(pad, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 2)); });
+            connect(reset, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->RestoreAction(action); });
+            SettingsPage::AddRow(rows, group->child(row)->text(), {}, QStringLiteral("keyboard"),
+                                 Tints::Gold(), control);
+        }
+    }
 }
 
 void ConfigureDialog::AddSettingRow(QVBoxLayout* group, QWidget* page,
