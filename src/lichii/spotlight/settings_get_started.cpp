@@ -25,6 +25,7 @@
 #include "lichii/spotlight/settings_get_started.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/util/content.h"
@@ -34,6 +35,7 @@ namespace {
 
 constexpr int StepCount = 5;
 constexpr int SidebarWidth = 264;
+constexpr qreal TileSize = 50;
 
 QLabel* Label(const QString& text, const QFont& font, const QColor& color, int line_height = 0) {
     auto* label = new QLabel(text);
@@ -77,8 +79,8 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Color::StrokeSubtle());
         painter.setBrush(Color::FillFaint());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), Radius::Tile,
-                                Radius::Tile);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), Radius::Row,
+                                Radius::Row);
     }
 };
 
@@ -95,8 +97,9 @@ public:
         setFixedHeight(56);
     }
 
-    void SetState(bool selected_, QString detail_) {
+    void SetState(bool selected_, bool done_, QString detail_) {
         selected = selected_;
+        done = done_;
         detail = std::move(detail_);
         update();
     }
@@ -146,8 +149,8 @@ protected:
                          Qt::AlignVCenter | Qt::AlignLeft,
                          painter.fontMetrics().elidedText(text(), Qt::ElideRight, text_width));
         if (!detail.isEmpty()) {
-            painter.setPen(Color::TextSecondary());
-            painter.setFont(Font(12, 500));
+            painter.setPen(done ? SettingsColor::Green() : Color::TextSecondary());
+            painter.setFont(Font(12, 400));
             painter.drawText(QRect(50, 30, text_width, 16), Qt::AlignVCenter | Qt::AlignLeft,
                              detail);
         }
@@ -156,6 +159,7 @@ protected:
 private:
     int number;
     bool selected = false;
+    bool done = false;
     bool keyboard_focus = false;
     QString detail;
     HoverFade hover{this};
@@ -178,16 +182,17 @@ public:
             setFocusPolicy(Qt::NoFocus);
             setAttribute(Qt::WA_TransparentForMouseEvents);
         }
-        setMinimumHeight(52 + margin * 2);
+        setMinimumHeight(option.status.isEmpty() ? 94 : 112);
 
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(margin, margin, margin, margin);
         row->setSpacing(0);
-        row->addSpacing(52 + 18);
+        row->addSpacing(TileSize + 18);
         auto* copy = new QVBoxLayout;
         copy->setSpacing(4);
         copy->addStretch();
-        copy->addWidget(Label(option.title, Font(17, 600), Color::Text(), 23));
+        copy->addWidget(Label(option.title, Font(16, 600),
+                              option.locked ? Color::TextSecondary() : Color::Text(), 21));
         auto* detail_row = new QHBoxLayout;
         auto* detail = Label(option.description, Font(13, 400), Color::TextSecondary());
         detail->setWordWrap(true);
@@ -196,9 +201,11 @@ public:
         detail_row->addStretch();
         copy->addLayout(detail_row);
         if (!option.status.isEmpty()) {
-            copy->addSpacing(4);
             copy->addWidget(Label(option.status, Font(12, 600),
-                                  done ? Color::Accent() : Color::TextSecondary(), 16));
+                                  option.locked ? SettingsColor::Gold()
+                                  : done        ? Color::Accent()
+                                                : Color::TextSecondary(),
+                                  16));
         }
         copy->addStretch();
         row->addLayout(copy, 1);
@@ -236,12 +243,12 @@ protected:
         painter.drawRoundedRect(QRectF(rect()).adjusted(inset, inset, -inset, -inset), 22 - inset,
                                 22 - inset);
 
-        const QRectF tile(margin, (height() - 52) / 2.0, 52, 52);
+        const QRectF tile(margin, (height() - TileSize) / 2, TileSize, TileSize);
         painter.setPen(Qt::NoPen);
         painter.setBrush(Color::Fill());
-        painter.drawRoundedRect(tile, 17, 17);
-        painter.drawPixmap(tile.topLeft() + QPointF(13, 13),
-                           IconPixmap(icon, 26, icon_color, devicePixelRatioF()));
+        painter.drawRoundedRect(tile, 15, 15);
+        painter.drawPixmap(tile.topLeft() + QPointF(12, 12),
+                           IconPixmap(icon, 25, icon_color, devicePixelRatioF()));
 
         const QRectF check(width() - margin - 26, (height() - 26) / 2.0, 26, 26);
         if (done) {
@@ -288,13 +295,13 @@ public:
         const int label = fontMetrics().horizontalAdvance(text());
         switch (kind) {
         case Kind::Back:
-            return {14 + 16 + 6 + label + 18, 42};
+            return {18 + 15 + 8 + label + 18, 42};
         case Kind::Skip:
-            return {14 + label + 14, 42};
+            return {18 + label + 18, 42};
         case Kind::Continue:
             break;
         }
-        return {20 + label + 6 + 16 + 16, 42};
+        return {18 + label + 8 + 14 + 18, 42};
     }
 
 protected:
@@ -317,18 +324,16 @@ protected:
         const qreal lit = hover.Value();
         QColor fill = Qt::transparent;
         QColor ink = Color::Text();
-        int x = 14;
         switch (kind) {
         case Kind::Back:
             fill = Mix(Color::Fill(), Color::ControlHover(), lit);
             break;
         case Kind::Skip:
-            ink = Mix(Color::TextSecondary(), Color::Text(), lit);
+            fill = Mix(fill, Color::Fill(), lit);
             break;
         case Kind::Continue:
             fill = Mix(Color::Accent(), Color::AccentLight(), lit);
             ink = Color::OnAccent();
-            x = 20;
             break;
         }
         if (!isEnabled()) {
@@ -339,10 +344,10 @@ protected:
         painter.setBrush(fill);
         painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 21, 21);
 
-        const auto glyph = IconPixmap(icon, 16, ink, devicePixelRatioF());
+        int x = 18;
         if (kind == Kind::Back) {
-            painter.drawPixmap(x, 13, glyph);
-            x += 16 + 6;
+            painter.drawPixmap(x, 13, IconPixmap(icon, 15, ink, devicePixelRatioF()));
+            x += 15 + 8;
         }
         const int label = fontMetrics().horizontalAdvance(text());
         painter.setPen(ink);
@@ -350,7 +355,7 @@ protected:
         painter.drawText(QRect(x, 0, label + 1, height()), Qt::AlignVCenter | Qt::AlignLeft,
                          text());
         if (kind == Kind::Continue) {
-            painter.drawPixmap(x + label + 6, 13, glyph);
+            painter.drawPixmap(x + label + 8, 14, IconPixmap(icon, 14, ink, devicePixelRatioF()));
         }
     }
 
@@ -401,6 +406,7 @@ GetStarted::GetStarted(QWidget* parent, Core::System& system_, Setup setup_)
     setWindowTitle(tr("Get Started"));
     setStyleSheet(
         QStringLiteral("QWidget[spotlightTransparent=true] { background: transparent; }"));
+    setWindowFlag(Qt::FramelessWindowHint, ClientFrame);
     setGeometry(parent->geometry());
     FadeInOnShow(this);
 
@@ -493,14 +499,14 @@ GetStarted::GetStarted(QWidget* parent, Core::System& system_, Setup setup_)
         main->addSpacing(14);
         auto* hint = new Panel(this);
         auto* hint_row = new QHBoxLayout(hint);
-        hint_row->setContentsMargins(15, 11, 15, 11);
+        hint_row->setContentsMargins(11, 11, 11, 11);
         hint_row->setSpacing(8);
         auto* controller = new QLabel(hint);
         controller->setPixmap(IconPixmap(QStringLiteral("game-controller"), 16,
                                          Color::TextSecondary(), devicePixelRatioF()));
         hint_row->addWidget(controller);
         const auto add_text = [hint_row](const QString& text) {
-            hint_row->addWidget(Label(text, Font(13, 500), Color::TextSecondary()));
+            hint_row->addWidget(Label(text, Font(13, 400), Color::TextSecondary()));
         };
         add_text(tr("While playing, open the in-game menu with"));
         for (int i = 0; i < keys.size(); ++i) {
@@ -542,6 +548,20 @@ GetStarted::GetStarted(QWidget* parent, Core::System& system_, Setup setup_)
     actions->addWidget(continue_button);
     main->addLayout(actions);
     footer = {back, skip, continue_button};
+
+    auto* bar = new WindowDragBar(this);
+    bar->setProperty("spotlightTransparent", true);
+    auto* bar_column = new QVBoxLayout(bar);
+    bar_column->setContentsMargins(0, 8, 14, 0);
+    auto* bar_row = new QHBoxLayout;
+    bar_row->addStretch();
+    bar->AddWindowControls(bar_row);
+    bar_column->addLayout(bar_row);
+    bar_column->addStretch();
+    title_bar = bar;
+    if constexpr (ClientFrame) {
+        edges = new FrameEdges(this);
+    }
 
     SetStep(0);
 }
@@ -600,13 +620,13 @@ void GetStarted::ShowStep() {
              running ? locked
              : keys  ? tr("prod.keys · installed")
                      : QString{},
-             keys, install},
+             keys, running, install},
             {QStringLiteral("key"), SettingsColor::Green(), tr("Add title.keys (optional)"),
              tr("Needed for some updates and DLC"),
              running      ? locked
              : title_keys ? tr("title.keys · installed")
                           : tr("Put it next to prod.keys, then choose prod.keys again"),
-             title_keys, install},
+             title_keys, running, install},
         });
         break;
     }
@@ -633,13 +653,14 @@ void GetStarted::ShowStep() {
         page = Options({
             {QStringLiteral("folder-open"), Color::Accent(), tr("Choose a firmware folder"),
              tr("The folder of .nca files you dumped from your console"), status,
-             !version.isEmpty(), folder},
+             !version.isEmpty(), running, folder},
             {QStringLiteral("archive"),
              SettingsColor::Green(),
              tr("Choose a firmware ZIP"),
              tr("The same files packed in a .zip archive"),
              {},
              false,
+             running,
              zip},
         });
         break;
@@ -655,6 +676,7 @@ void GetStarted::ShowStep() {
                  path_metrics.elidedText(QDir::toNativeSeparators(folder), Qt::ElideMiddle, 430),
                  {},
                  true,
+                 false,
                  {}});
         }
         options.append({QStringLiteral("folder-open"),
@@ -662,6 +684,7 @@ void GetStarted::ShowStep() {
                         tr("Add a game folder"),
                         tr("Lichii scans it and lists its games in your library"),
                         {},
+                        false,
                         false,
                         [this] {
                             setup.add_game_folder();
@@ -680,10 +703,11 @@ void GetStarted::ShowStep() {
              setup.controller_device.isEmpty() ? QString{}
                                                : tr("Input: %1").arg(setup.controller_device),
              setup.controller_connected,
+             false,
              {}},
             {QStringLiteral("keyboard"), SettingsColor::Gold(), tr("Map buttons"),
              tr("Opens player 1's buttons in Controls when you finish"),
-             map_buttons ? tr("Opens after Finish") : QString{}, map_buttons,
+             map_buttons ? tr("Opens after Finish") : QString{}, map_buttons, false,
              [this] {
                  map_buttons = !map_buttons;
                  ShowStep();
@@ -706,9 +730,11 @@ void GetStarted::ShowStep() {
     page->show();
 
     for (int i = 0; i < StepCount; ++i) {
-        steps[i]->SetState(i == current, i == current  ? tr("Now")
-                                         : StepDone(i) ? tr("Done")
-                                                       : QString{});
+        const bool done = i != current && StepDone(i);
+        steps[i]->SetState(i == current, done,
+                           i == current ? tr("Now")
+                           : done       ? tr("Done")
+                                        : QString{});
     }
     QList<QWidget*> chain(steps.cbegin(), steps.cend());
     const auto buttons = page->findChildren<QAbstractButton*>();
@@ -765,8 +791,18 @@ void GetStarted::paintEvent(QPaintEvent*) {
     sidebar.setColorAt(0, SettingsColor::Sidebar());
     sidebar.setColorAt(0.55, SettingsColor::SidebarBottom());
     painter.fillRect(QRect(0, 0, SidebarWidth, height()), sidebar);
-    painter.setPen(Color::StrokeSubtle());
+    painter.setPen(Color::Divider());
     painter.drawLine(SidebarWidth - 1, 0, SidebarWidth - 1, height());
+}
+
+void GetStarted::resizeEvent(QResizeEvent* event) {
+    QDialog::resizeEvent(event);
+    title_bar->setGeometry(0, 0, width(), 52);
+    if (edges != nullptr) {
+        edges->setGeometry(rect());
+        edges->setVisible(!isMaximized() && !isFullScreen());
+        edges->raise();
+    }
 }
 
 void GetStarted::keyPressEvent(QKeyEvent* event) {
