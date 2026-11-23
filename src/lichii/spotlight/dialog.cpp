@@ -36,6 +36,7 @@ constexpr char TitleHiddenProperty[] = "spotlightTitleHidden";
 constexpr char IconProperty[] = "spotlightIcon";
 constexpr char IconTintProperty[] = "spotlightIconTint";
 constexpr char ToneProperty[] = "spotlightTone";
+constexpr char ContentChromeProperty[] = "spotlightContentChrome";
 
 // Room around the card for its shadow (Paper: 0 30 80 #000000a6), which falls down.
 constexpr QMargins ShadowMargins{36, 20, 36, 52};
@@ -268,6 +269,13 @@ private:
     }
 
     void Update() {
+        if (dialog->property(ContentChromeProperty).toBool()) {
+            title->hide();
+            subtitle->hide();
+            icon->hide();
+            dialog->setContentsMargins(ShadowMargins);
+            return;
+        }
         title->setText(dialog->windowTitle());
         if (box) {
             title->setHidden(title->text().isEmpty());
@@ -293,6 +301,9 @@ private:
 
     // The header grows when the title or subtitle wraps to another line at the dialog's width.
     void UpdateMargins() {
+        if (dialog->property(ContentChromeProperty).toBool()) {
+            return;
+        }
         const int header = HeaderHeight();
         const QMargins margins(ShadowMargins.left() + Padding,
                                ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
@@ -303,6 +314,9 @@ private:
     }
 
     void Place() {
+        if (dialog->property(ContentChromeProperty).toBool()) {
+            return;
+        }
         if (box) {
             PlaceMessageTitle();
             return;
@@ -717,6 +731,11 @@ void RoundWindowCorners(QWidget* window) {
 
 Dialog::Dialog(QWidget* parent, Qt::WindowFlags flags) : QDialog(parent, flags) {
     AdoptDialogChrome(this);
+}
+
+Dialog::Dialog(QWidget* parent, Chrome) : QDialog(parent) {
+    setProperty(ContentChromeProperty, true);
+    AdoptDialogChrome(this, false);
 }
 
 void Dialog::SetSubtitle(const QString& subtitle) {

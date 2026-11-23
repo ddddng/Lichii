@@ -22,6 +22,10 @@ class Dialog : public QDialog {
 public:
     explicit Dialog(QWidget* parent = nullptr, Qt::WindowFlags flags = {});
 
+    /// Content chrome draws only the card: the contents bring their own header and buttons.
+    enum class Chrome { Content };
+    Dialog(QWidget* parent, Chrome chrome);
+
     /// A muted line under the title, such as what the dialog does. Empty hides it.
     void SetSubtitle(const QString& subtitle);
 
