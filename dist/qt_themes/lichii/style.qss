@@ -755,6 +755,17 @@ QProgressBar[textVisible="false"]::chunk {
     border-radius: 3px;
 }
 
+QProgressDialog QProgressBar[textVisible="false"] {
+    background-color: rgba(255, 255, 255, 46);
+    border-radius: 4px;
+    min-height: 8px;
+    max-height: 8px;
+}
+
+QProgressDialog QProgressBar[textVisible="false"]::chunk {
+    border-radius: 4px;
+}
+
 /* Scroll bars: thin rounded handles on a clear track ------------------------------------------ */
 
 QScrollArea,
