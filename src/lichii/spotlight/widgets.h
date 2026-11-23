@@ -5,6 +5,7 @@
 
 #include <QAbstractButton>
 #include <QColor>
+#include <QKeySequence>
 #include <QStringList>
 #include <QVariantAnimation>
 #include <QWidget>
@@ -18,6 +19,12 @@ inline constexpr int Hover = 120;
 inline constexpr int Slide = 180;
 inline constexpr int Fade = 160;
 } // namespace Motion
+
+/// A shortcut as Spotlight's key caps spell it: "Ctrl G" rather than "Ctrl+G".
+QString KeyText(const QKeySequence& sequence);
+
+/// Colours a label's text. The Lichii style sheet's QWidget colour overrides palettes.
+void SetTextColor(QWidget* label, const QColor& color);
 
 /// Fades a shown widget in, such as a page that just replaced another.
 void FadeIn(QWidget* widget, int duration = Motion::Fade);

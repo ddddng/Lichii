@@ -55,6 +55,23 @@ private:
 };
 } // namespace
 
+QString KeyText(const QKeySequence& sequence) {
+    QString text = sequence.toString(QKeySequence::NativeText);
+    for (qsizetype i = text.indexOf(QLatin1Char('+')); i > 0 && i + 1 < text.size();
+         i = text.indexOf(QLatin1Char('+'), i + 1)) {
+        text[i] = QLatin1Char(' ');
+    }
+    return text;
+}
+
+void SetTextColor(QWidget* label, const QColor& color) {
+    label->setStyleSheet(QStringLiteral("color: rgba(%1, %2, %3, %4); background: transparent;")
+                             .arg(color.red())
+                             .arg(color.green())
+                             .arg(color.blue())
+                             .arg(color.alpha()));
+}
+
 void FadeIn(QWidget* widget, int duration) {
     if (!widget->isVisible() || widget->graphicsEffect() != nullptr) {
         return;
