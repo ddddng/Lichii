@@ -102,6 +102,9 @@ private:
 
     void HandleApplyButtonClicked();
     void BuildSettings();
+    void BuildAddons(int mods, int updates);
+    void RebuildAddons();
+    void UpdateModsSummary();
     void UpdateSpotlightIdentity();
 
     void LoadConfiguration();
@@ -145,6 +148,11 @@ private:
     QLabel* game_banner_summary = nullptr;
     QLabel* game_banner_version = nullptr;
     QLabel* update_summary = nullptr;
+    QList<QLabel*> mods_summaries;
+    QVBoxLayout* store_rows = nullptr;
+    QVBoxLayout* own_rows = nullptr;
+    QVBoxLayout* content_rows = nullptr;
+    bool addons_queued = false;
     QPixmap shown_icon;
 
     std::unique_ptr<QtConfig> game_config;

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 #include <QDialog>
@@ -34,6 +35,9 @@ class ConfigureUi;
 class ConfigureWeb;
 
 class HotkeyRegistry;
+class QCheckBox;
+class QColor;
+class QComboBox;
 class QLabel;
 class QVBoxLayout;
 
@@ -41,7 +45,12 @@ namespace ConfigurationShared {
 class Builder;
 }
 
+namespace Settings {
+class BasicSetting;
+}
+
 namespace Spotlight {
+class PresetCard;
 class SettingsPage;
 class ToggleSwitch;
 }
@@ -59,7 +68,7 @@ class ConfigureDialog : public QDialog {
 
 public:
     explicit ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
-                             InputCommon::InputSubsystem* input_subsystem,
+                             InputCommon::InputSubsystem* input_subsystem_,
                              std::vector<VkDeviceInfo::Record>& vk_device_records,
                              Core::System& system_, bool enable_web_config = true);
     ~ConfigureDialog() override;
@@ -82,18 +91,51 @@ signals:
     void ExternalContentDirsChanged();
     void FullscreenOnStartChanged(bool enabled);
     void OpenGameFolderRequested(const QString& folder);
+    /// The Get Started wizard installed keys or firmware.
+    void ContentInstalled();
 
 private:
     void changeEvent(QEvent* event) override;
     void HandleApplyButtonClicked();
-    void BuildSettings(const std::vector<VkDeviceInfo::Record>& devices);
+    struct PresetSources {
+        QComboBox* resolution = nullptr;
+        QComboBox* filter = nullptr;
+        QComboBox* aa = nullptr;
+        QCheckBox* frame_generation = nullptr;
+        QComboBox* device = nullptr;
+
+        bool CanApply() const;
+    };
+
+    void BuildSettings();
+    void BuildGeneral(int general, int library, int controls);
+    void BuildLibrary(int library);
+    void BuildGraphics(int graphics);
     void BuildControls(int category, int shortcuts);
+    void EnsureInput();
+    void AddSettingRow(QVBoxLayout* group, QWidget* page, const Settings::BasicSetting& setting,
+                       const QString& title, const QString& detail, const QString& icon,
+                       const QColor& color);
+    PresetSources FindPresetSources() const;
+    const VkDeviceInfo::Record* SelectedGpu(const PresetSources& sources) const;
+    int CurrentPreset(const PresetSources& sources) const;
+    void ApplyPreset(const PresetSources& sources, int selection);
+    void WatchPreset(const PresetSources& sources, QObject* context,
+                     const std::function<void()>& sync);
     void RebuildGameFolders();
+    QString GameFolderSummary() const;
+    void AddGameFolder();
+    void OpenGetStarted(int controls, const QList<Spotlight::PresetCard*>& presets);
 
     std::unique_ptr<Ui::ConfigureDialog> ui;
     HotkeyRegistry& registry;
 
     Core::System& system;
+    const std::vector<VkDeviceInfo::Record>& devices;
+    InputCommon::InputSubsystem* input_subsystem;
+    int mapping_page = -1;
+    bool input_initialized = false;
+    QList<int> vibration_strength;
     std::unique_ptr<ConfigurationShared::Builder> builder;
 
     std::unique_ptr<ConfigureApplets> applets_tab;

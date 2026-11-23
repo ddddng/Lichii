@@ -354,6 +354,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         const auto& nup = static_cast<const Loader::AppLoader_NUP&>(*loader);
         if (const auto version = nup.ReadContainerUpdateVersion()) {
             auto* const name = new QStandardItem(tr("Update (NUP)"));
+            name->setData(static_cast<int>(FileSys::PatchType::Update), PATCH_TYPE);
             name->setToolTip(tr("This update is part of the NUP and cannot be disabled here."));
             item_model->appendRow({name, new QStandardItem(QString::fromStdString(*version))});
         }
@@ -365,6 +366,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         auto* const first_item = new QStandardItem;
         first_item->setText(name);
         first_item->setCheckable(true);
+        first_item->setData(static_cast<int>(patch.type), PATCH_TYPE);
         if (!patch.description.empty()) {
             first_item->setToolTip(QString::fromStdString(patch.description));
         }

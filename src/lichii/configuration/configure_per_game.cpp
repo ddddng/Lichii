@@ -25,20 +25,27 @@
 #include <QAbstractButton>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QDesktopServices>
+#include <QDir>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QGraphicsScene>
+#include <QHBoxLayout>
+#include <QHash>
 #include <QIcon>
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSignalBlocker>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QString>
 #include <QTimer>
@@ -47,6 +54,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include "common/fs/fs_util.h"
+#include "common/fs/path_util.h"
 #include "common/settings_enums.h"
 #include "common/settings_input.h"
 #include "common/string_util.h"
@@ -82,6 +90,7 @@
 #include "lichii/spotlight/widgets.h"
 #include "lichii/configuration/iidb_key_dialog.h"
 #include "lichii/game/artwork_image.h"
+#include "lichii/mod_store/mod_store_install.h"
 #include "lichii/util/util.h"
 
 namespace {
@@ -453,7 +462,7 @@ void ConfigurePerGame::BuildSettings() {
         settings_page->AddCategory(tr("Controls"), tr("Choose input profiles for this game"),
                                    QStringLiteral("game-controller"), Tints::Blue());
     const int mods = settings_page->AddCategory(tr("Mods and cheats"),
-                                                tr("Manage the installed add-ons for this game"),
+                                                tr("Turn mods on or off for this game. Changes apply on the next launch."),
                                                 QStringLiteral("puzzle-piece"), Tints::Lavender());
     const int updates = settings_page->AddCategory(
         tr("Updates and DLC"), tr("Find the installed version and manage downloadable content"),
@@ -505,7 +514,7 @@ void ConfigurePerGame::BuildSettings() {
         reject();
     });
     banner_layout->addWidget(reset, 0, Qt::AlignVCenter);
-    settings_page->SetBanner(banner);
+    settings_page->SetBanner(banner, {overview, graphics, frame_rate});
     connect(ui->display_name, &QLineEdit::textChanged, this, [this] { UpdateSpotlightIdentity(); });
 
     const auto add_setting = [this](QVBoxLayout* section, const Settings::BasicSetting& setting,
@@ -560,12 +569,15 @@ void ConfigurePerGame::BuildSettings() {
         auto* manage_mods = SettingsPage::Manage(tr("Manage"));
         connect(manage_mods, &QAbstractButton::clicked, this,
                 [this, mods] { settings_page->SetCategory(mods); });
-        SettingsPage::AddRow(content, tr("Mods and cheats"), tr("Manage installed mods and cheats"),
-                             QStringLiteral("puzzle-piece"), Tints::Blue(), manage_mods);
+        mods_summaries.append(SettingsPage::AddRow(content, tr("Mods and cheats"),
+                                                   tr("Manage installed mods and cheats"),
+                                                   QStringLiteral("puzzle-piece"), Tints::Blue(),
+                                                   manage_mods));
         add_updates_row(content, tr("Review installed updates and DLC"));
     }
-    update_summary =
-        add_updates_row(settings_page->AddSection(updates), tr("Review installed content"));
+    update_summary = SettingsPage::AddRow(settings_page->AddSection(updates), tr("Game version"),
+                                          tr("Review installed content"),
+                                          QStringLiteral("info"), Tints::Lavender(), nullptr);
 
     auto* save = SettingsPage::Manage(tr("Open folder"));
     save->setEnabled(title_id != 0);
@@ -574,7 +586,7 @@ void ConfigurePerGame::BuildSettings() {
                          tr("Open this game's saves in the file manager"),
                          QStringLiteral("folder-open"), Tints::Green(), save);
 
-    settings_page->AddPage(mods, addons_tab.get(), tr("Add-ons"), false);
+    BuildAddons(mods, updates);
     settings_page->AddPage(controls, input_tab.get(), tr("Input profiles"), false);
     settings_page->AddPage(overview, ui->gameInfo, tr("Game information and artwork"));
     for (const auto& [category, widget, name] :
@@ -621,6 +633,183 @@ void ConfigurePerGame::BuildSettings() {
     }
     update_count();
     settings_page->SetCategory(graphics);
+}
+
+void ConfigurePerGame::BuildAddons(int mods, int updates) {
+    using Spotlight::SettingsPage;
+    addons_tab->hide();
+    store_rows = settings_page->AddSection(mods, tr("From the Mod Store"));
+    own_rows = settings_page->AddSection(mods, tr("Your own files"));
+
+    auto* actions = new QWidget;
+    actions->setProperty("spotlightTransparent", true);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 4, 0, 0);
+    actions_layout->setSpacing(14);
+    auto* browse =
+        new Spotlight::PillButton(tr("Browse the Mod Store"), QStringLiteral("storefront"),
+                                  Spotlight::PillButton::Kind::Accent, 38);
+    connect(browse, &QAbstractButton::clicked, this, &ConfigurePerGame::BrowseModsRequested);
+    actions_layout->addWidget(browse);
+    actions_layout->addWidget(
+        SettingsPage::Text(tr("Installed mods are available offline."), 13, 500, true));
+    actions_layout->addStretch();
+    auto* add_folder = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("folder-open"));
+    connect(add_folder, &QAbstractButton::clicked, addons_tab.get(),
+            &ConfigurePerGameAddons::InstallModFolder);
+    actions_layout->addWidget(add_folder);
+    auto* add_zip = new Spotlight::PillButton(tr("Add ZIP"), QStringLiteral("archive"));
+    connect(add_zip, &QAbstractButton::clicked, addons_tab.get(),
+            &ConfigurePerGameAddons::InstallModZip);
+    actions_layout->addWidget(add_zip);
+    settings_page->AddBlock(mods, actions, tr("Browse the Mod Store"));
+
+    content_rows = settings_page->AddSection(updates, tr("Installed"));
+
+    const auto queue = [this] {
+        if (std::exchange(addons_queued, true)) {
+            return;
+        }
+        QTimer::singleShot(0, this, [this] {
+            addons_queued = false;
+            RebuildAddons();
+        });
+    };
+    auto* model = addons_tab->Model();
+    connect(model, &QAbstractItemModel::rowsInserted, this, queue);
+    connect(model, &QAbstractItemModel::rowsRemoved, this, queue);
+    connect(model, &QAbstractItemModel::modelReset, this, queue);
+    connect(model, &QStandardItemModel::itemChanged, this, &ConfigurePerGame::UpdateModsSummary);
+    RebuildAddons();
+}
+
+void ConfigurePerGame::RebuildAddons() {
+    using Spotlight::SettingsPage;
+    namespace Tints = Spotlight::SettingsColor;
+    for (auto* rows : {store_rows, own_rows, content_rows}) {
+        while (auto* item = rows->takeAt(0)) {
+            item->widget()->hide();
+            item->widget()->deleteLater();
+            delete item;
+        }
+    }
+
+    QHash<QString, ModStore::InstalledMod> store;
+    const QString load_dir = QDir(QString::fromStdString(Common::FS::GetEdenPathString(
+                                      Common::FS::EdenPath::LoadDir)))
+                                 .absolutePath();
+    for (auto& mod : ModStore::ReadInstalledMods(
+             load_dir, QString::fromStdString(fmt::format("{:016X}", title_id)))) {
+        store.insert(mod.id, std::move(mod));
+    }
+
+    auto* model = addons_tab->Model();
+    int store_count = 0;
+    int own_count = 0;
+    for (int row = 0; row < model->rowCount(); ++row) {
+        QStandardItem* const item = model->item(row, 0);
+        const QString version = model->item(row, 1) ? model->item(row, 1)->text() : QString{};
+        const QString location =
+            item->data(ConfigurePerGameAddons::PATCH_LOCATION).toString();
+        const bool is_mod = item->data(ConfigurePerGameAddons::PATCH_TYPE).toInt() ==
+                            static_cast<int>(FileSys::PatchType::Mod);
+
+        auto* control = new QWidget;
+        control->setProperty("spotlightTransparent", true);
+        auto* control_layout = new QHBoxLayout(control);
+        control_layout->setContentsMargins(0, 0, 0, 0);
+        control_layout->setSpacing(10);
+        if (item->isCheckable()) {
+            auto* toggle = new Spotlight::ToggleSwitch;
+            toggle->setChecked(item->checkState() == Qt::Checked);
+            toggle->setAccessibleName(item->text());
+            connect(toggle, &QAbstractButton::toggled, this, [item](bool on) {
+                item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+            });
+            connect(model, &QStandardItemModel::itemChanged, toggle,
+                    [item, toggle](QStandardItem* changed) {
+                        if (changed == item) {
+                            const QSignalBlocker blocker(toggle);
+                            toggle->setChecked(item->checkState() == Qt::Checked);
+                        }
+                    });
+            control_layout->addWidget(toggle);
+        }
+        if (!location.isEmpty()) {
+            auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
+            more->setAccessibleName(tr("More for %1").arg(item->text()));
+            auto* menu = new QMenu(more);
+            menu->addAction(tr("Open folder"), this, [location] {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(location));
+            });
+            menu->addAction(tr("Remove"), this, [this, item] {
+                addons_tab->AddonDeleteRequested({item->index()});
+            });
+            connect(more, &QAbstractButton::clicked, menu,
+                    [menu, more] { menu->popup(more->mapToGlobal(QPoint(0, more->height()))); });
+            control_layout->addWidget(more);
+        }
+
+        if (!is_mod) {
+            const QString detail = version.isEmpty() ? item->toolTip() : tr("Version %1").arg(version);
+            SettingsPage::AddRow(content_rows, item->text(), detail,
+                                 QStringLiteral("download-simple"), Tints::Lavender(), control,
+                                 item->toolTip());
+            continue;
+        }
+        if (const auto found = store.constFind(item->text()); found != store.cend()) {
+            ++store_count;
+            SettingsPage::AddRow(store_rows, found->name,
+                                 tr("Version %1 · Mod Store").arg(found->version),
+                                 QStringLiteral("storefront"), Tints::Blue(), control);
+            continue;
+        }
+        ++own_count;
+        const bool cheats = version.contains(QStringLiteral("Cheats"), Qt::CaseInsensitive);
+        const QString path = location.isEmpty() ? QString{} : QDir(load_dir).relativeFilePath(location);
+        const QString detail = version.isEmpty() || path.isEmpty()
+                                   ? version + path
+                                   : tr("%1 · %2").arg(version, path);
+        SettingsPage::AddRow(own_rows, item->text(), detail,
+                             cheats ? QStringLiteral("key") : QStringLiteral("folder"),
+                             cheats ? Tints::Gold() : Tints::Green(), control, item->toolTip());
+    }
+
+    const auto section_label = [](QVBoxLayout* rows) {
+        return static_cast<QLabel*>(rows->parentWidget()->parentWidget()->layout()->itemAt(0)->widget());
+    };
+    section_label(store_rows)->setText(tr("From the Mod Store · %1").arg(store_count));
+    store_rows->parentWidget()->parentWidget()->setVisible(store_count > 0);
+    section_label(own_rows)->setText(tr("Your own files · %1").arg(own_count));
+    if (own_count == 0) {
+        SettingsPage::AddRow(own_rows, tr("No mods yet"),
+                             tr("Add a folder or ZIP, or browse the Mod Store"),
+                             QStringLiteral("puzzle-piece"), Tints::Blue(), nullptr);
+    }
+    if (content_rows->isEmpty()) {
+        SettingsPage::AddRow(content_rows, tr("No updates or DLC"),
+                             tr("Install them from the game's menu in the library"),
+                             QStringLiteral("download-simple"), Tints::Lavender(), nullptr);
+    }
+    UpdateModsSummary();
+}
+
+void ConfigurePerGame::UpdateModsSummary() {
+    auto* model = addons_tab->Model();
+    int mod_count = 0;
+    int enabled_count = 0;
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QStandardItem* item = model->item(row, 0);
+        if (item->data(ConfigurePerGameAddons::PATCH_TYPE).toInt() ==
+            static_cast<int>(FileSys::PatchType::Mod)) {
+            ++mod_count;
+            enabled_count += item->checkState() == Qt::Checked;
+        }
+    }
+    for (auto* summary : mods_summaries) {
+        summary->setText(mod_count == 0 ? tr("No mods installed")
+                                        : tr("%1 of %2 on").arg(enabled_count).arg(mod_count));
+    }
 }
 
 void ConfigurePerGame::UpdateSpotlightIdentity() {

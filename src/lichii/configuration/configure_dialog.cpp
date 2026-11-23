@@ -18,7 +18,6 @@
 #include <QLabel>
 #include <QLocale>
 #include <QMenu>
-#include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -52,11 +51,13 @@
 #include "lichii/configuration/configure_web.h"
 #include "lichii/configuration/shared_widget.h"
 #include "lichii/hotkeys.h"
+#include "lichii/spotlight/settings_get_started.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 
 namespace {
+using Spotlight::PresetCard;
 using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
@@ -79,84 +80,41 @@ int SuggestedTier(const VkDeviceInfo::Record* device) {
     return mid.match(name).hasMatch() ? 1 : 0;
 }
 
+QString MappingStyle() {
+    return QStringLiteral(
+        "QTabWidget#spotlightMapping::pane { border: none; background: transparent; }"
+        "QTabWidget#spotlightMapping > QStackedWidget > QWidget { background: transparent; }"
+        "QTabWidget#spotlightMapping QGroupBox { background: rgba(255,255,255,13);"
+        " border: 1px solid rgba(255,255,255,20); border-radius: 14px; margin-top: 22px;"
+        " padding: 8px 4px 4px 4px; font-size: 12px; font-weight: 600; }"
+        "QTabWidget#spotlightMapping QGroupBox::title { subcontrol-origin: margin; left: 8px;"
+        " top: 2px; color: rgba(255,255,255,158); background: transparent; }"
+        "QTabWidget#spotlightMapping QGroupBox QGroupBox { background: transparent; border: none;"
+        " margin-top: 16px; padding: 2px; }"
+        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,20); color: #ffffff;"
+        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; padding: 0 6px;"
+        " font-size: 12px; font-weight: 600; }"
+        "QTabWidget#spotlightMapping QPushButton:hover { background: rgba(255,255,255,46); }"
+        "QTabWidget#spotlightMapping QPushButton:focus { border-color: #ff6b95; }"
+        "QTabWidget#spotlightMapping QComboBox { background: rgba(255,255,255,20); color: #ffffff;"
+        " border: 1px solid transparent; border-radius: 12px; min-height: 30px;"
+        " padding: 0 12px; font-size: 13px; font-weight: 600; }"
+        "QTabWidget#spotlightMapping QLabel { color: rgba(255,255,255,158);"
+        " background: transparent; }");
+}
+
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
 
-class PresetCard final : public QAbstractButton {
-public:
-    PresetCard(const QString& title, QString description_) : description{std::move(description_)} {
-        setText(title);
-        setCheckable(true);
-        setProperty("spotlightTransparent", true);
-        setAttribute(Qt::WA_Hover);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(98);
-    }
-
-    void SetSuggestion(QString device, QString tier) {
-        suggestion = std::move(device);
-        suggested_tier = std::move(tier);
-        setToolTip(suggestion + suggested_tier);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const bool active = isChecked();
-        painter.setBrush(active         ? Color::Accent()
-                         : underMouse() ? Color::Fill()
-                                        : Color::FillFaint());
-        painter.setPen(hasFocus() ? Color::Text()
-                       : active   ? Color::Accent()
-                                  : Color::StrokeSubtle());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
-
-        const QColor ink = !isEnabled() ? Color::TextFaint()
-                           : active     ? Color::OnAccent()
-                                        : Color::Text();
-        painter.setPen(ink);
-        painter.setFont(Spotlight::Font(15, 600));
-        painter.drawText(QRect(14, 13, width() - 28, 21), Qt::AlignVCenter | Qt::AlignLeft,
-                         painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 28));
-        if (active) {
-            painter.drawPixmap(
-                width() - 28, 15,
-                Spotlight::IconPixmap(QStringLiteral("check"), 16, ink, devicePixelRatioF()));
-        }
-        painter.setFont(Spotlight::Font(12));
-        painter.setPen(active ? ink : Color::TextSecondary());
-        painter.drawText(QRect(14, 36, width() - 28, 34), Qt::TextWordWrap | Qt::AlignLeft,
-                         description);
-        if (!suggestion.isEmpty()) {
-            painter.setPen(active ? ink : Color::AccentLight());
-            painter.setFont(Spotlight::Font(12, 600));
-            const int remaining =
-                width() - 28 - painter.fontMetrics().horizontalAdvance(suggested_tier);
-            painter.drawText(
-                QRect(14, 69, width() - 28, 16), Qt::AlignVCenter | Qt::AlignLeft,
-                painter.fontMetrics().elidedText(suggestion, Qt::ElideRight, remaining) +
-                    suggested_tier);
-        }
-    }
-
-private:
-    QString description;
-    QString suggestion;
-    QString suggested_tier;
-};
 } // namespace
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
-                                 InputCommon::InputSubsystem* input_subsystem,
+                                 InputCommon::InputSubsystem* input_subsystem_,
                                  std::vector<VkDeviceInfo::Record>& vk_device_records,
                                  Core::System& system_, bool enable_web_config)
     : QDialog(parent), ui{std::make_unique<Ui::ConfigureDialog>()}, registry(registry_),
-      system{system_},
+      system{system_}, devices{vk_device_records}, input_subsystem{input_subsystem_},
       builder{std::make_unique<ConfigurationShared::Builder>(this, !system_.IsPoweredOn())},
       applets_tab{std::make_unique<ConfigureApplets>(system_, nullptr, *builder, this)},
       audio_tab{std::make_unique<ConfigureAudio>(system_, nullptr, *builder, this)},
@@ -188,7 +146,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);
-    input_tab->Initialize(input_subsystem);
+    game_dirs = UISettings::values.game_dirs;
     general_tab->SetResetCallback([this] { close(); });
     connect(ui_tab.get(), &ConfigureUi::LanguageChanged, this, &ConfigureDialog::OnLanguageChanged);
     connect(general_tab.get(), &ConfigureGeneral::ExternalContentDirsChanged, this,
@@ -199,7 +157,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
         connect(apply, &QPushButton::clicked, this, &ConfigureDialog::HandleApplyButtonClicked);
     }
     ui->label->setVisible(system.IsPoweredOn());
-    BuildSettings(vk_device_records);
+    BuildSettings();
     ui->buttonBox->setFocus();
     ConfigurationShared::FitToScreen(this, QSize(1280, 800));
 }
@@ -212,7 +170,13 @@ void ConfigureDialog::ApplyConfiguration() {
     system_tab->ApplyConfiguration();
     profile_tab->ApplyConfiguration();
     filesystem_tab->ApplyConfiguration();
-    input_tab->ApplyConfiguration();
+    if (input_initialized) {
+        input_tab->ApplyConfiguration();
+        auto& players = Settings::values.players.GetValue();
+        for (int i = 0; i < vibration_strength.size(); ++i) {
+            players[i].vibration_strength = vibration_strength[i];
+        }
+    }
     hotkeys_tab->ApplyConfiguration(registry);
     cpu_tab->ApplyConfiguration();
     graphics_tab->ApplyConfiguration();
@@ -241,7 +205,9 @@ void ConfigureDialog::ApplyConfiguration() {
 }
 
 void ConfigureDialog::RestoreInputConfiguration() {
-    input_tab->RestoreConfiguration();
+    if (input_initialized) {
+        input_tab->RestoreConfiguration();
+    }
 }
 
 void ConfigureDialog::changeEvent(QEvent* event) {
@@ -264,7 +230,7 @@ void ConfigureDialog::OnLanguageChanged(const QString& locale) {
     accept();
 }
 
-void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& devices) {
+void ConfigureDialog::BuildSettings() {
     settings_page = new SettingsPage(this, false);
     ui->verticalLayout->setContentsMargins(0, 0, 0, 0);
     ui->verticalLayout->setSpacing(0);
@@ -279,7 +245,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
         tr("Library"), tr("Choose where Lichii looks for games and what the library shows"),
         QStringLiteral("folder"), Tints::Green());
     const int graphics = settings_page->AddCategory(
-        tr("Graphics"), tr("Set a preset or choose individual picture settings"),
+        tr("Graphics"), tr("Preset first; everything else follows it unless you change it"),
         QStringLiteral("monitor"), Tints::Gold());
     const int audio = settings_page->AddCategory(
         tr("Audio"), tr("Choose where game audio plays and how loud it is"),
@@ -297,8 +263,196 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
         settings_page->AddCategory(tr("Shortcuts"), tr("Edit keyboard and controller shortcuts"),
                                    QStringLiteral("keyboard"), Tints::Gold());
 
-    auto* preset_group = new QWidget;
-    settings_page->AddBlock(general, preset_group, tr("Performance preset"));
+    settings_page->SetBuilder(general, [this, general, library, controls] {
+        BuildGeneral(general, library, controls);
+    });
+    settings_page->SetBuilder(library, [this, library] { BuildLibrary(library); });
+    settings_page->SetBuilder(graphics, [this, graphics] { BuildGraphics(graphics); });
+    settings_page->SetBuilder(audio, [this, audio] {
+        auto* output = settings_page->AddSection(audio, tr("Output"));
+        AddSettingRow(output, audio_tab.get(), Settings::values.volume, tr("Volume"),
+                      tr("Game audio level"), QStringLiteral("speaker-high"), Tints::Blue());
+        AddSettingRow(output, audio_tab.get(), Settings::values.sink_id, tr("Audio engine"),
+                      tr("Backend for game audio"), QStringLiteral("sliders-horizontal"),
+                      Tints::Lavender());
+        AddSettingRow(output, audio_tab.get(), Settings::values.audio_output_device_id,
+                      tr("Output device"), tr("Speaker or headphone destination"),
+                      QStringLiteral("speaker-high"), Tints::Gold());
+    });
+    settings_page->SetBuilder(controls,
+                              [this, controls, shortcuts] { BuildControls(controls, shortcuts); });
+    settings_page->SetBuilder(system_page, [this, system_page] {
+        auto* console = settings_page->AddSection(system_page, tr("Console"));
+        AddSettingRow(console, system_tab.get(), Settings::values.language_index,
+                      tr("System language"), tr("Language reported to games"),
+                      QStringLiteral("translate"), Tints::Blue());
+        AddSettingRow(console, system_tab.get(), Settings::values.region_index, tr("Region"),
+                      tr("Region reported to games"), QStringLiteral("globe"), Color::Accent());
+        auto* profile = SettingsPage::Manage(tr("Manage"));
+        connect(profile, &QAbstractButton::clicked, settings_page, [this, system_page] {
+            settings_page->ShowAdvancedPage(system_page, profile_tab.get());
+        });
+        SettingsPage::AddRow(console, tr("Profiles"), tr("Manage local console profiles"),
+                             QStringLiteral("user"), Tints::Lavender(), profile);
+    });
+    settings_page->SetBuilder(multiplayer, [this, multiplayer] {
+        auto* networking = settings_page->AddSection(multiplayer, tr("Local network"));
+        SettingsPage::AddRow(networking, tr("Network interface"),
+                             tr("Connection to use for multiplayer"), QStringLiteral("wifi-high"),
+                             Tints::Blue(),
+                             SettingsPage::BindCombo(network_tab->findChild<QComboBox*>(
+                                 QStringLiteral("network_interface"))));
+        SettingsPage::AddRow(networking, tr("LAN play"), tr("Enable local network play"),
+                             QStringLiteral("users"), Tints::Green(),
+                             SettingsPage::BindToggle(
+                                 network_tab->findChild<QCheckBox*>(QStringLiteral("lan_play"))));
+    });
+
+    for (const auto& [category, widget, name] :
+         std::initializer_list<std::tuple<int, QWidget*, QString>>{
+             {general, general_tab.get(), tr("General")},
+             {general, debug_tab_tab.get(), tr("Debug")},
+             {library, ui_tab.get(), tr("Interface and game list")},
+             {graphics, graphics_tab.get(), tr("Graphics")},
+             {graphics, graphics_advanced_tab.get(), tr("Advanced graphics")},
+             {graphics, graphics_extensions_tab.get(), tr("Extras")},
+             {audio, audio_tab.get(), tr("Audio")},
+             {system_page, system_tab.get(), tr("System")},
+             {system_page, profile_tab.get(), tr("Profiles")},
+             {system_page, cpu_tab.get(), tr("CPU")},
+             {system_page, filesystem_tab.get(), tr("Filesystem")},
+             {system_page, applets_tab.get(), tr("Applets")},
+             {multiplayer, network_tab.get(), tr("Network")},
+             {multiplayer, web_tab.get(), tr("Web")},
+         }) {
+        settings_page->AddPage(category, widget, name);
+    }
+    settings_page->AddPage(shortcuts, hotkeys_tab.get(), tr("Hotkeys"), false);
+    input_tab->hide();
+    settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::AddSettingRow(QVBoxLayout* group, QWidget* page,
+                                    const Settings::BasicSetting& setting, const QString& title,
+                                    const QString& detail, const QString& icon,
+                                    const QColor& color) {
+    if (auto* source = SettingsPage::Editor(page, setting)) {
+        if (auto* control = SettingsPage::BindSetting(source)) {
+            SettingsPage::AddRow(group, title, detail, icon, color, control);
+        }
+    }
+}
+
+ConfigureDialog::PresetSources ConfigureDialog::FindPresetSources() const {
+    const auto& values = Settings::values;
+    auto* gfx = graphics_tab.get();
+    auto* resolution = SettingsPage::Editor(gfx, values.resolution_setup);
+    auto* filter = SettingsPage::Editor(gfx, values.scaling_filter);
+    auto* aa = SettingsPage::Editor(gfx, values.anti_aliasing);
+    auto* frame_gen = SettingsPage::Editor(gfx, values.frame_gen);
+    auto* device = SettingsPage::Editor(gfx, values.vulkan_device);
+    if (!resolution || !filter || !aa || !frame_gen) {
+        return {};
+    }
+    return {resolution->combobox, filter->combobox, aa->combobox, frame_gen->checkbox,
+            device ? device->combobox : nullptr};
+}
+
+bool ConfigureDialog::PresetSources::CanApply() const {
+    return resolution->isEnabled() && filter->isEnabled() && aa->isEnabled() &&
+           frame_generation->isEnabled();
+}
+
+const VkDeviceInfo::Record* ConfigureDialog::SelectedGpu(const PresetSources& sources) const {
+    const int index = sources.device ? sources.device->currentIndex() : -1;
+    return index >= 0 && std::cmp_less(index, devices.size()) ? &devices[index] : nullptr;
+}
+
+int ConfigureDialog::CurrentPreset(const PresetSources& sources) const {
+    const int selected = Spotlight::PerformancePresetIndex({
+        static_cast<Settings::ResolutionSetup>(sources.resolution->currentData().toUInt()),
+        static_cast<Settings::ScalingFilter>(sources.filter->currentData().toUInt()),
+        static_cast<Settings::AntiAliasing>(sources.aa->currentData().toUInt()),
+        sources.frame_generation->isChecked(),
+    });
+    if (selected == -1) {
+        return -1;
+    }
+    return selected == SuggestedTier(SelectedGpu(sources)) ? 0 : selected + 1;
+}
+
+void ConfigureDialog::ApplyPreset(const PresetSources& sources, int selection) {
+    const auto& preset =
+        Spotlight::PerformancePresets[selection == 0 ? SuggestedTier(SelectedGpu(sources))
+                                                     : selection - 1];
+    SettingsPage::SetComboIndex(sources.resolution,
+                                sources.resolution->findData(static_cast<u32>(preset.resolution)));
+    SettingsPage::SetComboIndex(sources.filter,
+                                sources.filter->findData(static_cast<u32>(preset.filter)));
+    SettingsPage::SetComboIndex(sources.aa,
+                                sources.aa->findData(static_cast<u32>(preset.anti_aliasing)));
+    if (sources.frame_generation->isChecked() != preset.frame_generation) {
+        sources.frame_generation->click();
+    }
+}
+
+void ConfigureDialog::WatchPreset(const PresetSources& sources, QObject* context,
+                                  const std::function<void()>& sync) {
+    for (auto* combo : {sources.resolution, sources.filter, sources.aa}) {
+        connect(combo, &QComboBox::currentIndexChanged, context, sync);
+    }
+    connect(sources.frame_generation, &QCheckBox::toggled, context, sync);
+    if (sources.device != nullptr) {
+        connect(sources.device, &QComboBox::currentIndexChanged, context, sync);
+    }
+    sync();
+}
+
+void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
+    const auto sources = FindPresetSources();
+    QList<PresetCard*> presets;
+    if (sources.resolution != nullptr) {
+        auto* preset_group = new QWidget;
+        auto* presets_layout = new QVBoxLayout(preset_group);
+        presets_layout->setContentsMargins(0, 0, 0, 0);
+        presets_layout->setSpacing(2);
+        auto* presets_label = SettingsPage::Text(
+            tr("Preset · changes inherited settings only; game overrides stay"), 13, 600, true);
+        presets_label->setContentsMargins(6, 4, 6, 6);
+        presets_layout->addWidget(presets_label);
+        auto* cards_layout = new QHBoxLayout;
+        cards_layout->setContentsMargins(0, 0, 0, 0);
+        cards_layout->setSpacing(10);
+        const std::array cards{
+            new PresetCard(tr("Auto"), tr("Picks for your GPU")),
+            new PresetCard(Spotlight::PerformancePresetName(0), tr("Older or integrated GPUs")),
+            new PresetCard(Spotlight::PerformancePresetName(1), tr("Most gaming laptops")),
+            new PresetCard(Spotlight::PerformancePresetName(2), tr("Desktop GPUs")),
+        };
+        for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
+            cards_layout->addWidget(cards[i], 1);
+            connect(cards[i], &QAbstractButton::clicked, this, [this, sources, cards, i] {
+                ApplyPreset(sources, i);
+                cards[i]->setChecked(CurrentPreset(sources) == i);
+            });
+        }
+        presets_layout->addLayout(cards_layout);
+        presets = {cards.cbegin(), cards.cend()};
+        settings_page->AddBlock(general, preset_group, tr("Performance preset"));
+        WatchPreset(sources, preset_group, [this, sources, cards] {
+            const auto* gpu = SelectedGpu(sources);
+            cards[0]->SetSuggestion(
+                gpu ? QString::fromStdString(gpu->name) : tr("No GPU identified"),
+                tr(" → %1").arg(Spotlight::PerformancePresetName(SuggestedTier(gpu))));
+            const int selected = CurrentPreset(sources);
+            const bool enabled = sources.CanApply();
+            for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
+                cards[i]->setChecked(i == selected);
+                cards[i]->setEnabled(enabled);
+            }
+        });
+    }
+
     auto* view = ui_tab.get();
     auto* options = settings_page->AddSection(general);
     auto* language = view->findChild<QComboBox*>(QStringLiteral("language_combobox"));
@@ -327,7 +481,7 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
     const int light_index = theme->findData(QStringLiteral("default"));
     const QStringList looks{tr("Dark"), tr("Light")};
     auto* look =
-        new Spotlight::SegmentedControl(looks, Spotlight::SegmentedControl::Kind::Accent, 36);
+        new Spotlight::SegmentedControl(looks, Spotlight::SegmentedControl::Kind::Accent, 38);
     const auto sync_theme = [look, theme, dark_index, light_index, looks] {
         const QSignalBlocker blocker(look);
         const int selected = theme->currentIndex() == dark_index    ? 0
@@ -352,176 +506,26 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
     auto* manage_folders = SettingsPage::Manage(tr("Manage"));
     connect(manage_folders, &QAbstractButton::clicked, settings_page,
             [this, library] { settings_page->SetCategory(library); });
-    folder_summary = SettingsPage::AddRow(options, tr("Game folders"), tr("No folders added"),
+    folder_summary = SettingsPage::AddRow(options, tr("Game folders"), GameFolderSummary(),
                                           QStringLiteral("folder"), Tints::Green(), manage_folders);
 #ifdef ENABLE_UPDATE_CHECKER
     check_updates = new Spotlight::ToggleSwitch;
     check_updates->setChecked(UISettings::values.check_for_updates.GetValue());
     SettingsPage::AddRow(options, tr("Updates"), tr("Check for new Lichii builds at start"),
-                         QStringLiteral("arrow-circle-up"), Tints::Gold(), check_updates);
+                         QStringLiteral("cloud-arrow-down"), Tints::Blue(), check_updates);
 #endif
+    auto* get_started = SettingsPage::Manage();
+    connect(get_started, &QAbstractButton::clicked, this,
+            [this, controls, presets] { OpenGetStarted(controls, presets); });
+    SettingsPage::AddRow(options, tr("Get Started"),
+                         tr("Run the setup again: keys, firmware, folders, controller, preset"),
+                         QStringLiteral("sparkle"), Tints::Lavender(), get_started);
+}
 
-    auto* quick = settings_page->AddSection(graphics, tr("Quick"));
-    auto* picture = settings_page->AddSection(graphics, tr("Picture"));
-    auto& values = Settings::values;
-    auto* gfx = graphics_tab.get();
-    auto* resolution = SettingsPage::Editor(gfx, values.resolution_setup);
-    auto* filter = SettingsPage::Editor(gfx, values.scaling_filter);
-    auto* aa = SettingsPage::Editor(gfx, values.anti_aliasing);
-    auto* frame_gen = SettingsPage::Editor(gfx, values.frame_gen);
-    auto* preset_cards = new QWidget;
-    preset_cards->setProperty("spotlightTransparent", true);
-    auto* cards_layout = new QHBoxLayout(preset_cards);
-    cards_layout->setContentsMargins(0, 0, 0, 0);
-    cards_layout->setSpacing(10);
-    const QStringList preset_names{Spotlight::PerformancePresetName(0),
-                                   Spotlight::PerformancePresetName(1),
-                                   Spotlight::PerformancePresetName(2)};
-    const std::array cards{
-        new PresetCard(tr("Auto"), tr("Picks for your GPU")),
-        new PresetCard(preset_names[0], tr("Older or integrated GPUs")),
-        new PresetCard(preset_names[1], tr("Most gaming laptops")),
-        new PresetCard(preset_names[2], tr("Desktop GPUs")),
-    };
-    for (auto* card : cards) {
-        cards_layout->addWidget(card, 1);
-    }
-    auto* presets_layout = new QVBoxLayout(preset_group);
-    presets_layout->setContentsMargins(0, 0, 0, 0);
-    presets_layout->setSpacing(6);
-    auto* presets_label = SettingsPage::Text(
-        tr("Preset · changes inherited settings only; game overrides stay"), 13, 600, true);
-    presets_label->setContentsMargins(6, 3, 6, 0);
-    presets_layout->addWidget(presets_label);
-    presets_layout->addWidget(preset_cards);
-
-    const QStringList preset_choices{tr("Auto"), tr("Low"), tr("Mid"), tr("High")};
-    auto* presets_control = new Spotlight::SegmentedControl(
-        preset_choices, Spotlight::SegmentedControl::Kind::Accent, 36);
-    auto* preset_summary =
-        SettingsPage::AddRow(quick, tr("Preset"), tr("Custom graphics settings"),
-                             QStringLiteral("lightning"), Color::Accent(), presets_control);
-    if (resolution && filter && aa && frame_gen) {
-        auto* device_editor = SettingsPage::Editor(gfx, values.vulkan_device);
-        auto* device_combo = device_editor ? device_editor->combobox : nullptr;
-        const auto selected_gpu = [device_combo, &devices]() -> const VkDeviceInfo::Record* {
-            const int index = device_combo ? device_combo->currentIndex() : -1;
-            return index >= 0 && std::cmp_less(index, devices.size()) ? &devices[index] : nullptr;
-        };
-        const auto sync_gpu = [cards, selected_gpu] {
-            const auto* gpu = selected_gpu();
-            cards[0]->SetSuggestion(
-                gpu ? QString::fromStdString(gpu->name) : tr("No GPU identified"),
-                tr(" → %1").arg(Spotlight::PerformancePresetName(SuggestedTier(gpu))));
-        };
-        sync_gpu();
-        if (device_combo != nullptr) {
-            connect(device_combo, &QComboBox::currentIndexChanged, this, sync_gpu);
-        }
-
-        auto* res_combo = resolution->combobox;
-        auto* filter_combo = filter->combobox;
-        auto* aa_combo = aa->combobox;
-        auto* frame_check = frame_gen->checkbox;
-        const bool can_apply = res_combo->isEnabled() && filter_combo->isEnabled() &&
-                               aa_combo->isEnabled() && frame_check->isEnabled();
-        for (auto* card : cards) {
-            card->setEnabled(can_apply);
-        }
-        presets_control->setEnabled(can_apply);
-        const auto sync_preset = [=] {
-            const int selected = Spotlight::PerformancePresetIndex({
-                static_cast<Settings::ResolutionSetup>(res_combo->currentData().toUInt()),
-                static_cast<Settings::ScalingFilter>(filter_combo->currentData().toUInt()),
-                static_cast<Settings::AntiAliasing>(aa_combo->currentData().toUInt()),
-                frame_check->isChecked(),
-            });
-            for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
-                cards[i]->setChecked(selected >= 0 && i == selected + 1);
-            }
-            const QSignalBlocker blocker(presets_control);
-            QStringList choices = preset_choices;
-            if (selected == -1) {
-                choices.append(tr("Custom"));
-            }
-            presets_control->SetOptions(choices);
-            presets_control->SetOptionEnabled(4, false);
-            presets_control->SetCurrentIndex(selected == -1 ? 4 : selected + 1);
-            preset_summary->setText(
-                selected == -1 ? tr("Custom graphics settings")
-                               : tr("%1: %2 resolution, %3, %4. Game overrides stay.")
-                                     .arg(preset_names[selected],
-                                          SettingsPage::ClosedSettingLabel(
-                                              res_combo, Settings::values.resolution_setup.Id(),
-                                              res_combo->currentIndex()),
-                                          SettingsPage::ClosedSettingLabel(
-                                              filter_combo, Settings::values.scaling_filter.Id(),
-                                              filter_combo->currentIndex()),
-                                          aa_combo->currentText()));
-        };
-        const auto apply_preset = [=](int selection) {
-            if (selection == 4) {
-                return;
-            }
-            const auto& preset =
-                Spotlight::PerformancePresets[selection == 0 ? SuggestedTier(selected_gpu())
-                                                             : selection - 1];
-            SettingsPage::SetComboIndex(res_combo,
-                                        res_combo->findData(static_cast<u32>(preset.resolution)));
-            SettingsPage::SetComboIndex(filter_combo,
-                                        filter_combo->findData(static_cast<u32>(preset.filter)));
-            SettingsPage::SetComboIndex(aa_combo,
-                                        aa_combo->findData(static_cast<u32>(preset.anti_aliasing)));
-            if (frame_check->isChecked() != preset.frame_generation) {
-                frame_check->click();
-            }
-            sync_preset();
-        };
-        for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
-            connect(cards[i], &QAbstractButton::clicked, this,
-                    [apply_preset, i] { apply_preset(i); });
-        }
-        connect(presets_control, &Spotlight::SegmentedControl::CurrentChanged, this, apply_preset);
-        for (auto* combo : {res_combo, filter_combo, aa_combo}) {
-            connect(combo, &QComboBox::currentIndexChanged, this, sync_preset);
-        }
-        connect(frame_check, &QCheckBox::toggled, this, sync_preset);
-        sync_preset();
-    }
-
-    const auto add_setting = [](QVBoxLayout* group, QWidget* page,
-                                const Settings::BasicSetting& setting, const QString& title,
-                                const QString& detail, const QString& icon, const QColor& color) {
-        if (auto* source = SettingsPage::Editor(page, setting)) {
-            if (auto* control = SettingsPage::BindSetting(source)) {
-                SettingsPage::AddRow(group, title, detail, icon, color, control);
-            }
-        }
-    };
-    add_setting(quick, gfx, values.fps_limit, tr("Guest FPS cap"),
-                tr("Limits how often supported games present; 0 follows the game"),
-                QStringLiteral("timer"), Tints::Green());
-    add_setting(picture, gfx, values.resolution_setup, tr("Resolution"),
-                tr("Choose the game's internal rendering scale"), QStringLiteral("monitor"),
-                Tints::Blue());
-    add_setting(picture, gfx, values.scaling_filter, tr("Scaling filter"),
-                tr("How the image fits the window"), QStringLiteral("sliders-horizontal"),
-                Tints::Lavender());
-    auto* frame_generation = SettingsPage::BindFrameGeneration(gfx);
-    if (frame_generation != nullptr) {
-        SettingsPage::AddRow(picture, tr("Frame generation"),
-                             tr("Adds displayed frames between game frames"),
-                             QStringLiteral("film-strip"), Tints::Gold(), frame_generation);
-    }
-    start_fullscreen = new Spotlight::ToggleSwitch;
-    start_fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
-    start_fullscreen->setEnabled(!system.IsPoweredOn());
-    SettingsPage::AddRow(picture, tr("Fullscreen when a game starts"), {},
-                         QStringLiteral("arrows-out"), Tints::Green(), start_fullscreen);
-
+void ConfigureDialog::BuildLibrary(int library) {
     folders_layout = settings_page->AddSection(library, tr("Game folders"));
-    game_dirs = UISettings::values.game_dirs;
     RebuildGameFolders();
+    auto* view = ui_tab.get();
     auto* display = settings_page->AddSection(library, tr("Display"));
     for (const auto& [name, label] : std::array{
              std::pair{"folder_icon_size_combobox", tr("Folder icon size")},
@@ -542,63 +546,73 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
             display, label, {}, QStringLiteral("eye"), Tints::Blue(),
             SettingsPage::BindToggle(view->findChild<QCheckBox*>(QString::fromLatin1(name))));
     }
+}
 
-    auto* output = settings_page->AddSection(audio, tr("Output"));
-    add_setting(output, audio_tab.get(), values.volume, tr("Volume"), tr("Game audio level"),
-                QStringLiteral("speaker-high"), Tints::Blue());
-    add_setting(output, audio_tab.get(), values.sink_id, tr("Audio engine"),
-                tr("Backend for game audio"), QStringLiteral("sliders-horizontal"),
-                Tints::Lavender());
-    add_setting(output, audio_tab.get(), values.audio_output_device_id, tr("Output device"),
-                tr("Speaker or headphone destination"), QStringLiteral("speaker-high"),
-                Tints::Gold());
-
-    BuildControls(controls, shortcuts);
-
-    auto* console = settings_page->AddSection(system_page, tr("Console"));
-    add_setting(console, system_tab.get(), values.language_index, tr("System language"),
-                tr("Language reported to games"), QStringLiteral("translate"), Tints::Blue());
-    add_setting(console, system_tab.get(), values.region_index, tr("Region"),
-                tr("Region reported to games"), QStringLiteral("globe"), Color::Accent());
-    auto* profile = SettingsPage::Manage(tr("Manage"));
-    connect(profile, &QAbstractButton::clicked, settings_page, [this, system_page] {
-        settings_page->ShowAdvancedPage(system_page, profile_tab.get());
-    });
-    SettingsPage::AddRow(console, tr("Profiles"), tr("Manage local console profiles"),
-                         QStringLiteral("user"), Tints::Lavender(), profile);
-
-    auto* networking = settings_page->AddSection(multiplayer, tr("Local network"));
-    SettingsPage::AddRow(networking, tr("Network interface"),
-                         tr("Connection to use for multiplayer"), QStringLiteral("wifi-high"),
-                         Tints::Blue(),
-                         SettingsPage::BindCombo(network_tab->findChild<QComboBox*>(
-                             QStringLiteral("network_interface"))));
-    SettingsPage::AddRow(
-        networking, tr("LAN play"), tr("Enable local network play"), QStringLiteral("users"),
-        Tints::Green(),
-        SettingsPage::BindToggle(network_tab->findChild<QCheckBox*>(QStringLiteral("lan_play"))));
-
-    for (const auto& [category, widget, name] :
-         std::initializer_list<std::tuple<int, QWidget*, QString>>{
-             {general, general_tab.get(), tr("General")},
-             {general, debug_tab_tab.get(), tr("Debug")},
-             {library, ui_tab.get(), tr("UI / Game List")},
-             {graphics, graphics_tab.get(), tr("Graphics")},
-             {graphics, graphics_advanced_tab.get(), tr("Advanced")},
-             {graphics, graphics_extensions_tab.get(), tr("Extras")},
-             {audio, audio_tab.get(), tr("Audio")},
-             {system_page, system_tab.get(), tr("System")},
-             {system_page, profile_tab.get(), tr("Profiles")},
-             {system_page, cpu_tab.get(), tr("CPU")},
-             {system_page, filesystem_tab.get(), tr("Filesystem")},
-             {system_page, applets_tab.get(), tr("Applets")},
-             {multiplayer, network_tab.get(), tr("Network")},
-             {multiplayer, web_tab.get(), tr("Web")},
-         }) {
-        ConfigurationShared::UseToggles(widget);
-        settings_page->AddPage(category, widget, name);
+void ConfigureDialog::BuildGraphics(int graphics) {
+    auto& values = Settings::values;
+    auto* gfx = graphics_tab.get();
+    auto* quick = settings_page->AddSection(graphics, tr("Quick"));
+    auto* picture = settings_page->AddSection(graphics, tr("Picture"));
+    const auto sources = FindPresetSources();
+    if (sources.resolution != nullptr) {
+        auto* presets_control = new Spotlight::SegmentedControl(
+            {tr("Auto"), tr("Low"), tr("Mid"), tr("High")},
+            Spotlight::SegmentedControl::Kind::Accent, 38);
+        auto* preset_summary =
+            SettingsPage::AddRow(quick, tr("Preset"), {}, QStringLiteral("sliders-horizontal"),
+                                 Color::Accent(), presets_control);
+        connect(presets_control, &Spotlight::SegmentedControl::CurrentChanged, this,
+                [this, sources](int selection) {
+                    if (selection < 4) {
+                        ApplyPreset(sources, selection);
+                    }
+                });
+        WatchPreset(sources, presets_control, [this, sources, presets_control, preset_summary] {
+            const int selected = CurrentPreset(sources);
+            const QSignalBlocker blocker(presets_control);
+            QStringList choices{tr("Auto"), tr("Low"), tr("Mid"), tr("High")};
+            if (selected == -1) {
+                choices.append(tr("Custom"));
+            }
+            presets_control->SetOptions(choices);
+            presets_control->SetOptionEnabled(4, false);
+            presets_control->SetCurrentIndex(selected == -1 ? 4 : selected);
+            presets_control->setEnabled(sources.CanApply());
+            const int tier = selected == 0 ? SuggestedTier(SelectedGpu(sources)) : selected - 1;
+            preset_summary->setText(
+                selected == -1
+                    ? tr("Custom graphics settings")
+                    : tr("%1: %2 resolution, %3, %4. Game overrides stay.")
+                          .arg(Spotlight::PerformancePresetName(tier),
+                               SettingsPage::ClosedSettingLabel(sources.resolution,
+                                                                Settings::values.resolution_setup.Id(),
+                                                                sources.resolution->currentIndex()),
+                               SettingsPage::ClosedSettingLabel(sources.filter,
+                                                                Settings::values.scaling_filter.Id(),
+                                                                sources.filter->currentIndex()),
+                               sources.aa->currentText()));
+            preset_summary->show();
+        });
     }
-    settings_page->AddPage(shortcuts, hotkeys_tab.get(), tr("Hotkeys"), false);
+    AddSettingRow(quick, gfx, values.fps_limit, tr("Guest FPS cap"),
+                  tr("Limits how often supported games present; 0 follows the game"),
+                  QStringLiteral("lightning"), Tints::Green());
+    AddSettingRow(picture, gfx, values.resolution_setup, tr("Resolution"),
+                  tr("Choose the game's internal rendering scale"), QStringLiteral("monitor"),
+                  Tints::Gold());
+    AddSettingRow(picture, gfx, values.scaling_filter, tr("Scaling filter"),
+                  tr("How the image fits the window"), QStringLiteral("stack"), Tints::Blue());
+    auto* frame_generation = SettingsPage::BindFrameGeneration(gfx);
+    if (frame_generation != nullptr) {
+        SettingsPage::AddRow(picture, tr("Frame generation"),
+                             tr("Adds displayed frames between game frames"),
+                             QStringLiteral("film-strip"), Tints::Lavender(), frame_generation);
+    }
+    start_fullscreen = new Spotlight::ToggleSwitch;
+    start_fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
+    start_fullscreen->setEnabled(!system.IsPoweredOn());
+    SettingsPage::AddRow(picture, tr("Fullscreen when a game starts"), {},
+                         QStringLiteral("monitor"), Color::Accent(), start_fullscreen);
 
     int advanced_count = 0;
     const bool has_frame_gen_choices = qobject_cast<QComboBox*>(frame_generation) != nullptr;
@@ -620,130 +634,206 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
             }
         }
     }
-    auto* footnote =
-        SettingsPage::Text(tr("VSync, speed limit and more are under Show advanced (%n more).",
-                              nullptr, advanced_count),
-                           13, 500, true);
-    footnote->setWordWrap(true);
+    auto* footnote = new QWidget;
+    auto* footnote_layout = new QHBoxLayout(footnote);
+    footnote_layout->setContentsMargins(6, 0, 6, 0);
+    footnote_layout->setSpacing(8);
+    auto* info = new QLabel;
+    info->setPixmap(Spotlight::IconPixmap(QStringLiteral("info"), 14, Color::TextSecondary(),
+                                          devicePixelRatioF()));
+    footnote_layout->addWidget(info, 0, Qt::AlignTop);
+    auto* footnote_text = SettingsPage::Text(
+        tr("VSync, speed limit and more are separate controls under Show advanced (%n more).",
+           nullptr, advanced_count),
+        12, 500, true);
+    footnote_text->setWordWrap(true);
+    footnote_layout->addWidget(footnote_text, 1);
     settings_page->AddBlock(graphics, footnote, tr("Show advanced"));
-    settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::EnsureInput() {
+    if (input_initialized) {
+        return;
+    }
+    input_initialized = true;
+    input_tab->Initialize(input_subsystem);
 }
 
 void ConfigureDialog::BuildControls(int category, int shortcuts) {
+    EnsureInput();
     const auto pages = input_tab->GetSubTabs();
     auto* input_tabs = input_tab->findChild<QTabWidget*>(QStringLiteral("tabWidget"));
+    const int mapping = settings_page->AddSubPage(category, tr("Map buttons"), {}, true);
+    mapping_page = mapping;
     auto* player_pages = new QStackedWidget;
-    player_pages->setProperty("spotlightTransparent", true);
     QStringList player_names;
     QList<QCheckBox*> connected;
+    const auto& players = Settings::values.players.GetValue();
+    vibration_strength.clear();
     for (int i = 0; i < 8; ++i) {
         player_names.append(tr("P%1").arg(i + 1));
         auto* state = input_tab->findChild<QCheckBox*>(
             QStringLiteral("checkboxPlayer%1Connected").arg(i + 1));
         connected.append(state);
+        vibration_strength.append(players[i].vibration_strength);
         auto* type = pages[i]->findChild<QComboBox*>(QStringLiteral("comboControllerType"));
         auto* profile = pages[i]->findChild<QComboBox*>(QStringLiteral("comboProfiles"));
-        auto* container = new QWidget;
-        container->setProperty("spotlightTransparent", true);
-        auto* layout = new QVBoxLayout(container);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(0);
         auto* card = SettingsPage::Card();
-        auto* card_layout = new QHBoxLayout(card);
-        card_layout->setContentsMargins(18, 20, 18, 20);
-        card_layout->setSpacing(16);
-        card_layout->addWidget(SettingsPage::Card(QStringLiteral("game-controller"), 102), 0,
-                               Qt::AlignVCenter);
+        auto* card_layout = new QVBoxLayout(card);
+        card_layout->setContentsMargins(1, 1, 1, 1);
+        card_layout->setSpacing(0);
+        auto* header = new QWidget;
+        header->setProperty("spotlightTransparent", true);
+        auto* header_layout = new QHBoxLayout(header);
+        header_layout->setContentsMargins(18, 18, 18, 18);
+        header_layout->setSpacing(20);
+        auto* picture = new QLabel;
+        picture->setFixedSize(150, 110);
+        picture->setAlignment(Qt::AlignCenter);
+        picture->setPixmap(Spotlight::IconPixmap(QStringLiteral("game-controller"), 72,
+                                                 Color::Text(), devicePixelRatioF()));
+        picture->setStyleSheet(
+            QStringLiteral("QLabel { background: rgba(255,255,255,20); border-radius: 24px; }"));
+        header_layout->addWidget(picture, 0, Qt::AlignVCenter);
         auto* detail = new QVBoxLayout;
-        detail->setSpacing(2);
-        detail->addWidget(SettingsPage::Text(tr("Player %1").arg(i + 1), 13, 500, true));
+        detail->setSpacing(4);
+        detail->addWidget(SettingsPage::Text(tr("Player %1").arg(i + 1), 13, 600, true));
         auto* controller = SettingsPage::Text(type->currentText(), 24, 600);
         controller->setFont(Spotlight::DisplayFont(24));
         connect(type, &QComboBox::currentTextChanged, controller, &QLabel::setText);
         detail->addWidget(controller);
-        auto* connected_text = SettingsPage::Text({}, 12, 500, true);
-        const auto sync_state = [connected_text, state] {
+        auto* status_row = new QHBoxLayout;
+        status_row->setSpacing(7);
+        auto* dot = new QLabel;
+        dot->setFixedSize(8, 8);
+        auto* connected_text = SettingsPage::Text({}, 13, 500, true);
+        const auto sync_state = [connected_text, dot, state] {
             connected_text->setText(state->isChecked() ? tr("Connected") : tr("Disconnected"));
+            dot->setStyleSheet(QStringLiteral("QLabel { background: %1; border-radius: 4px; }")
+                                   .arg(state->isChecked() ? QStringLiteral("#3FD18B")
+                                                           : QStringLiteral("rgba(255,255,255,70)")));
         };
         sync_state();
         connect(state, &QAbstractButton::toggled, connected_text, sync_state);
-        detail->addWidget(connected_text);
+        status_row->addWidget(dot, 0, Qt::AlignVCenter);
+        status_row->addWidget(connected_text);
+        status_row->addStretch();
+        detail->addLayout(status_row);
         auto* actions = new QHBoxLayout;
+        actions->setContentsMargins(0, 8, 0, 0);
         actions->setSpacing(8);
-        auto* mapping = new Spotlight::PillButton(tr("Map buttons"), QStringLiteral("keyboard"),
-                                                  Spotlight::PillButton::Kind::Accent);
-        connect(mapping, &QAbstractButton::clicked, this, [this, i, category, input_tabs] {
+        auto* map_buttons = new Spotlight::PillButton(
+            tr("Map buttons"), QStringLiteral("keyboard"), Spotlight::PillButton::Kind::Accent, 38);
+        connect(map_buttons, &QAbstractButton::clicked, this, [this, i, mapping, input_tabs] {
             input_tabs->setCurrentIndex(i);
-            settings_page->ShowAdvancedPage(category, input_tab.get());
+            settings_page->SetCategory(mapping);
         });
-        actions->addWidget(mapping);
-        auto* profiles = SettingsPage::BindCombo(profile, tr("No profile selected"));
+        actions->addWidget(map_buttons);
+        auto* profiles = SettingsPage::BindCombo(
+            profile, tr("Profile: none"), [](const QComboBox& combo, int index) {
+                return tr("Profile: %1").arg(combo.itemText(index));
+            });
         profiles->setAccessibleName(tr("Controller profile"));
         actions->addWidget(profiles);
         actions->addStretch();
         detail->addLayout(actions);
-        card_layout->addLayout(detail, 1);
-        layout->addWidget(card);
-        auto* type_card = SettingsPage::Card();
-        auto* type_rows = new QVBoxLayout(type_card);
-        type_rows->setContentsMargins(1, 1, 1, 1);
-        SettingsPage::AddRow(type_rows, tr("Controller type"), tr("What the game sees"),
+        header_layout->addLayout(detail, 1);
+        card_layout->addWidget(header);
+
+        auto* divider = new QWidget;
+        divider->setFixedHeight(1);
+        divider->setStyleSheet(QStringLiteral("QWidget { background: rgba(255,255,255,18); }"));
+        auto* divider_row = new QHBoxLayout;
+        divider_row->setContentsMargins(18, 0, 18, 0);
+        divider_row->addWidget(divider);
+        card_layout->addLayout(divider_row);
+        auto* rows = new QVBoxLayout;
+        rows->setSpacing(0);
+        card_layout->addLayout(rows);
+        SettingsPage::AddRow(rows, tr("Connected"), tr("Players connect in order"),
+                             QStringLiteral("power"), Tints::Blue(),
+                             SettingsPage::BindToggle(state));
+        SettingsPage::AddRow(rows, tr("Controller type"), tr("What the game sees"),
                              QStringLiteral("game-controller"), Tints::Green(),
                              SettingsPage::BindCombo(type));
-        layout->addWidget(type_card);
-        player_pages->addWidget(container);
+        auto* vibration = new QWidget;
+        vibration->setProperty("spotlightTransparent", true);
+        auto* vibration_layout = new QHBoxLayout(vibration);
+        vibration_layout->setContentsMargins(0, 0, 0, 0);
+        vibration_layout->setSpacing(6);
+        auto* slider = new QSlider(Qt::Horizontal, vibration);
+        slider->hide();
+        slider->setRange(1, 150);
+        slider->setValue(vibration_strength[i]);
+        auto* strength = SettingsPage::Text(tr("%1%").arg(slider->value()), 13, 600);
+        strength->setMinimumWidth(44);
+        strength->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        connect(slider, &QSlider::valueChanged, strength, [this, i, strength](int value) {
+            vibration_strength[i] = value;
+            strength->setText(tr("%1%").arg(value));
+        });
+        vibration_layout->addWidget(SettingsPage::BindSlider(slider));
+        vibration_layout->addWidget(strength);
+        SettingsPage::AddRow(rows, tr("Vibration"), tr("Rumble strength for this player"),
+                             QStringLiteral("vibrate"), Tints::Gold(), vibration);
+        player_pages->addWidget(card);
     }
+
     auto* picker = new QWidget;
-    picker->setProperty("spotlightTransparent", true);
     auto* picker_layout = new QHBoxLayout(picker);
     picker_layout->setContentsMargins(0, 0, 0, 0);
-    auto* players = new Spotlight::SegmentedControl(player_names,
-                                                    Spotlight::SegmentedControl::Kind::Accent, 36);
-    players->setAccessibleName(tr("Player"));
-    picker_layout->addWidget(players, 0, Qt::AlignLeft);
+    auto* player_picker = new Spotlight::SegmentedControl(
+        player_names, Spotlight::SegmentedControl::Kind::Accent, 38);
+    player_picker->setAccessibleName(tr("Player"));
+    picker_layout->addWidget(player_picker, 0, Qt::AlignLeft);
     picker_layout->addStretch();
     auto* count = SettingsPage::Text({}, 13, 500, true);
-    count->setWordWrap(true);
     picker_layout->addWidget(count);
     const auto sync_count = [connected, count] {
         const int active = std::count_if(connected.cbegin(), connected.cend(),
                                          [](const auto* player) { return player->isChecked(); });
-        count->setText(tr("Connected controllers: %1").arg(active));
+        count->setText(active == 1 ? tr("1 controller connected")
+                                   : tr("%1 controllers connected").arg(active));
     };
     sync_count();
     for (auto* state : connected) {
         connect(state, &QAbstractButton::toggled, count, sync_count);
     }
-    connect(players, &Spotlight::SegmentedControl::CurrentChanged, player_pages,
+    connect(player_picker, &Spotlight::SegmentedControl::CurrentChanged, player_pages,
             &QStackedWidget::setCurrentIndex);
     settings_page->AddBlock(category, picker, tr("Players"));
     settings_page->AddBlock(category, player_pages, tr("Controller and profile"));
 
-    auto* controllers = settings_page->AddSection(category);
-    auto* motion = input_tab->findChild<QGroupBox*>(QStringLiteral("motionGroup"));
-    SettingsPage::AddRow(controllers, tr("Motion"), tr("Use motion controls"),
-                         QStringLiteral("hand-pointing"), Tints::Lavender(),
-                         SettingsPage::BindToggle(motion));
-    auto* vibration = input_tab->findChild<QPushButton*>(QStringLiteral("vibrationButton"));
-    auto* vibration_group = input_tab->findChild<QGroupBox*>(QStringLiteral("vibrationGroup"));
-    auto* configure_vibration = SettingsPage::Manage(tr("Configure"));
-    configure_vibration->setEnabled(vibration_group->isChecked());
-    connect(vibration_group, &QGroupBox::toggled, configure_vibration, &QWidget::setEnabled);
-    connect(configure_vibration, &QAbstractButton::clicked, vibration, &QPushButton::click);
-    auto* vibration_controls = new QWidget;
-    vibration_controls->setProperty("spotlightTransparent", true);
-    auto* vibration_layout = new QHBoxLayout(vibration_controls);
-    vibration_layout->setContentsMargins(0, 0, 0, 0);
-    vibration_layout->setSpacing(12);
-    vibration_layout->addWidget(configure_vibration);
-    vibration_layout->addWidget(SettingsPage::BindToggle(vibration_group));
-    SettingsPage::AddRow(controllers, tr("Vibration"), tr("Adjust rumble strength per controller"),
-                         QStringLiteral("vibrate"), Tints::Gold(), vibration_controls);
+    auto* controllers = settings_page->AddSection(category, tr("All players"));
+    const auto configure_pair = [](QGroupBox* group, QPushButton* configure) {
+        auto* manage = SettingsPage::Manage(tr("Configure"));
+        manage->setEnabled(group->isChecked());
+        connect(group, &QGroupBox::toggled, manage, &QWidget::setEnabled);
+        connect(manage, &QAbstractButton::clicked, configure, &QPushButton::click);
+        auto* pair = new QWidget;
+        pair->setProperty("spotlightTransparent", true);
+        auto* layout = new QHBoxLayout(pair);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(12);
+        layout->addWidget(manage);
+        layout->addWidget(SettingsPage::BindToggle(group));
+        return pair;
+    };
+    SettingsPage::AddRow(
+        controllers, tr("Motion"), tr("Gyro and touch from your controllers"),
+        QStringLiteral("arrows-out-cardinal"), Tints::Gold(),
+        configure_pair(input_tab->findChild<QGroupBox*>(QStringLiteral("motionGroup")),
+                       input_tab->findChild<QPushButton*>(QStringLiteral("motionButton"))));
+    SettingsPage::AddRow(
+        controllers, tr("Vibration"), tr("Rumble on or off, and per-controller tests"),
+        QStringLiteral("vibrate"), Tints::Lavender(),
+        configure_pair(input_tab->findChild<QGroupBox*>(QStringLiteral("vibrationGroup")),
+                       input_tab->findChild<QPushButton*>(QStringLiteral("vibrationButton"))));
 
     auto* docked = input_tab->findChild<QRadioButton*>(QStringLiteral("radioDocked"));
     auto* handheld = input_tab->findChild<QRadioButton*>(QStringLiteral("radioUndocked"));
     auto* mode = new Spotlight::SegmentedControl({tr("Docked"), tr("Handheld")},
-                                                 Spotlight::SegmentedControl::Kind::Accent, 36);
+                                                 Spotlight::SegmentedControl::Kind::Accent, 38);
     const auto sync_mode = [mode, docked] {
         const QSignalBlocker blocker(mode);
         mode->SetCurrentIndex(docked->isChecked() ? 0 : 1);
@@ -759,13 +849,71 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
                 sync_mode();
             });
     SettingsPage::AddRow(controllers, tr("Console mode"), tr("Choose docked or handheld mode"),
-                         QStringLiteral("game-controller"), Tints::Blue(), mode);
+                         QStringLiteral("monitor"), Tints::Blue(), mode);
+    QStringList hotkey_names;
+    for (const auto& [action, name] : {std::pair{"Continue/Pause Emulation", tr("Pause")},
+                                       std::pair{"Stop Emulation", tr("Stop")},
+                                       std::pair{"Fullscreen", tr("Fullscreen")},
+                                       std::pair{"Toggle Performance Overlay", tr("Overlay")}}) {
+        const auto sequence = registry.GetKeySequence("Main Window", action);
+        if (!sequence.isEmpty()) {
+            hotkey_names.append(
+                QStringLiteral("%1 %2").arg(name, sequence.toString(QKeySequence::NativeText)));
+        }
+    }
     auto* edit_hotkeys = SettingsPage::Manage();
     connect(edit_hotkeys, &QAbstractButton::clicked, settings_page,
             [this, shortcuts] { settings_page->SetCategory(shortcuts); });
-    SettingsPage::AddRow(controllers, tr("Hotkeys"), tr("Edit keyboard and controller shortcuts"),
+    SettingsPage::AddRow(controllers, tr("Hotkeys"),
+                         hotkey_names.isEmpty() ? tr("Edit keyboard and controller shortcuts")
+                                                : hotkey_names.join(QStringLiteral(", ")),
                          QStringLiteral("keyboard"), Tints::Gold(), edit_hotkeys);
-    settings_page->AddPage(category, input_tab.get(), tr("Players and input settings"));
+
+    settings_page->SetBuilder(mapping, [this, mapping, input_tabs, player_names] {
+        auto* picker_row = new QWidget;
+        auto* picker_row_layout = new QHBoxLayout(picker_row);
+        picker_row_layout->setContentsMargins(0, 0, 0, 0);
+        picker_row_layout->setSpacing(8);
+        auto* players_control = new Spotlight::SegmentedControl(
+            player_names, Spotlight::SegmentedControl::Kind::Accent, 38);
+        players_control->SetCurrentIndex(input_tabs->currentIndex());
+        connect(players_control, &Spotlight::SegmentedControl::CurrentChanged, input_tabs,
+                &QTabWidget::setCurrentIndex);
+        connect(input_tabs, &QTabWidget::currentChanged, players_control,
+                [players_control](int index) {
+                    const QSignalBlocker blocker(players_control);
+                    players_control->SetCurrentIndex(index);
+                });
+        picker_row_layout->addWidget(players_control);
+        picker_row_layout->addStretch();
+        for (const auto& name : {QStringLiteral("buttonRestoreDefaults"),
+                                 QStringLiteral("buttonClearAll")}) {
+            picker_row_layout->addWidget(
+                SettingsPage::BindButton(input_tab->findChild<QPushButton*>(name)));
+        }
+        settings_page->AddBlock(mapping, picker_row, tr("Players"));
+        input_tabs->tabBar()->hide();
+        input_tabs->setDocumentMode(true);
+        input_tab->findChild<QWidget*>(QStringLiteral("consoleInputSettings"))->hide();
+        for (auto* combo : input_tabs->findChildren<QComboBox*>()) {
+            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+            combo->setMinimumContentsLength(10);
+        }
+        input_tabs->setProperty("spotlightTransparent", true);
+        for (auto* child : input_tabs->findChildren<QWidget*>()) {
+            if (!qobject_cast<QAbstractButton*>(child) && !qobject_cast<QComboBox*>(child) &&
+                !qobject_cast<QGroupBox*>(child) && !qobject_cast<QAbstractSlider*>(child)) {
+                child->setAutoFillBackground(false);
+                child->setProperty("spotlightTransparent", true);
+            }
+        }
+        input_tabs->setObjectName(QStringLiteral("spotlightMapping"));
+        input_tabs->setStyleSheet(MappingStyle());
+        input_tabs->setMinimumHeight(560);
+        settings_page->AddBlock(mapping, input_tabs, tr("Map buttons"));
+    });
+    settings_page->AddPage(category, pages[8], tr("Input devices"));
+    settings_page->AddPage(category, pages[9], tr("Microphone"));
 }
 
 void ConfigureDialog::RebuildGameFolders() {
@@ -822,16 +970,61 @@ void ConfigureDialog::RebuildGameFolders() {
                              QStringLiteral("folder"), Tints::Green(), menu_button);
     }
     auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
-    connect(add, &QAbstractButton::clicked, this, [this] {
-        const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
-        const UISettings::GameDir dir{path.toStdString(), false, true};
-        if (!path.isEmpty() && !game_dirs.contains(dir)) {
-            game_dirs.append(dir);
-            game_dirs_changed = true;
-            RebuildGameFolders();
-        }
-    });
+    connect(add, &QAbstractButton::clicked, this, &ConfigureDialog::AddGameFolder);
     SettingsPage::AddRow(folders_layout, tr("Add a game folder"), tr("Scan a folder for games"),
                          QStringLiteral("folder-open"), Tints::Green(), add);
-    folder_summary->setText(tr("Game folders added: %1").arg(custom_count));
+    if (folder_summary != nullptr) {
+        folder_summary->setText(GameFolderSummary());
+    }
+}
+
+QString ConfigureDialog::GameFolderSummary() const {
+    const auto custom = std::count_if(game_dirs.cbegin(), game_dirs.cend(),
+                                      [](const auto& folder) { return !IsBuiltInFolder(folder); });
+    return custom == 1 ? tr("1 folder added") : tr("%1 folders added").arg(custom);
+}
+
+void ConfigureDialog::AddGameFolder() {
+    const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
+    const UISettings::GameDir dir{path.toStdString(), false, true};
+    if (!path.isEmpty() && !game_dirs.contains(dir)) {
+        game_dirs.append(dir);
+        game_dirs_changed = true;
+        RebuildGameFolders();
+    }
+}
+
+void ConfigureDialog::OpenGetStarted(int controls, const QList<PresetCard*>& presets) {
+    EnsureInput();
+    auto* player = input_tab->GetSubTabs().front();
+    auto* type = player->findChild<QComboBox*>(QStringLiteral("comboControllerType"));
+    auto* device = player->findChild<QComboBox*>(QStringLiteral("comboDevices"));
+    auto* connected = input_tab->findChild<QCheckBox*>(QStringLiteral("checkboxPlayer1Connected"));
+    Spotlight::GetStarted wizard(this, system,
+                                 {
+                                     .game_folders =
+                                         [this] {
+                                             QStringList folders;
+                                             for (const auto& folder : game_dirs) {
+                                                 if (!IsBuiltInFolder(folder)) {
+                                                     folders.append(
+                                                         QString::fromStdString(folder.path));
+                                                 }
+                                             }
+                                             return folders;
+                                         },
+                                     .add_game_folder = [this] { AddGameFolder(); },
+                                     .controller = type->currentText(),
+                                     .controller_device = device->currentText(),
+                                     .controller_connected = connected->isChecked(),
+                                     .presets = presets,
+                                 });
+    connect(&wizard, &Spotlight::GetStarted::ContentInstalled, this,
+            &ConfigureDialog::ContentInstalled);
+    wizard.exec();
+    if (wizard.MapButtonsRequested()) {
+        settings_page->SetCategory(controls);
+        input_tab->findChild<QTabWidget*>(QStringLiteral("tabWidget"))->setCurrentIndex(0);
+        settings_page->SetCategory(mapping_page);
+    }
 }

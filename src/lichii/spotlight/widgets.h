@@ -26,6 +26,9 @@ QString KeyText(const QKeySequence& sequence);
 /// Colours a label's text. The Lichii style sheet's QWidget colour overrides palettes.
 void SetTextColor(QWidget* label, const QColor& color);
 
+/// The colour t of the way from one colour to another, alpha included.
+QColor Mix(const QColor& from, const QColor& to, qreal t);
+
 /// Fades a shown widget in, such as a page that just replaced another.
 void FadeIn(QWidget* widget, int duration = Motion::Fade);
 /// Fades a top-level window in every time it is shown.
