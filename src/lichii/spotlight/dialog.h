@@ -35,6 +35,9 @@ public:
     /// Hides the title, for a dialog whose contents start with their own heading. The close button
     /// stays.
     void SetTitleVisible(bool visible);
+
+    /// Hides the close button, for a card that only its own buttons may close, such as progress.
+    void SetCloseVisible(bool visible);
 };
 
 /// Rounds the corners of a top-level window that draws its own frame (Radius::Tile) while it is
