@@ -3828,7 +3828,7 @@ void MainWindow::OnMenuInstallToNAND() {
     // Save folder location of the first selected file
     UISettings::values.roms_path = QFileInfo(filenames[0]).path().toStdString();
 
-    int remaining = filenames.size();
+    int remaining = files.size();
 
     // This would only overflow above 2^51 bytes (2.252 PB)
     int total_size = 0;
@@ -3854,9 +3854,9 @@ void MainWindow::OnMenuInstallToNAND() {
     install_progress->show();
 
     for (const QString& file : files) {
-        install_progress->setWindowTitle(tr("%n file(s) remaining", "", remaining));
-        install_progress->setLabelText(
-            tr("Installing file \"%1\"...").arg(QFileInfo(file).fileName()));
+        install_progress->setWindowTitle(
+            tr("Installing %1 of %2").arg(files.size() - remaining + 1).arg(files.size()));
+        install_progress->setLabelText(QFileInfo(file).fileName());
 
         QFuture<ContentManager::InstallResult> future;
         ContentManager::InstallResult result;
