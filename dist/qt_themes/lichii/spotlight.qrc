@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/circle-fill.png</file>
         <file>spotlight/icons/circle-notch.png</file>
         <file>spotlight/icons/circle.png</file>
+        <file>spotlight/icons/clipboard-text.png</file>
         <file>spotlight/icons/clock.png</file>
         <file>spotlight/icons/cloud-arrow-down.png</file>
         <file>spotlight/icons/copy.png</file>
