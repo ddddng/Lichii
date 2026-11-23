@@ -24,6 +24,9 @@ constexpr char HotkeyHint[] = "spotlightHotkeyHint";
 constexpr int MinimumWidth = 240;
 
 QString HintOf(const QAction* action) {
+    if (const QString hint = action->property("spotlightHint").toString(); !hint.isEmpty()) {
+        return hint;
+    }
     const QString hint = action->text().section(QLatin1Char('\t'), 1);
     if (!hint.isEmpty()) {
         return hint;
@@ -91,7 +94,7 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
             continue;
         }
         const bool enabled = action->isEnabled();
-        if (action == menu.activeAction() && enabled) {
+        if (action == menu.activeAction() && enabled && !qobject_cast<QWidgetAction*>(action)) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(Color::RowHover());
             painter.drawRoundedRect(row, Radius::Small, Radius::Small);
@@ -216,9 +219,11 @@ void Menu::AddHeading(const QString& text, Heading style) {
 }
 
 void SetHotkeyHint(QAction* action, const QKeySequence& keys, const QString& controller) {
-    QStringList parts{keys.toString(QKeySequence::NativeText), controller};
+    const QString key = keys.toString(QKeySequence::NativeText);
+    QStringList parts{key, controller};
     parts.removeAll(QString{});
     action->setProperty(HotkeyHint, parts.join(QStringLiteral(" · ")));
+    action->setProperty("spotlightKey", key);
 }
 
 void InstallMenuStyle(QApplication& application) {

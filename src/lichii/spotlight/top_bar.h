@@ -77,8 +77,6 @@ public:
     void FloatOver(QWidget* screen);
     /// Adds a dropdown button after the game title that opens `menu` below it.
     void AddMenu(const QString& name, QMenu* menu);
-    /// Adds a dropdown button for a panel the caller opens; check it while the panel is shown.
-    QAbstractButton* AddPanelButton(const QString& name);
     /// Grows the docked bar past its base height, with its row centred, to take up letterboxing.
     void SetExtraHeight(int extra);
 

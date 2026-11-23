@@ -830,7 +830,7 @@ void NextendoGameChip::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
     PaintDot(painter, {13.5, height() / 2.0}, 7, playing);
     painter.setFont(font());
-    painter.setPen(playing ? Ink() : QColor(0xff, 0xff, 0xff, 0x9e));
+    painter.setPen(playing ? QColor(0xff, 0xff, 0xff, 0xb8) : Color::TextSecondary());
     painter.drawText(rect().adjusted(23, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, text);
 }
 

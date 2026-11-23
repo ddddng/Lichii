@@ -11,9 +11,9 @@
 #include <numeric>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QStringList>
 #include <QWindow>
 
 #include "common/settings.h"
@@ -31,8 +31,18 @@ namespace {
 using Common::DkbCpuTrace::Role;
 using namespace Spotlight;
 
-constexpr int OverlayWidth = 256;
-constexpr int OverlayHeight = 174;
+constexpr int CardWidth = 300;
+constexpr int CardRadius = 18;
+constexpr int Padding = 16;
+constexpr int GraphTop = Padding + 54 + 12;
+constexpr int GraphWidth = 260;
+constexpr int GraphHeight = 54;
+constexpr int MetricsTop = GraphTop + GraphHeight + 12;
+constexpr int ChipsTop = MetricsTop + 37 + 12;
+constexpr int ChipHeight = 22;
+constexpr int ChipGap = 6;
+constexpr QMargins ShadowMargins{16, 8, 16, 24};
+constexpr int ShadowOffset = 12;
 constexpr auto HistoryWindow = std::chrono::seconds{5};
 constexpr auto StatsWindow = std::chrono::milliseconds{500};
 
@@ -41,12 +51,53 @@ constexpr std::array CpuRoles{
     Role::GuestCore5, Role::GuestSingleCore, Role::GpuCommand, Role::GpuBack,
 };
 
-QColor Readout() {
-    return QColor(0xff, 0xff, 0xff, 0xbf);
+QColor CardFill() {
+    return QColor(0x0b, 0x0c, 0x10, 0xd9);
+}
+
+QColor GraphLine() {
+    return QColor(0x7e, 0xe2, 0xa8);
+}
+
+QColor Generated() {
+    return QColor(0xc9, 0xb3, 0xff);
+}
+
+QColor Building() {
+    return QColor(0xff, 0xd3, 0x7a);
+}
+
+QColor Soft(QColor color) {
+    color.setAlpha(0x2e);
+    return color;
+}
+
+QFont MetricLabelFont() {
+    QFont font = Font(11, 600);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 0.55);
+    return font;
 }
 
 QString Number(const std::optional<double>& value, int precision = 0) {
     return value ? QString::number(*value, 'f', precision) : QStringLiteral("—");
+}
+
+/// The chips run left to right and wrap inside the card's padding.
+std::vector<QRect> ChipRects(const QStringList& chips) {
+    const QFontMetrics metrics(Font(11, 600));
+    std::vector<QRect> rects;
+    int x = Padding;
+    int y = ChipsTop;
+    for (const QString& chip : chips) {
+        const int width = 18 + metrics.horizontalAdvance(chip);
+        if (x > Padding && x + width > CardWidth - Padding) {
+            x = Padding;
+            y += ChipHeight + ChipGap;
+        }
+        rects.emplace_back(x, y, width, ChipHeight);
+        x += width + ChipGap;
+    }
+    return rects;
 }
 
 } // namespace
@@ -56,15 +107,31 @@ PerformanceOverlay::PerformanceOverlay(MainWindow* parent, QWidget* anchor)
       m_anchor(anchor) {
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
-    setFixedSize(OverlayWidth, OverlayHeight);
+    setMouseTracking(true);
+    UpdateHeight();
     m_anchor->installEventFilter(this);
     connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::ResetPosition);
     connect(parent, &MainWindow::statsUpdated, this, &PerformanceOverlay::updateStats);
     ResetPosition();
 }
 
+QRect PerformanceOverlay::Card() const {
+    return rect().marginsRemoved(ShadowMargins);
+}
+
+QRect PerformanceOverlay::CloseButton() const {
+    return QRect{Card().left() + CardWidth - Padding - 24, Card().top() + Padding, 24, 24};
+}
+
+void PerformanceOverlay::UpdateHeight() {
+    const auto chips = ChipRects(m_chips);
+    const int bottom = chips.empty() ? ChipsTop - 12 : chips.back().bottom() + 1;
+    setFixedSize(CardWidth + ShadowMargins.left() + ShadowMargins.right(),
+                 bottom + Padding + ShadowMargins.top() + ShadowMargins.bottom());
+}
+
 void PerformanceOverlay::ResetPosition() {
-    move(m_anchor->mapToGlobal(m_offset));
+    move(m_anchor->mapToGlobal(m_offset) - QPoint{ShadowMargins.left(), ShadowMargins.top()});
 }
 
 bool PerformanceOverlay::eventFilter(QObject* watched, QEvent* event) {
@@ -87,8 +154,6 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
                                                     : std::nullopt;
     m_speed = std::isfinite(results.emulation_speed) ? std::optional(results.emulation_speed * 100)
                                                      : std::nullopt;
-    m_at_target = m_speed && Settings::values.use_speed_limit.GetValue() &&
-                  std::abs(*m_speed - Settings::SpeedLimit()) < 3.0;
     m_generated = m_mainWindow->FrameGenFps();
     m_shaders = std::max(shaders.ShadersLeft(), 0);
     m_frames = perf_stats.GetRecentFrameTimes(HistoryWindow);
@@ -137,15 +202,31 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
         m_gpuPercent = std::min(100.0, *gpu_ms / *m_frameMs * 100.0);
     }
 
-    const auto filter = Settings::values.scaling_filter.GetValue();
-    const auto backend = Settings::values.renderer_backend.GetValue();
     const auto label = [](const auto& options, auto value) {
-        return QCoreApplication::translate("MainWindow", options.at(value).toUtf8().constData());
+        const auto it = options.find(value);
+        return it == options.end()
+                   ? QString{}
+                   : QCoreApplication::translate("MainWindow", it->second.toUtf8().constData());
     };
-    m_tags = tr("%1 · %2× · %3")
-                 .arg(label(ConfigurationShared::renderer_backend_texts_map, backend))
-                 .arg(Settings::values.resolution_info.up_factor)
-                 .arg(label(ConfigurationShared::scaling_filter_texts_map, filter));
+    QStringList chips{
+        label(ConfigurationShared::renderer_backend_texts_map,
+              Settings::values.renderer_backend.GetValue()),
+        tr("%1×").arg(Settings::values.resolution_info.up_factor),
+        label(ConfigurationShared::scaling_filter_texts_map,
+              Settings::values.scaling_filter.GetValue()),
+    };
+    if (Settings::values.frame_gen.GetValue()) {
+        chips << label(ConfigurationShared::frame_gen_type_texts_map,
+                       Settings::values.frame_gen_type.GetValue());
+    }
+    chips.removeAll(QString{});
+    if (m_shaders > 0) {
+        chips << tr("%n shader(s) building", nullptr, m_shaders);
+    }
+    if (chips != m_chips) {
+        m_chips = chips;
+        UpdateHeight();
+    }
 
     std::vector<float> intervals;
     intervals.reserve(m_frames.size());
@@ -164,9 +245,9 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
             const double sum = std::accumulate(intervals.begin(), intervals.begin() + count, 0.0);
             m_low_fps = 1000 * count / sum;
         }
-        details << tr("Frame time (min / median / max): %1 / %2 / %3 ms")
+        details << tr("Frame time %1 ms · min %2 · max %3")
+                       .arg(m_frameMs.value_or(summary->median_ms), 0, 'f', 1)
                        .arg(summary->min_ms, 0, 'f', 1)
-                       .arg(summary->median_ms, 0, 'f', 1)
                        .arg(summary->max_ms, 0, 'f', 1);
     }
     if (!m_mainWindow->DlssStatusText().isEmpty()) {
@@ -176,79 +257,116 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
     update();
 }
 
+void PerformanceOverlay::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    const qreal ratio = devicePixelRatioF();
+    m_shadow = QPixmap(size() * ratio);
+    m_shadow.setDevicePixelRatio(ratio);
+    m_shadow.fill(Qt::transparent);
+    QPainter painter(&m_shadow);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 10));
+    const QRectF card = QRectF(Card()).translated(0, ShadowOffset);
+    for (int spread = 12; spread > 0; spread -= 2) {
+        painter.drawRoundedRect(card.adjusted(-spread, -spread, spread, spread),
+                                CardRadius + spread, CardRadius + spread);
+    }
+}
+
 void PerformanceOverlay::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(Color::Hud());
-    painter.drawRoundedRect(rect(), Radius::Panel, Radius::Panel);
+    painter.drawPixmap(0, 0, m_shadow);
+    painter.setPen(QPen(Color::StrokeSubtle(), 1));
+    painter.setBrush(CardFill());
+    painter.drawRoundedRect(QRectF(Card()).adjusted(0.5, 0.5, -0.5, -0.5), CardRadius, CardRadius);
 
-    const auto line = [&](const QRect& area, const QString& text, const QColor& ink,
-                          int pixels = 11, int weight = 500,
-                          Qt::Alignment alignment = Qt::AlignLeft) {
-        painter.setFont(Font(pixels, weight));
+    const QRect close = CloseButton().translated(-Card().topLeft());
+    painter.translate(Card().topLeft());
+    const auto text = [&](const QRect& area, const QString& value, const QFont& font,
+                          const QColor& ink, Qt::Alignment alignment = Qt::AlignLeft) {
+        painter.setFont(font);
         painter.setPen(ink);
-        painter.drawText(area, alignment | Qt::AlignVCenter,
-                         painter.fontMetrics().elidedText(text, Qt::ElideRight, area.width()));
+        painter.drawText(area, alignment | Qt::AlignVCenter, value);
     };
 
-    const QString fps = Number(m_fps);
-    const int fps_width = QFontMetrics(Font(26, 700)).horizontalAdvance(fps);
-    line(QRect{12, 10, fps_width + 1, 35}, fps, m_at_target ? Color::Success() : Color::Text(), 26,
-         700);
-    const int label_x = 20 + fps_width;
-    line(QRect{label_x, 12, 96, 15}, tr("FPS"), QColor(0xff, 0xff, 0xff, 0xb3), 11, 600);
-    line(QRect{label_x, 27, 96, 15}, tr("1% low %1").arg(Number(m_low_fps)), Color::TextMuted());
+    text(QRect{Padding, Padding, 200, 36}, Number(m_fps), Font(34, 700), Color::Text());
+    text(QRect{Padding, Padding + 38, 200, 16}, tr("FPS · 1% low %1").arg(Number(m_low_fps)),
+         Font(12), Color::TextSecondary());
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(m_close_hovered ? Color::ControlHover() : Color::Fill());
+    painter.drawEllipse(QRectF(close));
+    painter.drawPixmap(close.left() + 6, close.top() + 6,
+                       IconPixmap(u"x", 12, Color::TextSecondary(), devicePixelRatioF()));
+
     if (m_fps && m_generated >= 0.5) {
-        line(QRect{164, 11, 80, 20}, QString::number(*m_fps + m_generated, 'f', 0), Color::Text(),
-             15, 700, Qt::AlignRight);
-        line(QRect{164, 31, 80, 13}, tr("generated"), Color::TextMuted(), 10, 500, Qt::AlignRight);
+        const QString generated = tr("+%1 generated").arg(m_generated, 0, 'f', 0);
+        const int width = 18 + QFontMetrics(Font(11, 600)).horizontalAdvance(generated);
+        const QRect pill{close.left() - 10 - width, Padding, width, ChipHeight};
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Soft(Generated()));
+        painter.drawRoundedRect(QRectF(pill), ChipHeight / 2.0, ChipHeight / 2.0);
+        text(pill, generated, Font(11, 600), Generated(), Qt::AlignHCenter);
     }
 
-    paintGraph(painter, QRectF{12, 53, 232, 46});
+    paintGraph(painter, QRectF{Padding, GraphTop, GraphWidth, GraphHeight});
 
-    line(QRect{12, 105, 120, 15}, tr("Frame %1 ms").arg(Number(m_frameMs, 1)), Readout());
-    if (m_speed) {
-        line(QRect{132, 105, 112, 15}, tr("Speed %1%").arg(Number(m_speed)), Readout(), 11, 500,
-             Qt::AlignRight);
+    const std::array<std::pair<QString, QString>, 4> metrics{{
+        {tr("Frame"), m_frameMs ? tr("%1 ms").arg(Number(m_frameMs, 1)) : Number(m_frameMs)},
+        {tr("Speed"), m_speed ? tr("%1%").arg(Number(m_speed)) : Number(m_speed)},
+        {tr("GPU"), m_gpuPercent ? tr("%1%").arg(Number(m_gpuPercent)) : Number(m_gpuPercent)},
+        {tr("CPU"), m_cpuPercent ? tr("%1%").arg(Number(m_cpuPercent)) : Number(m_cpuPercent)},
+    }};
+    const QFontMetrics label_metrics(MetricLabelFont());
+    const QFontMetrics value_metrics(Font(15, 600));
+    int x = Padding;
+    for (const auto& [name, value] : metrics) {
+        const QString caption = QLocale().toUpper(name);
+        const int width = std::max(label_metrics.horizontalAdvance(caption),
+                                   value_metrics.horizontalAdvance(value));
+        text(QRect{x, MetricsTop, width, 15}, caption, MetricLabelFont(), Color::TextMuted());
+        text(QRect{x, MetricsTop + 17, width, 20}, value, Font(15, 600), Color::Text());
+        x += width + 18;
     }
 
-    const int tags_width = m_shaders > 0 ? 150 : 232;
-    line(QRect{12, 126, tags_width, 15}, m_tags, Readout());
-    if (m_shaders > 0) {
-        line(QRect{164, 126, 80, 15}, tr("Shaders %1").arg(m_shaders), Color::Warning(), 11, 600,
-             Qt::AlignRight);
+    const auto chips = ChipRects(m_chips);
+    for (std::size_t i = 0; i < chips.size(); ++i) {
+        const bool building = m_shaders > 0 && i + 1 == chips.size();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(building ? Soft(Building()) : Color::Control());
+        painter.drawRoundedRect(QRectF(chips[i]), ChipHeight / 2.0, ChipHeight / 2.0);
+        text(chips[i], m_chips[static_cast<qsizetype>(i)], Font(11, 600),
+             building ? Building() : Color::Text(), Qt::AlignHCenter);
     }
-    const QString gpu = m_gpuPercent ? tr("GPU %1%").arg(Number(m_gpuPercent)) : tr("GPU —");
-    const QString cpu = m_cpuPercent ? tr("CPU %1%").arg(Number(m_cpuPercent)) : tr("CPU —");
-    line(QRect{12, 147, 232, 15}, tr("%1 %2").arg(gpu, cpu), Color::TextFaint());
 }
 
 void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
     const qreal target_ms =
         1000.0 /
         (Settings::CurrentProgramIsSwitch2() ? Settings::values.frame_rate_limit.GetValue() : 60);
-    const qreal scale = area.height() / (2.5 * target_ms);
-    const qreal target_y = std::round(area.bottom() - target_ms * scale) + 0.5;
-    QPen dash(QColor(0xff, 0xff, 0xff, 0x2e), 1);
-    dash.setDashPattern({3, 3});
+    constexpr qreal target_y = 12;
+    if (m_frames.size() >= 2) {
+        const auto newest = m_frames.back().end;
+        const double window = std::chrono::duration<double>(HistoryWindow).count();
+        QPolygonF points;
+        points.reserve(static_cast<qsizetype>(m_frames.size()));
+        for (const auto& frame : m_frames) {
+            const double age = std::chrono::duration<double>(newest - frame.end).count();
+            points << QPointF{area.right() - area.width() * std::clamp(age / window, 0.0, 1.0),
+                              std::clamp(area.top() + target_y * frame.ms / target_ms,
+                                         area.top() + 1, area.bottom() - 1)};
+        }
+        painter.setPen(QPen(GraphLine(), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(points);
+    }
+    QPen dash(QColor(0xff, 0xff, 0xff, 0x24), 1);
+    dash.setDashPattern({3, 4});
     painter.setPen(dash);
-    painter.drawLine(QPointF{area.left(), target_y}, QPointF{area.right(), target_y});
-    if (m_frames.size() < 2) {
-        return;
-    }
-    const auto newest = m_frames.back().end;
-    const double window = std::chrono::duration<double>(HistoryWindow).count();
-    QPolygonF points;
-    points.reserve(static_cast<qsizetype>(m_frames.size()));
-    for (const auto& frame : m_frames) {
-        const double age = std::chrono::duration<double>(newest - frame.end).count();
-        points << QPointF{
-            area.right() - area.width() * std::clamp(age / window, 0.0, 1.0),
-            std::clamp(area.bottom() - frame.ms * scale, area.top() + 1, area.bottom() - 1)};
-    }
-    painter.setPen(QPen(Color::Success(), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.drawPolyline(points);
+    painter.drawLine(QPointF{area.left(), area.top() + target_y + 0.5},
+                     QPointF{area.right(), area.top() + target_y + 0.5});
 }
 
 void PerformanceOverlay::hideEvent(QHideEvent* event) {
@@ -266,25 +384,55 @@ void PerformanceOverlay::hideEvent(QHideEvent* event) {
     m_frames.clear();
     m_shaders = 0;
     m_generated = 0;
-    m_tags.clear();
+    m_chips.clear();
+    m_close_hovered = false;
+    UpdateHeight();
 }
 
 void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) {
         return;
     }
+    if (CloseButton().contains(event->pos())) {
+        m_close_pressed = true;
+        return;
+    }
     if (QGuiApplication::platformName().startsWith(QStringLiteral("wayland")) && windowHandle() &&
         windowHandle()->startSystemMove()) {
         return;
     }
+    m_dragging = true;
     m_drag_start_pos = event->pos();
 }
 
 void PerformanceOverlay::mouseMoveEvent(QMouseEvent* event) {
-    if (event->buttons() & Qt::LeftButton) {
+    if (m_dragging && (event->buttons() & Qt::LeftButton)) {
         const QPoint target = event->globalPosition().toPoint() - m_drag_start_pos;
-        m_offset = m_anchor->mapFromGlobal(target);
+        m_offset =
+            m_anchor->mapFromGlobal(target + QPoint{ShadowMargins.left(), ShadowMargins.top()});
         move(target);
+        return;
+    }
+    const bool hovered = CloseButton().contains(event->pos());
+    if (hovered != m_close_hovered) {
+        m_close_hovered = hovered;
+        setCursor(hovered ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        update(CloseButton());
+    }
+}
+
+void PerformanceOverlay::mouseReleaseEvent(QMouseEvent* event) {
+    m_dragging = false;
+    if (std::exchange(m_close_pressed, false) && CloseButton().contains(event->pos())) {
+        close();
+    }
+}
+
+void PerformanceOverlay::leaveEvent(QEvent*) {
+    if (m_close_hovered) {
+        m_close_hovered = false;
+        unsetCursor();
+        update(CloseButton());
     }
 }
 

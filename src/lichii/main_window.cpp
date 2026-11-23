@@ -57,6 +57,7 @@
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
 #include "lichii/spotlight/startup_prompt.h"
+#include "lichii/spotlight/stopping_overlay.h"
 #include "lichii/spotlight/style.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
@@ -1214,6 +1215,21 @@ void MainWindow::WebBrowserRequestExit() {
 #endif
 }
 
+namespace {
+
+QString ControllerKeys(std::string_view action) {
+    for (const auto& shortcut : UISettings::values.shortcuts) {
+        if (shortcut.group == "Main Window" && shortcut.name == action) {
+            return QString::fromStdString(shortcut.shortcut.controller_keyseq)
+                .replace(QStringLiteral("Screenshot"), MainWindow::tr("Capture"))
+                .replace(QLatin1Char('+'), QStringLiteral(" + "));
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
@@ -1300,10 +1316,23 @@ void MainWindow::InitializeWidgets() {
             }
         });
     };
-    const auto make_submenu = [](QMenu* parent, const QString& name) {
+    const auto make_submenu = [](QMenu* parent, const QString& name, QStringView icon = {}) {
         auto* menu = parent->addMenu(name);
         menu->setToolTipsVisible(true);
+        if (!icon.isEmpty()) {
+            menu->menuAction()->setProperty("spotlightIcon",
+                                            Spotlight::Icon(icon, Spotlight::Color::MenuInk(), 16));
+        }
         return menu;
+    };
+    const auto in_order = [](const auto& texts, const auto& order) {
+        std::vector<std::pair<typename std::decay_t<decltype(texts)>::key_type, QString>> choices;
+        for (const auto value : order) {
+            if (const auto it = texts.find(value); it != texts.end()) {
+                choices.emplace_back(value, it->second);
+            }
+        }
+        return choices;
     };
     const auto add_choices = [this](QMenu* menu, const auto& choices, auto& setting,
                                     const auto& apply, const auto& available) {
@@ -1321,16 +1350,16 @@ void MainWindow::InitializeWidgets() {
         }
     };
     const auto all = [](auto) { return true; };
-    const auto menu_icon = [](QMenu* menu, QStringView name) {
-        menu->menuAction()->setIcon(Spotlight::Icon(name, Spotlight::Color::MenuInk(), 16));
-    };
-    auto* renderer = make_submenu(quick_controls, tr("Renderer"));
-    menu_icon(renderer, u"monitor");
+    auto* renderer = make_submenu(quick_controls, tr("Renderer"), u"monitor");
     renderer_status_action = renderer->menuAction();
     renderer->addAction(tr("Cycle renderer"), this, &MainWindow::OnToggleGraphicsAPI);
     renderer->addSeparator();
+    using Settings::RendererBackend;
     add_choices(
-        renderer, ConfigurationShared::renderer_backend_texts_map,
+        renderer,
+        in_order(ConfigurationShared::renderer_backend_texts_map,
+                 std::array{RendererBackend::Vulkan, RendererBackend::OpenGL_GLSL,
+                            RendererBackend::OpenGL_SPIRV, RendererBackend::OpenGL_GLASM}),
         Settings::values.renderer_backend,
         [this](auto value) {
             Settings::values.renderer_backend.SetValue(value);
@@ -1338,14 +1367,13 @@ void MainWindow::InitializeWidgets() {
         },
         [](auto value) {
 #ifndef HAS_OPENGL
-            return value == Settings::RendererBackend::Vulkan;
+            return value == RendererBackend::Vulkan;
 #else
-            return value != Settings::RendererBackend::Null;
+            return value != RendererBackend::Null;
 #endif
         });
 
-    auto* console = make_submenu(quick_controls, tr("Console mode"));
-    menu_icon(console, u"game-controller");
+    auto* console = make_submenu(quick_controls, tr("Console mode"), u"game-controller");
     dock_status_action = console->menuAction();
     add_choices(
         console, ConfigurationShared::use_docked_mode_texts_map, Settings::values.use_docked_mode,
@@ -1356,8 +1384,7 @@ void MainWindow::InitializeWidgets() {
         },
         all);
 
-    auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"));
-    menu_icon(accuracy, u"gauge");
+    auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"), u"gauge");
     gpu_accuracy_action = accuracy->menuAction();
     add_choices(
         accuracy, ConfigurationShared::gpu_accuracy_texts_map, Settings::values.gpu_accuracy,
@@ -1369,8 +1396,18 @@ void MainWindow::InitializeWidgets() {
 
     auto* filter = make_submenu(quick_controls, tr("Scaling filter"));
     filter_status_action = filter->menuAction();
+    using Settings::ScalingFilter;
     add_choices(
-        filter, ConfigurationShared::scaling_filter_texts_map, Settings::values.scaling_filter,
+        filter,
+        in_order(ConfigurationShared::scaling_filter_texts_map,
+                 std::array{ScalingFilter::NearestNeighbor, ScalingFilter::Bilinear,
+                            ScalingFilter::Bicubic, ScalingFilter::ZeroTangent,
+                            ScalingFilter::BSpline, ScalingFilter::Mitchell, ScalingFilter::Spline1,
+                            ScalingFilter::Gaussian, ScalingFilter::Lanczos,
+                            ScalingFilter::ScaleForce, ScalingFilter::Fsr, ScalingFilter::Area,
+                            ScalingFilter::Mmpx, ScalingFilter::Sgsr, ScalingFilter::SgsrEdge,
+                            ScalingFilter::Fsr3}),
+        Settings::values.scaling_filter,
         [this](auto value) {
             Settings::values.scaling_filter.SetValue(value);
             UpdateFilterText();
@@ -1480,49 +1517,18 @@ void MainWindow::InitializeWidgets() {
     UpdatePostShaderText();
 #endif
 
-    auto* audio = make_submenu(quick_controls, tr("Audio"));
-    menu_icon(audio, u"speaker-high");
+    auto* audio = make_submenu(quick_controls, tr("Audio"), u"speaker-high");
     auto* slider_action = new QWidgetAction(audio);
-    auto* volume_panel = new QWidget(audio);
-    volume_panel->setStyleSheet(QStringLiteral("background: transparent;"));
-    auto* volume_column = new QVBoxLayout(volume_panel);
-    volume_column->setContentsMargins(12, 8, 12, 8);
-    volume_column->setSpacing(7);
-    auto* volume_title = new QLabel(tr("Volume").toUpper(), volume_panel);
-    QFont title_font = Spotlight::Font(11, 600);
-    title_font.setLetterSpacing(QFont::PercentageSpacing, 106);
-    volume_title->setFont(title_font);
-    QPalette title_palette = volume_title->palette();
-    title_palette.setColor(QPalette::WindowText, Spotlight::Color::TextMuted());
-    volume_title->setPalette(title_palette);
-    volume_column->addWidget(volume_title);
-    auto* volume_row = new QHBoxLayout;
-    volume_row->setSpacing(12);
-    volume_slider = new QSlider(Qt::Horizontal, volume_panel);
-    volume_slider->setAccessibleName(tr("Volume"));
-    volume_slider->setFixedWidth(252);
-    volume_slider->setMaximum(200);
-    volume_slider->setPageStep(5);
-    auto* volume_value = new QLabel(volume_panel);
-    volume_value->setFont(Spotlight::Font(13, 600));
-    volume_value->setFixedWidth(44);
-    volume_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    volume_row->addWidget(volume_slider);
-    volume_row->addWidget(volume_value);
-    volume_column->addLayout(volume_row);
-    const auto show_volume = [this, volume_value] {
-        volume_value->setText(QStringLiteral("%1%").arg(volume_slider->value()));
-    };
-    connect(volume_slider, &QSlider::valueChanged, volume_value, show_volume);
-    connect(audio, &QMenu::aboutToShow, volume_value, show_volume);
-    slider_action->setDefaultWidget(volume_panel);
+    auto* volume_block = new Spotlight::VolumeBlock(audio);
+    volume_slider = volume_block->Track();
+    slider_action->setDefaultWidget(volume_block);
     audio->addAction(slider_action);
     const auto set_volume = [this](int percentage) {
         Settings::values.audio_muted = false;
         Settings::values.volume.SetValue(static_cast<u8>(percentage));
         UpdateVolumeUI();
     };
-    connect(volume_slider, &QSlider::valueChanged, this, set_volume);
+    connect(volume_slider, &QAbstractSlider::valueChanged, this, set_volume);
     mute_action = audio->addAction(tr("Mute"), this, &MainWindow::OnMute);
     mute_action->setCheckable(true);
     auto* decrease_volume =
@@ -1536,8 +1542,7 @@ void MainWindow::InitializeWidgets() {
                          {decrease_volume, "Audio Volume Down"},
                          {increase_volume, "Audio Volume Up"}});
 
-    auto* speed = make_submenu(quick_controls, tr("Emulation speed"));
-    menu_icon(speed, u"timer");
+    auto* speed = make_submenu(quick_controls, tr("Emulation speed"), u"timer");
     speed_limit_action = speed->addAction(tr("Toggle speed limit"), this, [this] {
         RememberSpeedLimitBeforeHotkey();
         Settings::ToggleStandardMode();
@@ -1604,7 +1609,13 @@ void MainWindow::InitializeWidgets() {
                                              .decrease_volume = decrease_volume,
                                              .increase_volume = increase_volume,
                                              .mute = mute_action,
-                                             .reset_volume = reset_volume};
+                                             .reset_volume = reset_volume,
+                                             .audio = audio,
+                                             .speed = speed,
+                                             .session = session,
+                                             .rescan = refresh_action,
+                                             .performance_overlay =
+                                                 ui->action_Show_Performance_Overlay};
     ingame_menu = new Spotlight::InGameMenu({.pause = ui->action_Pause,
                                              .restart = ui->action_Restart,
                                              .stop = ui->action_Stop,
@@ -1615,8 +1626,6 @@ void MainWindow::InitializeWidgets() {
                                              .effects = post_shader_status_action,
                                              .controls = controls},
                                             this);
-    graphics_panel = new Spotlight::GraphicsControls(controls, this);
-    audio_panel = new Spotlight::AudioControls(controls, this);
     const auto set_docked = [this](bool docked) {
         if (Settings::IsDockedMode() != docked) {
             OnToggleDockedMode();
@@ -1624,17 +1633,6 @@ void MainWindow::InitializeWidgets() {
     };
     connect(ingame_menu, &Spotlight::InGameMenu::DockedChanged, this, set_docked);
     connect(ingame_menu, &Spotlight::InGameMenu::VolumeChanged, this, set_volume);
-    connect(graphics_panel, &Spotlight::GraphicsControls::AboutToOpen, this, [this] {
-        UpdateStatusButtons();
-        UpdateInGameGraphicsSummary();
-    });
-    connect(graphics_panel, &Spotlight::GraphicsControls::DockedChanged, this, set_docked);
-    connect(audio_panel, &Spotlight::AudioControls::AboutToOpen, this, [this] {
-        const auto device = Settings::values.audio_output_device_id.GetValue();
-        audio_panel->SetOutput(device.empty() || device == "auto" ? tr("System default")
-                                                                  : QString::fromStdString(device));
-    });
-    connect(audio_panel, &Spotlight::AudioControls::VolumeChanged, this, set_volume);
 
     auto* emulation_menu = new Spotlight::Menu(this);
     emulation_menu->addActions({ui->action_Pause, ui->action_Restart, ui->action_Stop});
@@ -1645,26 +1643,41 @@ void MainWindow::InitializeWidgets() {
                                   Spotlight::Icon(u"timer", Spotlight::Color::MenuInk(), 16));
     emulation_menu->addSeparator();
     emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
+    show_hotkeys(emulation_menu, {{ui->action_Pause, "Continue/Pause Emulation"},
+                                  {ui->action_Restart, "Restart Emulation"},
+                                  {ui->action_Stop, "Stop Emulation"},
+                                  {ui->action_Fullscreen, "Fullscreen"},
+                                  {ui->action_Capture_Screenshot, "Capture Screenshot"},
+                                  {ui->action_Load_Amiibo, "Load/Remove Amiibo"}});
     running_title_bar->AddMenu(tr("Emulation"), emulation_menu);
-    const auto add_panel = [this](const QString& name, Spotlight::InGamePopover* panel) {
-        auto* button = running_title_bar->AddPanelButton(name);
-        connect(button, &QAbstractButton::clicked, panel, [button, panel] {
-            button->setChecked(true);
-            panel->Open(button);
-        });
-        connect(panel, &Spotlight::InGamePopover::Dismissed, button,
-                [button] { button->setChecked(false); });
-    };
-    add_panel(tr("Graphics"), graphics_panel);
-    add_panel(tr("Audio"), audio_panel);
+    auto* graphics_menu = new Spotlight::Menu(this);
+    graphics_menu->setToolTipsVisible(true);
+    for (QMenu* menu : {renderer, console, accuracy, filter, antialiasing,
+                        static_cast<QMenu*>(frame_gen), effects}) {
+        if (menu) {
+            graphics_menu->addMenu(menu);
+        }
+    }
+    connect(graphics_menu, &QMenu::aboutToShow, this, &MainWindow::UpdateStatusButtons);
+    running_title_bar->AddMenu(tr("Graphics"), graphics_menu);
+    running_title_bar->AddMenu(tr("Audio"), audio);
     auto* view_menu = new Spotlight::Menu(this);
-    ui->action_Show_Status_Bar->setText(tr("Show bottom bar"));
     view_menu->addActions(
         {ui->action_Show_Performance_Overlay, ingame_menu_action, ui->action_Show_Status_Bar});
     view_menu->addSeparator();
-    view_menu->AddSharedMenu(session, Spotlight::Icon(u"info", Spotlight::Color::MenuInk(), 16));
+    view_menu->addMenu(session);
     view_menu->addAction(refresh_action);
+    show_hotkeys(view_menu, {{ui->action_Show_Performance_Overlay, "Toggle Performance Overlay"},
+                             {ingame_menu_action, "In-game Menu"},
+                             {ui->action_Show_Status_Bar, "Toggle Status Bar"}});
     running_title_bar->AddMenu(tr("View"), view_menu);
+    show_hotkeys(ui->menu_Emulation, {{ui->action_Pause, "Continue/Pause Emulation"},
+                                      {ui->action_Stop, "Stop Emulation"},
+                                      {ui->action_Restart, "Restart Emulation"}});
+    show_hotkeys(ui->menu_View,
+                 {{ui->action_Fullscreen, "Fullscreen"},
+                  {ui->action_Show_Status_Bar, "Toggle Status Bar"},
+                  {ui->action_Show_Performance_Overlay, "Toggle Performance Overlay"}});
     connect(ingame_bar, &Spotlight::InGameBar::ExpandRequested, ui->action_Show_Status_Bar,
             &QAction::trigger);
     auto* shaders = ingame_bar->Shaders();
@@ -1730,10 +1743,6 @@ bool ConfirmCard(QWidget* parent, const QString& title, const QString& text, con
     const bool accepted = dialog.exec() == QDialog::Accepted;
     navigation->UnloadController();
     return accepted;
-}
-
-QString ControllerKeys(std::string_view action) {
-    return ControllerHotkey(action).replace(QLatin1Char('+'), QStringLiteral(" + "));
 }
 
 } // namespace
@@ -2489,7 +2498,7 @@ FirmwareSource AskFirmwareSource(QWidget* parent) {
 bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletParameters params) {
     // Shutdown previous session if the emu thread is still active...
     if (QtCommon::emu_thread != nullptr)
-        ShutdownGame();
+        ShutdownGame(tr("The next game starts when this finishes"));
 
     if (!render_window->InitRenderTarget())
         return false;
@@ -3030,6 +3039,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
     running_title_bar->SetGameTitle(display_title);
+    current_game_title = display_title;
 
     loading_screen->Prepare(QtCommon::system->GetAppLoader(), display_title,
                             QString::fromStdString(title_version));
@@ -3142,11 +3152,8 @@ bool MainWindow::OnShutdownBegin() {
     return true;
 }
 
-void MainWindow::OnShutdownBeginDialog() {
-    shutdown_dialog =
-        new OverlayDialog(this, *QtCommon::system, QString{}, tr("Closing software..."), QString{},
-                          QString{}, Qt::AlignHCenter | Qt::AlignVCenter);
-    shutdown_dialog->open();
+void MainWindow::OnShutdownBeginDialog(const QString& next) {
+    shutdown_dialog = new Spotlight::StoppingOverlay(render_window, next, this);
 }
 
 /// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
@@ -3353,9 +3360,12 @@ void MainWindow::OnEmulationStopped() {
     }
 }
 
-void MainWindow::ShutdownGame() {
+void MainWindow::ShutdownGame(const QString& next) {
     if (!emulation_running) {
         return;
+    }
+    if (!shutdown_dialog) {
+        OnShutdownBeginDialog(next);
     }
 
     if (bug_report_dialog) {
@@ -4379,7 +4389,7 @@ void MainWindow::OnRestartGame() {
     if (ConfirmShutdownGame()) {
         // Make a copy since ShutdownGame edits game_path
         const auto current_game = QString(current_game_path);
-        ShutdownGame();
+        ShutdownGame(tr("%1 starts again when this finishes").arg(current_game_title));
         BootGame(current_game, ApplicationAppletParameters());
     }
 }
@@ -4406,7 +4416,7 @@ void MainWindow::OnStopGame() {
     if (ConfirmShutdownGame()) {
         play_time_manager->Stop();
         if (OnShutdownBegin()) {
-            OnShutdownBeginDialog();
+            OnShutdownBeginDialog(tr("Returning to the library"));
         } else {
             OnEmulationStopped();
         }
@@ -4455,7 +4465,7 @@ void MainWindow::OnExecuteProgram(std::size_t program_index) {
     LOG_INFO(Frontend, "ExecuteProgram requested, program_index={} previous_program_id={:016X}",
              program_index, previous_program_id);
 
-    ShutdownGame();
+    ShutdownGame(tr("%1 starts again when this finishes").arg(current_game_title));
 
     auto params = ApplicationAppletParameters();
     params.program_index = static_cast<s32>(program_index);
@@ -4514,7 +4524,7 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
     }
     LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
              filename.toStdString());
-    ShutdownGame();
+    ShutdownGame(tr("The next game starts when this finishes"));
 
     auto params = ApplicationAppletParameters();
     params.program_id = program_id;
@@ -7041,7 +7051,6 @@ void MainWindow::UpdateInGameGraphicsSummary() {
                          values.anti_aliasing.UsingGlobal() && values.frame_gen.UsingGlobal(),
     };
     ingame_menu->SetSummary(summary);
-    graphics_panel->SetSummary(summary);
 }
 
 void MainWindow::UpdateGPUAccuracyButton() {
@@ -7056,7 +7065,6 @@ void MainWindow::UpdateDockedButton() {
     const QString mode = docked ? tr("Docked") : tr("Handheld");
     dock_status_action->setText(tr("Console mode: %1").arg(mode));
     ingame_menu->SetConsoleMode(docked);
-    graphics_panel->SetConsoleMode(docked);
     UpdateAPIText();
 }
 
@@ -7208,7 +7216,6 @@ void MainWindow::UpdateVolumeUI() {
     mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
     mute_action->setChecked(muted);
     ingame_menu->SetVolume(value, muted);
-    audio_panel->SetVolume(value, muted);
 }
 
 void MainWindow::UpdateStatusButtons() {
@@ -7412,7 +7419,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             return;
         }
         if (OnShutdownBegin()) {
-            OnShutdownBeginDialog();
+            OnShutdownBeginDialog({});
         }
         return;
     }

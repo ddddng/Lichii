@@ -4,10 +4,12 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <QKeySequence>
 #include <QPixmap>
 #include <QWidget>
 
+class QAbstractSlider;
 class QAction;
 class QLabel;
 class QMenu;
@@ -34,6 +36,11 @@ struct InGameControls {
     QAction* increase_volume;
     QAction* mute;
     QAction* reset_volume;
+    QMenu* audio;
+    QMenu* speed;
+    QMenu* session;
+    QAction* rescan;
+    QAction* performance_overlay;
 };
 
 /// What the in-game panels show, refreshed by MainWindow.
@@ -50,63 +57,18 @@ struct InGameSummary {
     bool preset_global = true;
 };
 
-/// A panel that drops down from a running title bar menu button.
-class InGamePopover : public QWidget {
-    Q_OBJECT
-
+/// The head of the Audio quick controls menu: a caption, the volume slider and its value.
+class VolumeBlock final : public QWidget {
 public:
-    explicit InGamePopover(QWidget* parent);
-    void Open(QWidget* anchor);
-
-signals:
-    void AboutToOpen();
-    void Dismissed();
+    explicit VolumeBlock(QWidget* parent);
+    QAbstractSlider* Track() const;
+    QSize sizeHint() const override;
 
 protected:
     void paintEvent(QPaintEvent*) override;
-    void hideEvent(QHideEvent* event) override;
-};
-
-/// Graphics: renderer, console mode, resolution, upscaler, frame generation, GPU accuracy,
-/// anti-aliasing and post-processing.
-class GraphicsControls final : public InGamePopover {
-    Q_OBJECT
-
-public:
-    GraphicsControls(const InGameControls& controls, QWidget* parent);
-    void SetSummary(const InGameSummary& summary);
-    void SetConsoleMode(bool docked);
-
-signals:
-    void DockedChanged(bool docked);
 
 private:
-    ValueButton* renderer;
-    ValueButton* resolution;
-    ValueButton* filter;
-    ValueButton* frame_gen;
-    ValueButton* accuracy;
-    ValueButton* anti_aliasing;
-    ValueButton* effects = nullptr;
-    SegmentedControl* console_mode;
-};
-
-/// Audio: volume, mute and the output device.
-class AudioControls final : public InGamePopover {
-    Q_OBJECT
-
-public:
-    AudioControls(const InGameControls& controls, QWidget* parent);
-    void SetVolume(int volume, bool muted);
-    void SetOutput(const QString& device);
-
-signals:
-    void VolumeChanged(int volume);
-
-private:
-    VolumeControl* volume;
-    QWidget* mute;
-    QLabel* output;
+    QAbstractSlider* track;
 };
 
 class InGameMenu final : public QWidget {
@@ -147,6 +109,8 @@ protected:
 private:
     bool IsCloseKey(const QKeyEvent& event) const;
     QAction* ActionForKey(const QKeyEvent& event) const;
+    void ShowMoreControls(bool show);
+    void BuildMoreControls();
 
     QKeySequence menu_shortcut;
     std::array<QAction*, 6> popup_actions;
@@ -154,7 +118,17 @@ private:
     GameArt* art;
     QWidget* panel;
     QScrollArea* scroll;
+    QWidget* pages;
     QWidget* content;
+    QWidget* more_entry;
+    QWidget* more_page = nullptr;
+    QWidget* more_back = nullptr;
+    std::vector<QWidget*> more_rows;
+    ValueButton* more_accuracy = nullptr;
+    ValueButton* more_anti_aliasing = nullptr;
+    InGameControls controls;
+    InGameSummary summary;
+    int panel_limit = 0;
     QLabel* title;
     QLabel* play_time;
     QWidget* pause_tile;

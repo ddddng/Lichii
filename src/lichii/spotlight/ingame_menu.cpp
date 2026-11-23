@@ -16,8 +16,10 @@
 #include <QPainter>
 #include <QScreen>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
+#include <QWidgetAction>
 
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
@@ -376,11 +378,11 @@ protected:
 
 class VolumeTrack final : public QAbstractSlider {
 public:
-    explicit VolumeTrack(QWidget* parent) : QAbstractSlider(parent) {
+    VolumeTrack(int length, int knob, QWidget* parent) : QAbstractSlider(parent), knob(knob) {
         setOrientation(Qt::Horizontal);
         setRange(0, 200);
         setPageStep(5);
-        setFixedSize(120, 16);
+        setFixedSize(length, knob);
         setFocusPolicy(Qt::TabFocus);
         setCursor(Qt::PointingHandCursor);
         setAccessibleName(InGameMenu::tr("Volume"));
@@ -391,17 +393,19 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         const qreal fraction = qreal(value() - minimum()) / std::max(1, maximum() - minimum());
+        const qreal length = width();
+        const qreal top = (knob - 6) / 2.0;
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(0xff, 0xff, 0xff, 0x2e));
-        painter.drawRoundedRect(QRectF{0, 5, 120, 6}, 3, 3);
+        painter.drawRoundedRect(QRectF{0, top, length, 6}, 3, 3);
         painter.setBrush(Color::Accent());
-        painter.drawRoundedRect(QRectF{0, 5, 120 * fraction, 6}, 3, 3);
-        const qreal knob = std::clamp(120 * fraction - 8, 0.0, 104.0);
+        painter.drawRoundedRect(QRectF{0, top, length * fraction, 6}, 3, 3);
+        const qreal x = std::clamp(length * fraction - knob / 2.0, 0.0, length - knob);
         painter.setBrush(QColor(0, 0, 0, 0x4d));
-        painter.drawEllipse(QRectF{knob - 0.5, 0.5, 17, 17});
+        painter.drawEllipse(QRectF{x - 0.5, 0.5, knob + 1.0, knob + 1.0});
         painter.setPen(hasFocus() ? QPen(Color::Accent(), 2) : Qt::NoPen);
         painter.setBrush(Color::Text());
-        painter.drawEllipse(QRectF{knob, 0, 16, 16}.adjusted(1, 1, -1, -1));
+        painter.drawEllipse(QRectF(x, 0, knob, knob).adjusted(1, 1, -1, -1));
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -420,15 +424,18 @@ private:
         setSliderPosition(minimum() +
                           qRound(std::clamp(x / width(), 0.0, 1.0) * (maximum() - minimum())));
     }
+
+    int knob;
 };
 
 } // namespace
 
 class ValueButton final : public HoverButton {
 public:
-    explicit ValueButton(QWidget* parent) : HoverButton(parent) {
-        setFont(Font(13, 600));
-        setFixedHeight(34);
+    explicit ValueButton(QWidget* parent, bool compact = false)
+        : HoverButton(parent), inset(compact ? 18 : 14) {
+        setFont(Font(compact ? 12 : 13, 600));
+        setFixedHeight(compact ? 28 : 34);
     }
 
     void SetValue(const QString& value) {
@@ -440,7 +447,7 @@ public:
     }
 
     QSize sizeHint() const override {
-        return {14 + fontMetrics().horizontalAdvance(text()) + 8 + 16 + 10, 34};
+        return {inset + fontMetrics().horizontalAdvance(text()) + 8 + 16 + inset - 4, height()};
     }
 
 protected:
@@ -449,21 +456,26 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(hasFocus() ? QPen(Color::Accent()) : Qt::NoPen);
         painter.setBrush(Fill());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+        const qreal radius = std::min(12.0, height() / 2.0);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius);
         painter.setFont(font());
         painter.setPen(isEnabled() ? Color::Text() : Color::TextFaint());
-        painter.drawText(QRect{14, 0, width() - 40, height()}, Qt::AlignVCenter,
-                         fontMetrics().elidedText(text(), Qt::ElideRight, width() - 46));
+        const int caret = width() - inset + 4 - 16;
+        painter.drawText(QRect{inset, 0, caret - 6 - inset, height()}, Qt::AlignVCenter,
+                         fontMetrics().elidedText(text(), Qt::ElideRight, caret - 6 - inset));
         painter.drawPixmap(
-            width() - 26, 9,
+            caret, (height() - 16) / 2,
             IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
     }
+
+private:
+    int inset;
 };
 
 class VolumeControl final : public QWidget {
 public:
     VolumeControl(QAction* decrease, QAction* increase, QWidget* parent)
-        : QWidget(parent), track(new VolumeTrack(this)) {
+        : QWidget(parent), track(new VolumeTrack(120, 16, this)) {
         auto* layout = new QHBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(10);
@@ -492,52 +504,131 @@ private:
     QLabel* value;
 };
 
-class ActionRow final : public HoverButton {
+namespace {
+
+constexpr int RowInset = 8;
+
+int PageHeight(const QWidget& pages, int width) {
+    const int height = pages.heightForWidth(width);
+    return height >= 0 ? height : pages.sizeHint().height();
+}
+
+void PaintRowHover(QPainter& painter, const QAbstractButton& button) {
+    if (!button.isEnabled() || (!button.underMouse() && !button.hasFocus())) {
+        return;
+    }
+    painter.setPen(button.hasFocus() ? QPen(Color::Accent()) : Qt::NoPen);
+    painter.setBrush(button.underMouse() ? QBrush(Color::FillFaint()) : QBrush());
+    painter.drawRoundedRect(QRectF(button.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10);
+}
+
+/// A row of More controls for one action of the quick controls menus: a switch for a setting
+/// that toggles, its hotkey, and a caret when it opens a dialog.
+class MoreRow final : public HoverButton {
 public:
-    ActionRow(QAction* action_, const QString& label, QWidget* parent)
-        : HoverButton(parent), action(action_) {
-        setText(label);
-        setAccessibleName(text());
-        setFixedHeight(36);
+    MoreRow(QAction* action_, QWidget* parent) : HoverButton(parent), action(action_) {
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        connect(this, &QAbstractButton::clicked, action, &QAction::trigger);
-        connect(action, &QAction::changed, this, [this] {
-            setEnabled(action->isEnabled());
-            update();
-        });
+        connect(action, &QAction::changed, this, &MoreRow::Sync);
+        Sync();
+    }
+
+    void Sync() {
+        setVisible(action->isVisible());
+        setEnabled(action->isEnabled());
+        setAccessibleName(Name());
+        setFixedHeight((action->isCheckable() ? 26 : !Key().isEmpty() ? 24 : 17) + 9);
+        update();
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        if (isEnabled() && (underMouse() || hasFocus())) {
-            painter.setPen(hasFocus() ? QPen(Color::Accent()) : Qt::NoPen);
-            painter.setBrush(underMouse() ? Color::FillFaint() : Qt::NoBrush);
-            painter.drawRoundedRect(QRectF(rect()).adjusted(-7.5, 0.5, 7.5, -0.5), 10, 10);
-        }
-        int right = width();
+        PaintRowHover(painter, *this);
+        int right = width() - RowInset;
         if (action->isCheckable()) {
-            const QRectF track{right - 34.0, (height() - 20) / 2.0, 34, 20};
+            const QRectF track{right - 44.0, (height() - 26) / 2.0, 44, 26};
             painter.setPen(Qt::NoPen);
-            painter.setBrush(action->isChecked() ? Color::Accent() : Color::Control());
-            painter.drawRoundedRect(track, 10, 10);
+            painter.setBrush(action->isChecked() ? Color::Accent() : Color::ControlHover());
+            painter.drawRoundedRect(track, 13, 13);
             painter.setBrush(Color::Text());
-            painter.drawEllipse(
-                QPointF{action->isChecked() ? track.right() - 10 : track.left() + 10,
-                        track.center().y()},
-                7, 7);
-            right -= 44;
+            painter.drawEllipse(QRectF{action->isChecked() ? track.right() - 23 : track.left() + 3,
+                                       track.top() + 3, 20, 20});
+            right -= 44 + 12;
         }
-        painter.setFont(Font(13));
-        painter.setPen(isEnabled() ? Color::Text() : Color::TextFaint());
-        painter.drawText(QRect{0, 0, right, height()}, Qt::AlignVCenter,
-                         fontMetrics().elidedText(text(), Qt::ElideRight, right));
+        const QString name = Name();
+        if (const QString key = Key(); !key.isEmpty()) {
+            right -= KeyWidth(key);
+            PaintKey(painter, QRect{right, (height() - 24) / 2, KeyWidth(key), 24}, key,
+                     Color::Control(), Color::Stroke());
+            right -= 12;
+        } else if (name.endsWith(QChar(0x2026))) {
+            right -= 16;
+            painter.drawPixmap(
+                right, (height() - 16) / 2,
+                IconPixmap(u"caret-right", 16, Color::TextSecondary(), devicePixelRatioF()));
+            right -= 12;
+        }
+        const QFont font = Font(13);
+        painter.setFont(font);
+        painter.setPen(isEnabled() ? Color::Text() : Color::TextMuted());
+        const int width = std::max(0, right - RowInset);
+        painter.drawText(QRect{RowInset, 0, width, height()}, Qt::AlignVCenter,
+                         QFontMetrics(font).elidedText(name, Qt::ElideRight, width));
     }
 
 private:
+    QString Name() const {
+        return action->text().section(QLatin1Char('\t'), 0, 0).remove(QLatin1Char('&'));
+    }
+
+    QString Key() const {
+        const QString key = action->property("spotlightKey").toString();
+        return key.isEmpty() ? KeyText(action->shortcut()) : key;
+    }
+
     QAction* action;
 };
+
+/// Opens More controls from the first page, or leads back to it.
+class PageButton final : public HoverButton {
+public:
+    PageButton(const QString& name, bool back_, QWidget* parent)
+        : HoverButton(parent), back(back_) {
+        setText(name);
+        setAccessibleName(back ? InGameMenu::tr("Back") : name);
+        setFixedHeight(back ? 31 : 42);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        PaintRowHover(painter, *this);
+        const qreal ratio = devicePixelRatioF();
+        const int icon_top = (height() - 16) / 2;
+        painter.setPen(Color::Text());
+        if (back) {
+            painter.drawPixmap(RowInset, icon_top,
+                               IconPixmap(u"caret-left", 16, Color::Text(), ratio));
+            painter.setFont(DisplayFont(18));
+            painter.drawText(QRect{RowInset + 24, 0, width() - RowInset - 24, height()},
+                             Qt::AlignVCenter, text());
+            return;
+        }
+        painter.setFont(Font(14, 600));
+        painter.drawText(QRect{RowInset, 0, width() - 2 * RowInset - 16, height()},
+                         Qt::AlignVCenter, text());
+        painter.drawPixmap(width() - RowInset - 16, icon_top,
+                           IconPixmap(u"caret-right", 16, Color::TextSecondary(), ratio));
+    }
+
+private:
+    bool back;
+};
+
+} // namespace
 
 class GameArt final : public QWidget {
 public:
@@ -565,154 +656,39 @@ private:
     QPixmap image;
 };
 
-InGamePopover::InGamePopover(QWidget* parent) : QWidget(parent, PopupFlags) {
-    setAttribute(Qt::WA_TranslucentBackground);
-    setAttribute(Qt::WA_NoMouseReplay);
+VolumeBlock::VolumeBlock(QWidget* parent) : QWidget(parent), track(new VolumeTrack(252, 18, this)) {
     setStyleSheet(QStringLiteral("QWidget { background: transparent; }"));
-    setFocusPolicy(Qt::StrongFocus);
-    FadeInOnShow(this, Motion::Hover);
-    setFixedWidth(360);
+    track->move(12, 30);
+    connect(track, &QAbstractSlider::valueChanged, this, qOverload<>(&QWidget::update));
 }
 
-void InGamePopover::Open(QWidget* anchor) {
-    emit AboutToOpen();
-    adjustSize();
-    const QRect area = anchor->screen()->availableGeometry();
-    const QPoint origin = anchor->mapToGlobal(QPoint{0, anchor->height() + 6});
-    move(std::clamp(origin.x(), area.left(), std::max(area.left(), area.right() - width() + 1)),
-         std::clamp(origin.y(), area.top(), std::max(area.top(), area.bottom() - height() + 1)));
-    show();
-    setFocus(Qt::PopupFocusReason);
+QAbstractSlider* VolumeBlock::Track() const {
+    return track;
 }
 
-void InGamePopover::paintEvent(QPaintEvent*) {
+QSize VolumeBlock::sizeHint() const {
+    return {12 + 252 + 12 + 44 + 12, 56};
+}
+
+void VolumeBlock::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Color::StrokeSubtle());
-    painter.setBrush(Color::Popover());
-    painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
-}
-
-void InGamePopover::hideEvent(QHideEvent* event) {
-    QWidget::hideEvent(event);
-    emit Dismissed();
-}
-
-namespace {
-
-QHBoxLayout* AddPanelRow(QVBoxLayout* layout, QStringView icon, const QString& name,
-                         QWidget* control) {
-    auto* holder = new QWidget(layout->parentWidget());
-    holder->setFixedHeight(40);
-    auto* item = new QHBoxLayout(holder);
-    item->setContentsMargins(0, 0, 0, 0);
-    item->setSpacing(10);
-    auto* glyph = new QLabel(holder);
-    glyph->setPixmap(IconPixmap(icon, 16, Color::TextSecondary(), holder->devicePixelRatioF()));
-    item->addWidget(glyph);
-    item->addWidget(Label(name, Font(13), Color::Text(), holder), 1);
-    if (control) {
-        control->setAccessibleName(name);
-        item->addWidget(control);
-    }
-    layout->addWidget(holder);
-    return item;
-}
-
-} // namespace
-
-GraphicsControls::GraphicsControls(const InGameControls& controls, QWidget* parent)
-    : InGamePopover(parent) {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 14, 16, 14);
-    layout->setSpacing(0);
-    const auto dropdown = [&](QStringView icon, const QString& name, QMenu* menu, QAction* action) {
-        auto* button = new ValueButton(this);
-        AddPanelRow(layout, icon, name, button);
-        connect(button, &QAbstractButton::clicked, this, [this, button, menu, action] {
-            if (menu) {
-                PopupMenu(menu, button);
-            } else {
-                hide();
-                action->trigger();
-            }
-        });
-        return button;
-    };
-
-    renderer = dropdown(u"cpu", tr("Backend"), controls.renderer, nullptr);
-    console_mode = new SegmentedControl({tr("Docked"), tr("Handheld")},
-                                        SegmentedControl::Kind::Accent, 38, this);
-    AddPanelRow(layout, u"monitor", tr("Console mode"), console_mode);
-    connect(console_mode, &SegmentedControl::CurrentChanged, this,
-            [this](int index) { emit DockedChanged(index == 0); });
-    resolution = dropdown(u"stack", tr("Resolution scale"), nullptr, controls.settings);
-    resolution->setToolTip(tr("Applies from the next launch. Opens the game's settings."));
-    filter = dropdown(u"sparkle", tr("Upscaler"), controls.filter, nullptr);
-    frame_gen = dropdown(u"film-strip", tr("Frame generation"), controls.frame_gen, nullptr);
-    accuracy = dropdown(u"graphics-card", tr("GPU accuracy"), controls.accuracy, nullptr);
-    anti_aliasing =
-        dropdown(u"frame-corners", tr("Anti-aliasing"), controls.anti_aliasing, nullptr);
-    if (controls.effects) {
-        effects = dropdown(u"magic-wand", tr("Post-processing"), controls.effects, nullptr);
-    }
-    for (QMenu* menu : {controls.renderer, controls.filter, controls.frame_gen, controls.accuracy,
-                        controls.anti_aliasing, controls.effects}) {
-        if (menu) {
-            connect(menu, &QMenu::triggered, this, &GraphicsControls::AboutToOpen,
-                    Qt::QueuedConnection);
-        }
-    }
-}
-
-void GraphicsControls::SetSummary(const InGameSummary& summary) {
-    renderer->SetValue(summary.renderer);
-    resolution->SetValue(summary.resolution);
-    filter->SetValue(summary.filter);
-    frame_gen->SetValue(summary.frame_gen);
-    accuracy->SetValue(summary.accuracy);
-    anti_aliasing->SetValue(summary.anti_aliasing);
-    if (effects) {
-        effects->SetValue(summary.effects);
-    }
-}
-
-void GraphicsControls::SetConsoleMode(bool docked) {
-    const QSignalBlocker blocker(console_mode);
-    console_mode->SetCurrentIndex(docked ? 0 : 1);
-}
-
-AudioControls::AudioControls(const InGameControls& controls, QWidget* parent)
-    : InGamePopover(parent) {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 14, 16, 14);
-    layout->setSpacing(0);
-    volume = new VolumeControl(controls.decrease_volume, controls.increase_volume, this);
-    AddPanelRow(layout, u"speaker-high", tr("Volume"), volume);
-    connect(volume->track, &QAbstractSlider::valueChanged, this, &AudioControls::VolumeChanged);
-    mute = new ActionRow(controls.mute, tr("Mute"), this);
-    layout->addWidget(mute);
-    layout->addWidget(new ActionRow(controls.reset_volume, tr("Reset volume"), this));
-    layout->addSpacing(6);
-    layout->addWidget(new Hairline(this));
-    layout->addSpacing(8);
-    output = Label({}, Font(12), Color::TextSecondary(), this);
-    layout->addWidget(output);
-}
-
-void AudioControls::SetVolume(int value, bool muted) {
-    volume->Set(value, muted);
-    mute->update();
-}
-
-void AudioControls::SetOutput(const QString& device) {
-    output->setText(tr("Output: %1").arg(device));
+    QFont caption = Font(11, 600);
+    caption.setLetterSpacing(QFont::PercentageSpacing, 106);
+    painter.setFont(caption);
+    painter.setPen(Color::TextMuted());
+    painter.drawText(QRect{12, 8, width() - 24, 15}, Qt::AlignVCenter,
+                     InGameMenu::tr("Volume").toUpper());
+    painter.setFont(Font(13, 600));
+    painter.setPen(Color::Text());
+    painter.drawText(QRect{12 + 252 + 12, 30, 44, 18}, Qt::AlignRight | Qt::AlignVCenter,
+                     InGameMenu::tr("%1%").arg(track->value()));
 }
 
 InGameMenu::InGameMenu(const Actions& actions, QWidget* parent)
     : QWidget(parent, PopupFlags),
       popup_actions{actions.pause,   actions.restart,    actions.stop,
-                    actions.capture, actions.fullscreen, actions.controls.settings} {
+                    actions.capture, actions.fullscreen, actions.controls.settings},
+      controls(actions.controls) {
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_NoMouseReplay);
     setStyleSheet(QStringLiteral("QWidget { background: transparent; }"));
@@ -732,8 +708,13 @@ InGameMenu::InGameMenu(const Actions& actions, QWidget* parent)
     scroll->setWidgetResizable(true);
     scroll->viewport()->setAutoFillBackground(false);
     frame->addWidget(scroll);
-    content = new QWidget(scroll);
-    scroll->setWidget(content);
+    pages = new QWidget(scroll);
+    scroll->setWidget(pages);
+    auto* page_layout = new QVBoxLayout(pages);
+    page_layout->setContentsMargins(0, 0, 0, 0);
+    page_layout->setSpacing(0);
+    content = new QWidget(pages);
+    page_layout->addWidget(content);
     auto* layout = new QVBoxLayout(content);
     layout->setContentsMargins(19, 17, 19, 17);
     layout->setSpacing(12);
@@ -859,6 +840,11 @@ InGameMenu::InGameMenu(const Actions& actions, QWidget* parent)
     connect(volume->track, &QAbstractSlider::valueChanged, this, &InGameMenu::VolumeChanged);
     layout->addLayout(rows);
 
+    auto* more = new PageButton(tr("More controls"), false, content);
+    more_entry = more;
+    connect(more, &QAbstractButton::clicked, this, [this] { ShowMoreControls(true); });
+    layout->addWidget(more);
+
     auto* settings = new SettingsRow(actions.controls.settings, content);
     const auto sync_settings = [settings, action = actions.controls.settings] {
         settings->setEnabled(action->isEnabled());
@@ -897,9 +883,9 @@ void InGameMenu::Open(QWidget* anchor, const QKeySequence& shortcut, const QPixm
     const int left = anchor->width() - panel_width - margin;
     const int top =
         left < close_hint->width() + 2 * margin ? close_hint->height() + 2 * margin : margin;
-    const int panel_height =
-        std::min(content->heightForWidth(panel_width - 2) + 2, anchor->height() - top - margin);
-    panel->setGeometry(left, top, panel_width, std::max(panel_height, 0));
+    panel_limit = std::max(anchor->height() - top - margin, 0);
+    panel->setGeometry(left, top, panel_width,
+                       std::min(PageHeight(*pages, panel_width - 2) + 2, panel_limit));
     setGeometry(QRect{anchor->mapToGlobal(QPoint{}), anchor->size()});
     show();
     raise();
@@ -907,7 +893,12 @@ void InGameMenu::Open(QWidget* anchor, const QKeySequence& shortcut, const QPixm
     setFocus(Qt::PopupFocusReason);
 }
 
-void InGameMenu::SetSummary(const InGameSummary& summary) {
+void InGameMenu::SetSummary(const InGameSummary& summary_) {
+    summary = summary_;
+    if (more_page) {
+        more_accuracy->SetValue(summary.accuracy);
+        more_anti_aliasing->SetValue(summary.anti_aliasing);
+    }
     resolution->SetValue(summary.resolution.isEmpty()
                              ? summary.filter
                              : tr("%1 · %2").arg(summary.resolution, summary.filter));
@@ -933,7 +924,103 @@ void InGameMenu::paintEvent(QPaintEvent*) {
 
 void InGameMenu::hideEvent(QHideEvent* event) {
     QWidget::hideEvent(event);
+    if (more_page && more_page->isVisible()) {
+        more_page->hide();
+        content->show();
+    }
     emit Dismissed();
+}
+
+void InGameMenu::ShowMoreControls(bool show) {
+    const bool keyboard = (show ? more_entry : more_back)->hasFocus();
+    if (show && !more_page) {
+        BuildMoreControls();
+    }
+    if (show) {
+        for (QMenu* menu : {controls.effects, controls.audio, controls.speed, controls.session}) {
+            if (menu) {
+                emit menu->aboutToShow();
+            }
+        }
+        for (QWidget* row : more_rows) {
+            static_cast<MoreRow*>(row)->Sync();
+        }
+    }
+    content->setVisible(!show);
+    more_page->setVisible(show);
+    panel->resize(panel->width(),
+                  std::min(PageHeight(*pages, panel->width() - 2) + 2, panel_limit));
+    scroll->verticalScrollBar()->setValue(0);
+    if (keyboard) {
+        (show ? more_back : more_entry)->setFocus(Qt::TabFocusReason);
+    } else {
+        setFocus(Qt::OtherFocusReason);
+    }
+}
+
+void InGameMenu::BuildMoreControls() {
+    more_page = new QWidget(pages);
+    pages->layout()->addWidget(more_page);
+    auto* layout = new QVBoxLayout(more_page);
+    layout->setContentsMargins(16 - RowInset, 16, 16 - RowInset, 16);
+    layout->setSpacing(0);
+    auto* back = new PageButton(tr("More controls"), true, more_page);
+    more_back = back;
+    connect(back, &QAbstractButton::clicked, this, [this] { ShowMoreControls(false); });
+    layout->addWidget(back);
+
+    const auto dropdown = [&](const QString& name, QMenu* menu) {
+        auto* holder = new QWidget(more_page);
+        holder->setFixedHeight(28 + 9);
+        auto* item = new QHBoxLayout(holder);
+        item->setContentsMargins(RowInset, 0, RowInset, 0);
+        item->setSpacing(12);
+        item->addWidget(Label(name, Font(13), Color::Text(), holder), 1);
+        auto* button = new ValueButton(holder, true);
+        button->setAccessibleName(name);
+        item->addWidget(button);
+        connect(button, &QAbstractButton::clicked, this,
+                [button, menu] { PopupMenu(menu, button); });
+        layout->addWidget(holder);
+        return button;
+    };
+    more_accuracy = dropdown(tr("GPU accuracy"), controls.accuracy);
+    more_anti_aliasing = dropdown(tr("Anti-aliasing"), controls.anti_aliasing);
+    more_accuracy->SetValue(summary.accuracy);
+    more_anti_aliasing->SetValue(summary.anti_aliasing);
+
+    const auto add_row = [&](QAction* action, bool keep_open) {
+        auto* row = new MoreRow(action, more_page);
+        more_rows.push_back(row);
+        connect(row, &QAbstractButton::clicked, this, [this, action, keep_open] {
+            if (!keep_open || action->text().endsWith(QChar(0x2026))) {
+                hide();
+            }
+            action->trigger();
+        });
+        layout->addWidget(row);
+    };
+    const auto section = [&](const QString& name, QMenu* menu, bool keep_open) {
+        if (!menu) {
+            return;
+        }
+        auto* label = Label(name, Font(12, 600), Color::TextSecondary(), more_page);
+        label->setFixedHeight(16 + 9);
+        label->setContentsMargins(RowInset, 0, RowInset, 0);
+        layout->addWidget(label);
+        for (QAction* action : menu->actions()) {
+            if (!action->isSeparator() && !action->menu() &&
+                !qobject_cast<QWidgetAction*>(action)) {
+                add_row(action, keep_open || action->isCheckable());
+            }
+        }
+    };
+    section(tr("Post-processing"), controls.effects, true);
+    section(tr("Audio"), controls.audio, true);
+    section(tr("Emulation speed"), controls.speed, true);
+    add_row(controls.rescan, false);
+    add_row(controls.performance_overlay, true);
+    section(tr("Session status"), controls.session, false);
 }
 
 bool InGameMenu::IsCloseKey(const QKeyEvent& event) const {
@@ -959,6 +1046,18 @@ void InGameMenu::mousePressEvent(QMouseEvent* event) {
 }
 
 void InGameMenu::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        if (auto* button = qobject_cast<QAbstractButton*>(focusWidget())) {
+            event->accept();
+            button->click();
+            return;
+        }
+    }
+    if (event->key() == Qt::Key_Backspace && more_page && more_page->isVisible()) {
+        event->accept();
+        ShowMoreControls(false);
+        return;
+    }
     if (IsCloseKey(*event)) {
         event->accept();
         hide();

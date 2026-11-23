@@ -68,7 +68,7 @@ class NupProgressDialog;
 class ShaderWarmDialog;
 class WhatsNewDialog;
 class NxTools;
-class QSlider;
+class QAbstractSlider;
 class QMenu;
 class QHBoxLayout;
 class WaitTreeWidget;
@@ -77,8 +77,7 @@ namespace Spotlight {
 class FullscreenHint;
 class InGameBar;
 class InGameMenu;
-class AudioControls;
-class GraphicsControls;
+class StoppingOverlay;
 } // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
@@ -292,7 +291,8 @@ private:
     void BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                   StartGameType with_config = StartGameType::Normal);
     void BootGameFromList(const QString& filename, StartGameType with_config);
-    void ShutdownGame();
+    /// Ends the session and waits for it; next says on the stopping overlay what follows.
+    void ShutdownGame(const QString& next = {});
     void ExitIfEmulationThreadStuck();
 
     void SetDiscordEnabled(bool state);
@@ -464,7 +464,7 @@ private slots:
     void OnLanguageChanged(const QString& locale);
     void OnMouseActivity();
     bool OnShutdownBegin();
-    void OnShutdownBeginDialog();
+    void OnShutdownBeginDialog(const QString& next);
     void OnEmulationStopped();
     void OnEmulationStopTimeExpired();
     void OnEmulationStopTimeout();
@@ -613,7 +613,7 @@ private:
     Common::UUID nextendo_profile_user;
     // A forced pull that has to wait for the game to stop or for the running pull.
     bool nextendo_profile_force{};
-    OverlayDialog* shutdown_dialog{};
+    Spotlight::StoppingOverlay* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
 #ifdef HAS_RESHADE
@@ -626,8 +626,6 @@ private:
 
     Spotlight::InGameBar* ingame_bar = nullptr;
     Spotlight::InGameMenu* ingame_menu = nullptr;
-    Spotlight::GraphicsControls* graphics_panel = nullptr;
-    Spotlight::AudioControls* audio_panel = nullptr;
     Spotlight::FullscreenHint* fullscreen_hint = nullptr;
     Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
     QMenu* quick_controls = nullptr;
@@ -659,7 +657,7 @@ private:
     bool frame_gen_generating = false;
     double frame_gen_fps = 0.0;
     QElapsedTimer frame_gen_fps_timer;
-    QSlider* volume_slider = nullptr;
+    QAbstractSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
 
     // Stores what suffix to add to the FPS counter, e.g. Unlocked.
@@ -677,6 +675,7 @@ private:
     bool close_pending = false;
     // The path to the game currently running
     QString current_game_path;
+    QString current_game_title;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
     bool user_flag_cmd_line = false;
 
