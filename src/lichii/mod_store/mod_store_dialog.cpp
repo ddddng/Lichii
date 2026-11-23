@@ -11,11 +11,15 @@
 #include <utility>
 #include <variant>
 
+#include <QAbstractItemView>
+#include <QAction>
+#include <QApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDesktopServices>
-#include <QDialog>
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QEventLoop>
 #include <QFutureWatcher>
 #include <QGridLayout>
 #include <QHash>
@@ -26,6 +30,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -48,6 +53,7 @@
 #include "lichii/mod_store/mod_store_client.h"
 #include "lichii/mod_store/mod_store_install.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
 
 namespace ModStore {
@@ -150,28 +156,78 @@ QLabel* PlainLabel(QWidget* parent, bool wrap = false, const QColor& color = Col
     return label;
 }
 
-void PaintImage(QPainter& painter, const QRect& bounds, const QImage& image, int radius,
-                bool crop) {
-    QPainterPath clip;
-    clip.addRoundedRect(bounds, radius, radius);
-    painter.fillPath(clip, Color::PanelDeep());
-    if (image.isNull()) {
-        const auto size = qBound(14, bounds.height() / 4, 32);
-        painter.drawPixmap(bounds.center() - QPoint(size / 2, size / 2),
-                           Spotlight::IconPixmap(u"image", size, Color::TextFaint(),
-                                                 painter.device()->devicePixelRatioF()));
-        return;
-    }
-    const QSize size = image.size().scaled(bounds.size(), crop ? Qt::KeepAspectRatioByExpanding
-                                                               : Qt::KeepAspectRatio);
-    QRect image_rect(QPoint{}, size);
-    image_rect.moveCenter(bounds.center());
-    painter.save();
-    painter.setClipPath(clip);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawImage(image_rect, image);
-    painter.restore();
+QColor ImageWell() {
+    return {0x11, 0x11, 0x11};
 }
+
+QColor Rule() {
+    return {0xff, 0xff, 0xff, 0x12};
+}
+
+QPixmap CachedIcon(QStringView name, int size, const QColor& color, qreal ratio) {
+    static QHash<QString, QPixmap> cache;
+    const auto key = QStringLiteral("%1/%2/%3/%4").arg(name).arg(size).arg(color.rgba()).arg(ratio);
+    auto found = cache.constFind(key);
+    if (found == cache.cend()) {
+        found = cache.insert(key, Spotlight::IconPixmap(name, size, color, ratio));
+    }
+    return found.value();
+}
+
+class Picture {
+public:
+    Picture(int radius, bool crop) : radius(radius), crop(crop) {}
+
+    void Set(QImage value) {
+        source = std::move(value);
+        cache = {};
+    }
+
+    const QImage& Source() const {
+        return source;
+    }
+
+    void Paint(QPainter& painter, const QRect& bounds) {
+        const qreal ratio = painter.device()->devicePixelRatioF();
+        const QSize pixels = (QSizeF(bounds.size()) * ratio).toSize();
+        if (cache.size() != pixels || cache.devicePixelRatio() != ratio) {
+            Render(bounds.size(), ratio);
+        }
+        painter.drawPixmap(bounds.topLeft(), cache);
+    }
+
+private:
+    void Render(QSize size, qreal ratio) {
+        cache = QPixmap((QSizeF(size) * ratio).toSize());
+        cache.setDevicePixelRatio(ratio);
+        cache.fill(Qt::transparent);
+        QPainter painter(&cache);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRect bounds(QPoint{}, size);
+        QPainterPath clip;
+        clip.addRoundedRect(bounds, radius, radius);
+        painter.fillPath(clip, ImageWell());
+        if (source.isNull()) {
+            const int icon = qBound(14, size.height() / 4, 32);
+            painter.drawPixmap(bounds.center() - QPoint(icon / 2, icon / 2),
+                               Spotlight::IconPixmap(u"image", icon, Spotlight::Color::TextFaint(),
+                                                     ratio));
+            return;
+        }
+        const QSize fitted = source.size().scaled(
+            bounds.size(), crop ? Qt::KeepAspectRatioByExpanding : Qt::KeepAspectRatio);
+        QRect target(QPoint{}, fitted);
+        target.moveCenter(bounds.center());
+        painter.setClipPath(clip);
+        painter.drawImage(target, source.scaled((QSizeF(fitted) * ratio).toSize(),
+                                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    }
+
+    QImage source;
+    QPixmap cache;
+    int radius;
+    bool crop;
+};
 
 QIcon RoundedGameIcon(const QIcon& icon) {
     if (icon.isNull()) {
@@ -186,19 +242,98 @@ QIcon RoundedGameIcon(const QIcon& icon) {
         {
             QPainter painter(&square);
             painter.setRenderHint(QPainter::Antialiasing);
-            PaintImage(painter, QRect(0, 0, 24, 24), icon.pixmap(QSize(24, 24), ratio).toImage(), 3,
-                       false);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            Spotlight::PaintWholeIcon(painter, QRectF(0, 0, 24, 24),
+                                      icon.pixmap(QSize(24, 24), ratio), 3);
         }
         rounded.addPixmap(square);
     }
     return rounded;
 }
 
+class PillCombo final : public QComboBox {
+public:
+    explicit PillCombo(QWidget* parent, int max_width = 320)
+        : QComboBox(parent), max_width(max_width) {
+        setFont(Spotlight::Font(13, QFont::DemiBold));
+        setFixedHeight(36);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::TabFocus);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setMaxVisibleItems(12);
+        connect(this, &QComboBox::currentIndexChanged, this, [this] { updateGeometry(); });
+    }
+
+    QSize sizeHint() const override {
+        const int width = LeftPadding() + IconSpace() +
+                          fontMetrics().horizontalAdvance(currentText()) + 2 + 6 + 16 + 12;
+        return {qMin(width, max_width), 36};
+    }
+
+    QSize minimumSizeHint() const override {
+        return {qMin(sizeHint().width(), LeftPadding() + IconSpace() + 80), 36};
+    }
+
+    void showPopup() override {
+        int widest = 0;
+        for (int i = 0; i < count(); ++i) {
+            widest = qMax(widest, fontMetrics().horizontalAdvance(itemText(i)));
+        }
+        const int icons = iconSize().width() + 10;
+        view()->setMinimumWidth(qMin(qMax(width(), widest + icons + 52), 480));
+        QComboBox::showPopup();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool hovered = underMouse() && isEnabled();
+        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1) : Qt::NoPen);
+        painter.setBrush(hovered ? Color::ControlHover() : Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
+        painter.setOpacity(isEnabled() ? 1.0 : 0.45);
+        int x = LeftPadding();
+        if (const auto value = itemIcon(currentIndex()); !value.isNull()) {
+            const int size = iconSize().height();
+            value.paint(&painter, QRect(x, (height() - size) / 2, size, size));
+            x += IconSpace();
+        }
+        const int caret = width() - 12 - 16;
+        painter.drawPixmap(caret, 10, CachedIcon(u"caret-down", 16, Color::TextSecondary(),
+                                                 devicePixelRatioF()));
+        painter.setPen(Color::Text());
+        painter.setFont(font());
+        const QRect text_rect(x, 0, caret - 6 - x, height());
+        painter.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
+                         fontMetrics().elidedText(currentText(), Qt::ElideRight, text_rect.width()));
+    }
+
+    void enterEvent(QEnterEvent* event) override {
+        update();
+        QComboBox::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent* event) override {
+        update();
+        QComboBox::leaveEvent(event);
+    }
+
+private:
+    int LeftPadding() const {
+        return itemIcon(currentIndex()).isNull() ? 14 : iconSize().height() >= 24 ? 6 : 12;
+    }
+
+    int IconSpace() const {
+        return itemIcon(currentIndex()).isNull() ? 0 : iconSize().height() + (iconSize().height() >= 24 ? 8 : 7);
+    }
+
+    int max_width;
+};
+
 class PreviewImage final : public QWidget {
 public:
-    PreviewImage(int radius, bool crop, QWidget* parent)
-        : QWidget(parent), radius(radius), crop(crop) {
-        setObjectName(QStringLiteral("storeContents"));
+    explicit PreviewImage(QWidget* parent, int radius = 20) : QWidget(parent), picture(radius, true) {
         auto policy = QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         policy.setHeightForWidth(true);
         setSizePolicy(policy);
@@ -213,21 +348,18 @@ public:
     }
 
     void SetImage(QImage value) {
-        image = std::move(value);
+        picture.Set(std::move(value));
         update();
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        PaintImage(painter, rect(), image, radius, crop);
+        picture.Paint(painter, rect());
     }
 
 private:
-    QImage image;
-    int radius;
-    bool crop;
+    Picture picture;
 };
 
 class PreviewButton final : public QAbstractButton {
@@ -235,12 +367,12 @@ public:
     explicit PreviewButton(QWidget* parent) : QAbstractButton(parent) {
         setFixedSize(76, 44);
         setCheckable(true);
-        setFocusPolicy(Qt::StrongFocus);
+        setFocusPolicy(Qt::TabFocus);
         setCursor(Qt::PointingHandCursor);
     }
 
     void SetImage(QImage value) {
-        image = std::move(value);
+        picture.Set(std::move(value));
         update();
     }
 
@@ -249,14 +381,25 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         if (hasFocus() || isChecked() || underMouse()) {
-            painter.setPen(QPen(hasFocus() ? Color::Text() : Color::Accent(), 2));
+            painter.setPen(QPen(hasFocus()   ? Color::Text()
+                                : isChecked() ? Color::Accent()
+                                              : Color::Stroke(),
+                                2));
             painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 9, 9);
         }
-        PaintImage(painter, rect().adjusted(2, 2, -2, -2), image, Spotlight::Radius::KeyCap, true);
+        picture.Paint(painter, rect().adjusted(2, 2, -2, -2));
+    }
+
+    void enterEvent(QEnterEvent*) override {
+        update();
+    }
+
+    void leaveEvent(QEvent*) override {
+        update();
     }
 
 private:
-    QImage image;
+    Picture picture{7, true};
 };
 
 class ModCard final : public QAbstractButton {
@@ -284,12 +427,12 @@ public:
     }
 
     void SetImage(QImage value) {
-        image = std::move(value);
+        picture.Set(std::move(value));
         update();
     }
 
     const QImage& Image() const {
-        return image;
+        return picture.Source();
     }
 
     void SetInstalled(QString label, bool enabled) {
@@ -309,6 +452,14 @@ protected:
         QAbstractButton::keyPressEvent(event);
     }
 
+    void enterEvent(QEnterEvent*) override {
+        update();
+    }
+
+    void leaveEvent(QEvent*) override {
+        update();
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
@@ -317,31 +468,31 @@ protected:
                        : underMouse() ? Color::Stroke()
                                       : Color::StrokeSubtle());
         painter.setBrush(underMouse() || isDown() ? Color::Fill() : Color::FillFaint());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-                                Spotlight::Radius::Card, Spotlight::Radius::Card);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20);
         const QRect illustration(8, 8, width() - 16, height() - 94);
-        PaintImage(painter, illustration, image, 10, true);
-        const int title_top = illustration.bottom() + 10;
+        picture.Paint(painter, illustration);
+        const int title_top = illustration.y() + illustration.height() + 10;
         const int content_width = width() - 28;
         const auto mark = [&](QStringView icon, const QString& text, const QColor& color, int size,
-                              int weight, int top, bool right, int available) {
+                              int weight, int top, int line, bool right, int available, int gap) {
             painter.setFont(Spotlight::Font(size, weight));
             const auto label =
-                painter.fontMetrics().elidedText(text, Qt::ElideRight, available - 18);
+                painter.fontMetrics().elidedText(text, Qt::ElideRight, available - 14 - gap);
             const int text_width = painter.fontMetrics().horizontalAdvance(label);
-            const int left = right ? width() - 14 - text_width - 18 : 14;
-            painter.drawPixmap(left, top + 2,
-                               Spotlight::IconPixmap(icon, 14, color, devicePixelRatioF()));
+            const int left = right ? width() - 14 - text_width - 14 - gap : 14;
+            painter.drawPixmap(left, top + (line - 14) / 2,
+                               CachedIcon(icon, 14, color, devicePixelRatioF()));
             painter.setPen(color);
-            painter.drawText(QRect(left + 18, top, text_width, 18), Qt::AlignVCenter, label);
-            return text_width + 18;
+            painter.drawText(QRect(left + 14 + gap, top, text_width, line), Qt::AlignVCenter,
+                             label);
+            return text_width + 14 + gap;
         };
         const int badge_width =
             installed.isEmpty()
                 ? 0
                 : mark(u"check-circle-fill", installed,
                        installed_enabled ? Color::Success() : Color::TextSecondary(), 11,
-                       QFont::DemiBold, title_top + 1, true, content_width / 2) +
+                       QFont::DemiBold, title_top, 20, true, content_width / 2, 4) +
                       8;
         painter.setFont(Spotlight::Font(15, QFont::DemiBold));
         painter.setPen(Color::Text());
@@ -351,16 +502,16 @@ protected:
             painter.fontMetrics().elidedText(text(), Qt::ElideRight, title_rect.width()));
         painter.setFont(Spotlight::Font(12, QFont::Normal));
         painter.setPen(Color::TextSecondary());
-        painter.drawText(QRect(14, title_top + 22, content_width, 16), Qt::AlignVCenter,
+        painter.drawText(QRect(14, title_top + 24, content_width, 16), Qt::AlignVCenter,
                          painter.fontMetrics().elidedText(subtitle, Qt::ElideRight, content_width));
         const int verification_width =
             verification.isEmpty()
                 ? 0
                 : mark(u"warning-circle", verification, Color::Warning(), 12, QFont::DemiBold,
-                       title_top + 43, true, content_width * 3 / 5) +
+                       title_top + 46, 16, true, content_width * 3 / 5, 4) +
                       8;
-        mark(u"globe", source, Color::TextSecondary(), 12, QFont::Medium, title_top + 43, false,
-             content_width - verification_width);
+        mark(u"globe", source, Color::TextSecondary(), 12, QFont::Medium, title_top + 46, 16,
+             false, content_width - verification_width, 5);
     }
 
 private:
@@ -368,58 +519,60 @@ private:
     QString source;
     QString verification;
     QString installed;
-    QImage image;
+    Picture picture{14, true};
     bool installed_enabled{};
 };
 
-class Dialog final : public QDialog {
+class Dialog final : public QWidget {
     Q_DECLARE_TR_FUNCTIONS(ModStore::Dialog)
 
 public:
-    Dialog(QWidget* parent, DialogContext ctx)
-        : QDialog(parent), context(std::move(ctx)), client(context.base_url, this) {
+    Dialog(QWidget* host, DialogContext ctx)
+        : QWidget(host), context(std::move(ctx)), client(context.base_url, this) {
         setObjectName(QStringLiteral("spotlightModStore"));
-        setWindowTitle(tr("Mod Store"));
-        Spotlight::FadeInOnShow(this);
+        setAttribute(Qt::WA_OpaquePaintEvent);
         setFont(Spotlight::Font(13, QFont::Normal));
-        resize(1280, 800);
-        setMinimumSize(950, 520);
         setStyleSheet(
             QStringLiteral(
-                "QDialog#spotlightModStore { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-                " stop:0 %1, stop:1 %2); }"
-                "QDialog#spotlightModStore QScrollArea { background: transparent; border: none; }"
-                "QDialog#spotlightModStore QWidget#storeContents { background: transparent; }"
-                "QComboBox[storeControl=\"true\"], QLineEdit#storeSearch {"
-                " background: %3; color: %4; border: 1px solid transparent; border-radius: 18px;"
-                " min-height: 34px; padding: 0 12px; }"
-                "QComboBox[storeControl=\"true\"] { padding-right: 8px; }"
-                "QComboBox[storeControl=\"true\"]::drop-down { width: 30px; border: none; }"
-                "QComboBox[storeControl=\"true\"]::down-arrow {"
-                " image: url(:/spotlight/icons/caret-down.png); width: 14px; height: 14px; }"
-                "QComboBox[storeControl=\"true\"] QAbstractItemView { background: %2; color: %4;"
-                " selection-background-color: %5; selection-color: %4; }"
-                "QComboBox[storeControl=\"true\"]:focus, QLineEdit#storeSearch:focus { "
-                "border-color: %6; }"
+                "QWidget#spotlightModStore QScrollArea { background: transparent; border: none; }"
+                "QWidget#spotlightModStore QWidget#storeContents { background: transparent; }"
+                "QLineEdit#storeSearch { background: %1; color: %2; border: 1px solid transparent;"
+                " border-radius: 19px; min-height: 36px; max-height: 36px; padding: 0 12px 0 8px;"
+                " selection-background-color: %3; }"
+                "QLineEdit#storeSearch:hover { background: %4; }"
+                "QLineEdit#storeSearch:focus { border-color: %7; }"
+                "QComboBox { combobox-popup: 0; }"
+                "QComboBox QAbstractItemView { background: %6; color: %2; border: 1px solid %7;"
+                " border-radius: 12px; padding: 6px; outline: 0; }"
+                "QComboBox QAbstractItemView::item { min-height: 32px; padding: 0 10px;"
+                " border: none; border-radius: 8px; }"
+                "QComboBox QAbstractItemView::item:selected,"
+                " QComboBox QAbstractItemView::item:hover { background: %4; color: %2; }"
                 "QToolButton#storeDescription { background: transparent; border: 1px solid "
-                "transparent;"
-                " border-radius: 3px; color: %7; padding: 0; }"
-                "QToolButton#storeDescription:focus, QToolButton#storeDescription:hover { "
-                "border-color: %6; }"
+                "transparent; border-radius: 4px; color: %8; padding: 0; }"
+                "QToolButton#storeDescription:focus { border-color: %5; }"
+                "QToolButton#storeDescription:hover { color: %2; }"
                 "QPushButton#storeRowTitle { background: transparent; border: 1px solid "
-                "transparent;"
-                " border-radius: 3px; color: %4; padding: 0; text-align: left; }"
-                "QPushButton#storeRowTitle:focus, QPushButton#storeRowTitle:hover { border-color: "
-                "%6; }"
+                "transparent; border-radius: 4px; color: %2; padding: 0; text-align: left;"
+                " min-height: 0; }"
+                "QPushButton#storeRowTitle:focus { border-color: %5; }"
+                "QPushButton#storeRowTitle:hover { color: %9; }"
+                "QToolButton#storeRowMenu { background: transparent; border: 1px solid "
+                "transparent; border-radius: 15px; }"
+                "QToolButton#storeRowMenu:hover { background: %4; }"
+                "QToolButton#storeRowMenu:focus { border-color: %5; }"
                 "QToolButton#storeRowMenu::menu-indicator { image: none; }"
-                "QFrame#storePanel { background: %8; border: 1px solid %3; border-radius: 16px; }"
-                "QFrame#storeRule { background: %3; }")
-                .arg(CssColor(Color::Window()), CssColor(Color::Panel()), CssColor(Color::Fill()),
-                     CssColor(Color::Text()), CssColor(Color::AccentSoft()),
-                     CssColor(Color::Accent()), CssColor(Color::TextSecondary()),
-                     CssColor(Color::FillFaint())));
+                "QFrame#storePanel { background: %10; border: 1px solid %4; border-radius: 20px; }"
+                "QFrame#storeRule { background: %11; border: none; }"
+                "QProgressBar#storeProgress { border: none; background: %4; border-radius: 3px; }"
+                "QProgressBar#storeProgress::chunk { background: %5; border-radius: 3px; }")
+                .arg(CssColor(Color::Fill()), CssColor(Color::Text()),
+                     CssColor(QColor(0xff, 0x6b, 0x95, 0x73)), CssColor(Color::ControlHover()),
+                     CssColor(Color::Accent()), CssColor(Color::Panel()), CssColor(Color::Stroke()),
+                     CssColor(Color::TextSecondary()), CssColor(Color::AccentLight()),
+                     CssColor(Color::FillFaint()), CssColor(Rule())));
         auto palette = this->palette();
-        palette.setColor(QPalette::Window, Color::Panel());
+        palette.setColor(QPalette::Window, Color::PanelDeep());
         palette.setColor(QPalette::WindowText, Color::Text());
         palette.setColor(QPalette::Base, Color::PanelDeep());
         palette.setColor(QPalette::Text, Color::Text());
@@ -431,55 +584,50 @@ public:
         auto* root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
         root->setSpacing(0);
-        auto* header = new QWidget(this);
+        auto* header = new Spotlight::WindowDragBar(this);
         header->setObjectName(QStringLiteral("storeContents"));
         header->setFixedHeight(64);
         auto* header_layout = new QHBoxLayout(header);
         header_layout->setContentsMargins(20, 0, 20, 0);
         header_layout->setSpacing(10);
         back = new CircleButton(QStringLiteral("caret-left"), 34, header);
-        back->setAccessibleName(tr("Back"));
-        back->setToolTip(tr("Back"));
+        back->setAccessibleName(tr("Close Mod Store"));
+        back->setToolTip(tr("Close Mod Store"));
         auto* heading = PlainLabel(header);
         heading->setFont(Spotlight::DisplayFont(22));
         heading->setText(tr("Mod Store"));
-        game_picker = StoreCombo(header);
+        game_picker = new PillCombo(header, 290);
         game_picker->setAccessibleName(tr("Game"));
         game_picker->setIconSize({24, 24});
-        game_picker->setMinimumContentsLength(9);
-        game_picker->setMaximumWidth(290);
         installed_mode = new PillButton(tr("Installed"), QStringLiteral("archive"),
                                         PillButton::Kind::Control, 36, header);
         installed_mode->setCheckable(true);
-        refresh = new CircleButton(QStringLiteral("arrow-clockwise"), 34, header);
+        installed_mode->setToolTip(tr("Show the mods you installed from the store"));
+        refresh = new CircleButton(QStringLiteral("arrow-clockwise"), 36, header);
         refresh->setAccessibleName(tr("Refresh catalog"));
-        refresh->setToolTip(tr("Refresh catalog"));
+        refresh->setToolTip(tr("Refresh catalog (F5)"));
         search = new QLineEdit(header);
         search->setObjectName(QStringLiteral("storeSearch"));
         search->setAccessibleName(tr("Search mods"));
         search->setPlaceholderText(tr("Name, author or description"));
+        search->setFont(Spotlight::Font(13, QFont::Normal));
         search->setClearButtonEnabled(true);
         search->setMaxLength(128);
         search->setMinimumWidth(170);
         search->setMaximumWidth(300);
         search->addAction(Spotlight::Icon(u"magnifying-glass", Color::TextSecondary(), 16),
                           QLineEdit::LeadingPosition);
-        new QShortcut(QKeySequence::Find, this, [this] {
-            if (search->isEnabled()) {
-                search->setFocus();
-                search->selectAll();
-            }
-        });
-        new QShortcut(QKeySequence::Refresh, this, [this] { refresh->click(); });
-        new QShortcut(QKeySequence::Back, this, [this] { back->click(); });
         header_layout->addWidget(back);
         header_layout->addWidget(heading);
-        header_layout->addSpacing(16);
+        header_layout->addSpacing(6);
         header_layout->addWidget(game_picker);
         header_layout->addStretch(1);
-        header_layout->addWidget(search, 1);
-        header_layout->addWidget(refresh);
         header_layout->addWidget(installed_mode);
+        header_layout->addWidget(refresh);
+        header_layout->addWidget(search, 1);
+        if (host->windowFlags().testFlag(Qt::FramelessWindowHint)) {
+            header->AddWindowControls(header_layout);
+        }
         root->addWidget(header);
 
         pages = new QStackedWidget(this);
@@ -487,39 +635,13 @@ public:
                 [this] { Spotlight::FadeIn(pages->currentWidget()); });
         pages->setObjectName(QStringLiteral("storeContents"));
         BuildBrowsePage();
-        BuildInstalledPage();
+        pages->addWidget(installed_page = new QScrollArea);
         BuildDetailPage();
         root->addWidget(pages, 1);
         status = PlainLabel(this, true, Color::TextSecondary(), 12);
         status->setContentsMargins(32, 0, 32, 16);
         status->hide();
         root->addWidget(status);
-
-        progress = new QDialog(this);
-        progress->setWindowTitle(tr("Installing mod"));
-        progress->setWindowModality(Qt::WindowModal);
-        progress->setMinimumWidth(360);
-        progress->setAutoFillBackground(true);
-        auto* progress_layout = new QVBoxLayout(progress);
-        progress_layout->setContentsMargins(16, 16, 16, 16);
-        progress_layout->setSpacing(8);
-        progress_label = PlainLabel(progress, true, Color::Text(), 13, QFont::DemiBold);
-        progress_catalog_note = PlainLabel(progress, true, Color::Warning(), 12);
-        progress_catalog_note->setText(catalog_note->text());
-        progress_bar = new QProgressBar(progress);
-        progress_bar->setTextVisible(false);
-        progress_bar->setFixedHeight(8);
-        progress_bar->setStyleSheet(
-            QStringLiteral("QProgressBar { border: none; background: %1; border-radius: 4px; }"
-                           "QProgressBar::chunk { background: %2; border-radius: 4px; }")
-                .arg(CssColor(Color::Control()), CssColor(Color::Accent())));
-        cancel_button = new PillButton(tr("Cancel"), {}, PillButton::Kind::Control, 32, progress);
-        progress_layout->addWidget(progress_label);
-        progress_layout->addWidget(progress_catalog_note);
-        progress_layout->addWidget(progress_bar);
-        progress_layout->addWidget(cancel_button, 0, Qt::AlignRight);
-        connect(cancel_button, &QAbstractButton::clicked, this, [this] { CancelDownload(); });
-        connect(progress, &QDialog::rejected, this, [this] { CancelDownload(); });
 
         debounce.setSingleShot(true);
         debounce.setInterval(240);
@@ -541,6 +663,9 @@ public:
         connect(installed_mode, &QAbstractButton::toggled, this, [this](bool installed) {
             installed_mode->SetKind(installed ? PillButton::Kind::Accent
                                               : PillButton::Kind::Control);
+            if (installed && installed_list == nullptr) {
+                BuildInstalledPage();
+            }
             ReloadMods();
         });
         connect(game_picker, &QComboBox::currentIndexChanged, this,
@@ -565,7 +690,29 @@ public:
         return changed;
     }
 
-    void reject() override {
+    void Exec() {
+        auto* host = parentWidget();
+        const QPointer<QWidget> previous_focus = host->focusWidget();
+        host->installEventFilter(this);
+        qApp->installEventFilter(this);
+        setGeometry(host->rect());
+        show();
+        raise();
+        search->setFocus(Qt::OtherFocusReason);
+        Spotlight::FadeIn(this);
+        loop.exec();
+        qApp->removeEventFilter(this);
+        host->removeEventFilter(this);
+        hide();
+        if (previous_focus) {
+            previous_focus->setFocus(Qt::OtherFocusReason);
+        }
+        if (close_host) {
+            QTimer::singleShot(0, host, [host] { host->close(); });
+        }
+    }
+
+    void reject() {
         if (applying) {
             return;
         }
@@ -573,13 +720,108 @@ public:
             CancelDownload();
             return;
         }
-        QDialog::reject();
+        loop.quit();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        QPainter painter(this);
+        painter.fillRect(event->rect(), Color::PanelDeep());
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        switch (event->type()) {
+        case QEvent::Resize:
+            if (watched == parentWidget()) {
+                setGeometry(parentWidget()->rect());
+            }
+            break;
+        case QEvent::Close:
+            if (watched == parentWidget()) {
+                event->ignore();
+                if (!applying) {
+                    close_host = true;
+                    if (busy) {
+                        CancelDownload();
+                    }
+                    loop.quit();
+                }
+                return true;
+            }
+            break;
+        case QEvent::ShortcutOverride:
+            if (auto* widget = qobject_cast<QWidget*>(watched);
+                widget && (widget == this || isAncestorOf(widget))) {
+                event->accept();
+                return true;
+            }
+            break;
+        case QEvent::Shortcut:
+            if (auto* widget = qobject_cast<QWidget*>(watched)) {
+                if (widget->window() == window() && widget != this && !isAncestorOf(widget)) {
+                    return true;
+                }
+            } else if (qobject_cast<QAction*>(watched) != nullptr) {
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->matches(QKeySequence::Find)) {
+            if (search->isEnabled()) {
+                search->setFocus(Qt::ShortcutFocusReason);
+                search->selectAll();
+            }
+        } else if (event->matches(QKeySequence::Refresh)) {
+            if (refresh->isEnabled()) {
+                refresh->click();
+            }
+        } else if (event->key() == Qt::Key_Escape || event->matches(QKeySequence::Back)) {
+            if (back->isEnabled() || busy) {
+                NavigateBack();
+            }
+        }
+        event->accept();
+    }
+
+    void keyReleaseEvent(QKeyEvent* event) override {
+        event->accept();
+    }
+
+    bool focusNextPrevChild(bool next_child) override {
+        QWidget* candidate = focusWidget() ? focusWidget() : this;
+        for (int i = 0; i < 4096; ++i) {
+            candidate = next_child ? candidate->nextInFocusChain() : candidate->previousInFocusChain();
+            if (candidate == this) {
+                continue;
+            }
+            if (isAncestorOf(candidate) && candidate->isVisibleTo(this) && candidate->isEnabled() &&
+                (candidate->focusPolicy() & Qt::TabFocus)) {
+                candidate->setFocus(next_child ? Qt::TabFocusReason : Qt::BacktabFocusReason);
+                return true;
+            }
+        }
+        return true;
+    }
+
+    void dragEnterEvent(QDragEnterEvent* event) override {
+        event->setDropAction(Qt::IgnoreAction);
+        event->accept();
     }
 
 private:
     void NavigateBack() {
         if (pages->currentWidget() != detail_page) {
             reject();
+            return;
+        }
+        if (busy) {
+            CancelDownload();
             return;
         }
         const auto id = local_id;
@@ -590,20 +832,14 @@ private:
             ShowInstalled();
             FocusInstalledRow(id, view_title);
         } else if (auto* card = cards.value(id)) {
-            card->setFocus();
+            card->setFocus(Qt::OtherFocusReason);
         }
     }
 
-    static QComboBox* StoreCombo(QWidget* parent) {
-        auto* combo = new QComboBox(parent);
-        combo->setProperty("storeControl", true);
-        combo->setFont(Spotlight::Font(13, QFont::DemiBold));
-        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-        return combo;
-    }
-
-    static QScrollArea* ScrollPage(QWidget* contents) {
-        auto* scroll = new QScrollArea;
+    static QScrollArea* ScrollPage(QWidget* contents, QScrollArea* scroll = nullptr) {
+        if (scroll == nullptr) {
+            scroll = new QScrollArea;
+        }
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setWidgetResizable(true);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -629,16 +865,13 @@ private:
         }
         type = new SegmentedControl(categories, SegmentedControl::Kind::Accent, 38, browse_page);
         type->setAccessibleName(tr("Mod category"));
-        count = PlainLabel(browse_page, false, Color::TextSecondary());
-        sort = StoreCombo(browse_page);
+        count = PlainLabel(browse_page, false, Color::TextSecondary(), 13, QFont::Medium);
+        sort = new PillCombo(browse_page);
         sort->setAccessibleName(tr("Sort mods"));
         sort->setIconSize({16, 16});
         const auto sort_icon = Spotlight::Icon(u"sort-ascending", Color::Text(), 16);
         sort->addItem(sort_icon, tr("Recently updated"), static_cast<int>(Sort::Updated));
         sort->addItem(sort_icon, tr("Name A–Z"), static_cast<int>(Sort::Name));
-        sort->setFixedWidth(qMax(sort->fontMetrics().horizontalAdvance(sort->itemText(0)),
-                                 sort->fontMetrics().horizontalAdvance(sort->itemText(1))) +
-                            76);
         tools->addWidget(type);
         tools->addStretch();
         tools->addWidget(count);
@@ -668,25 +901,25 @@ private:
         list->addStretch();
         browse_scroll = ScrollPage(contents);
         body->addWidget(browse_scroll, 1);
-        pages->addWidget(browse_page);
+        pages->insertWidget(0, browse_page);
     }
 
     void BuildInstalledPage() {
         auto* contents = new QWidget;
         auto* body = new QVBoxLayout(contents);
-        body->setContentsMargins(40, 6, 40, 24);
-        body->setSpacing(12);
+        body->setContentsMargins(40, 22, 40, 24);
+        body->setSpacing(0);
         auto* heading = PlainLabel(contents);
         heading->setText(tr("Installed mods"));
         heading->setFont(Spotlight::DisplayFont(28));
         auto* subtitle = PlainLabel(contents, true, Color::TextSecondary(), 14);
         subtitle->setText(tr("Turn mods on or off. Changes apply on the next launch."));
         installed_count = PlainLabel(contents, false, Color::TextSecondary(), 13, QFont::DemiBold);
-        installed_count->setContentsMargins(6, 8, 0, 0);
+        installed_count->setContentsMargins(6, 4, 6, 6);
         auto* panel = new QFrame(contents);
         panel->setObjectName(QStringLiteral("storePanel"));
         installed_list = new QVBoxLayout(panel);
-        installed_list->setContentsMargins(12, 0, 12, 0);
+        installed_list->setContentsMargins(1, 1, 1, 1);
         installed_list->setSpacing(0);
         auto* return_to_store =
             new PillButton(tr("Browse the Mod Store"), QStringLiteral("storefront"),
@@ -700,42 +933,45 @@ private:
         notice->setText(tr("Installed mods are available offline."));
         actions->addWidget(notice, 1);
         body->addWidget(heading);
+        body->addSpacing(4);
         body->addWidget(subtitle);
+        body->addSpacing(18);
         body->addWidget(installed_count);
+        body->addSpacing(2);
         body->addWidget(panel);
+        body->addSpacing(14);
         body->addLayout(actions);
         body->addStretch();
-        installed_page = ScrollPage(contents);
-        pages->addWidget(installed_page);
+        ScrollPage(contents, installed_page);
     }
 
     void BuildDetailPage() {
         auto* contents = new QWidget;
         auto* body = new QHBoxLayout(contents);
-        body->setContentsMargins(40, 8, 80, 24);
+        body->setContentsMargins(40, 8, 84, 18);
         body->setSpacing(36);
         gallery = new QWidget(contents);
         gallery->setObjectName(QStringLiteral("storeContents"));
+        gallery->setMaximumWidth(720);
         auto* media = new QVBoxLayout(gallery);
         media->setContentsMargins(0, 0, 0, 0);
         media->setSpacing(12);
-        preview = new PreviewImage(Spotlight::Radius::Pill, false, gallery);
+        preview = new PreviewImage(gallery);
         preview->setAccessibleName(tr("Mod preview"));
         media->addWidget(preview);
 
         auto* strip = new QWidget(gallery);
         auto* strip_layout = new QHBoxLayout(strip);
         strip_layout->setSpacing(8);
-        strip_layout->setContentsMargins(2, 1, 2, 1);
+        strip_layout->setContentsMargins(0, 0, 0, 0);
         thumbnails = strip_layout;
         preview_strip = ScrollPage(strip);
-        preview_strip->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         preview_strip->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        preview_strip->setFixedHeight(46 + style()->pixelMetric(QStyle::PM_ScrollBarExtent));
+        preview_strip->setFixedHeight(44);
         auto* strip_row = new QHBoxLayout;
         strip_row->setSpacing(8);
         strip_row->addWidget(preview_strip, 1);
-        preview_count = PlainLabel(gallery, false, Color::TextSecondary(), 12);
+        preview_count = PlainLabel(gallery, false, Color::TextSecondary(), 12, QFont::Medium);
         preview_count->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         strip_row->addWidget(preview_count);
         media->addLayout(strip_row);
@@ -744,6 +980,7 @@ private:
 
         auto* pane = new QWidget(contents);
         pane->setObjectName(QStringLiteral("storeContents"));
+        pane->setMaximumWidth(620);
         auto* detail = new QVBoxLayout(pane);
         detail->setContentsMargins(0, 0, 0, 0);
         detail->setSpacing(8);
@@ -751,98 +988,127 @@ private:
         name->setFont(Spotlight::DisplayFont(24));
         byline = PlainLabel(pane, true, Color::TextSecondary(), 13, QFont::Medium);
         source_info = PlainLabel(pane, false, Color::TextSecondary(), 12, QFont::Medium);
-        verification = PlainLabel(pane, true, Color::Warning(), 12, QFont::DemiBold);
+        verification = PlainLabel(pane, false, Color::Warning(), 12, QFont::DemiBold);
         auto* source_icon = PlainLabel(pane);
         source_icon->setPixmap(
             Spotlight::IconPixmap(u"globe", 14, Color::TextSecondary(), devicePixelRatioF()));
+        verification_icon = PlainLabel(pane);
         source_info_row = new QWidget(pane);
         source_info_row->setObjectName(QStringLiteral("storeContents"));
         auto* tags = new QHBoxLayout(source_info_row);
-        tags->setContentsMargins(0, 0, 0, 0);
-        tags->setSpacing(6);
+        tags->setContentsMargins(0, 2, 0, 0);
+        tags->setSpacing(5);
         tags->addWidget(source_icon);
         tags->addWidget(source_info);
-        tags->addSpacing(8);
+        tags->addSpacing(9);
+        tags->addWidget(verification_icon);
+        tags->addSpacing(-1);
         tags->addWidget(verification);
         tags->addStretch();
         detail->addWidget(name);
         detail->addWidget(byline);
         detail->addWidget(source_info_row);
 
-        mod_actions = new QHBoxLayout;
+        target_picker = new PillCombo(pane, 520);
+        target_picker->setAccessibleName(tr("Target game"));
+        target_picker->setToolTip(tr("Game to install this mod for"));
+        release = new PillCombo(pane, 520);
+        release->setAccessibleName(tr("Release or file"));
+        auto* pickers = new QHBoxLayout;
+        pickers->setContentsMargins(0, 6, 0, 0);
+        pickers->setSpacing(8);
+        pickers->addWidget(target_picker);
+        pickers->addWidget(release);
+        pickers->addStretch();
+        detail->addLayout(pickers);
+
+        action_row = new QWidget(pane);
+        action_row->setObjectName(QStringLiteral("storeContents"));
+        mod_actions = new QHBoxLayout(action_row);
+        mod_actions->setContentsMargins(0, 6, 0, 0);
         mod_actions->setSpacing(8);
         install = new PillButton(tr("Install"), QStringLiteral("download-simple"),
-                                 PillButton::Kind::Accent, 36, pane);
-        source = new PillButton({}, QStringLiteral("globe"), PillButton::Kind::Control, 36, pane);
+                                 PillButton::Kind::Accent, 36, action_row);
+        enable = new PillButton({}, {}, PillButton::Kind::Control, 36, action_row);
+        uninstall = new CircleButton(QStringLiteral("trash"), 36, action_row);
+        uninstall->setAccessibleName(tr("Uninstall"));
+        uninstall->setToolTip(tr("Uninstall"));
+        source = new PillButton({}, QStringLiteral("globe"), PillButton::Kind::Control, 36,
+                                action_row);
         mod_actions->addWidget(install);
+        mod_actions->addWidget(enable);
+        mod_actions->addWidget(uninstall);
         mod_actions->addWidget(source);
         mod_actions->addStretch();
-        detail->addLayout(mod_actions);
+        detail->addWidget(action_row);
 
-        auto* installed_actions = new QHBoxLayout;
-        installed_actions->setSpacing(8);
-        enable = new PillButton({}, {}, PillButton::Kind::Control, 32, pane);
-        uninstall = new PillButton(tr("Uninstall"), QStringLiteral("trash"),
-                                   PillButton::Kind::Control, 32, pane);
-        installed_actions->addWidget(enable);
-        installed_actions->addWidget(uninstall);
-        installed_actions->addStretch();
-        detail->addLayout(installed_actions);
+        progress_panel = new QWidget(pane);
+        progress_panel->setObjectName(QStringLiteral("storeContents"));
+        auto* progress_layout = new QVBoxLayout(progress_panel);
+        progress_layout->setContentsMargins(0, 6, 0, 0);
+        progress_layout->setSpacing(6);
+        progress_title = PlainLabel(progress_panel, true, Color::Text(), 13, QFont::DemiBold);
+        progress_detail = PlainLabel(progress_panel, true, Color::TextSecondary(), 11);
+        progress_note = PlainLabel(progress_panel, true, Color::Warning(), 11, QFont::DemiBold);
+        progress_note->setText(tr("Not verified by the catalog"));
+        progress_bar = new QProgressBar(progress_panel);
+        progress_bar->setObjectName(QStringLiteral("storeProgress"));
+        progress_bar->setTextVisible(false);
+        progress_bar->setFixedSize(300, 6);
+        cancel_button = new PillButton(tr("Cancel"), {}, PillButton::Kind::Control, 30,
+                                       progress_panel);
+        progress_layout->addWidget(progress_title);
+        progress_layout->addWidget(progress_detail);
+        progress_layout->addWidget(progress_note);
+        progress_layout->addWidget(progress_bar);
+        progress_layout->addSpacing(4);
+        progress_layout->addWidget(cancel_button, 0, Qt::AlignLeft);
+        progress_panel->hide();
+        detail->addWidget(progress_panel);
+        connect(cancel_button, &QAbstractButton::clicked, this, [this] { CancelDownload(); });
+
         hint = PlainLabel(pane, true, Color::TextSecondary(), 12);
         detail->addWidget(hint);
 
         description = PlainLabel(pane, true);
         description->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        description->setContentsMargins(0, 4, 0, 0);
         description_toggle = new QToolButton(pane);
         description_toggle->setObjectName(QStringLiteral("storeDescription"));
         description_toggle->setFont(Spotlight::Font(12, QFont::DemiBold));
         description_toggle->setCheckable(true);
         description_toggle->setCursor(Qt::PointingHandCursor);
+        description_toggle->setFocusPolicy(Qt::TabFocus);
         detail->addWidget(description);
         detail->addWidget(description_toggle, 0, Qt::AlignLeft);
-        target_picker = StoreCombo(pane);
-        target_picker->setAccessibleName(tr("Target game"));
-        release = StoreCombo(pane);
-        release->setAccessibleName(tr("Release or file"));
-        detail->addWidget(target_picker);
-        detail->addWidget(release);
 
-        compatibility_card = new QFrame(pane);
-        compatibility_card->setObjectName(QStringLiteral("storePanel"));
-        auto* compatibility_layout = new QGridLayout(compatibility_card);
-        compatibility_layout->setContentsMargins(12, 10, 12, 10);
-        compatibility_layout->setHorizontalSpacing(10);
-        compatibility_layout->setVerticalSpacing(5);
-        compatibility_layout->setColumnMinimumWidth(0, 140);
-        compatibility_layout->setColumnStretch(1, 1);
-        auto* caption = PlainLabel(compatibility_card, false, Color::Text(), 13, QFont::DemiBold);
-        caption->setText(tr("Compatibility"));
-        compatibility_state =
-            PlainLabel(compatibility_card, false, Color::TextSecondary(), 12, QFont::DemiBold);
-        compatibility_layout->addWidget(caption, 0, 0);
-        compatibility_layout->addWidget(compatibility_state, 0, 1, Qt::AlignRight);
-        auto* rule = new QFrame(compatibility_card);
+        info = new QWidget(pane);
+        info->setObjectName(QStringLiteral("storeContents"));
+        auto* info_layout = new QGridLayout(info);
+        info_layout->setContentsMargins(0, 0, 0, 0);
+        info_layout->setHorizontalSpacing(10);
+        info_layout->setVerticalSpacing(7);
+        info_layout->setColumnMinimumWidth(0, 140);
+        info_layout->setColumnStretch(1, 1);
+        auto* rule = new QFrame(info);
         rule->setObjectName(QStringLiteral("storeRule"));
         rule->setFixedHeight(1);
-        compatibility_layout->addWidget(rule, 1, 0, 1, 2);
-        for (size_t i = 0; i < compatibility_rows.size(); ++i) {
-            auto& [key, value] = compatibility_rows[i];
-            key = PlainLabel(compatibility_card, true, Color::TextSecondary(), 12);
-            value = PlainLabel(compatibility_card, true, Color::Text(), 12, QFont::DemiBold);
+        info_layout->addWidget(rule, 0, 0, 1, 2);
+        info_layout->setRowMinimumHeight(1, 1);
+        for (size_t i = 0; i < info_rows.size(); ++i) {
+            auto& [key, value] = info_rows[i];
+            key = PlainLabel(info, false, Color::TextSecondary(), 12, QFont::Medium);
+            value = PlainLabel(info, true, Color::Text(), 12, QFont::DemiBold);
             value->setTextInteractionFlags(Qt::TextSelectableByMouse);
             const auto row = static_cast<int>(i) + 2;
-            compatibility_layout->addWidget(key, row, 0, Qt::AlignTop);
-            compatibility_layout->addWidget(value, row, 1, Qt::AlignTop);
+            info_layout->addWidget(key, row, 0, Qt::AlignTop);
+            info_layout->addWidget(value, row, 1, Qt::AlignTop);
         }
-        const auto note_row = static_cast<int>(compatibility_rows.size()) + 2;
-        catalog_note = PlainLabel(compatibility_card, true, Color::Warning(), 12);
-        catalog_note->setText(tr("Not verified by the catalog"));
-        compatibility_layout->addWidget(catalog_note, note_row, 0, 1, 2);
-        github_provenance = PlainLabel(compatibility_card, true, Color::TextSecondary(), 12);
-        compatibility_layout->addWidget(github_provenance, note_row + 1, 0, 1, 2);
-        detail->addWidget(compatibility_card);
+        detail->addSpacing(4);
+        detail->addWidget(info);
         detail->addStretch();
         body->addWidget(pane, 520);
+        body->addStretch(0);
         detail_page = ScrollPage(contents);
         pages->addWidget(detail_page);
 
@@ -950,8 +1216,6 @@ private:
     void UpdateGamePicker() {
         const auto name = game_picker->currentText();
         const auto mods = game_picker->currentData(Qt::ToolTipRole).toString();
-        const auto text_width = game_picker->fontMetrics().horizontalAdvance(name);
-        game_picker->setFixedWidth(qBound(116, text_width + 90, 290));
         game_picker->setToolTip(mods.isEmpty() ? name : tr("%1 · %2").arg(name, mods));
     }
 
@@ -1197,23 +1461,27 @@ private:
                     auto* rule = new QFrame(panel);
                     rule->setObjectName(QStringLiteral("storeRule"));
                     rule->setFixedHeight(1);
-                    installed_list->addWidget(rule);
+                    rule->setContentsMargins(0, 0, 0, 0);
+                    auto* inset = new QWidget(panel);
+                    auto* inset_layout = new QHBoxLayout(inset);
+                    inset_layout->setContentsMargins(12, 0, 18, 0);
+                    inset_layout->addWidget(rule);
+                    installed_list->addWidget(inset);
                 }
                 auto* row = new QWidget(panel);
                 row->setObjectName(QStringLiteral("storeContents"));
-                row->setMinimumHeight(78);
                 auto* layout = new QHBoxLayout(row);
-                layout->setContentsMargins(0, 12, 6, 12);
+                layout->setContentsMargins(12, 12, 14, 12);
                 layout->setSpacing(14);
                 const auto id = installed.id;
-                auto* art = new PreviewImage(10, true, row);
+                auto* art = new PreviewImage(row, 10);
                 art->setFixedSize(96, 54);
                 if (auto* card = cards.value(id)) {
                     art->SetImage(card->Image());
                 }
                 layout->addWidget(art);
-                auto* info = new QVBoxLayout;
-                info->setSpacing(4);
+                auto* info_column = new QVBoxLayout;
+                info_column->setSpacing(4);
                 auto button_text = installed.name;
                 button_text.replace(u'&', QStringLiteral("&&"));
                 auto* heading = new QPushButton(button_text, row);
@@ -1221,23 +1489,43 @@ private:
                 heading->setAccessibleName(installed.name);
                 heading->setFont(Spotlight::Font(15, QFont::DemiBold));
                 heading->setAutoDefault(false);
+                heading->setFocusPolicy(Qt::TabFocus);
                 heading->setCursor(Qt::PointingHandCursor);
-                heading->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+                heading->setFixedHeight(22);
+                heading->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
                 heading->setToolTip(tr("View details for %1").arg(installed.name));
                 connect(heading, &QAbstractButton::clicked, this,
                         [this, id, target] { SelectMod(id, target); });
-                auto* subtitle = PlainLabel(row, true, Color::TextSecondary(), 12);
-                if (const auto entry = catalog.constFind(id); entry != catalog.cend()) {
-                    subtitle->setText(tr("by %1 · %2 · Release %3 · %4")
-                                          .arg(entry->author, GameName(target), installed.version,
-                                               SourceName(entry.value())));
-                } else {
-                    subtitle->setText(
-                        tr("%1 · Release %2").arg(GameName(target), installed.version));
+                auto* meta = new QHBoxLayout;
+                meta->setSpacing(12);
+                const auto entry = catalog.constFind(id);
+                const bool known = entry != catalog.cend();
+                const bool external = known && entry->source == Source::GameBanana;
+                QStringList parts;
+                if (known) {
+                    parts.append(tr("by %1").arg(entry->author));
                 }
-                info->addWidget(heading);
-                info->addWidget(subtitle);
-                layout->addLayout(info, 1);
+                if (title.isEmpty()) {
+                    parts.append(GameName(target));
+                }
+                if (!external) {
+                    parts.append(tr("Release %1").arg(installed.version));
+                }
+                auto* subtitle = PlainLabel(row, false, Color::TextSecondary(), 12);
+                subtitle->setText(parts.join(QStringLiteral(" · ")));
+                meta->addWidget(subtitle);
+                if (known) {
+                    meta->addWidget(Mark(row, u"globe", SourceName(entry.value()),
+                                         Color::TextSecondary(), QFont::Medium, 5));
+                    if (external) {
+                        meta->addWidget(Mark(row, u"warning-circle", tr("Unverified"),
+                                             Color::Warning(), QFont::DemiBold, 4));
+                    }
+                }
+                meta->addStretch();
+                info_column->addWidget(heading);
+                info_column->addLayout(meta);
+                layout->addLayout(info_column, 1);
                 auto* toggle = new ToggleSwitch(row);
                 toggle->setAccessibleName(tr("Enable %1").arg(installed.name));
                 toggle->setToolTip(tr("Enable or disable %1").arg(installed.name));
@@ -1253,17 +1541,20 @@ private:
                 layout->addWidget(toggle);
                 auto* actions = new QToolButton(row);
                 actions->setObjectName(QStringLiteral("storeRowMenu"));
-                actions->setAutoRaise(true);
-                actions->setFocusPolicy(Qt::StrongFocus);
+                actions->setFixedSize(30, 30);
+                actions->setFocusPolicy(Qt::TabFocus);
+                actions->setCursor(Qt::PointingHandCursor);
                 actions->setPopupMode(QToolButton::InstantPopup);
                 actions->setIcon(Spotlight::Icon(u"dots-three", Color::TextSecondary(), 20));
                 actions->setIconSize({20, 20});
                 actions->setAccessibleName(tr("Actions for %1").arg(installed.name));
                 actions->setToolTip(actions->accessibleName());
                 auto* menu = new QMenu(actions);
-                menu->addAction(tr("View details"), this,
+                menu->addAction(Spotlight::Icon(u"info", Color::TextSecondary(), 16),
+                                tr("View details"), this,
                                 [this, id, target] { SelectMod(id, target); });
-                menu->addAction(tr("Uninstall"), this,
+                menu->addAction(Spotlight::Icon(u"trash", Color::TextSecondary(), 16),
+                                tr("Uninstall"), this,
                                 [this, installed, target] { RemoveLocal(installed, target); });
                 actions->setMenu(menu);
                 layout->addWidget(actions);
@@ -1279,6 +1570,21 @@ private:
             empty->setText(tr("No installed store mods match this filter."));
             installed_list->addWidget(empty);
         }
+    }
+
+    static QWidget* Mark(QWidget* parent, QStringView icon, const QString& text,
+                         const QColor& color, int weight, int gap) {
+        auto* mark = new QWidget(parent);
+        auto* layout = new QHBoxLayout(mark);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(gap);
+        auto* glyph = new QLabel(mark);
+        glyph->setPixmap(Spotlight::IconPixmap(icon, 14, color, parent->devicePixelRatioF()));
+        layout->addWidget(glyph);
+        auto* label = PlainLabel(mark, false, color, 12, weight);
+        label->setText(text);
+        layout->addWidget(label);
+        return mark;
     }
 
     void ClearDetail() {
@@ -1313,7 +1619,7 @@ private:
             delete item->widget();
             delete item;
         }
-        compatibility_card->hide();
+        info->hide();
         target_picker->hide();
         release->hide();
         hint->clear();
@@ -1332,7 +1638,7 @@ private:
         pages->setCurrentWidget(detail_page);
         back->setAccessibleName(tr("Back to mod list"));
         back->setToolTip(tr("Back to mod list"));
-        back->setFocus();
+        detail_page->setFocus(Qt::OtherFocusReason);
         if (installed_mode->isChecked()) {
             ReadLocal();
             if (local) {
@@ -1573,7 +1879,7 @@ private:
             }
         }
         release->setCurrentIndex(first_match < 0 ? 0 : first_match);
-        release->setVisible(release->count() > 0);
+        release->setVisible(release->count() > 1);
         UpdateOffer();
     }
 
@@ -1610,96 +1916,100 @@ private:
             return build.size() > 16 ? QStringLiteral("%1…%2").arg(build.left(12), build.right(8))
                                      : build;
         };
-        const auto set_row = [&](size_t row, const QString& key, const QString& value,
+        size_t rows = 0;
+        const auto add_row = [&](const QString& key, const QString& value,
                                  const QString& tooltip = {}) {
-            const auto [left, right] = compatibility_rows[row];
+            if (rows >= info_rows.size()) {
+                return;
+            }
+            const auto [left, right] = info_rows[rows++];
             left->setText(key);
             right->setText(value);
             right->setToolTip(tooltip);
-            left->setVisible(!key.isEmpty());
-            right->setVisible(!key.isEmpty());
+            left->show();
+            right->show();
         };
-        set_row(0, tr("Game"), local_title.isEmpty() ? unknown : GameName(local_title));
-        set_row(1, tr("Title ID"), local_title);
-        set_row(2, tr("Target game version"), unknown);
-        set_row(3, tr("Target build ID"), unknown);
-        set_row(4, tr("Minimum Lichii"), unknown);
-        set_row(5, tr("Installed version"),
-                identity.display_version.isEmpty()
-                    ? (identity.installed ? unknown : tr("Not in your library"))
-                    : identity.display_version);
-        set_row(6, tr("Installed build ID"),
-                KnownBuild(identity.build_id) ? short_build(identity.build_id) : unknown,
-                KnownBuild(identity.build_id) ? identity.build_id : QString{});
-        set_row(7, tr("Running Lichii"),
-                Common::g_build_release_tag[0] ? QString::fromLatin1(Common::g_build_release_tag)
-                                               : tr("Release number unavailable"));
         const auto* external = offer ? std::get_if<ExternalFile>(&offer->file) : nullptr;
-        catalog_note->setVisible(external && external->sha256.isEmpty());
+        const auto* version = offer ? std::get_if<Version>(&offer->file) : nullptr;
+        const auto* github_build = offer ? std::get_if<GitHubBuild>(&offer->file) : nullptr;
         const auto match = offer ? offer->compatibility : Compatibility::Unknown;
+        const bool unverified_file = external && external->sha256.isEmpty();
+        if (title.isEmpty() || !selected->title_ids.contains(title)) {
+            add_row(tr("Game"), local_title.isEmpty() ? unknown : GameName(local_title));
+        }
+        if (selected->github) {
+            const auto& github = *selected->github;
+            add_row(tr("Source"), tr("%1 @ %2").arg(github.repository, github.commit.left(12)),
+                    github.commit);
+            add_row(tr("License"), tr("Not declared"));
+        } else if (selected->external) {
+            add_row(tr("Source"),
+                    tr("%1 · %2").arg(SourceName(*selected), selected->external->category));
+        }
+        if (external) {
+            add_row(tr("File"),
+                    tr("%1 · %2").arg(external->name,
+                                      locale().formattedDataSize(external->size_bytes)));
+            add_row(tr("Uploaded"),
+                    locale().toString(external->uploaded_at.toLocalTime().date(),
+                                      QLocale::ShortFormat));
+            if (!external->build_ids.isEmpty()) {
+                auto visible_builds = short_build(external->build_ids.front());
+                if (external->build_ids.size() > 1) {
+                    visible_builds = tr("%1 and %n more", nullptr,
+                                        static_cast<int>(external->build_ids.size() - 1))
+                                         .arg(visible_builds);
+                }
+                add_row(tr("Patch build IDs"), visible_builds,
+                        external->build_ids.join(QLatin1Char('\n')));
+            }
+        }
+        if (version) {
+            add_row(tr("Title ID"), version->title_id);
+            add_row(tr("Target game version"), version->game_version);
+            add_row(tr("Target build ID"), short_build(version->build_id), version->build_id);
+            add_row(tr("Minimum Lichii"), version->min_lichii_build);
+        }
+        if (github_build) {
+            add_row(github_build->main && github_build->id.size() == 16 ? tr("Main build ID prefix")
+                    : github_build->main                                ? tr("Main build ID")
+                                                                        : tr("Patch build ID"),
+                    short_build(github_build->id), github_build->id);
+        }
+        if (version || selected->github) {
+            add_row(tr("Installed version"),
+                    identity.display_version.isEmpty()
+                        ? (identity.installed ? unknown : tr("Not in your library"))
+                        : identity.display_version);
+            add_row(tr("Installed build ID"),
+                    KnownBuild(identity.build_id) ? short_build(identity.build_id) : unknown,
+                    KnownBuild(identity.build_id) ? identity.build_id : QString{});
+            add_row(tr("Running Lichii"),
+                    Common::g_build_release_tag[0]
+                        ? QString::fromLatin1(Common::g_build_release_tag)
+                        : tr("Release number unavailable"));
+        }
+        add_row(tr("Compatibility"),
+                unverified_file ? tr("Not verified by the catalog") : CompatibilityName(match));
+        installed_row = rows;
+        add_row(tr("Installed"), {});
+        for (size_t i = rows; i < info_rows.size(); ++i) {
+            info_rows[i].first->hide();
+            info_rows[i].second->hide();
+        }
         verification->setText(CompatibilityName(match));
-        verification->setVisible(offer || selected->github.has_value());
+        const bool show_state = offer || selected->github.has_value();
+        verification->setVisible(show_state);
+        verification_icon->setVisible(show_state);
         const auto color = match == Compatibility::Match      ? Color::Success()
                            : match == Compatibility::Mismatch ? Color::Accent()
                                                               : Color::Warning();
-        const auto state_style =
-            QStringLiteral("color: %1; background: transparent;").arg(CssColor(color));
-        verification->setStyleSheet(state_style);
-        compatibility_state->setStyleSheet(state_style);
-        compatibility_state->setText(CompatibilityName(match));
-        set_row(8, selected->external ? tr("Source") : QString{},
-                selected->external
-                    ? tr("%1 · %2").arg(SourceName(*selected), selected->external->category)
-                    : QString{});
-        set_row(9, external ? tr("File") : QString{},
-                external ? tr("%1 · %2").arg(external->name,
-                                             locale().formattedDataSize(external->size_bytes))
-                         : QString{});
-        set_row(10, external ? tr("Uploaded") : QString{},
-                external ? locale().toString(external->uploaded_at.toLocalTime().date(),
-                                             QLocale::ShortFormat)
-                         : QString{});
-        github_provenance->setVisible(selected->github.has_value());
-        if (selected->github) {
-            const auto& github = *selected->github;
-            set_row(2, {}, {});
-            set_row(4, {}, {});
-            if (const auto* selected_build = offer ? std::get_if<GitHubBuild>(&offer->file) : nullptr) {
-                const auto& build = *selected_build;
-                set_row(3, build.main && build.id.size() == 16 ? tr("Main build ID prefix")
-                           : build.main                       ? tr("Main build ID")
-                                                              : tr("Patch build ID"),
-                        short_build(build.id), build.id);
-            }
-            github_provenance->setText(
-                tr("Source: %1 @ %2\nLicense: Not declared")
-                    .arg(github.repository, github.commit.left(12)));
-            github_provenance->setToolTip(github.commit);
-        }
-        if (offer) {
-            if (const auto* version = std::get_if<Version>(&offer->file)) {
-                set_row(1, tr("Title ID"), version->title_id);
-                set_row(2, tr("Target game version"), version->game_version);
-                set_row(3, tr("Target build ID"), short_build(version->build_id),
-                        version->build_id);
-                set_row(4, tr("Minimum Lichii"), version->min_lichii_build);
-            } else if (const auto* file = std::get_if<ExternalFile>(&offer->file)) {
-                QString visible_builds = unknown;
-                if (!file->build_ids.isEmpty()) {
-                    visible_builds = short_build(file->build_ids.front());
-                    if (file->build_ids.size() > 1) {
-                        visible_builds = tr("%1 and %n more", nullptr,
-                                            static_cast<int>(file->build_ids.size() - 1))
-                                             .arg(visible_builds);
-                    }
-                }
-                set_row(3, tr("Patch build IDs"), visible_builds,
-                        file->build_ids.join(QLatin1Char('\n')));
-            }
-        }
-        set_row(11, tr("Installed"), {});
-        compatibility_state->setVisible(offer != nullptr || selected->github.has_value());
-        compatibility_card->show();
+        verification->setStyleSheet(
+            QStringLiteral("color: %1; background: transparent;").arg(CssColor(color)));
+        verification_icon->setPixmap(Spotlight::IconPixmap(
+            match == Compatibility::Match ? u"seal-check" : u"warning-circle", 14, color,
+            devicePixelRatioF()));
+        info->show();
         UpdateButtons();
     }
 
@@ -1729,12 +2039,15 @@ private:
                                  ? local->version == ExternalVersion(external->id, external->sha256)
                                  : local->sha256 == external->sha256)
                       : local->version == offer->version);
-        install->setVisible(offer && (!selected->github || offer->supported));
+        install->setVisible(offer && !current && (!selected->github || offer->supported));
         install->setText(reinstall ? tr("Reinstall") : installed ? tr("Update") : tr("Install"));
+        install->SetIcon(installed && !reinstall ? QStringLiteral("arrow-circle-up")
+                                                 : QStringLiteral("download-simple"));
         install->setEnabled(!busy && offer && !current && CanInstall(*offer));
         source->setEnabled(!busy);
+        action_row->setVisible(!busy);
         const bool install_primary = install->isEnabled();
-        const bool source_primary = !install_primary && !source->isHidden() && !busy;
+        const bool source_primary = !install_primary && !installed && !source->isHidden() && !busy;
         install->SetKind(install_primary ? PillButton::Kind::Accent : PillButton::Kind::Control);
         source->SetKind(source_primary ? PillButton::Kind::Accent : PillButton::Kind::Control);
         if (mod_actions->indexOf(source_primary ? source : install) != 0) {
@@ -1747,11 +2060,14 @@ private:
         enable->setEnabled(!busy && static_cast<bool>(context.set_enabled));
         uninstall->setEnabled(!busy);
         const bool enabled = installed && IsEnabled(local_title, local_id);
-        if (selected) {
-            compatibility_rows[11].second->setText(installed ? (enabled ? tr("Enabled") : tr("Off"))
-                                                             : tr("Not installed"));
+        if (selected && installed_row < info_rows.size()) {
+            info_rows[installed_row].second->setText(
+                installed ? (enabled ? tr("Installed and enabled") : tr("Installed and disabled"))
+                          : tr("Not installed"));
         }
         enable->setText(enabled ? tr("Disable") : tr("Enable"));
+        enable->SetKind(installed && !enabled && !install_primary ? PillButton::Kind::Accent
+                                                                  : PillButton::Kind::Control);
         hint->clear();
         if (selected && selected->github && (!offer || !offer->supported)) {
             hint->setText(tr("No verified download is available for this patch. "
@@ -1806,18 +2122,21 @@ private:
         }
     }
 
-    void SetProgress(const QString& text, int percent = -1, bool can_cancel = false) {
-        if (text.isEmpty()) {
-            progress->hide();
+    void SetProgress(const QString& heading, const QString& detail = {}, int percent = -1,
+                     bool can_cancel = false) {
+        if (heading.isEmpty()) {
+            progress_panel->hide();
             return;
         }
-        progress_label->setText(text);
+        progress_title->setText(heading);
+        progress_detail->setText(detail);
+        progress_detail->setVisible(!detail.isEmpty());
         cancel_button->setVisible(can_cancel);
         progress_bar->setRange(0, percent < 0 ? 0 : 100);
         if (percent >= 0) {
             progress_bar->setValue(percent);
         }
-        progress->show();
+        progress_panel->show();
     }
 
     void SetBusy(bool value) {
@@ -1860,8 +2179,9 @@ private:
         reload_after_install = debounce.isActive();
         debounce.stop();
         SetBusy(true);
-        progress_catalog_note->setVisible(unverified);
-        SetProgress(tr("Downloading %1…").arg(label), 0, true);
+        progress_note->setVisible(unverified);
+        const auto from = tr("Downloading from %1…").arg(SourceName(*selected));
+        SetProgress(tr("Starting the download…"), from, 0, true);
         const auto generation = ++install_epoch;
         const auto version = chosen.version;
         const auto file_id = external ? external_file->id : 0;
@@ -1879,15 +2199,17 @@ private:
             ApplyDownloaded(owned, external ? ExternalVersion(file_id, received.sha256) : version,
                             received.sha256, label, external, patch);
         };
-        auto report = [this, generation, unverified](qint64 received, qint64 total) {
+        auto report = [this, generation, unverified, from](qint64 received, qint64 total) {
             if (generation != install_epoch || total <= 0) {
                 return;
             }
             if (received >= total) {
-                SetProgress(unverified ? tr("Checking the download…") : tr("Verifying SHA-256…"));
+                SetProgress(unverified ? tr("Checking the download…") : tr("Verifying SHA-256…"),
+                            tr("Then checking the ZIP and installing the mod…"), 100);
             } else {
-                SetProgress(tr("Downloading %1 of %2 KiB…").arg(received / 1024).arg(total / 1024),
-                            static_cast<int>(100 * received / total), true);
+                SetProgress(tr("%1 of %2").arg(locale().formattedDataSize(received),
+                                               locale().formattedDataSize(total)),
+                            from, static_cast<int>(100 * received / total), true);
             }
         };
         download = std::visit(
@@ -1905,7 +2227,8 @@ private:
                          const QByteArray& digest, const QString& label, bool external,
                          const std::optional<GitHubPatch>& patch) {
         SetProgress(patch ? tr("Checking and installing the patch…")
-                          : tr("Checking the ZIP and installing the mod…"));
+                          : tr("Checking the ZIP and installing the mod…"),
+                    {}, 100);
         applying = true;
         const auto root = context.mods_root;
         const auto target = local_title;
@@ -2091,17 +2414,18 @@ private:
     QToolButton* description_toggle{};
     PreviewImage* preview{};
     QLabel* preview_count{};
-    QLabel* compatibility_state{};
-    QLabel* catalog_note{};
-    QLabel* github_provenance{};
+    QLabel* verification_icon{};
     QLabel* hint{};
     QLabel* status{};
-    QFrame* compatibility_card{};
-    std::array<std::pair<QLabel*, QLabel*>, 12> compatibility_rows{};
+    QWidget* info{};
+    std::array<std::pair<QLabel*, QLabel*>, 14> info_rows{};
+    size_t installed_row{};
+    QWidget* action_row{};
     QHBoxLayout* mod_actions{};
-    QDialog* progress{};
-    QLabel* progress_label{};
-    QLabel* progress_catalog_note{};
+    QWidget* progress_panel{};
+    QLabel* progress_title{};
+    QLabel* progress_detail{};
+    QLabel* progress_note{};
     QProgressBar* progress_bar{};
     PillButton* cancel_button{};
     CircleButton* refresh{};
@@ -2110,16 +2434,20 @@ private:
     PillButton* install{};
     PillButton* source{};
     PillButton* enable{};
-    PillButton* uninstall{};
+    CircleButton* uninstall{};
     CircleButton* back{};
+    QEventLoop loop;
+    bool close_host{};
 };
 
 } // namespace
 
 bool ShowDialog(QWidget* parent, DialogContext context) {
-    Dialog dialog(parent, std::move(context));
-    dialog.exec();
-    return dialog.Changed();
+    const QPointer<Dialog> dialog = new Dialog(parent->window(), std::move(context));
+    dialog->Exec();
+    const bool changed = dialog && dialog->Changed();
+    delete dialog.data();
+    return changed;
 }
 
 } // namespace ModStore
