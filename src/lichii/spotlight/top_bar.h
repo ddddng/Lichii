@@ -54,12 +54,20 @@ class RunningTitleBar final : public WindowDragBar {
 public:
     explicit RunningTitleBar(QWidget* parent);
     void SetGameTitle(const QString& value);
+    /// Floats only the window controls over `screen` while it is shown, without a bar or title.
+    void FloatOver(QWidget* screen);
 
 protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    void SetFloating(bool value);
+
     QLabel* title;
+    QHBoxLayout* row;
+    QWidget* floating_screen = nullptr;
+    bool floating = false;
 };
 
 } // namespace Spotlight
