@@ -15,7 +15,6 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -30,13 +29,10 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
-#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
-#include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTemporaryFile>
@@ -272,125 +268,6 @@ struct Snapshot {
     QString name;
 };
 
-// Shows a picture with a square selection: click or drag to move it.
-class CropArea final : public QWidget {
-public:
-    CropArea(const QImage& image_, QWidget* parent) : QWidget(parent), image{image_} {
-        const QSize fit = image.size().scaled(360, 360, Qt::KeepAspectRatio);
-        setFixedSize(fit);
-        scale = static_cast<double>(fit.width()) / image.width();
-        side = std::min(image.width(), image.height());
-        center = QPointF(image.width() / 2.0, image.height() / 2.0);
-        setCursor(Qt::SizeAllCursor);
-    }
-
-    // 100: the whole short side; 400: a quarter of it.
-    void SetZoom(int percent) {
-        side = std::min(image.width(), image.height()) * 100.0 / percent;
-        Clamp();
-    }
-
-    QRect Selection() const {
-        const int s = static_cast<int>(side);
-        const int x = std::clamp(static_cast<int>(center.x() - side / 2.0), 0, image.width() - s);
-        const int y = std::clamp(static_cast<int>(center.y() - side / 2.0), 0, image.height() - s);
-        return QRect(x, y, s, s);
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.drawImage(rect(), image);
-        const QRect s = Selection();
-        const QRectF shown(s.x() * scale, s.y() * scale, s.width() * scale, s.height() * scale);
-        QPainterPath outside;
-        outside.addRect(QRectF(rect()));
-        outside.addRect(shown);
-        painter.fillPath(outside, QColor(0, 0, 0, 140));
-        painter.setPen(QPen(Qt::white, 2));
-        painter.drawRect(shown);
-    }
-    void mousePressEvent(QMouseEvent* event) override {
-        last = event->position();
-        pressed = event->position();
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if ((event->buttons() & Qt::LeftButton) == 0) {
-            return;
-        }
-        center += (event->position() - last) / scale;
-        last = event->position();
-        Clamp();
-    }
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        // A simple click centers the square on the point.
-        if (event->position() == pressed) {
-            center = event->position() / scale;
-            Clamp();
-        }
-    }
-
-private:
-    void Clamp() {
-        center.setX(std::clamp(center.x(), side / 2.0, image.width() - side / 2.0));
-        center.setY(std::clamp(center.y(), side / 2.0, image.height() - side / 2.0));
-        update();
-    }
-
-    QImage image;
-    double scale = 1.0;
-    double side = 0.0;
-    QPointF center;
-    QPointF last;
-    QPointF pressed;
-};
-
-// The square part of the picture to keep.
-std::optional<QRect> ChooseCrop(const QImage& image, QWidget* parent) {
-    QDialog dialog(parent);
-    dialog.setWindowTitle(QObject::tr("Crop Icon"));
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(
-        QObject::tr("Click or drag to move the square. Zoom to keep a smaller part."), &dialog));
-    auto* area = new CropArea(image, &dialog);
-    layout->addWidget(area, 0, Qt::AlignCenter);
-    auto* zoom_row = new QHBoxLayout;
-    zoom_row->addWidget(new QLabel(QObject::tr("Zoom:"), &dialog));
-    auto* zoom = new QSlider(Qt::Horizontal, &dialog);
-    zoom->setRange(100, 400);
-    QObject::connect(zoom, &QSlider::valueChanged, area,
-                     [area](int value) { area->SetZoom(value); });
-    zoom_row->addWidget(zoom, 1);
-    layout->addLayout(zoom_row);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted) {
-        return std::nullopt;
-    }
-    return area->Selection();
-}
-
-// The selected square as a size x size JPEG, like a console icon.
-QByteArray EncodeIcon(const QImage& source, const QRect& crop, int size) {
-    const QImage scaled =
-        source.copy(crop).scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    QImage flat(size, size, QImage::Format_RGB32);
-    flat.fill(Qt::black);
-    QPainter painter(&flat);
-    painter.drawImage(0, 0, scaled);
-    painter.end();
-    QByteArray bytes;
-    QBuffer buffer(&bytes);
-    buffer.open(QIODevice::WriteOnly);
-    if (!flat.save(&buffer, "JPEG", 92)) {
-        return {};
-    }
-    return bytes;
-}
-
 } // namespace
 
 struct NxTools::Job {
@@ -402,6 +279,9 @@ struct NxTools::Job {
     }
 
     QString title;
+    // The game the progress card shows.
+    QString display_title;
+    QPixmap display_icon;
     QString done_message;
     // Converted games or dumps the user may send to the Recycle Bin at the end.
     std::vector<std::filesystem::path> originals;
@@ -536,6 +416,21 @@ NxTools::~NxTools() {
     }
 }
 
+bool NxTools::Loaded() const {
+#ifdef LICHII_NXFORMAT_DYNAMIC
+    std::string error;
+    if (NxFormatDynamic::Load(error)) {
+        return true;
+    }
+    ArchiveNotice(parent_widget, tr("NX Archive"),
+                         tr("The NX tools need nxformat.dll next to the Lichii executable.\n\n%1")
+                             .arg(QString::fromStdString(error)));
+    return false;
+#else
+    return true;
+#endif
+}
+
 bool NxTools::CanConvert(const std::string& game_path) {
     return KindOf(game_path) != Kind::None;
 }
@@ -545,7 +440,7 @@ bool NxTools::IsNxArchive(const std::string& game_path) {
 }
 
 void NxTools::ConvertToNx(const std::string& game_path) {
-    if (running) {
+    if (running || !Loaded()) {
         return;
     }
     const QString title = tr("Convert to NX");
@@ -572,7 +467,7 @@ void NxTools::ConvertToNx(const std::string& game_path) {
     const auto output = FrontendCommon::NxArchive::WithNxExtension(ToUtf8(chosen));
     chosen = QString::fromStdString(output);
     if (std::error_code ec; std::filesystem::exists(ToPath(output), ec)) {
-        QMessageBox::warning(parent_widget, title,
+        ArchiveNotice(parent_widget, title,
                              tr("The archive already exists:\n%1").arg(chosen));
         return;
     }
@@ -582,7 +477,7 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         // Switch 1 NSP or XCI: decrypted on the fly, as a DNSP view of the package.
         job->args = {"pack"};
         if (const auto error = job->AddPackage(vfs, source); !error.isEmpty()) {
-            QMessageBox::warning(parent_widget, title, CannotDecrypt(source, error));
+            ArchiveNotice(parent_widget, title, CannotDecrypt(source, error));
             return;
         }
         job->originals.push_back(source);
@@ -590,35 +485,26 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         // Updates and DLC of the same game next to it go into the same archive.
         const auto related = RelatedPackages(vfs, source);
         if (!related.empty()) {
-            QDialog dialog(parent_widget);
-            dialog.setWindowTitle(title);
-            auto* layout = new QVBoxLayout(&dialog);
-            layout->addWidget(new QLabel(
-                tr("Updates and DLC of this game were found in the same folder.\n"
-                   "The checked ones are added to the NX archive:"),
-                &dialog));
-            auto* list = new QListWidget(&dialog);
+            ArchiveMessageDialog dialog(
+                title,
+                tr("Updates and DLC of this game were found in the same folder. The checked ones "
+                   "go into the NX archive too."),
+                parent_widget);
+            std::vector<QCheckBox*> checks;
             for (const auto& related_path : related) {
-                auto* item = new QListWidgetItem(ToQString(related_path.filename()), list);
-                item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-                item->setCheckState(Qt::Checked);
+                checks.push_back(dialog.AddCheckBox(ToQString(related_path.filename()), true));
             }
-            list->setMinimumWidth(560);
-            layout->addWidget(list);
-            auto* buttons =
-                new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-            QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            layout->addWidget(buttons);
+            dialog.AddButton(tr("Cancel"), {}, false);
+            dialog.AddButton(tr("Convert"), QStringLiteral("archive"), true);
             if (dialog.exec() != QDialog::Accepted) {
                 return;
             }
             for (std::size_t i = 0; i < related.size(); ++i) {
-                if (list->item(static_cast<int>(i))->checkState() != Qt::Checked) {
+                if (!checks[i]->isChecked()) {
                     continue;
                 }
                 if (const auto error = job->AddPackage(vfs, related[i]); !error.isEmpty()) {
-                    QMessageBox::warning(parent_widget, title, CannotDecrypt(related[i], error));
+                    ArchiveNotice(parent_widget, title, CannotDecrypt(related[i], error));
                     return;
                 }
                 job->originals.push_back(related[i]);
@@ -655,24 +541,25 @@ void NxTools::ConvertToNx(const std::string& game_path) {
 }
 
 void NxTools::AddToNx(const std::string& archive_path) {
-    if (running) {
+    if (running || !Loaded()) {
         return;
     }
     const QString title = tr("Add to NX");
     const auto archive = vfs->OpenFile(archive_path, FileSys::OpenMode::Read);
     const auto platform = archive != nullptr ? Loader::AppLoader_NX::ReadPlatform(archive, 0) : 0;
     if (platform == 0) {
-        QMessageBox::warning(parent_widget, title, tr("This NX archive cannot be read."));
+        ArchiveNotice(parent_widget, title, tr("This NX archive cannot be read."));
         return;
     }
     const bool switch2 = platform == 2;
 
-    QMessageBox choice(QMessageBox::Question, title,
-                       tr("Add an update or DLC to this NX archive. The archive is changed in "
-                          "place; the content it already holds is kept."),
-                       QMessageBox::Cancel, parent_widget);
-    auto* folder_button = choice.addButton(tr("Update Folder..."), QMessageBox::AcceptRole);
-    auto* file_button = choice.addButton(tr("NSP or XCI Files..."), QMessageBox::AcceptRole);
+    ArchiveMessageDialog choice(title,
+                                tr("Add an update or DLC to this NX archive. The archive is "
+                                   "changed in place; the content it already holds is kept."),
+                                parent_widget);
+    choice.AddButton(tr("Cancel"), {}, false);
+    auto* folder_button = choice.AddButton(tr("Update folder…"), QStringLiteral("folder-open"), true);
+    auto* file_button = choice.AddButton(tr("NSP or XCI files…"), QStringLiteral("archive"), true);
     if (switch2) {
         // Native Switch 1 packages only; a Switch 2 game takes extracted update folders.
         file_button->setVisible(false);
@@ -681,7 +568,7 @@ void NxTools::AddToNx(const std::string& archive_path) {
 
     auto job = std::make_shared<Job>();
     job->title = tr("Adding to NX");
-    if (choice.clickedButton() == folder_button) {
+    if (choice.Clicked() == folder_button) {
         const QString chosen = QFileDialog::getExistingDirectory(
             parent_widget, tr("Select the Update Folder"),
             ToQString(ToPath(archive_path).parent_path()));
@@ -710,7 +597,7 @@ void NxTools::AddToNx(const std::string& archive_path) {
             job->args.push_back("--update-version");
             job->args.push_back(std::to_string(*version));
         }
-    } else if (choice.clickedButton() == file_button) {
+    } else if (choice.Clicked() == file_button) {
         const QStringList files = QFileDialog::getOpenFileNames(
             parent_widget, tr("Select Updates or DLC"),
             ToQString(ToPath(archive_path).parent_path()), tr("Switch packages (*.nsp *.xci)"));
@@ -721,7 +608,7 @@ void NxTools::AddToNx(const std::string& archive_path) {
         for (const auto& name : files) {
             const auto path = ToPath(ToUtf8(name));
             if (const auto error = job->AddPackage(vfs, path); !error.isEmpty()) {
-                QMessageBox::warning(parent_widget, title, CannotDecrypt(path, error));
+                ArchiveNotice(parent_widget, title, CannotDecrypt(path, error));
                 return;
             }
         }
@@ -734,7 +621,7 @@ void NxTools::AddToNx(const std::string& archive_path) {
 }
 
 void NxTools::RemoveFromNx(const std::string& archive_path) {
-    if (running) {
+    if (running || !Loaded()) {
         return;
     }
     const QString title = tr("Remove from NX");
@@ -746,22 +633,20 @@ void NxTools::RemoveFromNx(const std::string& archive_path) {
             }
         });
         !error.isEmpty()) {
-        QMessageBox::warning(parent_widget, title,
+        ArchiveNotice(parent_widget, title,
                              tr("This NX archive cannot be read: %1").arg(error));
         return;
     }
     std::erase_if(snapshots, [](const Snapshot& s) { return s.kind == QStringLiteral("base"); });
     if (snapshots.empty()) {
-        QMessageBox::information(parent_widget, title,
+        ArchiveNotice(parent_widget, title,
                                  tr("This NX archive holds no update or DLC to remove."));
         return;
     }
 
-    QDialog dialog(parent_widget);
-    dialog.setWindowTitle(title);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(tr("Select the content to remove from the archive:"), &dialog));
-    auto* list = new QListWidget(&dialog);
+    ArchiveMessageDialog dialog(title, tr("Pick the updates and DLC to remove from the archive."),
+                                parent_widget);
+    std::vector<std::pair<QCheckBox*, QString>> checks;
     for (const auto& s : snapshots) {
         QString text = s.kind == QStringLiteral("dlc")
                            ? tr("DLC %1 (v%2)").arg(s.title_id.toUpper(), s.version)
@@ -769,18 +654,10 @@ void NxTools::RemoveFromNx(const std::string& archive_path) {
         if (s.kind == QStringLiteral("dlc") && !s.name.isEmpty()) {
             text += QStringLiteral(" - ") + s.name;
         }
-        auto* item = new QListWidgetItem(text, list);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(Qt::Unchecked);
-        item->setData(Qt::UserRole, s.identity);
+        checks.emplace_back(dialog.AddCheckBox(text, false), s.identity);
     }
-    layout->addWidget(list);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Remove"));
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    dialog.resize(480, 320);
+    dialog.AddButton(tr("Cancel"), {}, false);
+    dialog.AddButton(tr("Remove"), QStringLiteral("trash"), true);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -788,9 +665,9 @@ void NxTools::RemoveFromNx(const std::string& archive_path) {
     auto job = std::make_shared<Job>();
     job->title = tr("Removing from NX");
     job->args = {"remove", archive_path};
-    for (int i = 0; i < list->count(); ++i) {
-        if (list->item(i)->checkState() == Qt::Checked) {
-            job->args.push_back(ToUtf8(list->item(i)->data(Qt::UserRole).toString()));
+    for (const auto& [check, identity] : checks) {
+        if (check->isChecked()) {
+            job->args.push_back(ToUtf8(identity));
         }
     }
     if (job->args.size() == 2) {
@@ -801,173 +678,97 @@ void NxTools::RemoveFromNx(const std::string& archive_path) {
     Start(std::move(job));
 }
 
-void NxTools::EditNxMetadata(const std::string& archive_path,
-                             const std::function<bool()>& prepare_write) {
-    if (running) {
-        return;
-    }
-    const QString title = tr("Edit NX Metadata");
-
-    // The application ID, from the archive's own listing.
-    QString application_id;
+bool NxTools::ReadNxMetadata(const std::string& archive_path, NxMetadata& out) {
+    const QString title = tr("Edit title and icon");
     auto error = ListContents(archive_path, [&](const QStringList& fields) {
-        if (application_id.isEmpty() && fields.size() >= 2 && fields[0] == QStringLiteral("@APP")) {
-            application_id = fields[1];
+        if (out.application_id.isEmpty() && fields.size() >= 2 &&
+            fields[0] == QStringLiteral("@APP")) {
+            out.application_id = fields[1];
         }
     });
-    if (error.isEmpty() && application_id.isEmpty()) {
+    if (error.isEmpty() && out.application_id.isEmpty()) {
         error = QStringLiteral("no application");
     }
     if (!error.isEmpty()) {
-        QMessageBox::warning(parent_widget, title,
+        ArchiveNotice(parent_widget, title,
                              tr("This NX archive cannot be read: %1").arg(error));
-        return;
+        return false;
     }
-
-    // What the game list shows now.
     std::string current_title;
-    std::string current_publisher;
-    std::vector<u8> current_icon;
-    std::vector<u8> original_icon;
     if (const auto file = vfs->OpenFile(archive_path, FileSys::OpenMode::Read);
         file != nullptr && QtCommon::system != nullptr) {
         Loader::AppLoader_NX loader(*QtCommon::system, file);
         loader.ReadTitle(current_title);
-        loader.ReadIcon(current_icon);
-        loader.ReadPublisher(current_publisher);
-        loader.ReadOriginalIcon(application_id.toULongLong(nullptr, 16), original_icon);
+        loader.ReadIcon(out.current.icon);
+        loader.ReadPublisher(out.current.publisher);
+        loader.ReadOriginalIcon(out.application_id.toULongLong(nullptr, 16), out.original_icon);
     }
-
-    QDialog dialog(parent_widget);
-    dialog.setWindowTitle(title);
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* form = new QFormLayout;
     // Start from the name the game list shows: the title, or the file name without one.
-    const QString shown_title =
+    out.current.title_name =
         current_title.empty()
-            ? QFileInfo(QString::fromStdString(archive_path)).completeBaseName()
-            : QString::fromStdString(current_title);
-    auto* name_edit = new QLineEdit(shown_title, &dialog);
-    const auto shown_publisher = QString::fromStdString(current_publisher);
-    auto* publisher_edit = new QLineEdit(shown_publisher, &dialog);
-    form->addRow(tr("Title:"), name_edit);
-    form->addRow(tr("Publisher:"), publisher_edit);
+            ? QFileInfo(QString::fromStdString(archive_path)).completeBaseName().toStdString()
+            : current_title;
+    return true;
+}
 
-    // Drop an image on the icon or click it, as when converting to NUP.
-    auto* icon_preview = new IconDropZone(128, &dialog);
-    QPixmap shown;
-    if (shown.loadFromData(current_icon.data(), static_cast<uint>(current_icon.size()))) {
-        icon_preview->SetIcon(shown);
+void NxTools::EditNxMetadata(const std::string& archive_path,
+                             const std::function<bool()>& prepare_write) {
+    if (running || !Loaded()) {
+        return;
     }
-    auto* choose = new QPushButton(tr("Choose Image..."), &dialog);
-    auto* size_box = new QComboBox(&dialog);
-    size_box->addItem(tr("256 x 256 (default)"), 256);
-    size_box->addItem(tr("512 x 512"), 512);
-    size_box->addItem(tr("1024 x 1024"), 1024);
-    size_box->setToolTip(tr("Size of the icon stored in the archive"));
-    size_box->setEnabled(false);
-    auto* icon_buttons = new QVBoxLayout;
-    icon_buttons->addWidget(choose);
-    icon_buttons->addWidget(size_box);
-    auto* icon_row = new QHBoxLayout;
-    icon_row->addWidget(icon_preview, 0, Qt::AlignTop);
-    icon_row->addLayout(icon_buttons);
-    QByteArray new_icon;
-    // The chosen picture and the square kept from it, encoded at the chosen size.
-    QImage source;
-    QRect crop;
-    const auto encode = [&] {
-        if (source.isNull()) {
-            return;
-        }
-        new_icon = EncodeIcon(source, crop, size_box->currentData().toInt());
-        if (new_icon.isEmpty()) {
-            QMessageBox::warning(&dialog, title, tr("This image cannot be converted."));
-            return;
-        }
-        icon_preview->SetIcon(QPixmap::fromImage(source.copy(crop)));
-    };
-    const auto use_image = [&](const QString& path) {
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        const QImage image = reader.read();
-        if (image.isNull()) {
-            QMessageBox::warning(&dialog, title, tr("This image cannot be read."));
-            return;
-        }
-        const auto selection = ChooseCrop(image, &dialog);
-        if (!selection) {
-            return;
-        }
-        source = image;
-        crop = *selection;
-        size_box->setEnabled(true);
-        encode();
-    };
-    const auto browse = [&] {
-        const QString path = QFileDialog::getOpenFileName(
-            &dialog, tr("Choose Image"), {}, tr("Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"));
-        if (!path.isEmpty()) {
-            use_image(path);
-        }
-    };
-    connect(choose, &QPushButton::clicked, &dialog, browse);
-    connect(icon_preview, &IconDropZone::Clicked, &dialog, browse);
-    connect(icon_preview, &IconDropZone::FileDropped, &dialog, use_image);
-    connect(size_box, &QComboBox::currentIndexChanged, &dialog, encode);
-    QPixmap original;
-    if (!original_icon.empty() &&
-        (original.loadFromData(original_icon.data(), static_cast<uint>(original_icon.size()),
-                               "JPEG") ||
-         original.loadFromData(original_icon.data(), static_cast<uint>(original_icon.size()),
-                               "PNG"))) {
-        auto* restore = new QPushButton(tr("Restore Original Image"), &dialog);
-        icon_buttons->addWidget(restore);
-        connect(restore, &QPushButton::clicked, &dialog, [&] {
-            source = {};
-            size_box->setEnabled(false);
-            new_icon = original_icon == current_icon
-                           ? QByteArray{}
-                           : QByteArray(reinterpret_cast<const char*>(original_icon.data()),
-                                        static_cast<qsizetype>(original_icon.size()));
-            icon_preview->SetIcon(original);
-        });
+    NxMetadata metadata;
+    if (!ReadNxMetadata(archive_path, metadata)) {
+        return;
     }
-    icon_buttons->addStretch();
-    icon_row->addStretch();
-    form->addRow(tr("Icon:"), icon_row);
-    layout->addLayout(form);
-    layout->addWidget(new QLabel(
-        tr("The new title and icon are shown in every language. The game itself is not "
-           "changed."),
-        &dialog));
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    dialog.resize(520, 0);
+    ArchiveEditDialog dialog(ArchiveEditDialog::Format::Nx, ToPath(archive_path), metadata.current,
+                             metadata.original_icon, parent_widget);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
+    WriteNxMetadata(archive_path, metadata, dialog.Edit(), dialog.CurrentIcon(), prepare_write);
+}
 
+void NxTools::SetNxIcon(const std::string& archive_path, const QByteArray& icon,
+                        const std::function<bool()>& prepare_write) {
+    if (running || !Loaded()) {
+        return;
+    }
+    NxMetadata metadata;
+    if (!ReadNxMetadata(archive_path, metadata)) {
+        return;
+    }
+    FileSys::Nup::MetadataEdit edit;
+    edit.icon = std::vector<u8>(icon.begin(), icon.end());
+    QPixmap shown;
+    shown.loadFromData(icon);
+    WriteNxMetadata(archive_path, metadata, edit, shown, prepare_write);
+}
+
+void NxTools::WriteNxMetadata(const std::string& archive_path, const NxMetadata& metadata,
+                              const FileSys::Nup::MetadataEdit& edit, const QPixmap& icon,
+                              const std::function<bool()>& prepare_write) {
+    const QString title = tr("Edit title and icon");
     auto job = std::make_shared<Job>();
-    job->title = tr("Editing NX metadata");
-    job->args = {"set-metadata", archive_path, ToUtf8(application_id)};
-    const auto name = name_edit->text().trimmed();
-    if (FrontendCommon::NxArchive::IsTitleEdit(ToUtf8(name), ToUtf8(shown_title.trimmed()))) {
-        job->args.push_back("title=" + name.toStdString());
+    job->title = tr("Saving into the NX archive");
+    job->display_title = QString::fromStdString(edit.title_name.value_or(metadata.current.title_name));
+    job->display_icon = icon;
+    job->args = {"set-metadata", archive_path, ToUtf8(metadata.application_id)};
+    if (edit.title_name &&
+        FrontendCommon::NxArchive::IsTitleEdit(*edit.title_name, metadata.current.title_name)) {
+        job->args.push_back("title=" + *edit.title_name);
     }
-    const auto publisher = publisher_edit->text().trimmed();
-    if (!publisher.isEmpty() && publisher != shown_publisher.trimmed()) {
-        job->args.push_back("publisher=" + publisher.toStdString());
+    if (edit.publisher && !edit.publisher->empty()) {
+        job->args.push_back("publisher=" + *edit.publisher);
     }
-    if (!new_icon.isEmpty()) {
+    if (edit.icon && !edit.icon->empty()) {
         job->icon_file = std::make_unique<QTemporaryFile>(
             QDir::tempPath() + QStringLiteral("/lichii-icon-XXXXXX"));
-        if (!job->icon_file->open() || job->icon_file->write(new_icon) != new_icon.size() ||
+        if (!job->icon_file->open() ||
+            job->icon_file->write(reinterpret_cast<const char*>(edit.icon->data()),
+                                  static_cast<qint64>(edit.icon->size())) !=
+                static_cast<qint64>(edit.icon->size()) ||
             !job->icon_file->flush()) {
-            QMessageBox::warning(parent_widget, title, tr("The icon cannot be saved."));
+            ArchiveNotice(parent_widget, title, tr("The icon cannot be saved."));
             return;
         }
         job->icon_file->close();
@@ -976,7 +777,8 @@ void NxTools::EditNxMetadata(const std::string& archive_path,
     if (job->args.size() == 3 || running || !prepare_write()) {
         return;
     }
-    job->done_message = tr("The NX archive metadata was updated.");
+    job->done_message = tr("The new details were written into the NX archive, so they show on every PC that "
+                           "opens it.");
     Start(std::move(job));
 }
 
@@ -984,22 +786,18 @@ void NxTools::Start(std::shared_ptr<Job> job) {
     running = job;
     emit RunningChanged(true);
 
-    progress = new QProgressDialog(job->title, tr("Cancel"), 0, 0, parent_widget);
-    progress->setWindowTitle(job->title);
-    progress->setWindowModality(Qt::WindowModal);
-    progress->setMinimumDuration(0);
-    progress->setAutoClose(false);
-    progress->setAutoReset(false);
-    connect(progress, &QProgressDialog::canceled, this, [this, job] {
+    progress = new NupProgressDialog(job->title, job->display_title, job->display_icon,
+                                     parent_widget);
+    connect(progress, &NupProgressDialog::CancelRequested, this, [this, job] {
         nxformat_cancel_set(job->cancel);
         if (progress) {
-            progress->setLabelText(tr("Cancelling..."));
+            progress->SetCancelling();
         }
     });
     job->clock.start();
     auto* timer = new QTimer(progress);
     connect(timer, &QTimer::timeout, this, [this, job] {
-        if (!progress || progress->wasCanceled()) {
+        if (!progress) {
             return;
         }
         // nxformat counts the bytes it reads, not the checks it makes before and after:
@@ -1009,9 +807,9 @@ void NxTools::Start(std::shared_ptr<Job> job) {
         const qint64 now = job->clock.elapsed();
         QString step;
         if (total == 0) {
-            step = tr("Preparing...");
+            step = tr("Preparing");
         } else if (done >= total) {
-            step = tr("Finishing...");
+            step = tr("Finishing");
         } else {
             if (job->counting_since < 0) {
                 job->counting_since = now;
@@ -1036,21 +834,15 @@ void NxTools::Start(std::shared_ptr<Job> job) {
                       .arg(seconds % 60, 2, 10, QLatin1Char('0'))
                 : QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10,
                                                                  QLatin1Char('0'));
-        QString text = tr("%1\nElapsed: %2").arg(job->title, elapsed);
+        QString text = tr("%1 · %2 elapsed").arg(job->title, elapsed);
         if (!step.isEmpty()) {
-            text += QStringLiteral(" - ") + step;
+            text += QStringLiteral(" · ") + step;
         }
-        progress->setLabelText(text);
-        if (total == 0) {
-            return;
-        }
-        // setValue() of a modal dialog processes events: Finished() may run inside it and
-        // close the dialog, so it must be the last use of `progress` here. It stays below
-        // 100 % until nxformat has returned.
-        progress->setMaximum(1000);
-        progress->setValue(static_cast<int>(std::min<u64>(999, done * 1000 / total)));
+        progress->SetStep(text);
+        progress->SetProgress({.bytes_done = std::min<u64>(done, total ? total - 1 : 0),
+                               .bytes_total = total});
     });
-    timer->start(200);
+    timer->start(500);
     progress->show();
 
     job->future = QtConcurrent::run([this, job] {
@@ -1109,9 +901,9 @@ void NxTools::ReplyOriginal(Job& job, const QString& text) {
     } else {
         label = tr("Move the original game to the Recycle Bin:\n%1").arg(names.front());
     }
-    QMessageBox box(QMessageBox::Information, job.title, text, QMessageBox::Ok, parent_widget);
-    auto* remove = new QCheckBox(label, &box);
-    box.setCheckBox(remove);
+    ArchiveMessageDialog box(job.title, text, parent_widget);
+    auto* remove = box.AddCheckBox(label, false);
+    box.AddButton(tr("OK"), {}, true);
     box.exec();
     if (remove->isChecked()) {
         // nxformat has returned; close what it read before moving the originals.
@@ -1128,7 +920,7 @@ void NxTools::ReplyOriginal(Job& job, const QString& text) {
             }
         }
         if (failed > 0) {
-            QMessageBox::warning(
+            ArchiveNotice(
                 parent_widget, job.title,
                 originals.size() > 1
                     ? tr("%1 of the %2 original packages could not be moved to the Recycle Bin. "
@@ -1156,10 +948,10 @@ QString NxTools::TimeLeft(double seconds) {
 
 void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     if (progress) {
-        // Closing a QProgressDialog emits canceled(): disconnect first, or a failed or finished
-        // job shows "Cancelling..." behind its result.
+        // Closing the card asks for a cancel: disconnect first, or a failed or finished job shows
+        // "Cancelling" behind its result.
         QObject::disconnect(progress, nullptr, this, nullptr);
-        progress->hide();
+        progress->Finish();
         progress->deleteLater();
         progress.clear();
     }
@@ -1167,7 +959,7 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     emit RunningChanged(false);
     const bool metadata_write = job->args.front() == "set-metadata";
     if (metadata_write) {
-        emit MetadataWriteFinished();
+        emit MetadataWriteFinished(code == NXFORMAT_OK);
     }
 
     // add keeps the content it committed before a failure or a cancel, also across a retry:
@@ -1191,7 +983,8 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
             text += QStringLiteral("\n\n") +
                     tr("Already in the archive: %1").arg(job->skipped.join(QStringLiteral(", ")));
         }
-        QMessageBox::information(parent_widget, job->title, text);
+        ArchiveNotice(parent_widget, metadata_write ? tr("Saved into the NX archive") : job->title,
+                      text);
         if (!metadata_write) {
             emit ArchivesChanged();
         }
@@ -1199,31 +992,33 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     }
     case NXFORMAT_CANCELLED:
         if (changed) {
-            QMessageBox::information(parent_widget, job->title, tr("Cancelled.") + kept);
+            ArchiveNotice(parent_widget, job->title, tr("Cancelled.") + kept);
             emit ArchivesChanged();
         } else {
-            QMessageBox::information(parent_widget, job->title,
+            ArchiveNotice(parent_widget, job->title,
                                      tr("Cancelled. Nothing was changed on disk."));
         }
         break;
     default: {
         if (job->CanRetryWithoutRecipe(error)) {
-            const auto answer = QMessageBox::question(
-                parent_widget, job->title,
+            ArchiveMessageDialog retry(
+                job->title,
                 tr("The operation failed because the rebuild recipe could not be kept:\n%1\n\n"
                    "Try again without the recipe? The game still runs from the NX archive, but "
                    "the original package cannot be rebuilt exactly from it.")
                         .arg(error) +
                     kept,
-                QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Retry);
-            if (answer == QMessageBox::Retry) {
+                parent_widget);
+            retry.AddButton(tr("Cancel"), {}, false);
+            retry.AddButton(tr("Try again"), QStringLiteral("arrow-counter-clockwise"), true);
+            if (retry.exec() == QDialog::Accepted) {
                 // The retry refreshes the archives when it ends.
                 job->PrepareRetryWithoutRecipe();
                 Start(std::move(job));
                 break;
             }
         } else {
-            QMessageBox::warning(parent_widget, job->title,
+            ArchiveNotice(parent_widget, job->title,
                                  tr("The operation failed:\n%1").arg(error) + kept);
         }
         if (changed) {

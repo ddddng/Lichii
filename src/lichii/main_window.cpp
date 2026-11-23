@@ -201,6 +201,8 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
+#include "core/file_sys/control_metadata.h"
+#include "core/file_sys/nup_convert.h"
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
@@ -1884,8 +1886,14 @@ void MainWindow::ConnectWidgetEvents() {
     nx_tools = new NxTools(QtCommon::vfs, this);
     connect(nx_tools, &NxTools::RunningChanged, game_list, &GameList::SetNxToolRunning);
     connect(nx_tools, &NxTools::ArchivesChanged, this, &MainWindow::OnGameListRefresh);
-    connect(nx_tools, &NxTools::MetadataWriteFinished, this, [this] {
+    connect(nx_tools, &NxTools::MetadataWriteFinished, this, [this](bool written) {
         nx_metadata_write_in_progress = false;
+        // An icon from Game Settings is in the archive now: the local artwork would hide it.
+        if (written && nx_artwork_title_id != 0 &&
+            QtCommon::Game::RemoveCustomArtwork(nx_artwork_title_id)) {
+            game_list->OnCustomArtworkChanged(nx_artwork_title_id);
+        }
+        nx_artwork_title_id = 0;
         if (!close_pending) {
             QtCommon::Game::ResetMetadata(false);
             game_list->SetScanEnabled(true);
@@ -5006,6 +5014,14 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
 
     const auto result = dialog.exec();
 
+    // The game file is written once the dialog is gone and no longer holds it open.
+    if (auto archive_icon = dialog.TakeArchiveIcon(); archive_icon || dialog.ArchiveEditRequested()) {
+        QTimer::singleShot(0, this, [this, title_id, file_name, archive_icon = std::move(archive_icon),
+                                     edit = dialog.ArchiveEditRequested()] {
+            WriteArchiveFromSettings(title_id, file_name, archive_icon, edit);
+        });
+    }
+
     // A rename only changes the shown name: no rescan of the library.
     if (const auto renamed = dialog.RenamedTitle()) {
         game_list->SetGameTitle(title_id, *renamed);
@@ -5330,31 +5346,33 @@ void MainWindow::OnGameListRefresh() {
 }
 
 #ifdef LICHII_NX_TOOLS
-void MainWindow::OnGameListEditNxMetadata(const std::string& game_path) {
-    const auto can_edit = [this] {
-        if (boot_in_progress || close_pending || nx_metadata_write_in_progress) {
-            return false;
-        }
-        if (emulation_running || QtCommon::system->IsPoweredOn()) {
-            QMessageBox::information(this, tr("NX Archive"),
-                                     tr("Stop emulation before editing NX metadata."));
-            return false;
-        }
-        return true;
-    };
-    if (!can_edit()) {
-        return;
+bool MainWindow::CanWriteNxMetadata() {
+    if (boot_in_progress || close_pending || nx_metadata_write_in_progress) {
+        return false;
     }
-    nx_tools->EditNxMetadata(game_path, [this, &can_edit] {
-        if (!can_edit()) {
-            return false;
-        }
-        nx_metadata_write_in_progress = true;
-        game_list->SetScanEnabled(false);
-        // The manual provider keeps NX sessions alive through registered updates and DLC.
-        QtCommon::provider->ClearAllEntries();
-        return true;
-    });
+    if (emulation_running || QtCommon::system->IsPoweredOn()) {
+        ArchiveNotice(this, tr("NX Archive"),
+                                 tr("Stop emulation before editing NX metadata."));
+        return false;
+    }
+    return true;
+}
+
+bool MainWindow::PrepareNxMetadataWrite() {
+    if (!CanWriteNxMetadata()) {
+        return false;
+    }
+    nx_metadata_write_in_progress = true;
+    game_list->SetScanEnabled(false);
+    // The manual provider keeps NX sessions alive through registered updates and DLC.
+    QtCommon::provider->ClearAllEntries();
+    return true;
+}
+
+void MainWindow::OnGameListEditNxMetadata(const std::string& game_path) {
+    if (CanWriteNxMetadata()) {
+        nx_tools->EditNxMetadata(game_path, [this] { return PrepareNxMetadataWrite(); });
+    }
 }
 
 void MainWindow::OnGameListNxTool(const std::string& game_path,
@@ -5362,7 +5380,7 @@ void MainWindow::OnGameListNxTool(const std::string& game_path,
     // An archive edited in place must not be read by a running game.
     if (emulation_running && tool != &NxTools::ConvertToNx &&
         current_game_path == QString::fromStdString(game_path)) {
-        QMessageBox::information(this, tr("NX Archive"),
+        ArchiveNotice(this, tr("NX Archive"),
                                  tr("Stop the game before changing its NX archive."));
         return;
     }
@@ -5370,93 +5388,52 @@ void MainWindow::OnGameListNxTool(const std::string& game_path,
 }
 #endif
 
-void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
-    if (nup_running)
-        return;
-
-    const auto root =
-        FileSys::Nup::DumpRootFromMain(std::filesystem::path{Common::FS::ToU8String(game_path)});
-    if (!root)
-        return;
-    const QString convert_title = tr("Convert to NUP");
-    const auto archive = FileSys::Nup::DefaultArchivePath(*root);
-    if (std::filesystem::exists(archive)) {
-        QMessageBox::information(this, convert_title,
-                                 tr("The target archive already exists:\n%1")
-                                     .arg(QString::fromStdString(Common::FS::PathToUTF8String(archive))));
-        return;
-    }
-
-    const bool resume = FileSys::Nup::HasResumableJournal(archive);
-    bool delete_sources = resume;
-    FileSys::Nup::Metadata metadata;
-    QString progress_title;
-    QPixmap progress_icon;
-    if (resume) {
-        if (QMessageBox::question(this, tr("Resume Conversion"),
-                                  tr("Resume the interrupted conversion?"),
-                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-            return;
-    } else {
-        u64 needed{};
-        {
-            std::error_code ec;
-            for (std::filesystem::recursive_directory_iterator it(*root, ec), end;
-                 !ec && it != end; it.increment(ec)) {
-                if (it->is_regular_file(ec))
-                    needed += it->file_size(ec);
-            }
-        }
-        std::error_code space_error;
-        const auto space = std::filesystem::space(archive.parent_path(), space_error);
-        NupMetadataDialog dialog(*root, archive, needed, space_error ? 0 : space.available, this);
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        delete_sources = dialog.DeleteSources();
-        metadata = dialog.Metadata();
-        progress_title = dialog.DisplayName();
-        progress_icon = dialog.CurrentIcon();
-    }
-
+void MainWindow::StartNupJob(
+    const std::string& game_path, const QString& operation, const QString& title,
+    const QPixmap& icon,
+    std::function<std::function<void()>(const NupJobProgress&, const std::atomic_bool*)> work) {
     nup_running = true;
     nup_source_path = game_path;
     game_list->SetNupConversionRunning(true);
     nup_cancel = std::make_shared<std::atomic_bool>(false);
-    nup_progress = new NupProgressDialog(tr("Converting to NUP"), progress_title, progress_icon, this);
-    connect(nup_progress, &NupProgressDialog::CancelRequested, this,
-            [this, cancel = nup_cancel] {
-                cancel->store(true);
-                if (nup_progress)
-                    nup_progress->SetCancelling();
-            });
+    nup_progress = new NupProgressDialog(operation, title, icon, this);
+    connect(nup_progress, &NupProgressDialog::CancelRequested, this, [this, cancel = nup_cancel] {
+        cancel->store(true);
+        if (nup_progress) {
+            nup_progress->SetCancelling();
+        }
+    });
     nup_progress->show();
 
-    const auto cancel = nup_cancel;
-    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
-    nup_watcher.setFuture(QtConcurrent::run([this, root = *root, archive, delete_sources, metadata,
-                                                  cancel, last_update] {
-        std::string error;
-        const auto on_progress = [this, last_update](
-                                     const FileSys::Nup::PackProgress& progress) {
-                const auto now = std::chrono::steady_clock::now();
-                if (now - *last_update < std::chrono::milliseconds(200))
-                    return;
-                *last_update = now;
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, progress] {
-                        if (!nup_progress)
-                            return;
-                        nup_progress->SetProgress(progress);
-                    },
-                    Qt::QueuedConnection);
+    nup_watcher.setFuture(QtConcurrent::run([this, work = std::move(work), cancel = nup_cancel] {
+        QString last_step;
+        std::chrono::steady_clock::time_point last_update{};
+        const NupJobProgress report = [&](const QString& step,
+                                          const FileSys::Nup::PackProgress& progress) {
+            const auto now = std::chrono::steady_clock::now();
+            const bool new_step = step != last_step;
+            if (!new_step && now - last_update < std::chrono::milliseconds(200)) {
+                return;
+            }
+            last_step = step;
+            last_update = now;
+            QMetaObject::invokeMethod(
+                this,
+                [this, step, new_step, progress] {
+                    if (!nup_progress) {
+                        return;
+                    }
+                    if (new_step && !step.isEmpty()) {
+                        nup_progress->SetStep(step);
+                    }
+                    nup_progress->SetProgress(progress);
+                },
+                Qt::QueuedConnection);
         };
-        const auto result = FileSys::Nup::PackDump(
-            root, archive, {.delete_sources = delete_sources, .metadata = metadata}, on_progress,
-            cancel.get(), &error);
+        auto done = work(report, cancel.get());
         QMetaObject::invokeMethod(
             this,
-            [this, result, delete_sources, error] {
+            [this, done = std::move(done)] {
                 nup_running = false;
                 nup_source_path.clear();
                 game_list->SetNupConversionRunning(false);
@@ -5466,32 +5443,252 @@ void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
                     nup_progress = nullptr;
                 }
                 nup_cancel.reset();
-                switch (result) {
-                case FileSys::Nup::PackResult::Success:
-                    QMessageBox::information(
-                        this, tr("Conversion Complete"),
-                        delete_sources ? tr("The NUP was created and the loose folder was "
-                                            "removed.")
-                                       : tr("The NUP was created. You can delete the loose "
-                                            "folder if you no longer need it."));
-                    OnGameListRefresh();
-                    break;
-                case FileSys::Nup::PackResult::Cancelled:
-                    if (delete_sources)
-                        QMessageBox::information(this, tr("Conversion Cancelled"),
-                                                 tr("The conversion can be resumed by choosing "
-                                                    "Convert to NUP again."));
-                    break;
-                case FileSys::Nup::PackResult::InvalidSource:
-                case FileSys::Nup::PackResult::IoError:
-                    QMessageBox::critical(this, tr("Conversion Failed"),
-                                          QString::fromStdString(error));
-                    break;
+                if (done) {
+                    done();
                 }
             },
             Qt::QueuedConnection);
-        return result;
+        return FileSys::Nup::PackResult::Success;
     }));
+}
+
+void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
+    if (nup_running) {
+        return;
+    }
+    if (const auto root = FileSys::Nup::DumpRootFromMain(
+            std::filesystem::path{Common::FS::ToU8String(game_path)})) {
+        ConvertDumpToNup(*root, game_path);
+    } else {
+        ConvertPackageToNup(game_path);
+    }
+}
+
+void MainWindow::ConvertDumpToNup(const std::filesystem::path& root, const std::string& game_path) {
+    const QString convert_title = tr("Convert to NUP");
+    auto archive = FileSys::Nup::DefaultArchivePath(root);
+    const bool resume = FileSys::Nup::HasResumableJournal(archive);
+    bool delete_sources = resume;
+    FileSys::Nup::Metadata metadata;
+    QString progress_title;
+    QPixmap progress_icon;
+    if (resume) {
+        if (Spotlight::ConfirmDialog(this, tr("Resume conversion"),
+                                     tr("An earlier conversion of this game was interrupted. "
+                                        "Pick up where it stopped?"),
+                                     tr("Resume"), QStringLiteral("archive"))
+                .exec() != QDialog::Accepted) {
+            return;
+        }
+    } else {
+        NupConvertSummary summary;
+        summary.source_name = QString::fromStdString(Common::FS::PathToUTF8String(root));
+        summary.archive = archive;
+        summary.detected = FileSys::Nup::ProbeMetadata(root);
+        summary.offer_low_storage = true;
+        // What the packer finds: base/ (or a bare dump), updates/<version>/ and dlc/<id>/<n>/.
+        const auto tree_bytes = [](const std::filesystem::path& dir) {
+            u64 bytes{};
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator it(dir, ec), end; !ec && it != end;
+                 it.increment(ec)) {
+                if (it->is_regular_file(ec)) {
+                    bytes += it->file_size(ec);
+                }
+            }
+            return bytes;
+        };
+        const auto child = [](const std::filesystem::path& dir, std::string_view name) {
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                if (QString::fromStdString(Common::FS::PathToUTF8String(entry.path().filename()))
+                        .compare(QString::fromUtf8(name.data(), qsizetype(name.size())),
+                                 Qt::CaseInsensitive) == 0) {
+                    return entry.path();
+                }
+            }
+            return std::filesystem::path{};
+        };
+        const auto base = child(root, "base");
+        const auto updates = child(root, "updates");
+        const auto dlc = child(root, "dlc");
+        if (!base.empty() || (updates.empty() && dlc.empty())) {
+            summary.packages.push_back({tr("Base game"), tr("ExeFS and RomFS of the dump"),
+                                        tree_bytes(base.empty() ? root : base), false});
+        }
+        std::error_code ec;
+        if (!updates.empty()) {
+            for (const auto& entry : std::filesystem::directory_iterator(updates, ec)) {
+                if (entry.is_directory(ec)) {
+                    const auto name = QString::fromStdString(
+                        Common::FS::PathToUTF8String(entry.path().filename()));
+                    summary.packages.push_back({tr("Update %1").arg(name),
+                                                tr("Stored next to the base, kept as dumped"),
+                                                tree_bytes(entry.path()), false});
+                }
+            }
+        }
+        if (!dlc.empty()) {
+            for (const auto& entry : std::filesystem::directory_iterator(dlc, ec)) {
+                if (entry.is_directory(ec)) {
+                    summary.packages.push_back(
+                        {tr("DLC %1").arg(QString::fromStdString(
+                             Common::FS::PathToUTF8String(entry.path().filename()))),
+                         tr("Add-on content"), tree_bytes(entry.path()), false});
+                }
+            }
+        }
+        NupConvertDialog dialog(std::move(summary), this);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        delete_sources = dialog.DeleteSources();
+        metadata = dialog.Metadata();
+        archive = dialog.Archive();
+        progress_title = dialog.DisplayName();
+        progress_icon = dialog.CurrentIcon();
+    }
+
+    StartNupJob(game_path, tr("Converting to NUP"), progress_title, progress_icon,
+                [this, root, archive, delete_sources, metadata](const NupJobProgress& report,
+                                                                const std::atomic_bool* cancel)
+                    -> std::function<void()> {
+                    std::string error;
+                    const auto result = FileSys::Nup::PackDump(
+                        root, archive, {.delete_sources = delete_sources, .metadata = metadata},
+                        [&](const FileSys::Nup::PackProgress& p) { report({}, p); }, cancel,
+                        &error);
+                    return [this, result, delete_sources, error] {
+                        switch (result) {
+                        case FileSys::Nup::PackResult::Success:
+                            ArchiveNotice(
+                                this, tr("Conversion Complete"),
+                                delete_sources ? tr("The NUP was created and the loose folder was "
+                                                    "removed.")
+                                               : tr("The NUP was created. You can delete the "
+                                                    "loose folder if you no longer need it."));
+                            OnGameListRefresh();
+                            break;
+                        case FileSys::Nup::PackResult::Cancelled:
+                            if (delete_sources) {
+                                ArchiveNotice(
+                                    this, tr("Conversion Cancelled"),
+                                    tr("The conversion can be resumed by choosing Convert to NUP "
+                                       "again."));
+                            }
+                            break;
+                        case FileSys::Nup::PackResult::InvalidSource:
+                        case FileSys::Nup::PackResult::IoError:
+                            ArchiveNotice(this, tr("Conversion Failed"),
+                                                  QString::fromStdString(error));
+                            break;
+                        }
+                    };
+                });
+}
+
+void MainWindow::ConvertPackageToNup(const std::string& game_path) {
+    const QString convert_title = tr("Convert to NUP");
+    const auto file = QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read);
+    const auto loader = Loader::GetLoader(*QtCommon::system, file);
+    u64 program_id{};
+    if (loader == nullptr || loader->ReadProgramId(program_id) != Loader::ResultStatus::Success ||
+        program_id == 0) {
+        ArchiveNotice(this, convert_title, tr("This game cannot be read."));
+        return;
+    }
+    std::string error;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    auto source = FileSys::Nup::ReadGameSource(QtCommon::system->GetContentProvider(),
+                                               QtCommon::provider.get(), file, program_id,
+                                               &error);
+    QApplication::restoreOverrideCursor();
+    if (!source) {
+        ArchiveNotice(this, convert_title,
+                             tr("This game cannot be converted: %1")
+                                 .arg(QString::fromStdString(error)));
+        return;
+    }
+
+    auto archive = std::filesystem::path{Common::FS::ToU8String(game_path)};
+    archive.replace_extension(".nup");
+    NupConvertSummary summary;
+    summary.source_name = QFileInfo(QString::fromStdString(game_path)).fileName();
+    summary.archive = archive;
+    summary.detected = source->metadata;
+    summary.extra_bytes = FileSys::Nup::ConvertSpaceNeeded({});
+    for (const auto& package : source->packages) {
+        const auto id = QStringLiteral("%1").arg(package.title_id, 16, 16, QLatin1Char('0')).toUpper();
+        switch (package.kind) {
+        case FileSys::Nup::SourceKind::Base:
+            summary.packages.push_back({tr("Base game"), id, package.size, false});
+            break;
+        case FileSys::Nup::SourceKind::Update: {
+            QString version;
+            if (package.nacp != nullptr) {
+                version = QString::fromStdString(FileSys::NACP{package.nacp}.GetVersionString());
+            }
+            summary.packages.push_back(
+                {version.isEmpty() ? tr("Update") : tr("Update %1").arg(version),
+                 tr("v%1 · only the files it changes are stored").arg(package.version),
+                 package.size, true});
+            break;
+        }
+        case FileSys::Nup::SourceKind::AddOn:
+            summary.packages.push_back({tr("DLC"), id, package.size, true});
+            break;
+        }
+    }
+    NupConvertDialog dialog(std::move(summary), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const auto included = dialog.IncludedPackages();
+    std::vector<FileSys::Nup::SourcePackage> kept;
+    for (size_t i = 0; i < source->packages.size(); ++i) {
+        if (included[i]) {
+            kept.push_back(std::move(source->packages[i]));
+        }
+    }
+    source->packages = std::move(kept);
+    archive = dialog.Archive();
+    FileSys::Nup::PackOptions options{.metadata = dialog.Metadata()};
+
+    StartNupJob(
+        game_path, tr("Converting to NUP"), dialog.DisplayName(), dialog.CurrentIcon(),
+        [this, source = std::make_shared<FileSys::Nup::GameSource>(std::move(*source)), archive,
+         options](const NupJobProgress& report,
+                  const std::atomic_bool* cancel) -> std::function<void()> {
+            std::string error;
+            const auto result = FileSys::Nup::ConvertToNup(
+                *source, archive, options,
+                [&](FileSys::Nup::ConvertStep step, const FileSys::Nup::PackProgress& p) {
+                    report(step == FileSys::Nup::ConvertStep::Extract
+                               ? tr("Step 1 of 2 · Reading the game")
+                               : tr("Step 2 of 2 · Packing the NUP"),
+                           p);
+                },
+                cancel, &error);
+            return [this, result, error, archive] {
+                switch (result) {
+                case FileSys::Nup::PackResult::Success:
+                    ArchiveNotice(
+                        this, tr("Conversion Complete"),
+                        tr("The NUP was created:\n%1\n\nThe original files are untouched; delete "
+                           "them if you no longer need them.")
+                            .arg(QString::fromStdString(Common::FS::PathToUTF8String(archive))));
+                    OnGameListRefresh();
+                    break;
+                case FileSys::Nup::PackResult::Cancelled:
+                    break;
+                case FileSys::Nup::PackResult::InvalidSource:
+                case FileSys::Nup::PackResult::IoError:
+                    ArchiveNotice(this, tr("Conversion Failed"),
+                                          QString::fromStdString(error));
+                    break;
+                }
+            };
+        });
 }
 
 namespace {
@@ -5655,199 +5852,184 @@ void MainWindow::OnGameListExtractNup(const std::string& game_path) {
     if (nup_running) {
         return;
     }
-    const auto to_path = [](const std::string& utf8) {
-        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
-    };
-    const auto archive = to_path(game_path);
+    const auto archive = std::filesystem::path{Common::FS::ToU8String(game_path)};
     const auto out_dir = QFileDialog::getSaveFileName(
         this, tr("Extract NUP"),
-        QString::fromStdString(Common::FS::PathToUTF8String(
-            FileSys::Nup::DefaultExtractPath(archive))));
+        QString::fromStdString(
+            Common::FS::PathToUTF8String(FileSys::Nup::DefaultExtractPath(archive))));
     if (out_dir.isEmpty()) {
         return;
     }
-    const auto out_path = to_path(out_dir.toStdString());
+    const auto out_path = std::filesystem::path{Common::FS::ToU8String(out_dir.toStdString())};
     if (std::filesystem::exists(out_path)) {
-        QMessageBox::information(this, tr("Extract NUP"),
+        ArchiveNotice(this, tr("Extract NUP"),
                                  tr("The target directory already exists:\n%1").arg(out_dir));
         return;
     }
     const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
-    const QString progress_title =
-        QString::fromStdString(probed.title_name).trimmed().isEmpty()
-            ? tr("Extracting NUP")
-            : QString::fromStdString(probed.title_name);
+    const QString progress_title = QString::fromStdString(probed.title_name).trimmed();
     QPixmap progress_icon;
     if (!probed.icon.empty()) {
-        progress_icon.loadFromData(probed.icon.data(),
-                                   static_cast<uint>(probed.icon.size()));
+        progress_icon.loadFromData(probed.icon.data(), static_cast<uint>(probed.icon.size()));
     }
+    StartNupJob(game_path, tr("Extracting NUP"), progress_title, progress_icon,
+                [this, archive, out_path](const NupJobProgress& report,
+                                          const std::atomic_bool* cancel) -> std::function<void()> {
+                    std::string error;
+                    const auto result = FileSys::Nup::ExtractNup(
+                        archive, out_path,
+                        [&](const FileSys::Nup::PackProgress& p) { report({}, p); }, cancel,
+                        &error);
+                    return [this, result, error] {
+                        switch (result) {
+                        case FileSys::Nup::ExtractResult::Success:
+                            ArchiveNotice(
+                                this, tr("Extraction Complete"),
+                                tr("The NUP was extracted. You can delete the NUP file if you no "
+                                   "longer need it."));
+                            // Only a new loose dump can appear, so one rescan is enough. The full
+                            // refresh also rescans external content and the firmware on the UI
+                            // thread.
+                            game_list->RefreshGameDirectory();
+                            break;
+                        case FileSys::Nup::ExtractResult::Cancelled:
+                            break;
+                        case FileSys::Nup::ExtractResult::InvalidSource:
+                        case FileSys::Nup::ExtractResult::IoError:
+                            ArchiveNotice(this, tr("Extraction Failed"),
+                                                  QString::fromStdString(error));
+                            break;
+                        }
+                    };
+                });
+}
 
-    nup_running = true;
-    nup_source_path = game_path;
-    game_list->SetNupConversionRunning(true);
-    nup_cancel = std::make_shared<std::atomic_bool>(false);
-    nup_progress = new NupProgressDialog(tr("Extracting NUP"), progress_title, progress_icon, this);
-    connect(nup_progress, &NupProgressDialog::CancelRequested, this,
-            [this, cancel = nup_cancel] {
-                cancel->store(true);
-                if (nup_progress) {
-                    nup_progress->SetCancelling();
-                }
-            });
-    nup_progress->show();
-
-    const auto cancel = nup_cancel;
-    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
-    nup_watcher.setFuture(QtConcurrent::run([this, archive, out_path, cancel, last_update] {
-        std::string error;
-        const auto on_progress = [this,
-                                  last_update](const FileSys::Nup::PackProgress& progress) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now - *last_update < std::chrono::milliseconds(200)) {
-                return;
-            }
-            *last_update = now;
-            QMetaObject::invokeMethod(
-                this,
-                [this, progress] {
-                    if (!nup_progress) {
-                        return;
-                    }
-                    nup_progress->SetProgress(progress);
-                },
-                Qt::QueuedConnection);
-        };
-        const auto result =
-            FileSys::Nup::ExtractNup(archive, out_path, on_progress, cancel.get(), &error);
-        QMetaObject::invokeMethod(
-            this,
-            [this, result, error, out_path] {
-                nup_running = false;
-                nup_source_path.clear();
-                game_list->SetNupConversionRunning(false);
-                if (nup_progress) {
-                    nup_progress->Finish();
-                    nup_progress->deleteLater();
-                    nup_progress = nullptr;
-                }
-                nup_cancel.reset();
-                switch (result) {
-                case FileSys::Nup::ExtractResult::Success:
-                    QMessageBox::information(
-                        this, tr("Extraction Complete"),
-                        tr("The NUP was extracted. You can delete the NUP file if you no longer "
-                           "need it."));
-                    // Only a new loose dump can appear, so one rescan is enough. The full refresh
-                    // also rescans external content and the firmware on the UI thread.
-                    game_list->RefreshGameDirectory();
-                    break;
-                case FileSys::Nup::ExtractResult::Cancelled:
-                    break;
-                case FileSys::Nup::ExtractResult::InvalidSource:
-                case FileSys::Nup::ExtractResult::IoError:
-                    QMessageBox::critical(this, tr("Extraction Failed"),
-                                          QString::fromStdString(error));
-                    break;
-                }
-            },
-            Qt::QueuedConnection);
-        return FileSys::Nup::PackResult::Success;
-    }));
+bool MainWindow::CanRewriteArchive(const std::string& game_path, const QString& title) {
+    if (nup_running || boot_in_progress || close_pending) {
+        return false;
+    }
+    if (emulation_running && current_game_path == QString::fromStdString(game_path)) {
+        ArchiveNotice(this, title, tr("Stop the game before changing its file."));
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::OnGameListEditNupMetadata(const std::string& game_path) {
-    if (nup_running) {
+    const QString title = tr("Edit title and icon");
+    if (!CanRewriteArchive(game_path, title)) {
         return;
     }
-    const auto to_path = [](const std::string& utf8) {
-        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
-    };
-    const auto archive = to_path(game_path);
-    NupEditDialog dialog(archive, this);
+    const auto archive = std::filesystem::path{Common::FS::ToU8String(game_path)};
+    ArchiveEditDialog dialog(ArchiveEditDialog::Format::Nup, archive,
+                             FileSys::Nup::ProbeNupMetadata(archive), {}, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    const auto edit = dialog.Edit();
+    WriteNupMetadata(game_path, dialog.Edit(), dialog.DisplayName(), dialog.CurrentIcon());
+}
+
+void MainWindow::WriteNupMetadata(const std::string& game_path, FileSys::Nup::MetadataEdit edit,
+                                  const QString& title, const QPixmap& icon,
+                                  std::function<void()> on_success) {
     if (!edit.title_name && !edit.icon && !edit.display_version && !edit.publisher &&
         !edit.localized_titles) {
         return;
     }
-    const QString progress_title = dialog.DisplayName();
-    const QPixmap progress_icon = dialog.CurrentIcon();
+    const auto archive = std::filesystem::path{Common::FS::ToU8String(game_path)};
+    // The new file is written next to the old one before it replaces it.
+    std::error_code ec;
+    const u64 size = std::filesystem::file_size(archive, ec);
+    const u64 available = Common::FS::GetFreeSpaceSize(archive.parent_path());
+    if (!ec && available < size + (16ULL << 20)) {
+        ArchiveNotice(this, tr("Edit title and icon"),
+                             tr("Saving into the NUP writes a new copy of it next to the old one "
+                                "first: %1 MB is needed and %2 MB is free on its drive.")
+                                 .arg((size >> 20) + 16)
+                                 .arg(available >> 20));
+        return;
+    }
+    // The game list's content provider keeps the add-ons of every NUP it scanned open.
+    if (!emulation_running) {
+        QtCommon::provider->ClearAllEntries();
+    }
+    StartNupJob(game_path, tr("Saving into the NUP"), title, icon,
+                [this, archive, edit, on_success = std::move(on_success)](
+                    const NupJobProgress& report,
+                    const std::atomic_bool* cancel) -> std::function<void()> {
+                    std::string error;
+                    const auto result = FileSys::Nup::EditNupMetadata(
+                        archive, edit, &error, cancel,
+                        [&](const FileSys::Nup::PackProgress& p) { report({}, p); });
+                    return [this, result, error, on_success] {
+                        switch (result) {
+                        case FileSys::Nup::EditResult::Success:
+                            if (on_success) {
+                                on_success();
+                            }
+                            ArchiveNotice(
+                                this, tr("Saved into the NUP"),
+                                tr("The new details were written into the NUP file, so they show "
+                                   "on every PC that opens it."));
+                            // The cached name and icon are keyed by title, so they must go; the
+                            // rest is one rescan instead of the full refresh.
+                            QtCommon::Game::ResetMetadata(false);
+                            game_list->RefreshGameDirectory();
+                            break;
+                        case FileSys::Nup::EditResult::NoChange:
+                        case FileSys::Nup::EditResult::Cancelled:
+                            game_list->RefreshExternalContent();
+                            break;
+                        case FileSys::Nup::EditResult::InvalidSource:
+                        case FileSys::Nup::EditResult::IoError:
+                            game_list->RefreshExternalContent();
+                            ArchiveNotice(
+                                this, tr("Saving into the NUP failed"),
+                                tr("%1\n\nThe NUP was not changed.")
+                                    .arg(QString::fromStdString(error)));
+                            break;
+                        }
+                    };
+                });
+}
 
-    nup_running = true;
-    nup_source_path = game_path;
-    game_list->SetNupConversionRunning(true);
-    nup_cancel = std::make_shared<std::atomic_bool>(false);
-    nup_progress = new NupProgressDialog(tr("Editing NUP Metadata"), progress_title, progress_icon,
-                                         this);
-    connect(nup_progress, &NupProgressDialog::CancelRequested, this,
-            [this, cancel = nup_cancel] {
-                cancel->store(true);
-                if (nup_progress) {
-                    nup_progress->SetCancelling();
-                }
-            });
-    nup_progress->show();
-
-    const auto cancel = nup_cancel;
-    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
-    nup_watcher.setFuture(QtConcurrent::run([this, archive, edit, cancel, last_update] {
-        std::string error;
-        const auto on_progress = [this,
-                                  last_update](const FileSys::Nup::PackProgress& progress) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now - *last_update < std::chrono::milliseconds(200)) {
-                return;
+void MainWindow::WriteArchiveFromSettings(u64 title_id, const std::string& game_path,
+                                          const std::optional<QByteArray>& icon, bool edit) {
+    const bool nup =
+        QString::fromStdString(game_path).endsWith(QStringLiteral(".nup"), Qt::CaseInsensitive);
+    if (icon) {
+        QPixmap shown;
+        shown.loadFromData(*icon);
+        if (nup) {
+            if (CanRewriteArchive(game_path, tr("Edit title and icon"))) {
+                FileSys::Nup::MetadataEdit write;
+                write.icon = std::vector<u8>(icon->begin(), icon->end());
+                WriteNupMetadata(game_path, std::move(write), GameTitleName(game_path), shown,
+                                 [this, title_id] {
+                                     if (QtCommon::Game::RemoveCustomArtwork(title_id)) {
+                                         game_list->OnCustomArtworkChanged(title_id);
+                                     }
+                                 });
             }
-            *last_update = now;
-            QMetaObject::invokeMethod(
-                this,
-                [this, progress] {
-                    if (!nup_progress) {
-                        return;
-                    }
-                    nup_progress->SetProgress(progress);
-                },
-                Qt::QueuedConnection);
-        };
-        const auto result =
-            FileSys::Nup::EditNupMetadata(archive, edit, &error, cancel.get(), on_progress);
-        QMetaObject::invokeMethod(
-            this,
-            [this, result, error] {
-                nup_running = false;
-                nup_source_path.clear();
-                game_list->SetNupConversionRunning(false);
-                if (nup_progress) {
-                    nup_progress->Finish();
-                    nup_progress->deleteLater();
-                    nup_progress = nullptr;
-                }
-                nup_cancel.reset();
-                switch (result) {
-                case FileSys::Nup::EditResult::Success:
-                    QMessageBox::information(this, tr("Edit Complete"),
-                                             tr("The NUP metadata was updated."));
-                    // The cached name and icon are keyed by title, so they must go; the rest is
-                    // one rescan instead of the full refresh.
-                    QtCommon::Game::ResetMetadata(false);
-                    game_list->RefreshGameDirectory();
-                    break;
-                case FileSys::Nup::EditResult::NoChange:
-                case FileSys::Nup::EditResult::Cancelled:
-                    break;
-                case FileSys::Nup::EditResult::InvalidSource:
-                case FileSys::Nup::EditResult::IoError:
-                    QMessageBox::critical(this, tr("Edit Failed"),
-                                          QString::fromStdString(error));
-                    break;
-                }
-            },
-            Qt::QueuedConnection);
-        return FileSys::Nup::PackResult::Success;
-    }));
+        }
+#ifdef LICHII_NX_TOOLS
+        else if (NxTools::IsNxArchive(game_path) && CanWriteNxMetadata()) {
+            nx_artwork_title_id = title_id;
+            nx_tools->SetNxIcon(game_path, *icon, [this] { return PrepareNxMetadataWrite(); });
+        }
+#endif
+        return;
+    }
+    if (edit) {
+        if (nup) {
+            OnGameListEditNupMetadata(game_path);
+        }
+#ifdef LICHII_NX_TOOLS
+        else if (NxTools::IsNxArchive(game_path)) {
+            OnGameListEditNxMetadata(game_path);
+        }
+#endif
+    }
 }
 
 void MainWindow::LaunchFirmwareApplet(u64 raw_program_id,

@@ -261,6 +261,7 @@ add_executable(tests
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
     core/thread_startup_policy.cpp
+    core/nup_convert.cpp
     core/nup_writer.cpp
     core/nup_metadata.cpp
     core/nup_read_bench.cpp
