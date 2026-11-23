@@ -3459,7 +3459,13 @@ void MainWindow::OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRe
 void MainWindow::OnGameListSetPlayTime(u64 program_id) {
     const u64 current_play_time = play_time_manager->GetPlayTime(program_id);
 
-    SetPlayTimeDialog dialog(this, current_play_time);
+    const auto* const library = game_list->GetModel();
+    const auto games = library->match(library->index(0, 0), GameListItemPath::ProgramIdRole,
+                                      QVariant::fromValue(qulonglong(program_id)), 1,
+                                      Qt::MatchExactly | Qt::MatchRecursive);
+    const QString title =
+        games.isEmpty() ? QString{} : games.first().data(GameListItemPath::TitleRole).toString();
+    SetPlayTimeDialog dialog(this, title, current_play_time);
 
     if (dialog.exec() == QDialog::Accepted) {
         const u64 total_seconds = dialog.GetTotalSeconds();

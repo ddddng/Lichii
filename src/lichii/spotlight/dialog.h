@@ -29,6 +29,9 @@ public:
     /// An empty name hides the tile.
     void SetIcon(QStringView name, const QColor& tint);
 
+    /// Fixes the width of the card, shadow excluded, to the width Paper draws it, such as 600.
+    void SetCardWidth(int width);
+
     /// Hides the title, for a dialog whose contents start with their own heading. The close button
     /// stays.
     void SetTitleVisible(bool visible);

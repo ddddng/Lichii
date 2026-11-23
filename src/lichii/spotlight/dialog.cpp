@@ -499,6 +499,10 @@ void Dialog::SetIcon(QStringView name, const QColor& tint) {
     setProperty(IconProperty, name.toString());
 }
 
+void Dialog::SetCardWidth(int width) {
+    setFixedWidth(width + ShadowMargins.left() + ShadowMargins.right());
+}
+
 void Dialog::SetTitleVisible(bool visible) {
     setProperty(TitleHiddenProperty, !visible);
 }

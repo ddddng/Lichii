@@ -283,10 +283,6 @@ QDialogButtonBox {
     dialogbuttonbox-buttons-have-icons: 0;
 }
 
-QDialogButtonBox QPushButton {
-    min-width: 76px;
-}
-
 QMessageBox {
     messagebox-information-icon: url(:/lichii/icons/msgbox_information.png);
     messagebox-question-icon: url(:/lichii/icons/msgbox_question.png);
@@ -488,6 +484,10 @@ QComboBox[global="true"] {
 
 QAbstractSpinBox {
     padding-right: 28px;
+}
+
+QAbstractSpinBox[buttonSymbols="NoButtons"] {
+    padding-right: 13px;
 }
 
 QAbstractSpinBox::up-button,
