@@ -2744,11 +2744,10 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
             .arg(CssColor(Color::TextSecondary())));
     detail->setWordWrap(true);
     detail->setMaximumWidth(420);
-    copy->addStretch();
     copy->addLayout(title_line);
     copy->addWidget(detail);
-    copy->addStretch();
     layout->addLayout(copy, 1);
+    layout->setAlignment(copy, Qt::AlignVCenter);
     if (control != nullptr) {
         if (control->metaObject() == &QWidget::staticMetaObject) {
             control->setProperty("spotlightTransparent", true);
