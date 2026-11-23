@@ -29,7 +29,6 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMenu>
 #include <QMessageBox>
 #include <QPaintEvent>
 #include <QPainter>
@@ -55,6 +54,7 @@
 #include "lichii/mod_store/mod_store_client.h"
 #include "lichii/mod_store/mod_store_install.h"
 #include "lichii/spotlight/menu.h"
+#include "lichii/spotlight/notice.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
@@ -367,6 +367,40 @@ private:
     Picture picture;
 };
 
+void SetButtonKind(QAbstractButton* button, const QString& kind) {
+    button->setProperty("kind", kind);
+    button->style()->unpolish(button);
+    button->style()->polish(button);
+}
+
+class Chip final : public QLabel {
+public:
+    explicit Chip(const QString& text, const QColor& fill_, const QColor& color, QWidget* parent)
+        : QLabel(text, parent), fill(fill_) {
+        setTextFormat(Qt::PlainText);
+        setFont(Spotlight::Font(11, QFont::DemiBold));
+        setAlignment(Qt::AlignCenter);
+        setContentsMargins(9, 0, 9, 0);
+        setFixedHeight(22);
+        Spotlight::SetTextColor(this, color);
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        {
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(fill);
+            painter.drawRoundedRect(rect(), height() / 2.0, height() / 2.0);
+        }
+        QLabel::paintEvent(event);
+    }
+
+private:
+    QColor fill;
+};
+
 class PreviewButton final : public QAbstractButton {
 public:
     explicit PreviewButton(QWidget* parent) : QAbstractButton(parent) {
@@ -560,12 +594,13 @@ public:
                 " min-height: 0; }"
                 "QPushButton#storeRowTitle:focus { border-color: %5; }"
                 "QPushButton#storeRowTitle:hover { color: %9; }"
-                "QToolButton#storeRowMenu { background: transparent; border: 1px solid "
-                "transparent; border-radius: 15px; }"
-                "QToolButton#storeRowMenu:hover { background: %4; }"
-                "QToolButton#storeRowMenu:focus { border-color: %5; }"
-                "QToolButton#storeRowMenu::menu-indicator { image: none; }"
-                "QFrame#storePanel { background: %10; border: 1px solid %4; border-radius: 20px; }"
+                "QFrame#storePanel { background: %10; border: 1px solid %12; border-radius: 18px; }"
+                "QWidget#storeRow { background: transparent; }"
+                "QWidget#storeRow:hover { background: %13; }"
+                "QWidget#storeRow[first=\"true\"] { border-top-left-radius: 17px;"
+                " border-top-right-radius: 17px; }"
+                "QWidget#storeRow[last=\"true\"] { border-bottom-left-radius: 17px;"
+                " border-bottom-right-radius: 17px; }"
                 "QFrame#storeRule { background: %11; border: none; }"
                 "QProgressBar#storeProgress { border: none; background: %4; border-radius: 3px; }"
                 "QProgressBar#storeProgress::chunk { background: %5; border-radius: 3px; }")
@@ -573,7 +608,8 @@ public:
                      CssColor(QColor(0xff, 0x6b, 0x95, 0x73)), CssColor(Color::ControlHover()),
                      CssColor(Color::Accent()), CssColor(Color::Panel()), CssColor(Color::Stroke()),
                      CssColor(Color::TextSecondary()), CssColor(Color::AccentLight()),
-                     CssColor(Color::FillFaint()), CssColor(Rule())));
+                     CssColor(Color::FillFaint()), CssColor(Rule()),
+                     CssColor(Color::StrokeSubtle()), CssColor(QColor(0xff, 0xff, 0xff, 0x0f))));
         auto palette = this->palette();
         palette.setColor(QPalette::Window, Color::PanelDeep());
         palette.setColor(QPalette::WindowText, Color::Text());
@@ -650,10 +686,12 @@ public:
         pages->addWidget(installed_page = new QScrollArea);
         BuildDetailPage();
         root->addWidget(pages, 1);
-        status = PlainLabel(this, true, Color::TextSecondary(), 12);
-        status->setContentsMargins(32, 0, 32, 16);
+        status = new Spotlight::Notice(this);
         status->hide();
-        root->addWidget(status);
+        auto* footer = new QVBoxLayout;
+        footer->setContentsMargins(32, 0, 32, 16);
+        footer->addWidget(status);
+        root->addLayout(footer);
 
         debounce.setSingleShot(true);
         debounce.setInterval(240);
@@ -956,11 +994,10 @@ private:
         body->setSpacing(0);
         auto* heading = PlainLabel(contents);
         heading->setText(tr("Installed mods"));
-        heading->setFont(Spotlight::DisplayFont(28));
-        auto* subtitle = PlainLabel(contents, true, Color::TextSecondary(), 14);
+        heading->setFont(Spotlight::DisplayFont(25));
+        auto* subtitle = PlainLabel(contents, true, Color::TextSecondary(), 13);
         subtitle->setText(tr("Turn mods on or off. Changes apply on the next launch."));
         installed_count = PlainLabel(contents, false, Color::TextSecondary(), 13, QFont::DemiBold);
-        installed_count->setContentsMargins(6, 4, 6, 6);
         auto* panel = new QFrame(contents);
         panel->setObjectName(QStringLiteral("storePanel"));
         installed_list = new QVBoxLayout(panel);
@@ -972,19 +1009,20 @@ private:
         connect(return_to_store, &QAbstractButton::clicked, this,
                 [this] { installed_mode->setChecked(false); });
         auto* actions = new QHBoxLayout;
-        actions->setSpacing(14);
+        actions->setSpacing(10);
         actions->addWidget(return_to_store);
-        auto* notice = PlainLabel(contents, true, Color::TextSecondary(), 12);
+        actions->addStretch();
+        auto* notice = PlainLabel(contents, false, Color::TextSecondary(), 12);
         notice->setText(tr("Installed mods are available offline."));
-        actions->addWidget(notice, 1);
+        actions->addWidget(notice);
         body->addWidget(heading);
         body->addSpacing(4);
         body->addWidget(subtitle);
-        body->addSpacing(18);
+        body->addSpacing(16);
         body->addWidget(installed_count);
-        body->addSpacing(2);
+        body->addSpacing(16);
         body->addWidget(panel);
-        body->addSpacing(14);
+        body->addSpacing(16);
         body->addLayout(actions);
         body->addStretch();
         ScrollPage(contents, installed_page);
@@ -1204,7 +1242,8 @@ private:
         return {};
     }
 
-    void Status(const QString& text) {
+    void Status(const QString& text, Spotlight::Notice::Tone tone = Spotlight::Notice::Tone::Neutral) {
+        status->SetTone(tone);
         status->setText(text);
         status->setVisible(!text.isEmpty());
     }
@@ -1424,7 +1463,7 @@ private:
                         browse_message->setText(message);
                         browse_message->show();
                     } else {
-                        Status(message);
+                        Status(message, Spotlight::Notice::Tone::Error);
                     }
                     more->setEnabled(true);
                     return;
@@ -1493,6 +1532,7 @@ private:
             titles = QDir(context.mods_root).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
         }
         int displayed = 0;
+        QWidget* last_row = nullptr;
         const auto query = search->text().trimmed();
         auto* panel = installed_list->parentWidget();
         for (const auto& target : titles) {
@@ -1507,15 +1547,18 @@ private:
                     auto* inset = new QWidget(panel);
                     inset->setObjectName(QStringLiteral("storeContents"));
                     auto* inset_layout = new QHBoxLayout(inset);
-                    inset_layout->setContentsMargins(12, 0, 18, 0);
+                    inset_layout->setContentsMargins(18, 0, 18, 0);
                     inset_layout->addWidget(rule);
                     installed_list->addWidget(inset);
                 }
                 auto* row = new QWidget(panel);
-                row->setObjectName(QStringLiteral("storeContents"));
+                row->setObjectName(QStringLiteral("storeRow"));
+                row->setAttribute(Qt::WA_StyledBackground);
+                row->setProperty("first", displayed == 1);
+                last_row = row;
                 auto* layout = new QHBoxLayout(row);
-                layout->setContentsMargins(12, 12, 14, 12);
-                layout->setSpacing(14);
+                layout->setContentsMargins(14, 12, 14, 12);
+                layout->setSpacing(13);
                 const auto id = installed.id;
                 auto* art = new PreviewImage(row, 10);
                 art->setFixedSize(96, 54);
@@ -1542,7 +1585,7 @@ private:
                 connect(heading, &QAbstractButton::clicked, this,
                         [this, id, target] { SelectMod(id, target); });
                 auto* meta = new QHBoxLayout;
-                meta->setSpacing(12);
+                meta->setSpacing(6);
                 const auto entry = catalog.constFind(id);
                 const bool known = entry != catalog.cend();
                 const auto source = known ? std::optional{entry->source} : installed.source;
@@ -1562,16 +1605,17 @@ private:
                 subtitle->setText(parts.join(QStringLiteral(" · ")));
                 meta->addWidget(subtitle);
                 if (source) {
-                    meta->addWidget(Mark(row, u"globe", SourceName(*source),
-                                         Color::TextSecondary(), QFont::Medium, 5));
+                    meta->addWidget(
+                        new Chip(SourceName(*source), Color::Control(), Color::Text(), row));
                 }
                 if (known ? external : installed.verified == false) {
-                    meta->addWidget(Mark(row, u"warning-circle", tr("Unverified"),
-                                         Color::Warning(), QFont::DemiBold, 4));
+                    auto tint = Color::Warning();
+                    tint.setAlpha(0x2e);
+                    meta->addWidget(new Chip(tr("Unverified"), tint, Color::Warning(), row));
                 }
                 if (installed.update_available == true) {
-                    meta->addWidget(Mark(row, u"arrow-circle-up", tr("Update"), Color::Accent(),
-                                         QFont::DemiBold, 4));
+                    meta->addWidget(
+                        new Chip(tr("Update"), Color::Accent(), Color::OnAccent(), row));
                 }
                 if (!update_checked.contains(target + u'/' + id)) {
                     update_queue.append({target, id});
@@ -1593,28 +1637,27 @@ private:
                             }
                         });
                 layout->addWidget(toggle);
-                auto* actions = new QToolButton(row);
-                actions->setObjectName(QStringLiteral("storeRowMenu"));
-                actions->setFixedSize(30, 30);
-                actions->setFocusPolicy(Qt::TabFocus);
-                actions->setCursor(Qt::PointingHandCursor);
-                actions->setPopupMode(QToolButton::InstantPopup);
-                actions->setIcon(Spotlight::Icon(u"dots-three", Color::TextSecondary(), 20));
-                actions->setIconSize({20, 20});
+                auto* actions = new CircleButton(QStringLiteral("dots-three"), 34, row);
                 actions->setAccessibleName(tr("Actions for %1").arg(installed.name));
                 actions->setToolTip(actions->accessibleName());
-                auto* menu = new QMenu(actions);
-                menu->addAction(Spotlight::Icon(u"info", Color::TextSecondary(), 16),
-                                tr("View details"), this,
-                                [this, id, target] { SelectMod(id, target); });
-                menu->addAction(Spotlight::Icon(u"trash", Color::TextSecondary(), 16),
+                auto* menu = new Spotlight::Menu(actions);
+                menu->addAction(Spotlight::Icon(u"info", Color::MenuInk(), 16), tr("View details"),
+                                this, [this, id, target] { SelectMod(id, target); });
+                menu->addAction(Spotlight::Icon(u"trash", Color::AccentLight(), 16),
                                 tr("Uninstall"), this,
-                                [this, installed, target] { RemoveLocal(installed, target); });
-                actions->setMenu(menu);
+                                [this, installed, target] { RemoveLocal(installed, target); })
+                    ->setProperty("spotlightDestructive", true);
+                connect(actions, &QAbstractButton::clicked, menu, [actions, menu] {
+                    menu->popup(actions->mapToGlobal(QPoint(
+                        actions->width() - menu->sizeHint().width(), actions->height() + 5)));
+                });
                 layout->addWidget(actions);
                 installed_rows.insert(target + u'/' + id, heading);
                 installed_list->addWidget(row);
             }
+        }
+        if (last_row) {
+            last_row->setProperty("last", true);
         }
         installed_count->setText(tr("From the Mod Store · %n", nullptr, displayed));
         CheckInstalledUpdates();
@@ -1678,22 +1721,6 @@ private:
         return image.convertToFormat(QImage::Format_RGB888).save(&buffer, "JPEG", 85)
                    ? bytes
                    : QByteArray{};
-    }
-
-    static QWidget* Mark(QWidget* parent, QStringView icon, const QString& text,
-                         const QColor& color, int weight, int gap) {
-        auto* mark = new QWidget(parent);
-        mark->setObjectName(QStringLiteral("storeContents"));
-        auto* layout = new QHBoxLayout(mark);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(gap);
-        auto* glyph = new QLabel(mark);
-        glyph->setPixmap(Spotlight::IconPixmap(icon, 14, color, parent->devicePixelRatioF()));
-        layout->addWidget(glyph);
-        auto* label = PlainLabel(mark, false, color, 12, weight);
-        label->setText(text);
-        layout->addWidget(label);
-        return mark;
     }
 
     void ClearDetail() {
@@ -2265,7 +2292,7 @@ private:
     }
 
     void InstallFailed(const QString& error) {
-        Status(error);
+        Status(error, Spotlight::Notice::Tone::Error);
         if (!selected || selected->source_url.isEmpty()) {
             return;
         }
@@ -2273,10 +2300,28 @@ private:
         QMessageBox prompt(QMessageBox::Warning, tr("Could not install the mod"), error,
                            QMessageBox::Close, this);
         auto* open = prompt.addButton(source->text(), QMessageBox::ActionRole);
+        SetButtonKind(open, QStringLiteral("primary"));
         prompt.exec();
         if (prompt.clickedButton() == open && !source_url.isEmpty()) {
             QDesktopServices::openUrl(source_url);
         }
+    }
+
+    bool Confirm(QMessageBox::Icon icon, const QString& heading, const QString& text,
+                 const QString& yes_kind) {
+        QMessageBox prompt(icon, heading, text, QMessageBox::No | QMessageBox::Yes, this);
+        SetButtonKind(prompt.button(QMessageBox::Yes), yes_kind);
+        auto* no = prompt.button(QMessageBox::No);
+        no->setStyleSheet(
+            QStringLiteral("QPushButton:default { background-color: %1; border-color: %2;"
+                           " color: %3; }"
+                           "QPushButton:default:hover { background-color: %2; }"
+                           "QPushButton[keyboardFocus=\"true\"] { border-color: %3; }")
+                .arg(CssColor(Color::Control()), CssColor(Color::Stroke()),
+                     CssColor(Color::Text())));
+        prompt.setDefaultButton(QMessageBox::No);
+        prompt.setEscapeButton(QMessageBox::No);
+        return prompt.exec() == QMessageBox::Yes;
     }
 
     void SetProgress(const QString& heading, const QString& detail = {}, int percent = -1,
@@ -2299,8 +2344,7 @@ private:
     void SetBusy(bool value) {
         busy = value;
         for (QWidget* widget :
-             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(store_menu),
-              static_cast<QWidget*>(search), static_cast<QWidget*>(preview_strip),
+             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(search), static_cast<QWidget*>(preview_strip),
               static_cast<QWidget*>(browse_page), static_cast<QWidget*>(installed_page),
               static_cast<QWidget*>(release), static_cast<QWidget*>(target_picker),
               static_cast<QWidget*>(back)}) {
@@ -2332,11 +2376,10 @@ private:
             .thumbnail_jpeg = ThumbnailJpeg(),
         };
         if ((external || patch) && !unverified && chosen.compatibility == Compatibility::Unknown &&
-            QMessageBox::question(
-                this, tr("Compatibility unverified"),
-                tr("Lichii could not confirm that this file works with your game version. "
-                   "It will check the download's SHA-256 before installing. Continue?"),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            !Confirm(QMessageBox::Warning, tr("Compatibility unverified"),
+                     tr("Lichii could not confirm that this file works with your game version. "
+                        "It will check the download's SHA-256 before installing. Continue?"),
+                     QStringLiteral("primary"))) {
             return;
         }
         if (epoch != mod_epoch) {
@@ -2412,7 +2455,8 @@ private:
             }
             FinishOperation();
             if (error.isEmpty()) {
-                Status(tr("Installation complete. The mod is available in Add-Ons."));
+                Status(tr("Installation complete. The mod is available in Add-Ons."),
+                       Spotlight::Notice::Tone::Success);
             } else {
                 InstallFailed(error);
             }
@@ -2461,7 +2505,7 @@ private:
 
     bool SetEnabledFor(const QString& target, const QString& id, bool enabled) {
         if (!context.set_enabled || busy || !context.set_enabled(target, id, enabled)) {
-            Status(tr("Could not save the change to this mod."));
+            Status(tr("Could not save the change to this mod."), Spotlight::Notice::Tone::Error);
             return false;
         }
         changed = true;
@@ -2488,15 +2532,14 @@ private:
             return;
         }
         const auto epoch = mod_epoch;
-        if (QMessageBox::question(
-                this, tr("Uninstall mod"), tr("Uninstall %1?").arg(installed.name),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes ||
+        if (!Confirm(QMessageBox::Question, tr("Uninstall mod"),
+                     tr("Uninstall %1?").arg(installed.name), QStringLiteral("destructive")) ||
             epoch != mod_epoch) {
             return;
         }
         const auto error = UninstallMod(context.mods_root, target, installed.id);
         if (!error.isEmpty()) {
-            Status(error);
+            Status(error, Spotlight::Notice::Tone::Error);
             return;
         }
         const bool preference_reset =
@@ -2589,7 +2632,7 @@ private:
     QLabel* preview_count{};
     QLabel* verification_icon{};
     QLabel* hint{};
-    QLabel* status{};
+    Spotlight::Notice* status{};
     QWidget* info{};
     std::array<std::pair<QLabel*, QLabel*>, 14> info_rows{};
     size_t installed_row{};
