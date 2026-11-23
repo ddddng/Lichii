@@ -47,7 +47,6 @@ class ConfigureSystem;
 class ConfigureNetwork;
 class ConfigureApplets;
 
-class QGraphicsScene;
 class QLabel;
 class QStandardItem;
 class QStandardItemModel;
@@ -118,6 +117,12 @@ private:
     void BuildAddons(int mods, int updates);
     void RebuildAddons();
     void AddPresetRow(QVBoxLayout* section);
+    void BuildNativeModes(int category);
+    void BuildInfoPage(int category);
+    void BuildArtworkPage(int category);
+    /// Shown on the Artwork page: a warning when detection finds nothing, an error when saving
+    /// fails.
+    void ShowArtworkProblem(const QString& text, bool error);
     void UpdateModsSummary();
     void UpdateSpotlightIdentity();
 
@@ -160,12 +165,17 @@ private:
     QFutureWatcher<DetectIconResult> detect_watcher;
     std::shared_ptr<std::atomic_bool> detect_cancel;
 
-    QGraphicsScene* scene;
     Spotlight::SettingsPage* settings_page = nullptr;
     QLabel* game_banner_icon = nullptr;
     QLabel* game_banner_title = nullptr;
     QLabel* game_banner_summary = nullptr;
     QLabel* game_banner_version = nullptr;
+    int artwork_category = -1;
+    QLabel* artwork_image = nullptr;
+    QLabel* info_image = nullptr;
+    QWidget* artwork_detecting = nullptr;
+    QWidget* artwork_problem = nullptr;
+    QLabel* artwork_problem_text = nullptr;
     QLabel* update_summary = nullptr;
     QList<QLabel*> mods_summaries;
     QVBoxLayout* store_rows = nullptr;
