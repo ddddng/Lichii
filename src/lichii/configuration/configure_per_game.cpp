@@ -451,9 +451,10 @@ void ConfigurePerGame::BuildSettings() {
     const int controls =
         settings_page->AddCategory(tr("Controls"), tr("Choose input profiles for this game"),
                                    QStringLiteral("game-controller"), Tints::Blue());
-    const int mods = settings_page->AddCategory(tr("Mods and cheats"),
-                                                tr("Turn mods on or off for this game. Changes apply on the next launch."),
-                                                QStringLiteral("puzzle-piece"), Tints::Lavender());
+    const int mods = settings_page->AddCategory(
+        tr("Mods and cheats"),
+        tr("Turn mods on or off for this game. Changes apply on the next launch."),
+        QStringLiteral("puzzle-piece"), Tints::Lavender());
     const int updates = settings_page->AddCategory(
         tr("Updates and DLC"), tr("Find the installed version and manage downloadable content"),
         QStringLiteral("download-simple"), Color::Accent());
@@ -768,7 +769,8 @@ void ConfigurePerGame::RebuildAddons() {
         }
 
         if (!is_mod) {
-            const QString detail = version.isEmpty() ? item->toolTip() : tr("Version %1").arg(version);
+            const QString detail =
+                version.isEmpty() ? item->toolTip() : tr("Version %1").arg(version);
             SettingsPage::AddRow(content_rows, item->text(), detail,
                                  QStringLiteral("download-simple"), Tints::Lavender(), control,
                                  item->toolTip());
@@ -783,7 +785,8 @@ void ConfigurePerGame::RebuildAddons() {
         }
         ++own_count;
         const bool cheats = version.contains(QStringLiteral("Cheats"), Qt::CaseInsensitive);
-        const QString path = location.isEmpty() ? QString{} : QDir(load_dir).relativeFilePath(location);
+        const QString path =
+            location.isEmpty() ? QString{} : QDir(load_dir).relativeFilePath(location);
         const QString detail = version.isEmpty() || path.isEmpty()
                                    ? version + path
                                    : tr("%1 · %2").arg(version, path);
@@ -793,7 +796,8 @@ void ConfigurePerGame::RebuildAddons() {
     }
 
     const auto section_label = [](QVBoxLayout* rows) {
-        return static_cast<QLabel*>(rows->parentWidget()->parentWidget()->layout()->itemAt(0)->widget());
+        return static_cast<QLabel*>(
+            rows->parentWidget()->parentWidget()->layout()->itemAt(0)->widget());
     };
     section_label(store_rows)->setText(tr("From the Mod Store · %1").arg(store_count));
     auto* store_section = store_rows->parentWidget()->parentWidget();

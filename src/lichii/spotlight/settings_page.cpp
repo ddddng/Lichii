@@ -464,6 +464,44 @@ void MirrorEnabled(QWidget* source, QWidget* target) {
 
 // Follows whether any source control would be shown on its page, through every ancestor up to
 // the page, and stores it on the row for SettingsPage to combine with the search.
+QLayout* DirectLayout(QLayout* layout, const QWidget* widget) {
+    if (layout == nullptr) {
+        return nullptr;
+    }
+    for (int i = 0; i < layout->count(); ++i) {
+        QLayoutItem* item = layout->itemAt(i);
+        if (item->widget() == widget) {
+            return layout;
+        }
+        if (auto* found = DirectLayout(item->layout(), widget)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+bool OnSameLine(const QWidget* first, const QWidget* second) {
+    if (first->parentWidget() != second->parentWidget() || first->parentWidget() == nullptr) {
+        return false;
+    }
+    QLayout* const layout = DirectLayout(first->parentWidget()->layout(), first);
+    if (layout == nullptr || layout != DirectLayout(first->parentWidget()->layout(), second)) {
+        return false;
+    }
+    if (auto* box = qobject_cast<QBoxLayout*>(layout)) {
+        return box->direction() == QBoxLayout::LeftToRight ||
+               box->direction() == QBoxLayout::RightToLeft;
+    }
+    if (auto* grid = qobject_cast<QGridLayout*>(layout)) {
+        int first_row, second_row, column, span_rows, span_columns;
+        grid->getItemPosition(grid->indexOf(first), &first_row, &column, &span_rows, &span_columns);
+        grid->getItemPosition(grid->indexOf(second), &second_row, &column, &span_rows,
+                              &span_columns);
+        return first_row == second_row;
+    }
+    return false;
+}
+
 bool IsBound(const QWidget* widget) {
     const auto bound = [](const QWidget* source) {
         return source->property("spotlightBound").toBool();
@@ -1074,12 +1112,16 @@ void SettingsPage::BuildPage(int category, Page& page) {
         }
         return rows;
     };
+    QHBoxLayout* toggle_box = nullptr;
+    QWidget* toggle_source = nullptr;
     const auto start_section = [&](const QString& title) {
         rows = nullptr;
         section_title = title;
+        toggle_box = nullptr;
     };
     const auto add_row = [&](const QString& title, const QString& tooltip,
                              const QList<QWidget*>& sources, QWidget* control) {
+        toggle_box = nullptr;
         auto* layout = group();
         AddRow(layout, title.isEmpty() ? page.name : title, Summary(tooltip), icon, color, control,
                PlainText(tooltip));
@@ -1088,6 +1130,7 @@ void SettingsPage::BuildPage(int category, Page& page) {
         new VisibilityMirror(sources, source, row, changed);
     };
     const auto add_note = [&](QLabel* label) {
+        toggle_box = nullptr;
         auto* note = Text(PlainText(label->text()), 12, 500, true);
         note->setWordWrap(true);
         note->setContentsMargins(18, 10, 18, 10);
@@ -1150,8 +1193,9 @@ void SettingsPage::BuildPage(int category, Page& page) {
             return;
         }
         const auto buttons = setting->findChildren<QPushButton*>(Qt::FindDirectChildrenOnly);
-        if (std::any_of(buttons.cbegin(), buttons.cend(),
-                        [setting](QPushButton* button) { return button != setting->restore_button; })) {
+        if (std::any_of(buttons.cbegin(), buttons.cend(), [setting](QPushButton* button) {
+                return button != setting->restore_button;
+            })) {
             auto* box = new QWidget;
             box->setProperty("spotlightTransparent", true);
             auto* box_layout = new QHBoxLayout(box);
@@ -1235,6 +1279,7 @@ void SettingsPage::BuildPage(int category, Page& page) {
             }
             auto* first = controls.front();
             QWidget* control = nullptr;
+            QHBoxLayout* toggle_layout = nullptr;
             QString title;
             QString tooltip;
             if (label == nullptr && controls.size() == 1 && qobject_cast<QPushButton*>(first) &&
@@ -1242,6 +1287,15 @@ void SettingsPage::BuildPage(int category, Page& page) {
                 !CleanLabel(static_cast<QPushButton*>(first)->text()).isEmpty()) {
                 auto* button = static_cast<QAbstractButton*>(first);
                 button->setProperty("spotlightBound", true);
+                if (toggle_box != nullptr && OnSameLine(toggle_source, button)) {
+                    auto* manage = Manage(CleanLabel(button->text()));
+                    MirrorEnabled(button, manage);
+                    connect(manage, &QAbstractButton::clicked, button, &QAbstractButton::click);
+                    toggle_box->insertWidget(0, manage);
+                    toggle_box = nullptr;
+                    controls.clear();
+                    return;
+                }
                 auto* manage = Manage();
                 MirrorEnabled(button, manage);
                 connect(manage, &QAbstractButton::clicked, button, &QAbstractButton::click);
@@ -1264,9 +1318,17 @@ void SettingsPage::BuildPage(int category, Page& page) {
                 title = label ? CleanLabel(label->text()) : row_title(first);
                 tooltip = label && !label->toolTip().isEmpty() ? label->toolTip()
                                                                 : first->toolTip();
+                if (controls.size() == 1 && qobject_cast<QAbstractButton*>(first) &&
+                    static_cast<QAbstractButton*>(first)->isCheckable()) {
+                    toggle_layout = box_layout;
+                }
             }
             QList<QWidget*> sources = controls;
             add_row(title, tooltip, sources, control);
+            if (toggle_layout != nullptr) {
+                toggle_box = toggle_layout;
+                toggle_source = first;
+            }
             controls.clear();
             label = nullptr;
         };
@@ -1324,8 +1386,17 @@ void SettingsPage::BuildPage(int category, Page& page) {
             } else if (auto* check = qobject_cast<QCheckBox*>(widget)) {
                 if (label == nullptr || !controls.isEmpty()) {
                     flush();
-                    add_row(CleanLabel(check->text()), check->toolTip(), {check},
-                            BindToggle(check));
+                    auto* box = new QWidget;
+                    box->setProperty("spotlightTransparent", true);
+                    auto* box_layout = new QHBoxLayout(box);
+                    box_layout->setContentsMargins(0, 0, 0, 0);
+                    box_layout->setSpacing(8);
+                    auto* toggle = BindToggle(check);
+                    toggle->setAccessibleName(CleanLabel(check->text()));
+                    box_layout->addWidget(toggle);
+                    add_row(CleanLabel(check->text()), check->toolTip(), {check}, box);
+                    toggle_box = box_layout;
+                    toggle_source = check;
                 } else {
                     controls.append(check);
                 }
@@ -1439,7 +1510,8 @@ void SettingsPage::SetCategory(int category) {
     parent_link->setVisible(entry.parent != -1);
     navigation->setVisible(!entry.wide);
     if (banner != nullptr) {
-        banner->setVisible(banner_categories.contains(entry.parent == -1 ? category : entry.parent));
+        banner->setVisible(
+            banner_categories.contains(entry.parent == -1 ? category : entry.parent));
     }
     content->setContentsMargins(entry.wide ? 24 : 40, 22, entry.wide ? 24 : 40, 24);
     scroll->setHorizontalScrollBarPolicy(entry.wide ? Qt::ScrollBarAsNeeded
