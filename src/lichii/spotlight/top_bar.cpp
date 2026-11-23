@@ -362,6 +362,13 @@ void RunningTitleBar::AddMenu(const QString& name, QMenu* menu) {
     connect(menu, &QMenu::aboutToHide, button, [button] { button->setChecked(false); });
 }
 
+void RunningTitleBar::SetExtraHeight(int extra) {
+    extra_height = extra;
+    if (!floating) {
+        setFixedHeight(36 + extra_height);
+    }
+}
+
 void RunningTitleBar::FloatOver(QWidget* screen) {
     floating_screen = screen;
     screen->installEventFilter(this);
@@ -387,7 +394,7 @@ void RunningTitleBar::SetFloating(bool value) {
     floating = value;
     title->setVisible(!floating);
     menus->setVisible(!floating);
-    setFixedHeight(floating ? 52 : 36);
+    setFixedHeight(floating ? 52 : 36 + extra_height);
     row->setContentsMargins(14, 0, floating ? 14 : 10, 0);
     if (floating) {
         frame->removeWidget(this);

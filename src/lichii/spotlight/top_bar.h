@@ -77,6 +77,8 @@ public:
     void AddMenu(const QString& name, QMenu* menu);
     /// Adds a dropdown button for a panel the caller opens; check it while the panel is shown.
     QAbstractButton* AddPanelButton(const QString& name);
+    /// Grows the docked bar past its base height, with its row centred, to take up letterboxing.
+    void SetExtraHeight(int extra);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -91,6 +93,7 @@ private:
     QHBoxLayout* row;
     QWidget* floating_screen = nullptr;
     bool floating = false;
+    int extra_height = 0;
 };
 
 } // namespace Spotlight

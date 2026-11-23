@@ -209,10 +209,17 @@ void InGameBar::SetCollapsed(bool collapsed_) {
     }
     collapsed = collapsed_;
     contents->setVisible(!collapsed);
-    setFixedHeight(collapsed ? 16 : 36);
+    setFixedHeight(collapsed ? 16 : 36 + extra_height);
     setCursor(collapsed ? Qt::PointingHandCursor : Qt::ArrowCursor);
     setToolTip(collapsed ? tr("Show the bar") : QString{});
     update();
+}
+
+void InGameBar::SetExtraHeight(int extra) {
+    extra_height = extra;
+    if (!collapsed) {
+        setFixedHeight(36 + extra_height);
+    }
 }
 
 void InGameBar::paintEvent(QPaintEvent*) {

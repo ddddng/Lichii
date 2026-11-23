@@ -334,6 +334,7 @@ private:
     void changeEvent(QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
 
     std::string CreateTASFramesString(
@@ -510,6 +511,7 @@ private:
     void UpdateInGameGraphicsSummary();
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
+    void UpdateLetterboxBars();
     void UpdateMenuIcons();
     void UpdateUISettings();
     void UpdateInputDrivers();
@@ -626,6 +628,9 @@ private:
     QString frame_gen_status_text;
     QString session_status_text;
     bool ingame_fullscreen = false;
+    /// The windowed bars' growth past their base heights, taken from the picture's letterboxing.
+    int letterbox_top = 0;
+    int letterbox_bottom = 0;
     bool fullscreen_hint_shown = false;
     bool fullscreen_shader_active = false;
 

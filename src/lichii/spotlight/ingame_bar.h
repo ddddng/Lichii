@@ -27,6 +27,8 @@ public:
     void SetSpeedStatus(const QString& description);
     /// Collapsed, the bar is a 6 px strip with a handle (bar-states 15AJ-0); a click expands it.
     void SetCollapsed(bool collapsed);
+    /// Grows the expanded bar past its base height, with its row centred, to take up letterboxing.
+    void SetExtraHeight(int extra);
     ShaderChip* Shaders() const {
         return shaders;
     }
@@ -47,6 +49,7 @@ private:
     QLabel* notice;
     BarMetrics* metrics;
     bool collapsed = false;
+    int extra_height = 0;
 };
 
 } // namespace Spotlight

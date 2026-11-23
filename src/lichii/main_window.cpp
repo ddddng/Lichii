@@ -1249,6 +1249,8 @@ void MainWindow::InitializeWidgets() {
     ingame_bar = new Spotlight::InGameBar(this);
     setStatusBar(ingame_bar);
     ingame_bar->hide();
+    // Sizes the bars before the window's layout runs, so a resize moves them and the picture once.
+    installEventFilter(this);
     loading_screen->SetCancelAction(ui->action_Stop);
     ingame_menu_action =
         ui->menu_Emulation->addAction(tr("In-game Menu"), this, &MainWindow::ToggleInGameMenu);
@@ -4372,9 +4374,10 @@ void MainWindow::ResetWindowSize(u32 width, u32 height) {
             render_window->showNormal();
         }
     }
-    const auto status_bar_height = single_window ? statusBar()->height() : 0;
+    const auto status_bar_height = single_window ? statusBar()->height() - letterbox_bottom : 0;
     const auto menu_bar_height = single_window && menuBar()->isVisible() ? menuBar()->height() : 0;
-    const auto title_bar_height = running_title_bar->isVisible() ? running_title_bar->height() : 0;
+    const auto title_bar_height =
+        running_title_bar->isVisible() ? running_title_bar->height() - letterbox_top : 0;
     const auto extra_height = menu_bar_height + title_bar_height + status_bar_height;
 
     auto* current_screen = this->screen();
@@ -5261,6 +5264,26 @@ void MainWindow::OnFocusLibrarySearch() {
 void MainWindow::OnToggleStatusBar() {
     ingame_bar->SetCollapsed(!ui->action_Show_Status_Bar->isChecked());
     ingame_bar->setVisible(emulation_running && !ingame_fullscreen && !loading_screen->isVisible());
+    UpdateLetterboxBars();
+}
+
+void MainWindow::UpdateLetterboxBars() {
+    int leftover = 0;
+    const bool title_shown = running_title_bar->isVisible();
+    const int column =
+        height() - (menuBar()->isVisible() ? menuBar()->height() : 0) - (title_shown ? 36 : 0) - 36;
+    if (emulation_running && !ingame_fullscreen && ingame_bar->isVisible() &&
+        ui->action_Show_Status_Bar->isChecked() && ui->action_Single_Window_Mode->isChecked() &&
+        width() > 0 && column > 0) {
+        const qreal ratio = render_window->windowPixelRatio();
+        const auto area = static_cast<u32>(column * ratio);
+        const auto layout = Layout::DefaultFrameLayout(static_cast<u32>(width() * ratio), area);
+        leftover = static_cast<int>((area - layout.screen.GetHeight()) / ratio);
+    }
+    letterbox_top = title_shown ? leftover / 2 : 0;
+    letterbox_bottom = leftover - letterbox_top;
+    running_title_bar->SetExtraHeight(letterbox_top);
+    ingame_bar->SetExtraHeight(letterbox_bottom);
 }
 
 void MainWindow::OnTogglePerfOverlay() {
@@ -6604,6 +6627,7 @@ void MainWindow::UpdateVolumeUI() {
 }
 
 void MainWindow::UpdateStatusButtons() {
+    UpdateLetterboxBars();
     UpdateGPUAccuracyButton();
     UpdateDockedButton();
     UpdateFilterText();
@@ -6908,6 +6932,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
     emit sizeChanged(event->size());
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == this && event->type() == QEvent::Resize) {
+        UpdateLetterboxBars();
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::moveEvent(QMoveEvent* event) {
