@@ -52,6 +52,7 @@ int QtAmiiboSettingsDialog::exec() {
     if (!is_initialized) {
         return QDialog::Rejected;
     }
+    setWindowFlag(Qt::FramelessWindowHint);
     return QDialog::exec();
 }
 
