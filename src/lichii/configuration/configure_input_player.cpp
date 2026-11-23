@@ -258,6 +258,7 @@ QComboBox[keyboardFocus="true"] {
 QPushButton[pill="fill"],
 QPushButton[pill="ghost"] {
     background-color: rgba(255, 255, 255, 20);
+    color: #ffffff;
     border: 1px solid transparent;
     border-radius: 17px;
     min-height: 32px;
