@@ -13,8 +13,10 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QStyle>
 #include <QWindow>
 
@@ -334,12 +336,23 @@ private:
         scrim = new Scrim(window);
     }
 
-    // setupUi sizes a dialog from its form, which was drawn without the card around it, so the
-    // dialog grows to the size its layout asks for when the form is too small.
+    // setupUi sizes a dialog from its form, which was drawn without the card around it, so a dialog
+    // given a size grows by the card's margins, then to what its layout asks for, within the
+    // screen.
     void MakeRoomForChrome() {
-        if (!box) {
-            dialog->resize(dialog->size().expandedTo(dialog->sizeHint()));
+        if (box) {
+            return;
         }
+        QSize size = dialog->size();
+        if (dialog->testAttribute(Qt::WA_Resized)) {
+            const QMargins margins = dialog->contentsMargins();
+            size = size.grownBy(margins);
+        }
+        size = size.expandedTo(dialog->sizeHint());
+        if (const QScreen* screen = dialog->screen()) {
+            size = size.boundedTo(screen->availableGeometry().size());
+        }
+        dialog->resize(size.expandedTo(dialog->minimumSizeHint()));
     }
 
     // Runs before QMessageBox::showEvent, which sizes the box from its layout.
@@ -431,7 +444,47 @@ private:
     bool fitting = false;
 };
 
+// Masks a window to a rounded rectangle. A mask has hard edges, so the corner is one pixel smaller
+// than Radius::Tile and the masked window keeps no shadow; the window manager draws its frame.
+class WindowCorners final : public QObject {
+public:
+    explicit WindowCorners(QWidget* window_) : QObject(window_), window(window_) {
+        window->installEventFilter(this);
+        Update();
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange) {
+            Update();
+        }
+        return false;
+    }
+
+private:
+    void Update() {
+        if (window->windowState() & (Qt::WindowMaximized | Qt::WindowFullScreen)) {
+            window->clearMask();
+            return;
+        }
+        QPainterPath path;
+        path.addRoundedRect(QRectF(window->rect()), Radius::Tile, Radius::Tile);
+        window->setMask(QRegion(path.toFillPolygon().toPolygon()));
+    }
+
+    QWidget* window;
+};
+
 } // namespace
+
+void RoundWindowCorners(QWidget* window) {
+#ifdef _WIN32
+    // Windows 11 rounds the window itself (DWMWA_WINDOW_CORNER_PREFERENCE).
+    static_cast<void>(window);
+#else
+    new WindowCorners(window);
+#endif
+}
 
 Dialog::Dialog(QWidget* parent, Qt::WindowFlags flags) : QDialog(parent, flags) {
     AdoptDialogChrome(this);
