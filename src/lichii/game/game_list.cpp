@@ -378,9 +378,12 @@ void GameList::OnPopulate() {
     first_result = QModelIndex{};
     result_count = 0;
     emit LibraryChanged({}, 0);
-    const bool view_focused = window()->focusWidget() == m_currentView;
+    const QWidget* focus = window()->focusWidget();
+    refocus_view = focus == nullptr || focus == m_currentView;
+    if (refocus_view) {
+        window()->setFocus();
+    }
     m_currentView->setEnabled(false);
-    focus_fallback = view_focused ? window()->focusWidget() : nullptr;
 
     switch (game_list_mode) {
     case Settings::GameListMode::TreeView:
@@ -587,10 +590,10 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     m_populating = false;
     m_currentView->setEnabled(true);
     ApplyFilter();
-    if (focus_fallback && window()->focusWidget() == focus_fallback) {
+    if (refocus_view && window()->focusWidget() == window()) {
         m_currentView->setFocus();
     }
-    focus_fallback = nullptr;
+    refocus_view = false;
 
     // Artwork a lookup saved while this scan ran can be missing from rows added after the save.
     for (const u64 program_id : std::as_const(artwork_saved)) {
