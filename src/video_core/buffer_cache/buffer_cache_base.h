@@ -1215,6 +1215,7 @@ private:
         /// No longer GPU-modified once written: a newer GPU write (MarkWrittenBuffer) or value in
         /// guest memory takes its bytes out.
         Common::RangeSet<DAddr> clean_ranges;
+        std::optional<Common::RangeSet<DAddr>> speculative_clean_ranges;
         std::unique_ptr<ReadCheck> check; ///< EDEN_NX2_READ_CHECK
         size_t first_extra_copy{};
         /// Recorded right after a GPU write, before any read (RecordEarlyDownloads)
@@ -1223,8 +1224,8 @@ private:
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;
     std::function<bool(DAddr, u64)> read_run_page_allowed;
-    /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
-    /// their way, which later reads wait for rather than download again.
+    /// Required clean_ranges only: GPU-modified bytes later reads can wait for without recording
+    /// another copy. A speculative copy can be discarded, so it never contributes coverage.
     Common::RangeSet<DAddr> read_download_ranges;
 
     /// EDEN_NX2_READ_CHECK: the bytes early downloads brought to a page's guest memory, and

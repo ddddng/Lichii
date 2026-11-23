@@ -497,6 +497,12 @@ struct BufferCacheTestAccess {
     static size_t ReadDownloads(Cache& cache) {
         return cache.read_downloads.size();
     }
+    static bool HasSpeculativeRead(Cache& cache, DAddr addr) {
+        return std::ranges::any_of(cache.read_downloads, [addr](const auto& download) {
+            return download.speculative_clean_ranges &&
+                   download.speculative_clean_ranges->Intersects(addr, 1);
+        });
+    }
     static u32 MaxUnreadWrites() {
         return Cache::MaxUnreadWrites;
     }
@@ -1939,9 +1945,7 @@ TEST_CASE("Adjacent read downloads supply the same bytes with fewer host waits",
     const auto first = f.cache->GetFlushArea(0x21010, 4);
     REQUIRE_FALSE(first->preemtive);
     f.cache->DownloadMemoryForRead(first->start_address, first->end_address - first->start_address);
-    if (read_runs) {
-        REQUIRE(f.cache->GetFlushArea(0x22010, 4)->in_flight);
-    }
+    REQUIRE(Access::HasSpeculativeRead(*f.cache, 0x22010) == read_runs);
     f.cache->FinishReadDownloads(first->start_address, first->end_address - first->start_address);
     for (u32 i = 0; i < 4; ++i) {
         const DAddr page = 0x20000 + i * 0x1000;
@@ -2560,7 +2564,7 @@ TEST_CASE("A write racing an adjacent download keeps its bytes",
     Access::MarkWritten(*f.cache, id, 0x21000, 0x1000);
     GuestCpuWrites writes{*f.cache};
     f.cache->DownloadMemoryForRead(0x20000, 0x1000);
-    REQUIRE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+    REQUIRE(Access::HasSpeculativeRead(*f.cache, 0x21010));
     SECTION("the write is pending when the landing starts") {
         writes.Write(f.bytes + 0x11a20, 0x21a20, NewGuestValue);
         f.cache->FinishReadDownloads(0x20000, 0x1000);
@@ -2590,13 +2594,38 @@ TEST_CASE("An adjacent staged page that becomes CPU-dirty is not downloaded",
     const auto id = GuestWrittenPage(f);
     Access::MarkWritten(*f.cache, id, 0x21000, 0x80);
     f.cache->DownloadMemoryForRead(0x20000, 0x1000);
-    REQUIRE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+    REQUIRE(Access::HasSpeculativeRead(*f.cache, 0x21010));
     f.runtime.before_completion = [&] { f.cache->WriteMemory(0x21080, 4); };
     f.cache->FinishReadDownloads(0x20000, 0x1000);
     REQUIRE(f.bytes[0x10000] == 0x12);
     REQUIRE(f.bytes[0x11000] == 0);
     REQUIRE(f.cache->IsRegionGpuModified(0x21000, 0x80));
     REQUIRE_FALSE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+}
+
+TEST_CASE("A second reader queues its own copy over a speculative download",
+          "[buffer_ports][read_runs]") {
+    Fixture f;
+    const bool cpu_write = GENERATE(false, true);
+    f.cache->SetReadRunPageFilter([](DAddr, u64) { return true; });
+    const auto id = GuestWrittenPage(f);
+    Access::MarkWritten(*f.cache, id, 0x21000, 0x80);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(Access::HasSpeculativeRead(*f.cache, 0x21010));
+    if (cpu_write) {
+        f.runtime.before_completion = [&] {
+            f.cache->WriteMemory(0x21080, 4);
+            f.bytes[0x11080] = 0x93;
+        };
+    }
+    const auto area = ReadWord(f, 0x21010);
+    REQUIRE_FALSE(area.preemtive);
+    REQUIRE_FALSE(area.in_flight);
+    REQUIRE(f.runtime.host_read_barriers == 2);
+    REQUIRE(f.runtime.host_read_waits == 1);
+    REQUIRE(f.bytes[0x10010] == 0x12);
+    REQUIRE(f.bytes[0x11010] == 0x12);
+    REQUIRE(f.bytes[0x11080] == (cpu_write ? 0x93 : 0));
 }
 
 TEST_CASE("A new GPU write supersedes an adjacent staged copy",
@@ -2608,7 +2637,7 @@ TEST_CASE("A new GPU write supersedes an adjacent staged copy",
     WriteByDispatch(f, id, 0x20000, 0x80, 1);
     WriteByDispatch(f, id, 0x21000, 0x80, 2);
     f.cache->DownloadMemoryForRead(0x20000, 0x1000);
-    REQUIRE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+    REQUIRE(Access::HasSpeculativeRead(*f.cache, 0x21010));
     WriteByDispatch(f, id, 0x21000, 0x80, 3);
     f.cache->FinishReadDownloads(0x20000, 0x1000);
     REQUIRE(f.bytes[0x10010] == 1);
