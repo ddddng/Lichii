@@ -133,7 +133,7 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
     SetSubtitle(tr("Share your experience with the latest completed session. Review the report "
                    "before submitting."));
     SetIcon(u"clipboard-text", Spotlight::Color::Accent());
-    resize(1102, 800);
+    resize(982, 616);
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(14);

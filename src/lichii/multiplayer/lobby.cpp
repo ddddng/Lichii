@@ -86,7 +86,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
       announce_multiplayer_session(session), system{system_} {
     ui->setupUi(this);
     SetIcon(u"users", Spotlight::Color::Success());
-    resize(844, 800);
+    resize(724, 638);
     for (auto* label : {ui->label, ui->label_2}) {
         label->setFont(Spotlight::Font(13, 600));
         Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());

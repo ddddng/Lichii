@@ -5230,7 +5230,7 @@ void MainWindow::OnWhatsNew() {
                                        Qt::ISODate);
     whats_new_dialog = new WhatsNewDialog(build, date, LICHII_USE_PENDING_RELEASE_NOTES, this);
     whats_new_dialog->setAttribute(Qt::WA_DeleteOnClose);
-    ConfigurationShared::FitToScreen(whats_new_dialog, QSize(600, 740));
+    ConfigurationShared::FitToScreen(whats_new_dialog, QSize(442, 576));
     whats_new_dialog->show();
 
     if (build && build != UISettings::values.last_seen_release.GetValue()) {

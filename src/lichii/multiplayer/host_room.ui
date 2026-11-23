@@ -2,7 +2,7 @@
 <ui version="4.0">
  <class>HostRoom</class>
  <widget class="QWidget" name="HostRoom">
-  <property name="geometry"><rect><x>0</x><y>0</y><width>590</width><height>600</height></rect></property>
+  <property name="geometry"><rect><x>0</x><y>0</y><width>592</width><height>100</height></rect></property>
   <property name="windowTitle"><string>Create Room</string></property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <property name="spacing"><number>14</number></property>

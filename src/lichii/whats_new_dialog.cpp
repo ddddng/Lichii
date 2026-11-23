@@ -201,7 +201,6 @@ WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pen
     SetIcon(u"newspaper", Spotlight::Color::Accent());
     const QIcon icon(QString::fromLatin1(app_icon));
     setWindowIcon(icon);
-    resize(562, 760);
 
     auto* const root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);

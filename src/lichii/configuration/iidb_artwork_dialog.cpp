@@ -414,7 +414,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     ResetSearch();
-    resize(1000, 800);
+    resize(880, 616);
 }
 
 void ArtworkDialog::SetStatus(const QString& text, Spotlight::Notice::Tone tone) {

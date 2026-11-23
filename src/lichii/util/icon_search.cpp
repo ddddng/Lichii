@@ -846,7 +846,7 @@ int IconSearch::ChooseIcon(const std::vector<std::vector<u8>>& choices) {
     layout->addWidget(SecondaryLabel(tr("Double-click an icon to accept it."), &dialog));
     layout->addSpacing(6);
     layout->addWidget(buttons);
-    dialog.resize(612, 500);
+    dialog.resize(492, 316);
     if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
         return -1;
     }
