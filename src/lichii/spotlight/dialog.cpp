@@ -12,6 +12,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QPushButton>
 #include <QStyle>
 #include <QWindow>
@@ -75,9 +76,32 @@ QPixmap MessageIcon(QMessageBox::Icon icon, qreal ratio) {
     return tile;
 }
 
+class DialogScrim final : public QWidget {
+public:
+    explicit DialogScrim(QWidget* owner) : QWidget(owner) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setGeometry(owner->rect());
+        owner->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* owner, QEvent* event) override {
+        if (event->type() == QEvent::Resize) {
+            setGeometry(static_cast<QWidget*>(owner)->rect());
+        }
+        return false;
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0x07, 0x08, 0x0b, 0xb8));
+    }
+};
+
 class DialogChrome final : public QObject {
 public:
-    DialogChrome(QDialog* dialog_, bool close_button) : QObject(dialog_), dialog(dialog_) {
+    DialogChrome(QDialog* dialog_, bool close_button, bool custom_ = false)
+        : QObject(dialog_), dialog(dialog_), custom(custom_) {
         title = new QLabel(dialog);
         title->setObjectName(QStringLiteral("spotlightDialogTitle"));
         title->setFont(Font(18, 700));
@@ -98,6 +122,10 @@ public:
         Update();
     }
 
+    ~DialogChrome() override {
+        delete scrim.data();
+    }
+
 protected:
     bool eventFilter(QObject*, QEvent* event) override {
         switch (event->type()) {
@@ -106,6 +134,11 @@ protected:
             Update();
             return false;
         case QEvent::Show:
+            if (custom && dialog->parentWidget()) {
+                scrim = new DialogScrim(dialog->parentWidget()->window());
+                scrim->show();
+                scrim->raise();
+            }
             PrepareMessageBox();
             MarkDestructiveButtons();
             Update();
@@ -113,6 +146,9 @@ protected:
                 shown = true;
                 MakeRoomForChrome();
             }
+            return false;
+        case QEvent::Hide:
+            delete scrim.data();
             return false;
         case QEvent::Resize:
             Place();
@@ -149,6 +185,12 @@ private:
     }
 
     void Update() {
+        if (custom) {
+            title->hide();
+            subtitle->hide();
+            dialog->setContentsMargins(ShadowMargins);
+            return;
+        }
         title->setText(dialog->windowTitle());
         title->setHidden(title->text().isEmpty() || dialog->property(TitleHiddenProperty).toBool());
         subtitle->setText(dialog->property(SubtitleProperty).toString());
@@ -162,6 +204,9 @@ private:
     }
 
     void Place() {
+        if (custom) {
+            return;
+        }
         const QRect card = Card();
         const int left = card.left() + PaddingX + 8;
         const int right = card.right() - PaddingX - (close ? 4 : 8);
@@ -185,6 +230,7 @@ private:
         QPainter painter(dialog);
         painter.setRenderHint(QPainter::Antialiasing);
         const QRectF card = QRectF(Card()).adjusted(0.5, 0.5, -0.5, -0.5);
+        const int radius = custom ? Radius::Card + 2 : Radius::Dialog;
         painter.setPen(Qt::NoPen);
         QColor shadow = Color::Shadow();
         for (int step = ShadowBlur; step > 0; --step) {
@@ -194,11 +240,11 @@ private:
             const qreal grow = step;
             painter.drawRoundedRect(
                 card.translated(0, ShadowOffset * t).adjusted(-grow, -grow, grow, grow),
-                Radius::Dialog + grow, Radius::Dialog + grow);
+                radius + grow, radius + grow);
         }
         painter.setPen(QPen(Color::StrokeSubtle(), 1));
-        painter.setBrush(Color::DialogSolid());
-        painter.drawRoundedRect(card, Radius::Dialog, Radius::Dialog);
+        painter.setBrush(custom ? QColor(0x15, 0x16, 0x1e) : Color::DialogSolid());
+        painter.drawRoundedRect(card, radius, radius);
     }
 
     // setupUi sizes a dialog from its form, which was drawn without the card around it, so the
@@ -232,6 +278,8 @@ private:
     QLabel* title;
     QLabel* subtitle;
     CircleButton* close = nullptr;
+    QPointer<DialogScrim> scrim;
+    bool custom;
     bool shown = false;
 };
 
@@ -239,6 +287,13 @@ private:
 
 Dialog::Dialog(QWidget* parent, Qt::WindowFlags flags) : QDialog(parent, flags) {
     AdoptDialogChrome(this);
+}
+
+Dialog::Dialog(QWidget* parent, Chrome) : QDialog(parent) {
+    setProperty(ChromeProperty, true);
+    setAttribute(Qt::WA_TranslucentBackground);
+    overrideWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+    new DialogChrome(this, false, true);
 }
 
 void Dialog::SetSubtitle(const QString& subtitle) {
