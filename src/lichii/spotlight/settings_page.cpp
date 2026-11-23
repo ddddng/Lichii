@@ -1,14 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <utility>
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTimeEdit>
+#include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFocusEvent>
+#include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -16,14 +21,16 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSet>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
-#include <QTabBar>
 #include <QTabWidget>
+#include <QTextDocumentFragment>
 #include <QTimer>
 #include <QVBoxLayout>
 #include "common/settings.h"
@@ -43,6 +50,8 @@ QString CssColor(const QColor& color) {
         .arg(color.blue())
         .arg(color.alpha());
 }
+
+constexpr int GroupRadius = 20;
 
 class Surface final : public QWidget {
 public:
@@ -123,14 +132,34 @@ protected:
             painter.setBrush(Color::AccentSoft());
             painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), Radius::Card,
                                     Radius::Card);
-        } else if (divider) {
-            painter.setPen(Color::StrokeSubtle());
-            painter.drawLine(0, 0, width(), 0);
+        } else if (divider && !PreviousRowHighlighted()) {
+            painter.fillRect(QRect(18, 0, width() - 36, 1), QColor(0xff, 0xff, 0xff, 0x12));
         }
     }
 
 private:
+    bool PreviousRowHighlighted() const {
+        const auto* layout = parentWidget()->layout();
+        const int index = layout->indexOf(this);
+        for (int i = index - 1; i >= 0; --i) {
+            auto* previous = layout->itemAt(i)->widget();
+            if (previous == nullptr || previous->isHidden()) {
+                continue;
+            }
+            const auto* focused = QApplication::focusWidget();
+            return previous->underMouse() || (focused && previous->isAncestorOf(focused));
+        }
+        return false;
+    }
+
     bool divider;
+};
+
+class DescriptionLabel final : public QLabel {
+public:
+    int heightForWidth(int width) const override {
+        return QLabel::heightForWidth(std::min(width, maximumWidth()));
+    }
 };
 
 class NavigationButton final : public QAbstractButton {
@@ -169,11 +198,12 @@ protected:
             painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), Radius::Row,
                                     Radius::Row);
         }
-        painter.drawPixmap(12, 12, IconPixmap(icon, 20, icon_color, devicePixelRatioF()));
+        painter.drawPixmap(12, (height() - 24) / 2,
+                           IconPixmap(icon, 24, icon_color, devicePixelRatioF()));
         painter.setFont(Font(14, isChecked() ? 600 : 500));
         painter.setPen(Color::Text());
-        painter.drawText(rect().adjusted(44, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                         painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 52));
+        painter.drawText(rect().adjusted(48, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                         painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 56));
     }
 
 private:
@@ -190,7 +220,7 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setCursor(Qt::PointingHandCursor);
         setProperty("spotlightTransparent", true);
-        setFixedSize(fontMetrics().horizontalAdvance(label) + (label.isEmpty() ? 32 : 48), 36);
+        setFixedSize(fontMetrics().horizontalAdvance(label) + (label.isEmpty() ? 32 : 46), 36);
     }
 
 protected:
@@ -206,9 +236,9 @@ protected:
                          : underMouse() ? Color::Text()
                                         : Color::TextSecondary();
         painter.setPen(ink);
-        painter.drawText(rect().adjusted(12, 0, -26, 0), Qt::AlignLeft | Qt::AlignVCenter, text());
-        painter.drawPixmap(width() - 22, (height() - 14) / 2,
-                           IconPixmap(QStringLiteral("caret-right"), 14, ink, devicePixelRatioF()));
+        painter.drawText(rect().adjusted(8, 0, -30, 0), Qt::AlignRight | Qt::AlignVCenter, text());
+        painter.drawPixmap(width() - 24, (height() - 16) / 2,
+                           IconPixmap(QStringLiteral("caret-right"), 16, ink, devicePixelRatioF()));
     }
 };
 
@@ -217,7 +247,7 @@ public:
     explicit ComboPill(std::function<QString(const QComboBox&, int)> label_ = {})
         : label{std::move(label_)} {
         setFont(Font(13, 600));
-        setFixedHeight(36);
+        setFixedHeight(34);
         setCursor(Qt::PointingHandCursor);
         setProperty("spotlightTransparent", true);
         connect(this, &QComboBox::currentIndexChanged, this, [this] { Refresh(); });
@@ -225,7 +255,8 @@ public:
 
     void Refresh() {
         const auto display = ClosedText();
-        setFixedWidth(qBound(64, fontMetrics().horizontalAdvance(display) + 48, 224));
+        const QFontMetrics metrics(Font(13, 600));
+        setFixedWidth(qBound(64, metrics.horizontalAdvance(display) + 50, 260));
         setToolTip(currentText().isEmpty() ? display : currentText());
         update();
     }
@@ -245,17 +276,19 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(hasFocus() ? QPen(Color::Accent()) : QPen(Qt::NoPen));
-        painter.setBrush(underMouse() && isEnabled() ? Color::ControlHover() : Color::Control());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
+        painter.setBrush(underMouse() && isEnabled() ? Color::Control() : Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
         const auto ink = isEnabled() ? Color::Text() : Color::TextFaint();
-        const QRect label_rect = rect().adjusted(12, 0, -26, 0);
-        painter.setFont(font());
+        const QRect label_rect = rect().adjusted(14, 0, -34, 0);
+        painter.setFont(Font(13, 600));
         painter.setPen(ink);
         painter.drawText(
             label_rect, Qt::AlignLeft | Qt::AlignVCenter,
-            fontMetrics().elidedText(ClosedText(), Qt::ElideRight, label_rect.width()));
-        painter.drawPixmap(width() - 22, (height() - 12) / 2,
-                           IconPixmap(QStringLiteral("caret-down"), 12, ink, devicePixelRatioF()));
+            painter.fontMetrics().elidedText(ClosedText(), Qt::ElideRight, label_rect.width()));
+        painter.drawPixmap(width() - 26, (height() - 16) / 2,
+                           IconPixmap(QStringLiteral("caret-down"), 16,
+                                      isEnabled() ? Color::TextSecondary() : Color::TextFaint(),
+                                      devicePixelRatioF()));
     }
 
 private:
@@ -268,6 +301,138 @@ private:
     }
 
     std::function<QString(const QComboBox&, int)> label;
+};
+
+class FieldPill final : public QWidget {
+public:
+    explicit FieldPill(QWidget* focus_target_) : focus_target{focus_target_} {
+        setProperty("spotlightTransparent", true);
+        setFixedHeight(34);
+        setAttribute(Qt::WA_Hover);
+        focus_target->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut ||
+            event->type() == QEvent::EnabledChange) {
+            update();
+        }
+        return false;
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(focus_target->hasFocus() ? QPen(Color::Accent()) : QPen(Qt::NoPen));
+        painter.setBrush(underMouse() && isEnabled() ? Color::Control() : Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+    }
+
+private:
+    QWidget* focus_target;
+};
+
+QString FieldStyle(const QString& type) {
+    return QStringLiteral("%1 { background: transparent; border: none; color: %2; "
+                          "selection-background-color: %3; selection-color: %4; }"
+                          "%1:disabled { color: %5; }")
+        .arg(type, CssColor(Color::Text()), CssColor(Color::Accent()),
+             CssColor(Color::OnAccent()), CssColor(Color::TextFaint()));
+}
+
+QWidget* NumberField(QAbstractSpinBox* editor) {
+    auto* field = new FieldPill(editor);
+    auto* layout = new QHBoxLayout(field);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(2);
+    auto* minus = new CircleButton(QStringLiteral("minus"), 26);
+    auto* plus = new CircleButton(QStringLiteral("plus"), 26);
+    for (auto* step : {minus, plus}) {
+        step->setFocusPolicy(Qt::NoFocus);
+        step->setAutoRepeat(true);
+    }
+    minus->setAccessibleName(SettingsPage::tr("Decrease"));
+    plus->setAccessibleName(SettingsPage::tr("Increase"));
+    editor->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    editor->setAlignment(Qt::AlignCenter);
+    editor->setFrame(false);
+    editor->setFont(Font(13, 600));
+    editor->setStyleSheet(FieldStyle(QString::fromLatin1(editor->metaObject()->className())));
+    editor->setMinimumWidth(56);
+    QObject::connect(minus, &QAbstractButton::clicked, editor, &QAbstractSpinBox::stepDown);
+    QObject::connect(plus, &QAbstractButton::clicked, editor, &QAbstractSpinBox::stepUp);
+    layout->addWidget(minus);
+    layout->addWidget(editor, 1);
+    layout->addWidget(plus);
+    const auto sync_width = [field, editor] {
+        const int text = editor->fontMetrics().horizontalAdvance(editor->text());
+        field->setFixedWidth(qBound(132, text + 96, 260));
+    };
+    sync_width();
+    if (auto* spin = qobject_cast<QSpinBox*>(editor)) {
+        QObject::connect(spin, &QSpinBox::textChanged, field, sync_width);
+    } else if (auto* real = qobject_cast<QDoubleSpinBox*>(editor)) {
+        QObject::connect(real, &QDoubleSpinBox::textChanged, field, sync_width);
+    }
+    return field;
+}
+
+class SlimSlider final : public QSlider {
+public:
+    SlimSlider() : QSlider(Qt::Horizontal) {
+        setFixedSize(196, 20);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setProperty("spotlightTransparent", true);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        setSliderDown(true);
+        MoveTo(event->position().x());
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (isSliderDown()) {
+            MoveTo(event->position().x());
+        }
+    }
+    void mouseReleaseEvent(QMouseEvent*) override {
+        setSliderDown(false);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const qreal span = maximum() - minimum();
+        qreal ratio = span > 0 ? (value() - minimum()) / span : 0;
+        if (invertedAppearance()) {
+            ratio = 1 - ratio;
+        }
+        const QRectF track(8, height() / 2.0 - 3, width() - 16, 6);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Stroke());
+        painter.drawRoundedRect(track, 3, 3);
+        const QColor fill = isEnabled() ? Color::Accent() : Color::TextFaint();
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(track.left(), track.top(), track.width() * ratio, 6), 3, 3);
+        const QPointF knob(track.left() + track.width() * ratio, height() / 2.0);
+        painter.setBrush(QColor(0, 0, 0, 0x4d));
+        painter.drawEllipse(knob + QPointF(0, 1), 8.5, 8.5);
+        painter.setBrush(Color::Text());
+        painter.setPen(hasFocus() ? QPen(Color::Accent(), 2) : QPen(Qt::NoPen));
+        painter.drawEllipse(knob, 8, 8);
+    }
+
+private:
+    void MoveTo(qreal x) {
+        qreal ratio = qBound(0.0, (x - 8) / (width() - 16), 1.0);
+        if (invertedAppearance()) {
+            ratio = 1 - ratio;
+        }
+        setSliderPosition(minimum() + qRound(ratio * (maximum() - minimum())));
+    }
 };
 
 class WatchWidget final : public QObject {
@@ -296,6 +461,68 @@ void MirrorEnabled(QWidget* source, QWidget* target) {
                     [source, target] { target->setEnabled(source->isEnabled()); });
 }
 
+// Follows whether any source control would be shown on its page, through every ancestor up to
+// the page, and stores it on the row for SettingsPage to combine with the search.
+bool IsBound(const QWidget* widget) {
+    const auto bound = [](const QWidget* source) {
+        return source->property("spotlightBound").toBool();
+    };
+    if (qobject_cast<const QGroupBox*>(widget) != nullptr) {
+        return false;
+    }
+    if (qobject_cast<const ConfigurationShared::Widget*>(widget) != nullptr) {
+        const auto children = widget->findChildren<QWidget*>();
+        return std::any_of(children.cbegin(), children.cend(), bound);
+    }
+    return bound(widget);
+}
+
+class VisibilityMirror final : public QObject {
+public:
+    VisibilityMirror(QList<QWidget*> sources_, QWidget* page_, QWidget* row_,
+                     std::function<void()> changed_)
+        : QObject(row_), sources{std::move(sources_)}, page{page_}, row{row_},
+          changed{std::move(changed_)} {
+        QSet<QWidget*> watched;
+        for (auto* source : sources) {
+            for (auto* widget = source; widget != nullptr && widget != page;
+                 widget = widget->parentWidget()) {
+                if (!watched.contains(widget)) {
+                    watched.insert(widget);
+                    widget->installEventFilter(this);
+                }
+            }
+        }
+        Sync();
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::ShowToParent || event->type() == QEvent::HideToParent) {
+            Sync();
+        }
+        return false;
+    }
+
+private:
+    void Sync() {
+        const bool visible = std::any_of(sources.cbegin(), sources.cend(),
+                                         [this](QWidget* source) {
+                                             return source->isVisibleTo(page);
+                                         });
+        if (row->property("sourceVisible").toBool() == visible) {
+            return;
+        }
+        row->setProperty("sourceVisible", visible);
+        changed();
+    }
+
+    QList<QWidget*> sources;
+    QWidget* page;
+    QWidget* row;
+    std::function<void()> changed;
+};
+
 QLabel* DisplayText(const QString& text, int size) {
     auto* label = SettingsPage::Text(text, size);
     label->setFont(DisplayFont(size));
@@ -303,7 +530,7 @@ QLabel* DisplayText(const QString& text, int size) {
 }
 
 bool Matches(const QString& text, const QString& query) {
-    return text.contains(query, Qt::CaseInsensitive);
+    return !query.isEmpty() && text.contains(query, Qt::CaseInsensitive);
 }
 
 bool MatchesWidget(QWidget* widget, const QString& query) {
@@ -320,32 +547,139 @@ bool MatchesWidget(QWidget* widget, const QString& query) {
             return true;
         }
     }
-    for (auto* group : widget->findChildren<QGroupBox*>()) {
-        if (Matches(group->title(), query)) {
-            return true;
-        }
-    }
     return false;
 }
 
-bool SelectMatchingTab(QTabWidget* tabs, const QString& query) {
-    for (int i = 0; i < tabs->count(); ++i) {
-        if (!tabs->isTabVisible(i)) {
-            continue;
-        }
-        auto* page = tabs->widget(i);
-        for (auto* nested : page->findChildren<QTabWidget*>()) {
-            if (SelectMatchingTab(nested, query)) {
-                tabs->setCurrentIndex(i);
-                return true;
+QString CleanLabel(QString text) {
+    text.replace(QStringLiteral("&&"), QStringLiteral("\x01"));
+    text.remove(QChar::fromLatin1('&'));
+    text.replace(QChar::fromLatin1('\x01'), QChar::fromLatin1('&'));
+    text = text.trimmed();
+    while (text.endsWith(QChar::fromLatin1(':')) || text.endsWith(QChar::fromLatin1('*')) ||
+           text.endsWith(QStringLiteral("..."))) {
+        text.chop(text.endsWith(QStringLiteral("...")) ? 3 : 1);
+        text = text.trimmed();
+    }
+    return text;
+}
+
+QString PlainText(const QString& text) {
+    return Qt::mightBeRichText(text) ? QTextDocumentFragment::fromHtml(text).toPlainText() : text;
+}
+
+QString Summary(const QString& tooltip) {
+    QString text = PlainText(tooltip).trimmed();
+    text = text.section(QChar::fromLatin1('\n'), 0, 0).trimmed();
+    constexpr int limit = 150;
+    if (text.size() <= limit) {
+        return text;
+    }
+    const int sentence = text.lastIndexOf(QStringLiteral(". "), limit);
+    if (sentence > 40) {
+        return text.left(sentence + 1);
+    }
+    return text.left(limit - 1).trimmed() + QChar(0x2026);
+}
+
+QString ItemViewStyle() {
+    return QStringLiteral(
+               "QAbstractItemView { background: transparent; border: none; color: %1; "
+               "outline: none; font-size: 13px; }"
+               "QAbstractItemView::item { min-height: 34px; padding: 0 8px; border-radius: 10px; }"
+               "QAbstractItemView::item:hover { background: %2; }"
+               "QAbstractItemView::item:selected { background: %3; color: %1; }"
+               "QHeaderView { background: transparent; border: none; }"
+               "QHeaderView::section { background: transparent; color: %4; border: none; "
+               "border-bottom: 1px solid %5; padding: 8px; font-size: 12px; font-weight: 600; }")
+        .arg(CssColor(Color::Text()), CssColor(Color::Fill()), CssColor(Color::AccentSoft()),
+             CssColor(Color::TextSecondary()), CssColor(Color::StrokeSubtle()));
+}
+
+bool IsControl(QWidget* widget) {
+    return qobject_cast<QAbstractButton*>(widget) || qobject_cast<QComboBox*>(widget) ||
+           qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QLineEdit*>(widget) ||
+           qobject_cast<QAbstractSlider*>(widget);
+}
+
+class GlyphButton final : public QAbstractButton {
+public:
+    explicit GlyphButton(const QString& glyph) {
+        setText(glyph);
+        setFixedSize(16, 24);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::NoFocus);
+        setAutoRepeat(true);
+        setAttribute(Qt::WA_Hover);
+        setProperty("spotlightTransparent", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setFont(Font(15, 600));
+        painter.setPen(!isEnabled()   ? Color::TextFaint()
+                       : underMouse() ? Color::Text()
+                                      : Color::TextSecondary());
+        painter.drawText(rect(), Qt::AlignCenter, text());
+    }
+};
+
+class SwatchButton final : public QAbstractButton {
+public:
+    explicit SwatchButton(QAbstractButton* source_) : source{source_} {
+        setFixedSize(34, 34);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover);
+        setProperty("spotlightTransparent", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+        painter.setPen(hasFocus() ? QPen(Color::Accent()) : QPen(Qt::NoPen));
+        painter.setBrush(underMouse() ? Color::Control() : Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+        const QRectF swatch = QRectF(rect()).adjusted(8, 8, -8, -8);
+        QPainterPath clip;
+        clip.addRoundedRect(swatch, 5, 5);
+        painter.setClipPath(clip);
+        const qreal ratio = devicePixelRatioF();
+        painter.drawPixmap(swatch, source->icon().pixmap(swatch.size().toSize(), ratio),
+                           QRectF(QPointF{}, swatch.size() * ratio));
+    }
+
+private:
+    QAbstractButton* source;
+};
+
+QWidget* RadioControl(const QList<QRadioButton*>& radios) {
+    QStringList names;
+    for (auto* radio : radios) {
+        names.append(CleanLabel(radio->text()));
+    }
+    auto* control = new SegmentedControl(names, SegmentedControl::Kind::Accent, 38);
+    const auto sync = [control, radios] {
+        const QSignalBlocker blocker(control);
+        for (int i = 0; i < radios.size(); ++i) {
+            if (radios[i]->isChecked()) {
+                control->SetCurrentIndex(i);
             }
         }
-        if (Matches(tabs->tabText(i), query) || MatchesWidget(page, query)) {
-            tabs->setCurrentIndex(i);
-            return true;
-        }
+    };
+    sync();
+    for (auto* radio : radios) {
+        QObject::connect(radio, &QAbstractButton::toggled, control, sync);
     }
-    return false;
+    QObject::connect(control, &SegmentedControl::CurrentChanged, control,
+                     [radios, sync](int index) {
+                         if (radios[index]->isEnabled()) {
+                             radios[index]->click();
+                         }
+                         sync();
+                     });
+    MirrorEnabled(radios.front(), control);
+    return control;
 }
 
 } // namespace
@@ -380,7 +714,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     shell->setContentsMargins(0, 0, 0, 0);
     shell->setSpacing(0);
 
-    auto* navigation = new Surface(SettingsColor::Sidebar(), 0);
+    navigation = new Surface(SettingsColor::Sidebar(), 0);
     navigation->setFixedWidth(264);
     sidebar = new QVBoxLayout(navigation);
     sidebar->setContentsMargins(14, 18, 14, 18);
@@ -397,11 +731,11 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     back_row->addWidget(Text(tr("Library"), 13, 500, true), 1);
     sidebar->addLayout(back_row);
     connect(back, &QAbstractButton::clicked, this, &SettingsPage::BackRequested);
-    sidebar->addSpacing(10);
+    sidebar->addSpacing(12);
 
     if (per_game) {
         auto* identity = new QHBoxLayout;
-        identity->setContentsMargins(4, 0, 4, 6);
+        identity->setContentsMargins(4, 0, 4, 10);
         identity->setSpacing(10);
         game_icon = new QLabel;
         game_icon->setFixedSize(44, 44);
@@ -443,7 +777,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     sidebar->addStretch();
 
     auto* advanced_row = new QHBoxLayout;
-    advanced_row->setContentsMargins(10, 8, 10, 8);
+    advanced_row->setContentsMargins(10, 9, 10, 9);
     advanced_row->addWidget(Text(tr("Show advanced"), 13, 500, true), 1);
     advanced = new ToggleSwitch;
     advanced->setAccessibleName(tr("Show advanced"));
@@ -470,7 +804,25 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     content->setContentsMargins(40, 22, 40, 24);
     content->setSpacing(14);
     auto* header = new QVBoxLayout;
+    header->setContentsMargins(0, 0, 0, 4);
     header->setSpacing(4);
+    parent_link = new QWidget;
+    parent_link->setProperty("spotlightTransparent", true);
+    auto* parent_row = new QHBoxLayout(parent_link);
+    parent_row->setContentsMargins(0, 0, 0, 6);
+    parent_row->setSpacing(8);
+    auto* up = new CircleButton(QStringLiteral("caret-left"), 28);
+    parent_name = Text({}, 13, 500, true);
+    parent_row->addWidget(up);
+    parent_row->addWidget(parent_name);
+    parent_row->addStretch();
+    connect(up, &QAbstractButton::clicked, this, [this] {
+        if (current_category != -1 && categories[current_category].parent != -1) {
+            SetCategory(categories[current_category].parent);
+        }
+    });
+    header->addWidget(parent_link);
+    parent_link->hide();
     heading = DisplayText({}, 28);
     subtitle = Text({}, 14, 500, true);
     subtitle->setWordWrap(true);
@@ -483,7 +835,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     content->addStretch();
 
     connect(search, &QLineEdit::textChanged, this, &SettingsPage::UpdateSearch);
-    connect(advanced, &QAbstractButton::toggled, this, &SettingsPage::UpdateSearch);
+    connect(advanced, &QAbstractButton::toggled, this, &SettingsPage::UpdateAdvanced);
     auto* focus_search = new QShortcut(QKeySequence::Find, this);
     connect(focus_search, &QShortcut::activated, search, [this] {
         search->setFocus();
@@ -512,55 +864,459 @@ int SettingsPage::AddCategory(const QString& title, const QString& subtitle_, co
     if (page_title.isEmpty()) {
         page_title = title;
     }
-    categories.push_back({title, std::move(page_title), subtitle_, button, panel, {}});
+    Category entry;
+    entry.title = title;
+    entry.page_title = std::move(page_title);
+    entry.subtitle = subtitle_;
+    entry.icon = icon;
+    entry.color = color;
+    entry.button = button;
+    entry.panel = panel;
+    categories.push_back(std::move(entry));
     return index;
 }
 
-QVBoxLayout* SettingsPage::AddSection(int category, const QString& title) {
+int SettingsPage::AddSubPage(int parent, const QString& title, const QString& subtitle_,
+                             bool wide) {
+    const int index = AddCategory(title, subtitle_, categories[parent].icon,
+                                  categories[parent].color);
+    categories[index].parent = parent;
+    categories[index].wide = wide;
+    categories[index].button->hide();
+    return index;
+}
+
+void SettingsPage::SetBuilder(int category, std::function<void()> build) {
+    categories[category].build = std::move(build);
+}
+
+QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool advanced_) {
     auto* section = new QWidget;
     section->setProperty("spotlightTransparent", true);
     auto* layout = new QVBoxLayout(section);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(6);
+    layout->setSpacing(2);
     if (!title.isEmpty()) {
         auto* label = Text(title, 13, 600, true);
-        label->setContentsMargins(6, 3, 6, 0);
+        label->setContentsMargins(6, 4, 6, 6);
         layout->addWidget(label);
     }
-    auto* surface = new Surface(Color::FillFaint(), Radius::Card, Color::StrokeSubtle());
+    auto* surface = new Surface(Color::FillFaint(), GroupRadius, Color::StrokeSubtle());
+    surface->setObjectName(QStringLiteral("settingsGroup"));
     auto* rows = new QVBoxLayout(surface);
     rows->setContentsMargins(1, 1, 1, 1);
     rows->setSpacing(0);
     layout->addWidget(surface);
-    AddBlock(category, section, title);
+    AddBlock(category, section, title, advanced_);
     return rows;
 }
 
 void SettingsPage::AddBlock(int category, QWidget* widget, QString search_label, bool advanced_) {
     auto& entry = categories[category];
-    auto* layout = qobject_cast<QVBoxLayout*>(entry.panel->layout());
-    const int index =
-        !advanced_ && entry.advanced_tabs != nullptr ? layout->count() - 1 : layout->count();
-    layout->insertWidget(index, widget);
-    if (!qobject_cast<QTabWidget*>(widget)) {
-        widget->setProperty("spotlightTransparent", true);
+    auto* layout = static_cast<QVBoxLayout*>(entry.panel->layout());
+    if (advanced_) {
+        layout->addWidget(widget);
+    } else {
+        layout->insertWidget(entry.basic_count++, widget);
     }
+    widget->setProperty("spotlightTransparent", true);
     entry.blocks.push_back({widget, std::move(search_label), advanced_});
-    widget->setVisible(!advanced_ || advanced->isChecked());
+    if (advanced_ && !advanced->isChecked() && !filtering) {
+        widget->hide();
+    }
 }
 
 void SettingsPage::AddPage(int category, QWidget* page, const QString& name, bool advanced_) {
+    page->hide();
     auto& entry = categories[category];
-    auto*& tabs = advanced_ ? entry.advanced_tabs : entry.basic_tabs;
-    if (tabs == nullptr) {
-        tabs = new QTabWidget;
-        tabs->setUsesScrollButtons(true);
-        tabs->setDocumentMode(true);
-        tabs->setMinimumHeight(450);
-        AddBlock(category, tabs, advanced_ ? tr("Advanced") : name, advanced_);
+    entry.pages.push_back({page, name, advanced_});
+    if (advanced_ ? entry.advanced_built : entry.basic_built) {
+        BuildPage(category, entry.pages.back());
+        RefreshCategory(category);
     }
-    tabs->addTab(ConfigurationShared::ScrollTab(page), name);
-    tabs->tabBar()->setVisible(tabs->count() > 1);
+}
+
+void SettingsPage::Build(int index, bool with_advanced) {
+    auto& entry = categories[index];
+    const bool basic_pending = !entry.basic_built;
+    const bool advanced_pending = with_advanced && !entry.advanced_built;
+    if (!basic_pending && !advanced_pending) {
+        return;
+    }
+    building = true;
+    if (basic_pending) {
+        entry.basic_built = true;
+        if (auto build = std::exchange(entry.build, {})) {
+            build();
+        }
+        for (auto& page : categories[index].pages) {
+            if (!page.advanced) {
+                BuildPage(index, page);
+            }
+        }
+    }
+    if (advanced_pending) {
+        categories[index].advanced_built = true;
+        for (auto& page : categories[index].pages) {
+            if (page.advanced) {
+                BuildPage(index, page);
+            }
+        }
+    }
+    building = false;
+    RefreshCategory(index);
+}
+
+void SettingsPage::BuildPage(int category, Page& page) {
+    QWidget* const source = page.source;
+    const bool in_advanced = page.advanced;
+    const QString icon = categories[category].icon;
+    const QColor color = categories[category].color;
+    const auto changed = [this, category] {
+        if (!building) {
+            RefreshCategory(category);
+        }
+    };
+    if (in_advanced) {
+        auto* heading_label = Text(page.name, 17, 600);
+        heading_label->setContentsMargins(6, 10, 6, 0);
+        AddBlock(category, heading_label, page.name, true);
+        page.anchor = heading_label;
+    }
+
+    QVBoxLayout* rows = nullptr;
+    QString section_title = in_advanced ? QString{} : page.name;
+    QSet<QWidget*> consumed;
+    const auto group = [&]() -> QVBoxLayout* {
+        if (rows == nullptr) {
+            rows = AddSection(category, section_title, in_advanced);
+            if (page.anchor == nullptr) {
+                page.anchor = rows->parentWidget()->parentWidget();
+            }
+        }
+        return rows;
+    };
+    const auto start_section = [&](const QString& title) {
+        rows = nullptr;
+        section_title = title;
+    };
+    const auto add_row = [&](const QString& title, const QString& tooltip,
+                             const QList<QWidget*>& sources, QWidget* control) {
+        auto* layout = group();
+        AddRow(layout, title.isEmpty() ? page.name : title, Summary(tooltip), icon, color, control,
+               PlainText(tooltip));
+        auto* row = layout->itemAt(layout->count() - 1)->widget();
+        row->setProperty("sourceVisible", true);
+        new VisibilityMirror(sources, source, row, changed);
+    };
+    const auto add_note = [&](QLabel* label) {
+        auto* note = Text(PlainText(label->text()), 12, 500, true);
+        note->setWordWrap(true);
+        note->setContentsMargins(18, 10, 18, 10);
+        note->setObjectName(QStringLiteral("settingsRow"));
+        note->setProperty("searchText", note->text());
+        note->setProperty("sourceVisible", true);
+        group()->addWidget(note);
+        new VisibilityMirror({label}, source, note, changed);
+    };
+    const auto add_view = [&](QAbstractItemView* view) {
+        QWidget* const origin = view->parentWidget();
+        auto* block = new QWidget;
+        auto* block_layout = new QVBoxLayout(block);
+        block_layout->setContentsMargins(0, 0, 0, 0);
+        block_layout->setSpacing(2);
+        if (!section_title.isEmpty() && rows == nullptr) {
+            auto* label = Text(section_title, 13, 600, true);
+            label->setContentsMargins(6, 4, 6, 6);
+            block_layout->addWidget(label);
+        }
+        auto* card = new Surface(Color::FillFaint(), GroupRadius, Color::StrokeSubtle());
+        auto* card_layout = new QVBoxLayout(card);
+        card_layout->setContentsMargins(8, 8, 8, 8);
+        card_layout->setSpacing(8);
+        view->setStyleSheet(ItemViewStyle());
+        view->setFrameShape(QFrame::NoFrame);
+        view->setMinimumHeight(260);
+        card_layout->addWidget(view);
+        auto* tools = new QHBoxLayout;
+        tools->setContentsMargins(4, 0, 4, 2);
+        tools->setSpacing(8);
+        for (auto* button : origin->findChildren<QPushButton*>()) {
+            if (consumed.contains(button) || button->isCheckable() ||
+                !button->isVisibleTo(source) || button->text().isEmpty()) {
+                continue;
+            }
+            consumed.insert(button);
+            tools->addWidget(BindButton(button));
+        }
+        tools->addStretch();
+        card_layout->addLayout(tools);
+        block_layout->addWidget(card);
+        block->setProperty("sourceVisible", true);
+        AddBlock(category, block, section_title + QChar::fromLatin1('\n') + page.name,
+                 in_advanced);
+        if (origin != source) {
+            new VisibilityMirror({origin}, source, block, changed);
+        }
+        start_section({});
+    };
+
+    std::function<void(QLayout*)> walk_layout;
+    std::function<void(const QList<QWidget*>&)> process;
+    const auto setting_row = [&](ConfigurationShared::Widget* setting) {
+        if (!setting->Valid()) {
+            return;
+        }
+        auto* control = BindSetting(setting);
+        if (control == nullptr) {
+            return;
+        }
+        QString title;
+        if (auto* label = setting->findChild<QLabel*>()) {
+            title = label->text();
+        }
+        if (title.isEmpty() && setting->checkbox != nullptr) {
+            title = setting->checkbox->text();
+        }
+        add_row(CleanLabel(title), setting->toolTip(), {setting}, control);
+    };
+    const auto bind = [&](QWidget* widget) -> QWidget* {
+        if (auto* combo = qobject_cast<QComboBox*>(widget)) {
+            return BindCombo(combo);
+        }
+        if (auto* line = qobject_cast<QLineEdit*>(widget)) {
+            return BindLineEdit(line);
+        }
+        if (qobject_cast<QAbstractSpinBox*>(widget)) {
+            return BindSpin(widget);
+        }
+        if (auto* slider = qobject_cast<QSlider*>(widget)) {
+            return BindSlider(slider);
+        }
+        if (auto* button = qobject_cast<QAbstractButton*>(widget)) {
+            if (button->isCheckable() && !qobject_cast<QRadioButton*>(button)) {
+                return BindToggle(button);
+            }
+            return BindButton(button);
+        }
+        return nullptr;
+    };
+    const auto row_title = [](QWidget* widget) {
+        if (auto* button = qobject_cast<QAbstractButton*>(widget)) {
+            if (!CleanLabel(button->text()).isEmpty()) {
+                return CleanLabel(button->text());
+            }
+        }
+        if (!widget->accessibleName().isEmpty()) {
+            return widget->accessibleName();
+        }
+        return CleanLabel(PlainText(widget->toolTip()).section(QChar::fromLatin1('\n'), 0, 0));
+    };
+    process = [&](const QList<QWidget*>& widgets) {
+        QLabel* label = nullptr;
+        QList<QWidget*> controls;
+        QList<QRadioButton*> radios;
+        const auto flush = [&] {
+            if (!radios.isEmpty()) {
+                auto* control = RadioControl(radios);
+                const QString title = label ? CleanLabel(label->text())
+                                            : (section_title.isEmpty() ? page.name : section_title);
+                add_row(title, label ? label->toolTip() : radios.front()->toolTip(),
+                        {radios.cbegin(), radios.cend()}, control);
+                radios.clear();
+                label = nullptr;
+            }
+            if (controls.isEmpty()) {
+                if (label != nullptr && !CleanLabel(label->text()).isEmpty()) {
+                    add_note(label);
+                }
+                label = nullptr;
+                return;
+            }
+            auto* first = controls.front();
+            QWidget* control = nullptr;
+            QString title;
+            QString tooltip;
+            if (label == nullptr && controls.size() == 1 && qobject_cast<QPushButton*>(first) &&
+                !static_cast<QPushButton*>(first)->isCheckable() &&
+                !CleanLabel(static_cast<QPushButton*>(first)->text()).isEmpty()) {
+                auto* button = static_cast<QAbstractButton*>(first);
+                auto* manage = Manage();
+                MirrorEnabled(button, manage);
+                connect(manage, &QAbstractButton::clicked, button, &QAbstractButton::click);
+                control = manage;
+                title = CleanLabel(button->text());
+                tooltip = button->toolTip();
+            } else {
+                auto* box = new QWidget;
+                box->setProperty("spotlightTransparent", true);
+                auto* box_layout = new QHBoxLayout(box);
+                box_layout->setContentsMargins(0, 0, 0, 0);
+                box_layout->setSpacing(8);
+                for (auto* widget : controls) {
+                    consumed.insert(widget);
+                    if (auto* bound = bind(widget)) {
+                        box_layout->addWidget(bound);
+                    }
+                }
+                control = box;
+                title = label ? CleanLabel(label->text()) : row_title(first);
+                tooltip = label && !label->toolTip().isEmpty() ? label->toolTip()
+                                                                : first->toolTip();
+            }
+            QList<QWidget*> sources = controls;
+            add_row(title, tooltip, sources, control);
+            controls.clear();
+            label = nullptr;
+        };
+        for (auto* widget : widgets) {
+            if (consumed.contains(widget)) {
+                continue;
+            }
+            if (IsBound(widget)) {
+                if (controls.isEmpty() && radios.isEmpty()) {
+                    label = nullptr;
+                }
+                continue;
+            }
+            if (auto* setting = qobject_cast<ConfigurationShared::Widget*>(widget)) {
+                flush();
+                setting_row(setting);
+            } else if (auto* text = qobject_cast<QLabel*>(widget)) {
+                if (text->text().isEmpty()) {
+                    continue;
+                }
+                flush();
+                label = text;
+            } else if (auto* box = qobject_cast<QGroupBox*>(widget)) {
+                flush();
+                start_section(CleanLabel(box->title()));
+                if (box->isCheckable() && !box->property("spotlightBound").toBool()) {
+                    add_row(CleanLabel(box->title()), box->toolTip(), {box}, BindToggle(box));
+                }
+                if (box->layout() != nullptr) {
+                    walk_layout(box->layout());
+                }
+                start_section({});
+            } else if (auto* tabs = qobject_cast<QTabWidget*>(widget)) {
+                flush();
+                for (int i = 0; i < tabs->count(); ++i) {
+                    start_section(CleanLabel(tabs->tabText(i)));
+                    if (tabs->widget(i)->layout() != nullptr) {
+                        walk_layout(tabs->widget(i)->layout());
+                    }
+                }
+                start_section({});
+            } else if (auto* area = qobject_cast<QScrollArea*>(widget)) {
+                flush();
+                if (area->widget() != nullptr && area->widget()->layout() != nullptr) {
+                    walk_layout(area->widget()->layout());
+                }
+            } else if (auto* view = qobject_cast<QAbstractItemView*>(widget)) {
+                flush();
+                add_view(view);
+            } else if (auto* radio = qobject_cast<QRadioButton*>(widget)) {
+                if (!controls.isEmpty()) {
+                    flush();
+                }
+                radios.append(radio);
+            } else if (auto* check = qobject_cast<QCheckBox*>(widget)) {
+                if (label == nullptr || !controls.isEmpty()) {
+                    flush();
+                    add_row(CleanLabel(check->text()), check->toolTip(), {check},
+                            BindToggle(check));
+                } else {
+                    controls.append(check);
+                }
+            } else if (IsControl(widget)) {
+                if (!radios.isEmpty()) {
+                    flush();
+                }
+                controls.append(widget);
+            } else if (widget->layout() != nullptr) {
+                flush();
+                walk_layout(widget->layout());
+            }
+        }
+        flush();
+    };
+
+    std::function<void(QLayout*, QList<QWidget*>&)> collect = [&](QLayout* layout,
+                                                                QList<QWidget*>& out) {
+        for (int i = 0; i < layout->count(); ++i) {
+            auto* item = layout->itemAt(i);
+            if (auto* widget = item->widget()) {
+                out.append(widget);
+            } else if (auto* nested = item->layout()) {
+                collect(nested, out);
+            }
+        }
+    };
+    walk_layout = [&](QLayout* layout) {
+        if (auto* grid = qobject_cast<QGridLayout*>(layout)) {
+            for (int row = 0; row < grid->rowCount(); ++row) {
+                QList<QWidget*> unit;
+                for (int column = 0; column < grid->columnCount(); ++column) {
+                    auto* item = grid->itemAtPosition(row, column);
+                    if (item == nullptr) {
+                        continue;
+                    }
+                    int item_row = 0;
+                    int item_column = 0;
+                    int row_span = 0;
+                    int column_span = 0;
+                    grid->getItemPosition(grid->indexOf(item), &item_row, &item_column, &row_span,
+                                          &column_span);
+                    if (item_row != row || item_column != column) {
+                        continue;
+                    }
+                    if (auto* widget = item->widget()) {
+                        unit.append(widget);
+                    } else if (auto* nested = item->layout()) {
+                        collect(nested, unit);
+                    }
+                }
+                process(unit);
+            }
+            return;
+        }
+        if (auto* form = qobject_cast<QFormLayout*>(layout)) {
+            for (int row = 0; row < form->rowCount(); ++row) {
+                QList<QWidget*> unit;
+                for (auto role : {QFormLayout::LabelRole, QFormLayout::FieldRole,
+                                  QFormLayout::SpanningRole}) {
+                    if (auto* item = form->itemAt(row, role)) {
+                        if (auto* widget = item->widget()) {
+                            unit.append(widget);
+                        } else if (auto* nested = item->layout()) {
+                            collect(nested, unit);
+                        }
+                    }
+                }
+                process(unit);
+            }
+            return;
+        }
+        auto* box = qobject_cast<QBoxLayout*>(layout);
+        if (box != nullptr && (box->direction() == QBoxLayout::LeftToRight ||
+                               box->direction() == QBoxLayout::RightToLeft)) {
+            QList<QWidget*> unit;
+            collect(box, unit);
+            process(unit);
+            return;
+        }
+        for (int i = 0; i < layout->count(); ++i) {
+            auto* item = layout->itemAt(i);
+            if (auto* widget = item->widget()) {
+                process({widget});
+            } else if (auto* nested = item->layout()) {
+                walk_layout(nested);
+            }
+        }
+    };
+    if (source->layout() != nullptr) {
+        walk_layout(source->layout());
+    }
 }
 
 void SettingsPage::SetCategory(int category) {
@@ -570,18 +1326,25 @@ void SettingsPage::SetCategory(int category) {
     if (filtering && categories[category].button->isHidden()) {
         search->clear();
     }
-    const bool switching = current_category != -1 && current_category != category;
-    if (switching) {
+    Build(category, advanced->isChecked() || filtering);
+    if (current_category != -1 && current_category != category) {
         categories[current_category].panel->hide();
-        categories[current_category].button->setChecked(false);
+        const int previous_parent = categories[current_category].parent;
+        categories[previous_parent == -1 ? current_category : previous_parent].button->setChecked(
+            false);
     }
     current_category = category;
     const auto& entry = categories[category];
     entry.panel->show();
-    if (switching) {
-        FadeIn(entry.panel);
+    categories[entry.parent == -1 ? category : entry.parent].button->setChecked(true);
+    parent_link->setVisible(entry.parent != -1);
+    navigation->setVisible(!entry.wide);
+    content->setContentsMargins(entry.wide ? 24 : 40, 22, entry.wide ? 24 : 40, 24);
+    scroll->setHorizontalScrollBarPolicy(entry.wide ? Qt::ScrollBarAsNeeded
+                                                    : Qt::ScrollBarAlwaysOff);
+    if (entry.parent != -1) {
+        parent_name->setText(categories[entry.parent].title);
     }
-    entry.button->setChecked(true);
     heading->setText(entry.page_title);
     subtitle->setText(entry.subtitle);
     subtitle->setVisible(!entry.subtitle.isEmpty());
@@ -593,17 +1356,13 @@ void SettingsPage::ShowAdvancedPage(int category, QWidget* page) {
     search->clear();
     SetCategory(category);
     advanced->setChecked(true);
-    auto* tabs = categories[category].advanced_tabs;
-    if (tabs == nullptr) {
-        return;
-    }
-    for (int i = 0; i < tabs->count(); ++i) {
-        if (!tabs->widget(i)->isAncestorOf(page)) {
+    for (const auto& entry : categories[category].pages) {
+        if (entry.source != page || entry.anchor == nullptr) {
             continue;
         }
-        tabs->setCurrentIndex(i);
-        QTimer::singleShot(0, scroll, [this, tabs] {
-            scroll->verticalScrollBar()->setValue(tabs->mapTo(scroll->widget(), QPoint{}).y());
+        QTimer::singleShot(0, scroll, [this, anchor = entry.anchor] {
+            scroll->verticalScrollBar()->setValue(anchor->mapTo(scroll->widget(), QPoint{}).y() -
+                                                  content->contentsMargins().top());
         });
         return;
     }
@@ -625,6 +1384,51 @@ void SettingsPage::SetGame(const QString& title, const QPixmap& icon) {
     game_icon->setPixmap(WholeIcon(icon, 44, devicePixelRatioF()));
 }
 
+void SettingsPage::UpdateAdvanced() {
+    if (current_category == -1) {
+        return;
+    }
+    if (advanced->isChecked()) {
+        Build(current_category, true);
+    }
+    RefreshCategory(current_category);
+}
+
+bool SettingsPage::RefreshCategory(int index) {
+    const auto source_visible = [](const QWidget* widget) {
+        const auto value = widget->property("sourceVisible");
+        return !value.isValid() || value.toBool();
+    };
+    const auto& entry = categories[index];
+    const QString query = search->text().trimmed();
+    const bool category_match = Matches(entry.title, query);
+    bool any = false;
+    for (const auto& block : entry.blocks) {
+        if (!source_visible(block.widget) ||
+            (block.advanced && !advanced->isChecked() && !filtering)) {
+            block.widget->hide();
+            continue;
+        }
+        const bool label_match = !filtering || category_match || Matches(block.search_label, query);
+        bool visible = false;
+        const auto rows = block.widget->findChildren<QWidget*>(QStringLiteral("settingsRow"));
+        if (rows.isEmpty()) {
+            visible = label_match || MatchesWidget(block.widget, query);
+        } else {
+            for (auto* row : rows) {
+                const bool shown =
+                    source_visible(row) &&
+                    (label_match || Matches(row->property("searchText").toString(), query));
+                row->setVisible(shown);
+                visible |= shown;
+            }
+        }
+        block.widget->setVisible(visible);
+        any |= visible;
+    }
+    return any;
+}
+
 void SettingsPage::UpdateSearch() {
     const QString query = search->text().trimmed();
     if (!query.isEmpty() && !filtering) {
@@ -633,55 +1437,35 @@ void SettingsPage::UpdateSearch() {
     filtering = !query.isEmpty();
     int first = -1;
     for (int i = 0; i < categories.size(); ++i) {
-        auto& entry = categories[i];
-        const bool category_match = Matches(entry.title, query);
-        bool any = category_match;
-        for (const auto& block : entry.blocks) {
-            if (block.advanced && !advanced->isChecked()) {
-                block.widget->hide();
-                continue;
-            }
-            const bool all = category_match || Matches(block.search_label, query);
-            bool match = all;
-            if (!all) {
-                if (auto* tabs = qobject_cast<QTabWidget*>(block.widget)) {
-                    match = SelectMatchingTab(tabs, query);
-                } else {
-                    for (auto* nested_tabs : block.widget->findChildren<QTabWidget*>()) {
-                        match |= SelectMatchingTab(nested_tabs, query);
-                    }
-                    match |= MatchesWidget(block.widget, query);
-                }
-            }
-            if (auto* rows = block.widget->findChild<QWidget*>(QStringLiteral("settingsGroup"))) {
-                for (auto* row : rows->findChildren<QWidget*>(QStringLiteral("settingsRow"),
-                                                              Qt::FindDirectChildrenOnly)) {
-                    row->setVisible(all || MatchesWidget(row, query));
-                }
-            }
-            block.widget->setVisible(match);
-            any |= match;
+        if (filtering) {
+            Build(i, true);
         }
-        entry.button->setVisible(any);
+        const bool any = RefreshCategory(i) && filtering;
+        auto& entry = categories[i];
+        entry.button->setVisible(filtering ? any : entry.parent == -1);
         if (any && first == -1) {
             first = i;
         }
     }
-
+    if (!filtering) {
+        if (unfiltered_category != -1) {
+            SetCategory(std::exchange(unfiltered_category, -1));
+        }
+        return;
+    }
     if (first == -1) {
         if (current_category != -1) {
             categories[current_category].panel->hide();
         }
+        parent_link->hide();
         heading->setText(tr("Search results"));
         subtitle->hide();
         empty->show();
         return;
     }
-    if (!filtering && unfiltered_category != -1) {
-        SetCategory(std::exchange(unfiltered_category, -1));
-    } else if (current_category == -1 || categories[current_category].button->isHidden()) {
+    if (current_category == -1 || categories[current_category].button->isHidden()) {
         SetCategory(first);
-    } else if (filtering) {
+    } else {
         SetCategory(current_category);
     }
 }
@@ -751,30 +1535,49 @@ QWidget* SettingsPage::Badge(const QString& text, const QColor& fill, const QCol
 }
 
 QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QString& description,
-                             const QString& icon, const QColor& color, QWidget* control) {
+                             const QString& icon, const QColor& color, QWidget* control,
+                             const QString& tooltip) {
     auto* row = new SettingsRow(group->count() > 0);
     row->setObjectName(QStringLiteral("settingsRow"));
     row->setProperty("spotlightTransparent", true);
-    group->parentWidget()->setObjectName(QStringLiteral("settingsGroup"));
+    row->setProperty("searchText", QString(title + QChar::fromLatin1('\n') + description +
+                                           QChar::fromLatin1('\n') + tooltip));
+    if (!tooltip.isEmpty() && tooltip != description) {
+        row->setToolTip(tooltip);
+    }
     row->setMinimumHeight(72);
     auto* layout = new QHBoxLayout(row);
-    layout->setContentsMargins(13, 8, 17, 8);
+    layout->setContentsMargins(14, 12, 18, 12);
     layout->setSpacing(14);
     layout->addWidget(new IconTile(icon, color), 0, Qt::AlignVCenter);
     auto* copy = new QVBoxLayout;
     copy->setSpacing(3);
+    auto* title_line = new QHBoxLayout;
+    title_line->setSpacing(8);
     auto* name = Text(title, 15, 600);
-    auto* detail = Text(description, 13, 400, true);
+    title_line->addWidget(name);
+    auto* detail = new DescriptionLabel;
+    detail->setText(description);
+    detail->setTextFormat(Qt::PlainText);
+    detail->setFont(Font(13, 400));
+    detail->setStyleSheet(
+        QStringLiteral("QLabel { background: transparent; border: none; color: %1; }")
+            .arg(CssColor(Color::TextSecondary())));
     detail->setWordWrap(true);
+    detail->setMaximumWidth(400);
     copy->addStretch();
-    copy->addWidget(name);
+    copy->addLayout(title_line);
     copy->addWidget(detail);
     copy->addStretch();
     layout->addLayout(copy, 1);
     if (control != nullptr) {
+        if (auto* badge = control->findChild<QWidget*>(QStringLiteral("changedBadge"))) {
+            title_line->addWidget(badge, 0, Qt::AlignVCenter);
+        }
         control->setAccessibleName(title);
         layout->addWidget(control);
     }
+    title_line->addStretch();
     group->addWidget(row);
     detail->setVisible(!description.isEmpty());
     return detail;
@@ -819,6 +1622,7 @@ QString SettingsPage::ClosedSettingLabel(const QComboBox* source, u32 setting_id
 
 QComboBox* SettingsPage::BindCombo(QComboBox* source, const QString& placeholder,
                                    std::function<QString(const QComboBox&, int)> closed_label) {
+    source->setProperty("spotlightBound", true);
     auto* proxy = new ComboPill(std::move(closed_label));
     proxy->setModel(source->model());
     proxy->setPlaceholderText(placeholder);
@@ -940,6 +1744,7 @@ void SettingsPage::SetComboIndex(QComboBox* source, int index) {
 }
 
 QWidget* SettingsPage::BindToggle(QAbstractButton* source) {
+    source->setProperty("spotlightBound", true);
     auto* toggle = new ToggleSwitch;
     toggle->setChecked(source->isChecked());
     MirrorEnabled(source, toggle);
@@ -953,6 +1758,7 @@ QWidget* SettingsPage::BindToggle(QAbstractButton* source) {
 }
 
 QWidget* SettingsPage::BindToggle(QGroupBox* source) {
+    source->setProperty("spotlightBound", true);
     auto* toggle = new ToggleSwitch;
     toggle->setChecked(source->isChecked());
     MirrorEnabled(source, toggle);
@@ -974,45 +1780,58 @@ QWidget* SettingsPage::BindSetting(ConfigurationShared::Widget* source) {
                                return ClosedSettingLabel(&combo, id, index);
                            });
     } else if (auto* slider = source->slider) {
-        auto* proxy = new QSlider(Qt::Horizontal);
-        proxy->setFixedWidth(150);
-        proxy->setRange(slider->minimum(), slider->maximum());
-        proxy->setValue(slider->value());
-        auto* value = Text(QString::number(proxy->value()), 13);
-        MirrorEnabled(slider, proxy);
-        connect(slider, &QSlider::valueChanged, proxy, &QSlider::setValue);
-        connect(proxy, &QSlider::valueChanged, proxy, [slider, value](int next) {
-            value->setText(QString::number(next));
-            if (slider->value() != next) {
-                slider->setValue(next);
-                emit slider->actionTriggered(QAbstractSlider::SliderMove);
-            }
+        const auto labels = source->findChildren<QLabel*>();
+        QLabel* feedback = labels.size() >= 2 ? labels.back() : nullptr;
+        auto* value = Text(feedback ? feedback->text() : QString::number(slider->value()), 13, 600);
+        value->setMinimumWidth(44);
+        value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        connect(slider, &QSlider::valueChanged, value, [slider, value, feedback] {
+            value->setText(feedback ? feedback->text() : QString::number(slider->value()));
         });
         editor = new QWidget;
         editor->setProperty("spotlightTransparent", true);
         auto* horizontal = new QHBoxLayout(editor);
         horizontal->setContentsMargins(0, 0, 0, 0);
-        horizontal->addWidget(proxy);
+        horizontal->setSpacing(6);
+        horizontal->addWidget(BindSlider(slider));
         horizontal->addWidget(value);
-    } else if (auto* spin = source->spinbox) {
-        auto* proxy = new QSpinBox;
-        proxy->setFont(Font(13, 600));
-        proxy->setFixedHeight(36);
-        proxy->setRange(spin->minimum(), spin->maximum());
-        proxy->setSpecialValueText(tr("Auto"));
-        proxy->setValue(spin->value());
-        proxy->setStyleSheet(
-            QStringLiteral("QSpinBox { background: %1; color: %2; border: 1px solid transparent; "
-                           "border-radius: 17px; padding-left: 10px; } "
-                           "QSpinBox:focus { border-color: %3; }")
-                .arg(CssColor(Color::Control()), CssColor(Color::Text()),
-                     CssColor(Color::Accent())));
-        MirrorEnabled(spin, proxy);
-        connect(spin, &QSpinBox::valueChanged, proxy, &QSpinBox::setValue);
-        connect(proxy, &QSpinBox::valueChanged, spin, &QSpinBox::setValue);
-        editor = proxy;
-    } else if (source->checkbox != nullptr) {
-        editor = BindToggle(source->checkbox);
+    } else if (source->spinbox != nullptr || source->double_spinbox != nullptr ||
+               source->date_time_edit != nullptr) {
+        QWidget* spin = source->spinbox;
+        if (spin == nullptr) {
+            spin = source->double_spinbox;
+        }
+        if (spin == nullptr) {
+            spin = source->date_time_edit;
+        }
+        editor = BindSpin(spin);
+        if (source->SettingId() == Settings::values.fps_limit.Id() &&
+            source->spinbox->specialValueText().isEmpty()) {
+            editor->findChild<QSpinBox*>()->setSpecialValueText(tr("Auto"));
+        }
+    } else if (source->line_edit != nullptr) {
+        editor = BindLineEdit(source->line_edit);
+    } else if (!source->radio_buttons.empty()) {
+        QList<QRadioButton*> radios;
+        for (const auto& [value, radio] : source->radio_buttons) {
+            radios.append(radio);
+        }
+        editor = RadioControl(radios);
+    }
+    if (source->checkbox != nullptr) {
+        auto* toggle = BindToggle(source->checkbox);
+        if (editor == nullptr) {
+            editor = toggle;
+        } else {
+            auto* pair = new QWidget;
+            pair->setProperty("spotlightTransparent", true);
+            auto* layout = new QHBoxLayout(pair);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(12);
+            layout->addWidget(editor);
+            layout->addWidget(toggle);
+            editor = pair;
+        }
     }
     if (editor == nullptr || source->restore_button == nullptr) {
         return editor;
@@ -1021,23 +1840,179 @@ QWidget* SettingsPage::BindSetting(ConfigurationShared::Widget* source) {
     combined->setProperty("spotlightTransparent", true);
     auto* layout = new QHBoxLayout(combined);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    auto* badge = Badge(tr("Changed"), Color::AccentSoft(), Color::AccentLight());
+    layout->setSpacing(10);
+    auto* badge = new Surface(Color::Accent(), 9);
+    badge->setObjectName(QStringLiteral("changedBadge"));
+    auto* badge_layout = new QHBoxLayout(badge);
+    badge_layout->setContentsMargins(8, 0, 8, 0);
+    auto* badge_text = Text(tr("Changed"), 11, 600);
+    badge_text->setStyleSheet(QStringLiteral("QLabel { background: transparent; color: %1; }")
+                                  .arg(CssColor(Color::OnAccent())));
+    badge_layout->addWidget(badge_text);
+    badge->setFixedHeight(19);
+    badge->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
     auto* reset = new CircleButton(QStringLiteral("arrow-counter-clockwise"), 32);
     reset->setAccessibleName(tr("Use global setting"));
     reset->setToolTip(reset->accessibleName());
     reset->setFocusPolicy(Qt::StrongFocus);
     connect(reset, &QAbstractButton::clicked, source->restore_button, &QAbstractButton::click);
-    WatchOverride(source, combined, [source, badge, reset] {
+    auto* spacer = new QWidget;
+    spacer->setFixedSize(32, 32);
+    spacer->setProperty("spotlightTransparent", true);
+    WatchOverride(source, combined, [source, badge, reset, spacer] {
         const bool custom = source->property("custom").toBool();
         badge->setVisible(custom);
         reset->setVisible(custom);
+        spacer->setVisible(!custom);
     });
     MirrorEnabled(source, reset);
     layout->addWidget(badge);
     layout->addWidget(editor);
     layout->addWidget(reset);
+    layout->addWidget(spacer);
     return combined;
+}
+
+QWidget* SettingsPage::BindSpin(QWidget* source) {
+    source->setProperty("spotlightBound", true);
+    QAbstractSpinBox* proxy = nullptr;
+    if (auto* spin = qobject_cast<QSpinBox*>(source)) {
+        auto* copy = new QSpinBox;
+        copy->setRange(spin->minimum(), spin->maximum());
+        copy->setSingleStep(spin->singleStep());
+        copy->setPrefix(spin->prefix());
+        copy->setSuffix(spin->suffix().isEmpty() || !spin->suffix().front().isLetter()
+                            ? spin->suffix()
+                            : QChar::fromLatin1(' ') + spin->suffix());
+        copy->setSpecialValueText(spin->specialValueText());
+        copy->setDisplayIntegerBase(spin->displayIntegerBase());
+        copy->setValue(spin->value());
+        connect(spin, &QSpinBox::valueChanged, copy, &QSpinBox::setValue);
+        connect(copy, &QSpinBox::valueChanged, spin, &QSpinBox::setValue);
+        proxy = copy;
+    } else if (auto* real = qobject_cast<QDoubleSpinBox*>(source)) {
+        auto* copy = new QDoubleSpinBox;
+        copy->setDecimals(real->decimals());
+        copy->setRange(real->minimum(), real->maximum());
+        copy->setSingleStep(real->singleStep());
+        copy->setPrefix(real->prefix());
+        copy->setSuffix(real->suffix());
+        copy->setSpecialValueText(real->specialValueText());
+        copy->setValue(real->value());
+        connect(real, &QDoubleSpinBox::valueChanged, copy, &QDoubleSpinBox::setValue);
+        connect(copy, &QDoubleSpinBox::valueChanged, real, &QDoubleSpinBox::setValue);
+        proxy = copy;
+    } else if (auto* date = qobject_cast<QDateTimeEdit*>(source)) {
+        auto* copy = new QDateTimeEdit;
+        copy->setDisplayFormat(date->displayFormat());
+        copy->setDateTimeRange(date->minimumDateTime(), date->maximumDateTime());
+        copy->setDateTime(date->dateTime());
+        connect(date, &QDateTimeEdit::dateTimeChanged, copy, &QDateTimeEdit::setDateTime);
+        connect(copy, &QDateTimeEdit::dateTimeChanged, date, &QDateTimeEdit::setDateTime);
+        proxy = copy;
+    }
+    if (proxy == nullptr) {
+        return nullptr;
+    }
+    auto* field = NumberField(proxy);
+    MirrorEnabled(source, field);
+    return field;
+}
+
+QWidget* SettingsPage::BindSlider(QSlider* source) {
+    source->setProperty("spotlightBound", true);
+    auto* proxy = new SlimSlider;
+    proxy->setRange(source->minimum(), source->maximum());
+    proxy->setSingleStep(source->singleStep());
+    proxy->setPageStep(source->pageStep());
+    proxy->setInvertedAppearance(source->invertedAppearance());
+    proxy->setValue(source->value());
+    connect(source, &QSlider::valueChanged, proxy, &QSlider::setValue);
+    connect(proxy, &QSlider::valueChanged, source, [source](int next) {
+        if (source->value() != next) {
+            source->setValue(next);
+            emit source->actionTriggered(QAbstractSlider::SliderMove);
+        }
+    });
+    auto* minus = new GlyphButton(QStringLiteral("\u2212"));
+    auto* plus = new GlyphButton(QStringLiteral("+"));
+    connect(minus, &QAbstractButton::clicked, proxy,
+            [proxy] { proxy->triggerAction(QAbstractSlider::SliderSingleStepSub); });
+    connect(plus, &QAbstractButton::clicked, proxy,
+            [proxy] { proxy->triggerAction(QAbstractSlider::SliderSingleStepAdd); });
+    auto* control = new QWidget;
+    control->setProperty("spotlightTransparent", true);
+    auto* layout = new QHBoxLayout(control);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    layout->addWidget(minus);
+    layout->addWidget(proxy);
+    layout->addWidget(plus);
+    MirrorEnabled(source, control);
+    return control;
+}
+
+QWidget* SettingsPage::BindLineEdit(QLineEdit* source) {
+    source->setProperty("spotlightBound", true);
+    auto* edit = new QLineEdit;
+    edit->setFont(Font(13));
+    edit->setFrame(false);
+    edit->setStyleSheet(FieldStyle(QStringLiteral("QLineEdit")));
+    edit->setPlaceholderText(source->placeholderText());
+    edit->setEchoMode(source->echoMode());
+    edit->setReadOnly(source->isReadOnly());
+    edit->setMaxLength(source->maxLength());
+    edit->setInputMask(source->inputMask());
+    edit->setValidator(source->validator());
+    edit->setText(source->text());
+    edit->setCursorPosition(0);
+    connect(source, &QLineEdit::textChanged, edit, [edit](const QString& text) {
+        if (edit->text() != text) {
+            edit->setText(text);
+            edit->setCursorPosition(0);
+        }
+    });
+    connect(edit, &QLineEdit::textEdited, source, [source](const QString& text) {
+        source->setText(text);
+        emit source->textEdited(text);
+    });
+    connect(edit, &QLineEdit::editingFinished, source, &QLineEdit::editingFinished);
+    connect(edit, &QLineEdit::returnPressed, source, &QLineEdit::returnPressed);
+    auto* field = new FieldPill(edit);
+    auto* layout = new QHBoxLayout(field);
+    layout->setContentsMargins(14, 0, 14, 0);
+    layout->addWidget(edit);
+    field->setMinimumWidth(220);
+    field->setMaximumWidth(320);
+    field->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    MirrorEnabled(source, field);
+    return field;
+}
+
+QAbstractButton* SettingsPage::BindButton(QAbstractButton* source, const QString& text) {
+    const QString label = text.isEmpty() ? CleanLabel(source->text()) : text;
+    QAbstractButton* proxy = nullptr;
+    if (!label.isEmpty()) {
+        proxy = new PillButton(label);
+    } else if (!source->icon().isNull()) {
+        proxy = new SwatchButton(source);
+    } else {
+        proxy = new CircleButton(QStringLiteral("folder-open"), 34);
+    }
+    proxy->setFocusPolicy(Qt::StrongFocus);
+    proxy->setToolTip(source->toolTip());
+    proxy->setAccessibleName(label.isEmpty() ? source->toolTip() : label);
+    MirrorEnabled(source, proxy);
+    connect(proxy, &QAbstractButton::clicked, source, [source, proxy, text] {
+        source->click();
+        if (text.isEmpty() && !CleanLabel(source->text()).isEmpty() &&
+            proxy->text() != CleanLabel(source->text())) {
+            proxy->setText(CleanLabel(source->text()));
+            proxy->updateGeometry();
+        }
+        proxy->update();
+    });
+    return proxy;
 }
 
 } // namespace Spotlight

@@ -14,9 +14,10 @@ class QAbstractButton;
 class QComboBox;
 class QGroupBox;
 class QLabel;
+class QLayout;
 class QLineEdit;
 class QScrollArea;
-class QTabWidget;
+class QSlider;
 class QVBoxLayout;
 
 namespace Settings {
@@ -84,8 +85,15 @@ public:
 
     int AddCategory(const QString& title, const QString& subtitle, const QString& icon,
                     const QColor& color, QString page_title = {});
-    QVBoxLayout* AddSection(int category, const QString& title = {});
+    /// A page without a sidebar entry, reached from a row of its parent category.
+    /// A wide page hides the sidebar while it is shown.
+    int AddSubPage(int parent, const QString& title, const QString& subtitle, bool wide = false);
+    /// Builds the category's rows the first time it is shown or searched.
+    void SetBuilder(int category, std::function<void()> build);
+    QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false);
     void AddBlock(int category, QWidget* widget, QString search_label, bool advanced = false);
+    /// Shows an existing settings page as Spotlight rows, built when first needed. The page stays
+    /// hidden and keeps its own load and apply logic; the rows edit its controls.
     void AddPage(int category, QWidget* page, const QString& name, bool advanced = true);
     void SetCategory(int category);
     void ShowAdvancedPage(int category, QWidget* page);
@@ -98,7 +106,8 @@ public:
     static QWidget* Badge(const QString& text, const QColor& fill, const QColor& ink);
     static QWidget* Card(const QString& icon = {}, int image_size = 0);
     static QLabel* AddRow(QVBoxLayout* group, const QString& title, const QString& description,
-                          const QString& icon, const QColor& color, QWidget* control);
+                          const QString& icon, const QColor& color, QWidget* control,
+                          const QString& tooltip = {});
     static QAbstractButton* Manage(const QString& text = {});
     static ConfigurationShared::Widget* Editor(QWidget* page,
                                                const Settings::BasicSetting& setting);
@@ -109,6 +118,10 @@ public:
     static QString ClosedSettingLabel(const QComboBox* source, u32 setting_id, int index);
     static QWidget* BindToggle(QAbstractButton* source);
     static QWidget* BindToggle(QGroupBox* source);
+    static QWidget* BindSpin(QWidget* source);
+    static QWidget* BindSlider(QSlider* source);
+    static QWidget* BindLineEdit(QLineEdit* source);
+    static QAbstractButton* BindButton(QAbstractButton* source, const QString& text = {});
     static void WatchOverride(ConfigurationShared::Widget* source, QWidget* context,
                               std::function<void()> update);
     static void SetComboIndex(QComboBox* source, int index);
@@ -122,24 +135,44 @@ private:
         QString search_label;
         bool advanced;
     };
+    struct Page {
+        QWidget* source;
+        QString name;
+        bool advanced;
+        QWidget* anchor = nullptr;
+    };
     struct Category {
         QString title;
         QString page_title;
         QString subtitle;
-        QAbstractButton* button;
-        QWidget* panel;
+        QString icon;
+        QColor color;
+        QAbstractButton* button = nullptr;
+        QWidget* panel = nullptr;
+        int parent = -1;
+        bool wide = false;
+        int basic_count = 0;
         QList<Block> blocks;
-        QTabWidget* advanced_tabs = nullptr;
-        QTabWidget* basic_tabs = nullptr;
+        QList<Page> pages;
+        std::function<void()> build;
+        bool basic_built = false;
+        bool advanced_built = false;
     };
 
+    void Build(int category, bool with_advanced);
+    void BuildPage(int category, Page& page);
+    bool RefreshCategory(int category);
+    void UpdateAdvanced();
     void UpdateSearch();
 
+    QWidget* navigation;
     QVBoxLayout* sidebar;
     QVBoxLayout* content;
     QVBoxLayout* main_column;
     QScrollArea* scroll;
     QLineEdit* search;
+    QWidget* parent_link;
+    QLabel* parent_name;
     QLabel* heading;
     QLabel* subtitle;
     QLabel* empty;
@@ -150,6 +183,7 @@ private:
     int current_category = -1;
     int unfiltered_category = -1;
     bool filtering = false;
+    bool building = false;
 };
 
 } // namespace Spotlight
