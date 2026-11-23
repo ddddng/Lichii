@@ -300,7 +300,19 @@ static inline void ApplyWindowsTitleBarDarkMode(HWND hwnd, bool enabled) {
 static inline void ApplyDarkToTopLevel(QWidget* w, bool on) {
     if (!w || !w->isWindow())
         return;
-    ApplyWindowsTitleBarDarkMode(reinterpret_cast<HWND>(w->winId()), on);
+    const HWND hwnd = reinterpret_cast<HWND>(w->winId());
+    if (w->testAttribute(Qt::WA_TranslucentBackground)) {
+        // The window paints its own rounded card inside a transparent shadow margin, so a DWM
+        // corner and border would outline the whole window around the card.
+        // 33 = DWMWA_WINDOW_CORNER_PREFERENCE, 1 = DWMWCP_DONOTROUND
+        const int corners = 1;
+        DwmSetWindowAttribute(hwnd, 33, &corners, sizeof(corners));
+        // 34 = DWMWA_BORDER_COLOR, 0xFFFFFFFE = DWMWA_COLOR_NONE
+        const COLORREF border = 0xFFFFFFFE;
+        DwmSetWindowAttribute(hwnd, 34, &border, sizeof(border));
+        return;
+    }
+    ApplyWindowsTitleBarDarkMode(hwnd, on);
 }
 
 namespace {
