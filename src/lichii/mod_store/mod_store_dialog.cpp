@@ -54,6 +54,7 @@
 #include "common/scm_rev.h"
 #include "lichii/mod_store/mod_store_client.h"
 #include "lichii/mod_store/mod_store_install.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
@@ -601,13 +602,23 @@ public:
         game_picker = new PillCombo(header, 290);
         game_picker->setAccessibleName(tr("Game"));
         game_picker->setIconSize({24, 24});
-        installed_mode = new PillButton(tr("Installed"), QStringLiteral("archive"),
-                                        PillButton::Kind::Control, 36, header);
+        installed_mode = new QAction(Spotlight::Icon(u"archive", Color::TextSecondary(), 16),
+                                     tr("Installed mods"), this);
         installed_mode->setCheckable(true);
-        installed_mode->setToolTip(tr("Show the mods you installed from the store"));
-        refresh = new CircleButton(QStringLiteral("arrow-clockwise"), 36, header);
-        refresh->setAccessibleName(tr("Refresh catalog"));
-        refresh->setToolTip(tr("Refresh catalog (F5)"));
+        refresh = new QAction(Spotlight::Icon(u"arrow-clockwise", Color::TextSecondary(), 16),
+                              tr("Refresh catalog"), this);
+        refresh->setShortcut(QKeySequence::Refresh);
+        refresh->setShortcutContext(Qt::WidgetShortcut);
+        store_menu = new CircleButton(QStringLiteral("dots-three"), 34, header);
+        store_menu->setAccessibleName(tr("More Mod Store actions"));
+        store_menu->setToolTip(tr("Installed mods and catalog refresh"));
+        auto* menu = new Spotlight::Menu(store_menu);
+        menu->addAction(installed_mode);
+        menu->addAction(refresh);
+        connect(store_menu, &QAbstractButton::clicked, this, [this, menu] {
+            menu->popup(store_menu->mapToGlobal(
+                QPoint(store_menu->width() - menu->sizeHint().width(), store_menu->height() + 5)));
+        });
         search = new QLineEdit(header);
         search->setObjectName(QStringLiteral("storeSearch"));
         search->setAccessibleName(tr("Search mods"));
@@ -624,9 +635,8 @@ public:
         header_layout->addSpacing(6);
         header_layout->addWidget(game_picker);
         header_layout->addStretch(1);
-        header_layout->addWidget(installed_mode);
-        header_layout->addWidget(refresh);
         header_layout->addWidget(search, 1);
+        header_layout->addWidget(store_menu);
         if (host->windowFlags().testFlag(Qt::FramelessWindowHint)) {
             header->AddWindowControls(header_layout);
         }
@@ -655,16 +665,14 @@ public:
         const auto filters_changed = [this] { ReloadMods(); };
         connect(type, &SegmentedControl::CurrentChanged, this, filters_changed);
         connect(sort, &QComboBox::currentIndexChanged, this, filters_changed);
-        connect(refresh, &QAbstractButton::clicked, this, [this] {
+        connect(refresh, &QAction::triggered, this, [this] {
             identities.clear();
             if (!installed_mode->isChecked()) {
                 LoadGames();
             }
             ReloadMods();
         });
-        connect(installed_mode, &QAbstractButton::toggled, this, [this](bool installed) {
-            installed_mode->SetKind(installed ? PillButton::Kind::Accent
-                                              : PillButton::Kind::Control);
+        connect(installed_mode, &QAction::toggled, this, [this](bool installed) {
             if (installed && installed_list == nullptr) {
                 BuildInstalledPage();
             }
@@ -729,6 +737,38 @@ protected:
     void paintEvent(QPaintEvent* event) override {
         QPainter painter(this);
         painter.fillRect(event->rect(), Color::PanelDeep());
+        if (backdrop.size() != size() * devicePixelRatioF()) {
+            backdrop = RenderBackdrop();
+        }
+        painter.drawPixmap(0, 0, backdrop);
+    }
+
+    QPixmap RenderBackdrop() const {
+        const qreal ratio = devicePixelRatioF();
+        QPixmap result(size() * ratio);
+        result.setDevicePixelRatio(ratio);
+        result.fill(Qt::transparent);
+        QPainter painter(&result);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const auto game = std::ranges::find(context.library_games, title, &LibraryGame::title_id);
+        if (game != context.library_games.end() && !game->icon.isNull()) {
+            const auto art = game->icon.pixmap(256)
+                                 .toImage()
+                                 .scaled(8, 8, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                                 .scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            const QSizeF area = QSizeF(art.size()).scaled(size(), Qt::KeepAspectRatioByExpanding);
+            painter.setOpacity(0.18);
+            painter.drawImage(QRectF(QPointF(width() - area.width(), height() - area.height()) / 2,
+                                     area),
+                              art);
+            painter.setOpacity(1.0);
+        }
+        auto wash = Color::Info();
+        wash.setAlpha(0x14);
+        QLinearGradient gradient(0, 0, 0, height());
+        gradient.setStops({{0.0, wash}, {0.55, Qt::transparent}});
+        painter.fillRect(rect(), gradient);
+        return result;
     }
 
     bool eventFilter(QObject* watched, QEvent* event) override {
@@ -783,7 +823,7 @@ protected:
             }
         } else if (event->matches(QKeySequence::Refresh)) {
             if (refresh->isEnabled()) {
-                refresh->click();
+                refresh->trigger();
             }
         } else if (event->key() == Qt::Key_Escape || event->matches(QKeySequence::Back)) {
             if (back->isEnabled() || busy) {
@@ -1255,6 +1295,8 @@ private:
             return;
         }
         title = id;
+        backdrop = {};
+        update();
         UpdateGamePicker();
         ReloadMods();
     }
@@ -2257,13 +2299,15 @@ private:
     void SetBusy(bool value) {
         busy = value;
         for (QWidget* widget :
-             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(refresh),
-              static_cast<QWidget*>(installed_mode), static_cast<QWidget*>(search),
-              static_cast<QWidget*>(preview_strip), static_cast<QWidget*>(browse_page),
-              static_cast<QWidget*>(installed_page), static_cast<QWidget*>(release),
-              static_cast<QWidget*>(target_picker), static_cast<QWidget*>(back)}) {
+             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(store_menu),
+              static_cast<QWidget*>(search), static_cast<QWidget*>(preview_strip),
+              static_cast<QWidget*>(browse_page), static_cast<QWidget*>(installed_page),
+              static_cast<QWidget*>(release), static_cast<QWidget*>(target_picker),
+              static_cast<QWidget*>(back)}) {
             widget->setEnabled(!value);
         }
+        refresh->setEnabled(!value);
+        installed_mode->setEnabled(!value);
         UpdateButtons();
     }
 
@@ -2557,8 +2601,10 @@ private:
     QLabel* progress_note{};
     QProgressBar* progress_bar{};
     PillButton* cancel_button{};
-    CircleButton* refresh{};
-    PillButton* installed_mode{};
+    QAction* refresh{};
+    QAction* installed_mode{};
+    CircleButton* store_menu{};
+    QPixmap backdrop;
     PillButton* more{};
     PillButton* install{};
     PillButton* source{};
