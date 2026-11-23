@@ -2300,7 +2300,7 @@ private:
         const QUrl source_url = selected->source_url;
         QMessageBox prompt(QMessageBox::Warning, tr("Could not install the mod"), error,
                            QMessageBox::Close, this);
-        auto* open = prompt.addButton(source->text(), QMessageBox::ActionRole);
+        auto* open = prompt.addButton(source->text(), QMessageBox::AcceptRole);
         SetButtonKind(open, QStringLiteral("primary"));
         prompt.exec();
         if (prompt.clickedButton() == open && !source_url.isEmpty()) {
