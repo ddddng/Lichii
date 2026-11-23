@@ -28,6 +28,10 @@ class ComboBoxProxyModel;
 
 class ChatMessage;
 
+namespace Spotlight {
+class SegmentedControl;
+}
+
 namespace Network::VerifyUser {
 class Backend;
 };
@@ -59,6 +63,7 @@ private:
     std::weak_ptr<Core::AnnounceMultiplayerSession> announce_multiplayer_session;
     QStandardItemModel* game_list;
     ComboBoxProxyModel* proxy;
+    Spotlight::SegmentedControl* host_type;
     Validation validation;
     Core::System& system;
 };
