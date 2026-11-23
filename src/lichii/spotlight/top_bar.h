@@ -69,6 +69,8 @@ class RunningTitleBar final : public WindowDragBar {
     Q_OBJECT
 
 public:
+    static constexpr int Height = 36;
+
     explicit RunningTitleBar(QWidget* parent);
     void SetGameTitle(const QString& value);
     /// Floats only the window controls over `screen` while it is shown, without a bar or title.

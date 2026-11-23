@@ -323,7 +323,7 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
 RunningTitleBar::RunningTitleBar(QWidget* parent)
     : WindowDragBar(parent), title(new QLabel(this)), menus(new QWidget(this)),
       menu_row(new QHBoxLayout(menus)), row(new QHBoxLayout(this)) {
-    setFixedHeight(36);
+    setFixedHeight(Height);
     row->setContentsMargins(14, 0, 10, 0);
     row->setSpacing(9);
     title->setFont(Font(13, 600));
@@ -365,7 +365,7 @@ void RunningTitleBar::AddMenu(const QString& name, QMenu* menu) {
 void RunningTitleBar::SetExtraHeight(int extra) {
     extra_height = extra;
     if (!floating) {
-        setFixedHeight(36 + extra_height);
+        setFixedHeight(Height + extra_height);
     }
 }
 
@@ -394,7 +394,7 @@ void RunningTitleBar::SetFloating(bool value) {
     floating = value;
     title->setVisible(!floating);
     menus->setVisible(!floating);
-    setFixedHeight(floating ? 52 : 36 + extra_height);
+    setFixedHeight(floating ? 52 : Height + extra_height);
     row->setContentsMargins(14, 0, floating ? 14 : 10, 0);
     if (floating) {
         frame->removeWidget(this);

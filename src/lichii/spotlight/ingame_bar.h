@@ -20,6 +20,9 @@ class InGameBar final : public QStatusBar {
     Q_OBJECT
 
 public:
+    static constexpr int Height = 36;
+    static constexpr int CollapsedHeight = 16;
+
     explicit InGameBar(QWidget* parent);
     void SetConfiguration(const QString& renderer, const QString& mode);
     void SetStats(double game_fps, double generated_fps, double frame_ms, bool at_target,

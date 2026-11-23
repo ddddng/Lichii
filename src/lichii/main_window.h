@@ -628,9 +628,6 @@ private:
     QString frame_gen_status_text;
     QString session_status_text;
     bool ingame_fullscreen = false;
-    /// The windowed bars' growth past their base heights, taken from the picture's letterboxing.
-    int letterbox_top = 0;
-    int letterbox_bottom = 0;
     bool fullscreen_hint_shown = false;
     bool fullscreen_shader_active = false;
 

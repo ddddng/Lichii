@@ -149,7 +149,7 @@ private:
 
 InGameBar::InGameBar(QWidget* parent) : QStatusBar(parent), contents(new QWidget(this)) {
     setStyleSheet(QStringLiteral("QWidget { background: transparent; }"));
-    setFixedHeight(36);
+    setFixedHeight(Height);
     setSizeGripEnabled(false);
     auto* layout = new QHBoxLayout(contents);
     layout->setContentsMargins(6, 1, 6, 0);
@@ -209,7 +209,7 @@ void InGameBar::SetCollapsed(bool collapsed_) {
     }
     collapsed = collapsed_;
     contents->setVisible(!collapsed);
-    setFixedHeight(collapsed ? 16 : 36 + extra_height);
+    setFixedHeight(collapsed ? CollapsedHeight : Height + extra_height);
     setCursor(collapsed ? Qt::PointingHandCursor : Qt::ArrowCursor);
     setToolTip(collapsed ? tr("Show the bar") : QString{});
     update();
@@ -218,7 +218,7 @@ void InGameBar::SetCollapsed(bool collapsed_) {
 void InGameBar::SetExtraHeight(int extra) {
     extra_height = extra;
     if (!collapsed) {
-        setFixedHeight(36 + extra_height);
+        setFixedHeight(Height + extra_height);
     }
 }
 
