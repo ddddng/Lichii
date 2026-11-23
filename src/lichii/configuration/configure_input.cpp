@@ -212,6 +212,18 @@ QList<QWidget*> ConfigureInput::GetSubTabs() const {
     };
 }
 
+QTabWidget* ConfigureInput::PlayerTabs() const {
+    return ui->tabWidget;
+}
+
+QCheckBox* ConfigureInput::PlayerConnected(std::size_t player) const {
+    return connected_controller_checkboxes[player];
+}
+
+ConfigureInputPlayer* ConfigureInput::Player(std::size_t player) const {
+    return player_controllers[player];
+}
+
 /// Apply all Controls pages, including the saved microphone device and gain.
 void ConfigureInput::ApplyConfiguration() {
     const bool was_global = Settings::values.players.UsingGlobal();

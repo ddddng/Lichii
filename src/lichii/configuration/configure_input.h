@@ -19,6 +19,7 @@ class System;
 
 class QCheckBox;
 class QString;
+class QTabWidget;
 class QTimer;
 
 class ConfigureInputAdvanced;
@@ -54,6 +55,9 @@ public:
     void RestoreConfiguration();
 
     QList<QWidget*> GetSubTabs() const;
+    QTabWidget* PlayerTabs() const;
+    QCheckBox* PlayerConnected(std::size_t player) const;
+    ConfigureInputPlayer* Player(std::size_t player) const;
 
 private:
     void changeEvent(QEvent* event) override;

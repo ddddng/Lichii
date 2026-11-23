@@ -90,6 +90,7 @@
 #include "lichii/configuration/iidb_artwork_dialog.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
 #include "lichii/configuration/iidb_key_dialog.h"
 #include "lichii/game/artwork_image.h"
@@ -345,7 +346,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
                                    Core::System& system_)
     : QDialog(parent), ui(std::make_unique<Ui::ConfigurePerGame>()),
       file_path(std::filesystem::path(Common::FS::ToU8String(file_name))), title_id{title_id_},
-      system{system_},
+      system{system_}, devices{vk_device_records},
       builder{std::make_unique<ConfigurationShared::Builder>(this, !system_.IsPoweredOn())},
       tab_group{std::make_shared<std::vector<ConfigurationShared::Tab*>>()} {
     const auto config_file_name = title_id == 0 ? Common::FS::PathToUTF8String(file_path.filename())
@@ -425,6 +426,7 @@ void ConfigurePerGame::BuildSettings() {
     using Spotlight::SettingsPage;
     namespace Color = Spotlight::Color;
     namespace Tints = Spotlight::SettingsColor;
+    setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
     settings_page = new SettingsPage(this, true);
     ui->verticalLayout_3->setContentsMargins(0, 0, 0, 0);
     ui->verticalLayout_3->setSpacing(0);
@@ -561,16 +563,7 @@ void ConfigurePerGame::BuildSettings() {
         if (frame_rate != -1) {
             add_fps(picture);
         }
-        const auto& values = Settings::values;
-        const int global_preset = Spotlight::PerformancePresetIndex({
-            values.resolution_setup.GetValue(true),
-            values.scaling_filter.GetValue(true),
-            values.anti_aliasing.GetValue(true),
-            values.frame_gen.GetValue(true),
-        });
-        SettingsPage::AddRow(picture, tr("Global preset"),
-                             Spotlight::PerformancePresetName(global_preset),
-                             QStringLiteral("lightning"), Color::Accent(), nullptr);
+        AddPresetRow(picture);
         add_resolution(picture);
         add_setting(picture, Settings::values.scaling_filter, tr("Scaling filter"),
                     tr("How the image fits the window"), QStringLiteral("sliders-horizontal"),
@@ -663,6 +656,111 @@ void ConfigurePerGame::BuildSettings() {
     }
     update_count();
     settings_page->SetCategory(graphics);
+}
+
+void ConfigurePerGame::AddPresetRow(QVBoxLayout* section) {
+    using Spotlight::SettingsPage;
+    const auto& values = Settings::values;
+    auto* gfx = graphics_tab.get();
+    const std::array editors{
+        SettingsPage::Editor(gfx, values.resolution_setup),
+        SettingsPage::Editor(gfx, values.scaling_filter),
+        SettingsPage::Editor(gfx, values.anti_aliasing),
+        SettingsPage::Editor(gfx, values.frame_gen),
+    };
+    if (std::ranges::any_of(editors, [](const auto* editor) {
+            return editor == nullptr || editor->restore_button == nullptr;
+        }) ||
+        !editors[0]->combobox || !editors[1]->combobox || !editors[2]->combobox ||
+        !editors[3]->checkbox) {
+        return;
+    }
+    auto* resolution = editors[0]->combobox;
+    auto* filter = editors[1]->combobox;
+    auto* aa = editors[2]->combobox;
+    auto* frame_generation = editors[3]->checkbox;
+    const auto suggested_tier = [this] {
+        const int index = Settings::values.vulkan_device.GetValue();
+        if (index < 0 || std::cmp_greater_equal(index, devices.size())) {
+            return 0;
+        }
+        return Spotlight::SuggestedPresetTier(QString::fromStdString(devices[index].name),
+                                              devices[index].fsr4_capable);
+    };
+
+    auto* choices = new QComboBox(this);
+    choices->hide();
+    choices->addItems({{}, tr("Auto"), tr("Low"), tr("Mid"), tr("High")});
+    auto* summary = SettingsPage::AddRow(section, tr("Preset"), {},
+                                         QStringLiteral("sliders-horizontal"),
+                                         Spotlight::Color::Accent(),
+                                         SettingsPage::BindCombo(choices, tr("Custom")));
+    const auto sync = [editors, resolution, filter, aa, frame_generation, suggested_tier, choices,
+                       summary] {
+        const auto& global_values = Settings::values;
+        const int global = Spotlight::PerformancePresetIndex({
+            global_values.resolution_setup.GetValue(true),
+            global_values.scaling_filter.GetValue(true),
+            global_values.anti_aliasing.GetValue(true),
+            global_values.frame_gen.GetValue(true),
+        });
+        summary->show();
+        const QStringList tiers{tr("Low"), tr("Mid"), tr("High")};
+        choices->setItemText(0, tr("Global (%1)").arg(global == -1 ? tr("Custom") : tiers[global]));
+        if (std::ranges::none_of(editors, [](const auto* editor) {
+                return editor->property("custom").toBool();
+            })) {
+            choices->setCurrentIndex(0);
+            summary->setText(
+                tr("Following global: %1").arg(Spotlight::PerformancePresetName(global)));
+            return;
+        }
+        const int tier = Spotlight::PerformancePresetIndex({
+            static_cast<Settings::ResolutionSetup>(resolution->currentData().toUInt()),
+            static_cast<Settings::ScalingFilter>(filter->currentData().toUInt()),
+            static_cast<Settings::AntiAliasing>(aa->currentData().toUInt()),
+            frame_generation->isChecked(),
+        });
+        if (tier == -1) {
+            choices->setCurrentIndex(-1);
+            summary->setText(tr("Custom graphics settings for this game"));
+            return;
+        }
+        choices->setCurrentIndex(tier == suggested_tier() ? 1 : tier + 2);
+        summary->setText(tr("%1 for this game").arg(Spotlight::PerformancePresetName(tier)));
+    };
+    connect(choices, &QComboBox::activated, this,
+            [editors, resolution, filter, aa, frame_generation, suggested_tier](int selection) {
+                if (selection == 0) {
+                    for (auto* editor : editors) {
+                        if (editor->property("custom").toBool()) {
+                            editor->restore_button->click();
+                        }
+                    }
+                    return;
+                }
+                const auto& preset =
+                    Spotlight::PerformancePresets[selection == 1 ? suggested_tier()
+                                                                 : selection - 2];
+                SettingsPage::SetComboIndex(
+                    resolution, resolution->findData(static_cast<u32>(preset.resolution)));
+                SettingsPage::SetComboIndex(filter,
+                                            filter->findData(static_cast<u32>(preset.filter)));
+                SettingsPage::SetComboIndex(aa,
+                                            aa->findData(static_cast<u32>(preset.anti_aliasing)));
+                if (frame_generation->isChecked() == preset.frame_generation) {
+                    frame_generation->click();
+                }
+                frame_generation->click();
+            });
+    for (auto* editor : editors) {
+        SettingsPage::WatchOverride(editor, summary, sync);
+    }
+    for (auto* combo : {resolution, filter, aa}) {
+        connect(combo, &QComboBox::currentIndexChanged, summary, sync);
+    }
+    connect(frame_generation, &QCheckBox::toggled, summary, sync);
+    sync();
 }
 
 void ConfigurePerGame::BuildAddons(int mods, int updates) {

@@ -104,6 +104,7 @@ private:
     void BuildSettings();
     void BuildAddons(int mods, int updates);
     void RebuildAddons();
+    void AddPresetRow(QVBoxLayout* section);
     void UpdateModsSummary();
     void UpdateSpotlightIdentity();
 
@@ -158,6 +159,7 @@ private:
     std::unique_ptr<QtConfig> game_config;
 
     Core::System& system;
+    const std::vector<VkDeviceInfo::Record>& devices;
     std::unique_ptr<ConfigurationShared::Builder> builder;
     std::shared_ptr<std::vector<ConfigurationShared::Tab*>> tab_group;
 

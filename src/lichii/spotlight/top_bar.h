@@ -21,6 +21,22 @@ inline constexpr bool ClientFrame = false;
 inline constexpr bool ClientFrame = true;
 #endif
 
+/// Resize handles along the edges of a frameless window, masked to leave the inside clickable.
+class FrameEdges final : public QWidget {
+public:
+    explicit FrameEdges(QWidget* parent);
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+
+private:
+    Qt::Edges EdgesAt(QPoint point) const;
+
+    static constexpr int Size = 6;
+};
+
 class WindowDragBar : public QWidget {
 public:
     explicit WindowDragBar(QWidget* parent);

@@ -41,6 +41,7 @@
 #include "lichii/configuration/shared_widget.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
 
 namespace Spotlight {
@@ -111,6 +112,12 @@ private:
     QColor color;
 };
 
+bool KeyboardFocusWithin(const QWidget* widget) {
+    const auto* focused = QApplication::focusWidget();
+    return focused != nullptr && widget->isAncestorOf(focused) &&
+           widget->window()->testAttribute(Qt::WA_KeyboardFocusChange);
+}
+
 class SettingsRow final : public QWidget {
 public:
     explicit SettingsRow(bool divider_) : divider{divider_} {
@@ -128,8 +135,7 @@ protected:
 
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        const auto* focused = QApplication::focusWidget();
-        if (underMouse() || (focused && isAncestorOf(focused))) {
+        if (underMouse() || KeyboardFocusWithin(this)) {
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(QPen(Color::Accent(), 2));
             painter.setBrush(Color::AccentSoft());
@@ -149,8 +155,7 @@ private:
             if (previous == nullptr || previous->isHidden()) {
                 continue;
             }
-            const auto* focused = QApplication::focusWidget();
-            return previous->underMouse() || (focused && previous->isAncestorOf(focused));
+            return previous->underMouse() || KeyboardFocusWithin(previous);
         }
         return false;
     }
@@ -685,6 +690,14 @@ QString PlainText(const QString& text) {
 QString Summary(const QString& tooltip) {
     QString text = PlainText(tooltip).trimmed();
     text = text.section(QChar::fromLatin1('\n'), 0, 0).trimmed();
+    static const QRegularExpression old_lead(
+        QStringLiteral(R"(^(?:when|if) (?:checked|enabled),\s*(?:it (?:will )?)?)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto lead = old_lead.match(text);
+    if (lead.hasMatch() && lead.capturedLength() < text.size()) {
+        text.remove(0, lead.capturedLength());
+        text[0] = text[0].toUpper();
+    }
     constexpr int limit = 150;
     if (text.size() <= limit) {
         return text;
@@ -801,6 +814,20 @@ QWidget* RadioControl(const QList<QRadioButton*>& radios) {
 }
 
 } // namespace
+
+int SuggestedPresetTier(const QString& gpu_name, bool fsr4_capable) {
+    static const QRegularExpression high(
+        QStringLiteral(R"(RTX\s+[345]\d{3}\b|RX\s+[67][789]\d{2}\b)"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression mid(
+        QStringLiteral(
+            R"(RTX\s+\d{4}\b|GTX\s+\d{4}\b|RX\s+\d{3,4}\b|Arc\s+[AB]\d{3}\b|Apple M[1-9])"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (fsr4_capable || high.match(gpu_name).hasMatch()) {
+        return 2;
+    }
+    return mid.match(gpu_name).hasMatch() ? 1 : 0;
+}
 
 int PerformancePresetIndex(const PerformancePreset& values) {
     for (int index = 0; index < static_cast<int>(PerformancePresets.size()); ++index) {
@@ -962,7 +989,9 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     search_layout->addWidget(search);
     sidebar->addWidget(search_pill);
     sidebar->addSpacing(8);
-    sidebar->addStretch();
+    auto* sidebar_drag = new WindowDragBar(navigation);
+    sidebar_drag->setProperty("spotlightTransparent", true);
+    sidebar->addWidget(sidebar_drag, 1);
 
     auto* advanced_row = new QHBoxLayout;
     advanced_row->setContentsMargins(10, 9, 10, 9);
@@ -989,7 +1018,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     scroll->viewport()->setProperty("spotlightTransparent", true);
     main_column->addWidget(scroll, 1);
     content = new QVBoxLayout(body);
-    content->setContentsMargins(40, 22, 40, 24);
+    content->setContentsMargins(40, 0, 40, 24);
     content->setSpacing(14);
     auto* header = new QVBoxLayout;
     header->setContentsMargins(0, 0, 0, 4);
@@ -1016,7 +1045,18 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     subtitle->setWordWrap(true);
     header->addWidget(heading);
     header->addWidget(subtitle);
-    content->addLayout(header);
+    auto* header_bar = new WindowDragBar(background);
+    header_bar->setProperty("spotlightTransparent", true);
+    header_row = new QHBoxLayout(header_bar);
+    header_row->setContentsMargins(40, 22, ClientFrame ? 14 : 40, 14);
+    header_row->setSpacing(12);
+    header_row->addLayout(header, 1);
+    if constexpr (ClientFrame) {
+        header_bar->AddWindowControls(header_row);
+        header_row->itemAt(header_row->count() - 1)->setAlignment(Qt::AlignTop);
+        edges = new FrameEdges(this);
+    }
+    main_column->insertWidget(0, header_bar);
     empty = Text(tr("No matching settings"), 15, 500, true);
     empty->hide();
     content->addWidget(empty);
@@ -1072,6 +1112,15 @@ int SettingsPage::AddSubPage(int parent, const QString& title, const QString& su
     categories[index].wide = wide;
     categories[index].button->hide();
     return index;
+}
+
+void SettingsPage::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (edges != nullptr) {
+        edges->setGeometry(rect());
+        edges->setVisible(!window()->isMaximized() && !window()->isFullScreen());
+        edges->raise();
+    }
 }
 
 void SettingsPage::SetBuilder(int category, std::function<void()> build) {
@@ -1591,7 +1640,8 @@ void SettingsPage::SetCategory(int category) {
         banner->setVisible(
             banner_categories.contains(entry.parent == -1 ? category : entry.parent));
     }
-    content->setContentsMargins(entry.wide ? 24 : 40, 22, entry.wide ? 24 : 40, 24);
+    content->setContentsMargins(entry.wide ? 24 : 40, 0, entry.wide ? 24 : 40, 24);
+    header_row->setContentsMargins(entry.wide ? 24 : 40, 22, ClientFrame ? 14 : 40, 14);
     scroll->setHorizontalScrollBarPolicy(entry.wide ? Qt::ScrollBarAsNeeded
                                                     : Qt::ScrollBarAlwaysOff);
     if (entry.parent != -1) {
@@ -1629,7 +1679,7 @@ void SettingsPage::SetBanner(QWidget* widget, QList<int> shown_in) {
     banner = widget;
     banner_categories = std::move(shown_in);
     banner->setProperty("spotlightTransparent", true);
-    content->insertWidget(1, banner);
+    content->insertWidget(0, banner);
 }
 
 void SettingsPage::SetGame(const QString& title, const QPixmap& icon) {

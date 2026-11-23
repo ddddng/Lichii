@@ -13,6 +13,7 @@
 
 class QComboBox;
 class QGroupBox;
+class QHBoxLayout;
 class QLabel;
 class QLayout;
 class QLineEdit;
@@ -76,6 +77,8 @@ inline constexpr std::array PerformancePresets{
 };
 
 int PerformancePresetIndex(const PerformancePreset& values);
+/// The preset tier Auto picks for a GPU: 0 low-end, 1 mid-range, 2 high-end.
+int SuggestedPresetTier(const QString& gpu_name, bool fsr4_capable);
 QString PerformancePresetName(int index);
 
 /// A performance preset choice of Settings > General: Auto, Low-end, Mid-range or High-end.
@@ -151,6 +154,9 @@ public:
 signals:
     void BackRequested();
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 private:
     struct Block {
         QWidget* widget;
@@ -188,10 +194,12 @@ private:
     void UpdateSearch();
 
     QWidget* navigation;
+    QWidget* edges = nullptr;
     QWidget* banner = nullptr;
     QList<int> banner_categories;
     QVBoxLayout* sidebar;
     QVBoxLayout* content;
+    QHBoxLayout* header_row;
     QVBoxLayout* main_column;
     QScrollArea* scroll;
     QLineEdit* search;

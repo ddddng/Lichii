@@ -101,6 +101,8 @@ public:
                               QWidget* parent = nullptr);
     int CurrentIndex() const { return current; }
     void SetCurrentIndex(int index);
+    /// Selects no option, for a state none of the options describes.
+    void ClearSelection();
     void SetOptions(QStringList options);
     /// Greys out an option that the current game or hardware does not support.
     void SetOptionEnabled(int index, bool enabled);

@@ -994,6 +994,14 @@ void ConfigureInputPlayer::RestoreDefaults() {
     UpdateMappingWithDefaults();
 }
 
+QString ConfigureInputPlayer::ControllerName() const {
+    return ui->comboControllerType->currentText();
+}
+
+QString ConfigureInputPlayer::DeviceName() const {
+    return ui->comboDevices->currentText();
+}
+
 void ConfigureInputPlayer::ClearAll() {
     for (int button_id = 0; button_id < Settings::NativeButton::NumButtons; ++button_id) {
         const auto* const button = button_map[button_id];

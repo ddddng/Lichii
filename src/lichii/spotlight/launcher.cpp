@@ -10,7 +10,6 @@
 #include <QMenuBar>
 #include <QPainter>
 #include <QPixmapCache>
-#include <QRegion>
 #include <QStackedLayout>
 #include <QVBoxLayout>
 #include <QWindow>
@@ -26,63 +25,6 @@
 #include "lichii/spotlight/top_bar.h"
 
 namespace Spotlight {
-
-namespace {
-
-class FrameEdges final : public QWidget {
-public:
-    explicit FrameEdges(QWidget* parent) : QWidget(parent) {
-        setAttribute(Qt::WA_NoSystemBackground);
-        setMouseTracking(true);
-    }
-
-protected:
-    void resizeEvent(QResizeEvent*) override {
-        setMask(QRegion(rect()) - QRegion(rect().adjusted(Size, Size, -Size, -Size)));
-    }
-
-    void mouseMoveEvent(QMouseEvent* event) override {
-        const auto edges = EdgesAt(event->pos());
-        const bool horizontal = edges & (Qt::LeftEdge | Qt::RightEdge);
-        const bool vertical = edges & (Qt::TopEdge | Qt::BottomEdge);
-        if (horizontal && vertical) {
-            const bool descending =
-                edges == (Qt::TopEdge | Qt::LeftEdge) || edges == (Qt::BottomEdge | Qt::RightEdge);
-            setCursor(descending ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
-        } else {
-            setCursor(horizontal ? Qt::SizeHorCursor : Qt::SizeVerCursor);
-        }
-    }
-
-    void mousePressEvent(QMouseEvent* event) override {
-        if (event->button() == Qt::LeftButton && window()->windowHandle() &&
-            window()->windowHandle()->startSystemResize(EdgesAt(event->pos()))) {
-            event->accept();
-            return;
-        }
-        QWidget::mousePressEvent(event);
-    }
-
-private:
-    Qt::Edges EdgesAt(QPoint point) const {
-        Qt::Edges result;
-        if (point.x() < Size) {
-            result |= Qt::LeftEdge;
-        } else if (point.x() >= width() - Size) {
-            result |= Qt::RightEdge;
-        }
-        if (point.y() < Size) {
-            result |= Qt::TopEdge;
-        } else if (point.y() >= height() - Size) {
-            result |= Qt::BottomEdge;
-        }
-        return result;
-    }
-
-    static constexpr int Size = 6;
-};
-
-} // namespace
 
 Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* placeholder,
                    RunningTitleBar* running_title_, const PlayTime::PlayTimeManager& playtime_,

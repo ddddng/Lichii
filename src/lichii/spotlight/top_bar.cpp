@@ -86,6 +86,52 @@ private:
 
 } // namespace
 
+FrameEdges::FrameEdges(QWidget* parent) : QWidget(parent) {
+    setAttribute(Qt::WA_NoSystemBackground);
+    setMouseTracking(true);
+}
+
+void FrameEdges::resizeEvent(QResizeEvent*) {
+    setMask(QRegion(rect()) - QRegion(rect().adjusted(Size, Size, -Size, -Size)));
+}
+
+void FrameEdges::mouseMoveEvent(QMouseEvent* event) {
+    const auto edges = EdgesAt(event->pos());
+    const bool horizontal = edges & (Qt::LeftEdge | Qt::RightEdge);
+    const bool vertical = edges & (Qt::TopEdge | Qt::BottomEdge);
+    if (horizontal && vertical) {
+        const bool descending =
+            edges == (Qt::TopEdge | Qt::LeftEdge) || edges == (Qt::BottomEdge | Qt::RightEdge);
+        setCursor(descending ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+    } else {
+        setCursor(horizontal ? Qt::SizeHorCursor : Qt::SizeVerCursor);
+    }
+}
+
+void FrameEdges::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && window()->windowHandle() &&
+        window()->windowHandle()->startSystemResize(EdgesAt(event->pos()))) {
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+Qt::Edges FrameEdges::EdgesAt(QPoint point) const {
+    Qt::Edges result;
+    if (point.x() < Size) {
+        result |= Qt::LeftEdge;
+    } else if (point.x() >= width() - Size) {
+        result |= Qt::RightEdge;
+    }
+    if (point.y() < Size) {
+        result |= Qt::TopEdge;
+    } else if (point.y() >= height() - Size) {
+        result |= Qt::BottomEdge;
+    }
+    return result;
+}
+
 WindowDragBar::WindowDragBar(QWidget* parent) : QWidget(parent) {}
 
 void WindowDragBar::AddWindowControls(QHBoxLayout* row) {

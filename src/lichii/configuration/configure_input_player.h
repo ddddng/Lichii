@@ -77,6 +77,9 @@ public:
     /// Clear all input configuration.
     void ClearAll();
 
+    QString ControllerName() const;
+    QString DeviceName() const;
+
 signals:
     /// Emitted when this controller is (dis)connected by the user.
     void Connected(bool connected);

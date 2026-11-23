@@ -165,7 +165,6 @@ private:
 
     Spotlight::SettingsPage* settings_page = nullptr;
     Spotlight::ToggleSwitch* start_fullscreen = nullptr;
-    Spotlight::ToggleSwitch* check_updates = nullptr;
     QVector<UISettings::GameDir> game_dirs;
     QVBoxLayout* folders_layout = nullptr;
     QLabel* folder_summary = nullptr;
