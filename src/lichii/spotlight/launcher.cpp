@@ -288,6 +288,13 @@ QPixmap Launcher::RenderBackdrop(const QImage& image, const QColor& color) const
     } else if (color.isValid()) {
         painter.fillRect(bounds, color);
     }
+    const QRectF edge(bounds.topLeft(), QSizeF(320, bounds.height()));
+    QLinearGradient edge_fade(edge.topLeft(), edge.topRight());
+    auto clear = Color::Window();
+    clear.setAlpha(0);
+    edge_fade.setColorAt(0, Color::Window());
+    edge_fade.setColorAt(1, clear);
+    painter.fillRect(edge, edge_fade);
 
     const auto scrim = [](int opacity) {
         auto color = Color::Scrim();
