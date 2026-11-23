@@ -12,11 +12,13 @@
 #include <QFocusEvent>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPointer>
 #include <QProgressDialog>
 #include <QProxyStyle>
 #include <QScreen>
 #include <QStyleFactory>
+#include <QStyleOptionButton>
 
 #include "lichii/spotlight/dialog.h"
 
@@ -25,6 +27,7 @@ namespace Spotlight {
 namespace {
 
 constexpr char KeyboardFocusProperty[] = "keyboardFocus";
+constexpr int ButtonIconGap = 8;
 
 bool IsPopupWindow(const QWidget* widget) {
     return widget->isWindow() &&
@@ -71,6 +74,40 @@ public:
         default:
             return QProxyStyle::styleHint(hint, option, widget, data);
         }
+    }
+
+    // Paper leaves 8 px between a button's icon and its text; Fusion leaves 4.
+    void drawControl(ControlElement element, const QStyleOption* option, QPainter* painter,
+                     const QWidget* widget) const override {
+        const auto* button = qstyleoption_cast<const QStyleOptionButton*>(option);
+        if (element != CE_PushButtonLabel || !button || button->icon.isNull() ||
+            button->text.isEmpty()) {
+            QProxyStyle::drawControl(element, option, painter, widget);
+            return;
+        }
+        const QSize icon = button->iconSize;
+        const int text_width = button->fontMetrics.horizontalAdvance(button->text);
+        const int width = icon.width() + ButtonIconGap + text_width;
+        const QRect& area = button->rect;
+        const int left = area.left() + std::max(0, (area.width() - width) / 2);
+        const QIcon::Mode mode = button->state & State_Enabled ? QIcon::Normal : QIcon::Disabled;
+        painter->drawPixmap(left, area.top() + (area.height() - icon.height()) / 2,
+                            button->icon.pixmap(icon, painter->device()->devicePixelRatio(), mode));
+        drawItemText(
+            painter,
+            QRect(left + icon.width() + ButtonIconGap, area.top(), text_width + 1, area.height()),
+            Qt::AlignLeft | Qt::AlignVCenter | Qt::TextShowMnemonic, button->palette,
+            button->state & State_Enabled, button->text, QPalette::ButtonText);
+    }
+
+    QSize sizeFromContents(ContentsType type, const QStyleOption* option, const QSize& size,
+                           const QWidget* widget) const override {
+        QSize result = QProxyStyle::sizeFromContents(type, option, size, widget);
+        const auto* button = qstyleoption_cast<const QStyleOptionButton*>(option);
+        if (type == CT_PushButton && button && !button->icon.isNull() && !button->text.isEmpty()) {
+            result.rwidth() += ButtonIconGap - 4;
+        }
+        return result;
     }
 
     void polish(QWidget* widget) override {

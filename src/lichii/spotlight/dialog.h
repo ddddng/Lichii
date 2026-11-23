@@ -29,10 +29,17 @@ public:
     /// An empty name hides the tile.
     void SetIcon(QStringView name, const QColor& tint);
 
+    /// Fixes the width of the card, shadow excluded, to the width Paper draws it, such as 600.
+    void SetCardWidth(int width);
+
     /// Hides the title, for a dialog whose contents start with their own heading. The close button
     /// stays.
     void SetTitleVisible(bool visible);
 };
+
+/// Rounds the corners of a top-level window that draws its own frame (Radius::Tile) while it is
+/// neither maximized nor full screen, for platforms whose window manager leaves it square.
+void RoundWindowCorners(QWidget* window);
 
 /// Shows a message box with the success icon (a green check) instead of its information icon.
 void MarkSuccess(QMessageBox* box);

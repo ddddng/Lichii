@@ -98,6 +98,7 @@ inline constexpr int Field = 12;  // multi-line fields, compact 34 px chips
 inline constexpr int Row = 13;    // 40-44 px rows and icon tiles
 inline constexpr int Tile = 14;   // library tiles, 56 px rows, windows
 inline constexpr int Panel = 16;  // menus, popovers, HUD panels, focused card rows
+inline constexpr int Inset = 18;  // panels inside a dialog card
 inline constexpr int Card = 20;   // settings cards and group boxes
 inline constexpr int Dialog = 22; // dialog cards and message boxes
 /// Buttons, fields and segmented controls are pills: half their height.

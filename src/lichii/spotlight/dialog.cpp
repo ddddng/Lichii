@@ -13,8 +13,10 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QStyle>
 #include <QWindow>
 
@@ -110,6 +112,9 @@ class Scrim final : public QWidget {
 public:
     explicit Scrim(QWidget* window) : QWidget(window) {
         setAttribute(Qt::WA_TransparentForMouseEvents);
+        // The style sheet gives a plain QWidget the window background; the scrim only dims.
+        ensurePolished();
+        setAttribute(Qt::WA_StyledBackground, false);
         setGeometry(window->rect());
         window->installEventFilter(this);
         raise();
@@ -137,7 +142,7 @@ public:
         title->setObjectName(QStringLiteral("spotlightDialogTitle"));
         title->setFont(DisplayFont(box ? 20 : 22));
         title->setTextFormat(Qt::PlainText);
-        title->setWordWrap(box != nullptr);
+        title->setWordWrap(true);
         SetTextColor(title, Color::Text());
         subtitle = new QLabel(dialog);
         subtitle->setObjectName(QStringLiteral("spotlightDialogSubtitle"));
@@ -187,6 +192,8 @@ protected:
         case QEvent::Resize:
             if (box) {
                 FitMessageBox();
+            } else {
+                UpdateMargins();
             }
             Place();
             return false;
@@ -225,7 +232,7 @@ private:
 
     int HeaderHeight() const {
         const int width = std::max(1, TextRight() - TextLeft());
-        int height = title->isHidden() ? 0 : title->sizeHint().height();
+        int height = title->isHidden() ? 0 : title->heightForWidth(width);
         if (!subtitle->isHidden()) {
             height += SubtitleGap + subtitle->heightForWidth(width);
         }
@@ -258,12 +265,19 @@ private:
                                        dialog->property(IconTintProperty).value<QColor>(),
                                        dialog->devicePixelRatioF()));
         }
-        const int header = HeaderHeight();
-        dialog->setContentsMargins(
-            ShadowMargins.left() + Padding,
-            ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
-            ShadowMargins.right() + Padding, ShadowMargins.bottom() + Padding);
+        UpdateMargins();
         Place();
+    }
+
+    // The header grows when the title or subtitle wraps to another line at the dialog's width.
+    void UpdateMargins() {
+        const int header = HeaderHeight();
+        const QMargins margins(ShadowMargins.left() + Padding,
+                               ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
+                               ShadowMargins.right() + Padding, ShadowMargins.bottom() + Padding);
+        if (dialog->contentsMargins() != margins) {
+            dialog->setContentsMargins(margins);
+        }
     }
 
     void Place() {
@@ -276,15 +290,14 @@ private:
         const int left = TextLeft();
         const int width = std::max(1, TextRight() - left);
         icon->move(card.left() + Padding, top);
-        title->setText(
-            title->fontMetrics().elidedText(dialog->windowTitle(), Qt::ElideRight, width));
+        const int title_height = title->heightForWidth(width);
         int y = top;
         if (!icon->isHidden() && subtitle->isHidden()) {
-            y += (HeaderIconSize - title->sizeHint().height()) / 2;
+            y += std::max(0, HeaderIconSize - title_height) / 2;
         }
         if (!title->isHidden()) {
-            title->setGeometry(left, y, width, title->sizeHint().height());
-            y += title->sizeHint().height() + SubtitleGap;
+            title->setGeometry(left, y, width, title_height);
+            y += title_height + SubtitleGap;
         }
         subtitle->setGeometry(left, y, width, subtitle->heightForWidth(width));
         if (close) {
@@ -334,12 +347,27 @@ private:
         scrim = new Scrim(window);
     }
 
-    // setupUi sizes a dialog from its form, which was drawn without the card around it, so the
-    // dialog grows to the size its layout asks for when the form is too small.
+    // setupUi sizes a dialog from its form, which was drawn without the card around it, so a dialog
+    // given a size grows by the card's margins, then to what its layout asks for, within the
+    // screen.
     void MakeRoomForChrome() {
-        if (!box) {
-            dialog->resize(dialog->size().expandedTo(dialog->sizeHint()));
+        if (box) {
+            return;
         }
+        QSize size = dialog->size();
+        if (dialog->testAttribute(Qt::WA_Resized)) {
+            const QMargins margins = dialog->contentsMargins();
+            size = size.grownBy(margins);
+        }
+        size = size.expandedTo(dialog->sizeHint());
+        // sizeHint ignores word-wrapped labels, which need more height at the final width.
+        if (dialog->hasHeightForWidth()) {
+            size.setHeight(std::max(size.height(), dialog->heightForWidth(size.width())));
+        }
+        if (const QScreen* screen = dialog->screen()) {
+            size = size.boundedTo(screen->availableGeometry().size());
+        }
+        dialog->resize(size.expandedTo(dialog->minimumSizeHint()));
     }
 
     // Runs before QMessageBox::showEvent, which sizes the box from its layout.
@@ -431,7 +459,47 @@ private:
     bool fitting = false;
 };
 
+// Masks a window to a rounded rectangle. A mask has hard edges, so the corner is one pixel smaller
+// than Radius::Tile and the masked window keeps no shadow; the window manager draws its frame.
+class WindowCorners final : public QObject {
+public:
+    explicit WindowCorners(QWidget* window_) : QObject(window_), window(window_) {
+        window->installEventFilter(this);
+        Update();
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange) {
+            Update();
+        }
+        return false;
+    }
+
+private:
+    void Update() {
+        if (window->windowState() & (Qt::WindowMaximized | Qt::WindowFullScreen)) {
+            window->clearMask();
+            return;
+        }
+        QPainterPath path;
+        path.addRoundedRect(QRectF(window->rect()), Radius::Tile, Radius::Tile);
+        window->setMask(QRegion(path.toFillPolygon().toPolygon()));
+    }
+
+    QWidget* window;
+};
+
 } // namespace
+
+void RoundWindowCorners(QWidget* window) {
+#ifdef _WIN32
+    // Windows 11 rounds the window itself (DWMWA_WINDOW_CORNER_PREFERENCE).
+    static_cast<void>(window);
+#else
+    new WindowCorners(window);
+#endif
+}
 
 Dialog::Dialog(QWidget* parent, Qt::WindowFlags flags) : QDialog(parent, flags) {
     AdoptDialogChrome(this);
@@ -444,6 +512,10 @@ void Dialog::SetSubtitle(const QString& subtitle) {
 void Dialog::SetIcon(QStringView name, const QColor& tint) {
     setProperty(IconTintProperty, tint);
     setProperty(IconProperty, name.toString());
+}
+
+void Dialog::SetCardWidth(int width) {
+    setFixedWidth(width + ShadowMargins.left() + ShadowMargins.right());
 }
 
 void Dialog::SetTitleVisible(bool visible) {
