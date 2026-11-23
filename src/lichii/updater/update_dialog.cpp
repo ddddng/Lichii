@@ -14,6 +14,10 @@
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QAbstractTextDocumentLayout>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QtMath>
 #include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
@@ -25,6 +29,8 @@
 #endif
 #include "ui_update_dialog.h"
 #include "update_dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 #include "common/httplib.h"
 
@@ -37,22 +43,60 @@
 UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
     : Spotlight::Dialog(parent), ui(new Ui::UpdateDialog) {
     ui->setupUi(this);
+    SetIcon(u"cloud-arrow-down", Spotlight::Color::Accent());
+    setFixedWidth(702);
 
-    ui->version->setText(
-        tr("%1 is available for download.").arg(QString::fromStdString(release.title)));
+    QString subtitle =
+        tr("%1 is available for download.").arg(QString::fromStdString(release.title));
     ui->url->setText(
-        tr("<a href=\"%1\">View on GitHub</a>").arg(QString::fromStdString(release.html_url)));
+        tr("<a href=\"%1\" style=\"color: #8fb5ff; text-decoration: none\">View on GitHub</a>")
+            .arg(QString::fromStdString(release.html_url)));
+    ui->url->setFont(Spotlight::Font(13, 600));
+    ui->urlIcon->setPixmap(
+        Spotlight::IconPixmap(u"github-logo", 14, Spotlight::Color::Info(), devicePixelRatioF()));
+
+    for (auto* card : {ui->notesCard, ui->groupBox}) {
+        card->setStyleSheet(QStringLiteral("#%1 { background-color: rgba(255, 255, 255, 13); "
+                                           "border: 1px solid rgba(255, 255, 255, 20); "
+                                           "border-radius: 16px; }")
+                                .arg(card->objectName()));
+    }
+    ui->notesTitle->setFont(Spotlight::Font(12, 600));
+    Spotlight::SetTextColor(ui->notesTitle, Spotlight::Color::TextSecondary());
+    ui->versionsTitle->setFont(Spotlight::Font(13, 600));
+    ui->question->setFont(Spotlight::Font(14, 600));
+    ui->question->setWordWrap(true);
 
     std::string text{release.body};
     if (auto pos = text.find("# Packages"); pos != std::string::npos) {
         text = text.substr(0, pos);
     }
 
+    ui->body->setStyleSheet(QStringLiteral(
+        "QTextBrowser { background: transparent; border: 0; padding: 0; "
+        "color: rgba(255, 255, 255, 158); }"));
+    ui->body->viewport()->setAutoFillBackground(false);
+    ui->body->document()->setDocumentMargin(0);
+    ui->body->document()->setDefaultFont(Spotlight::Font(13, 400));
     ui->body->setMarkdown(QString::fromStdString(text));
+    QTextCharFormat heading;
+    heading.setFont(Spotlight::DisplayFont(23));
+    heading.setForeground(Spotlight::Color::Text());
+    for (auto block = ui->body->document()->begin(); block.isValid(); block = block.next()) {
+        if (block.blockFormat().headingLevel() > 0) {
+            QTextCursor cursor(block);
+            cursor.select(QTextCursor::BlockUnderCursor);
+            cursor.mergeCharFormat(heading);
+        }
+    }
+    connect(ui->body->document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged, ui->body, [this](QSizeF size) {
+                ui->body->setFixedHeight(qMin(qCeil(size.height()), 280));
+            });
 
     ui->buttonBox->button(QDialogButtonBox::No)->setText(tr("Remind Me Later"));
-    auto* skip = ui->buttonBox->addButton(tr("Skip This Version"), QDialogButtonBox::ActionRole);
-    connect(skip, &QPushButton::clicked, this, [this] { done(SkipVersion); });
+    ui->buttonBox->button(QDialogButtonBox::Yes)->setDefault(true);
+    connect(ui->skip, &QPushButton::clicked, this, [this] { done(SkipVersion); });
 
     // TODO(crueter): Find a way to set default
     const auto assets = release.GetPlatformAssets();
@@ -68,16 +112,17 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
 
         if (m_asset.name == "Standard" &&
             std::string_view{Common::g_build_release_platform}.ends_with("-pgo")) {
-            ui->version->setText(
-                ui->version->text() +
-                tr(" This release has no PGO build, so the standard build will be downloaded."));
+            subtitle +=
+                tr(" This release has no PGO build, so the standard build will be downloaded.");
         }
 
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     } else {
+        ui->radioButtons->setAlignment(Qt::AlignLeft);
         u32 i = 0;
         for (const Common::Net::Asset& a : assets) {
             QRadioButton* r = new QRadioButton(tr(a.name.c_str()), this);
+            r->setFont(Spotlight::Font(14, 600));
             connect(r, &QRadioButton::toggled, this, [a, this](bool checked) {
                 if (checked)
                     m_asset = a;
@@ -92,6 +137,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
 
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     }
+    SetSubtitle(subtitle);
 }
 
 UpdateDialog::~UpdateDialog() {
