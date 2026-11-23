@@ -55,6 +55,7 @@
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
+#include "lichii/spotlight/stopping_overlay.h"
 #include "lichii/spotlight/style.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
@@ -2319,7 +2320,7 @@ void MainWindow::AllowOSSleep() {
 bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletParameters params) {
     // Shutdown previous session if the emu thread is still active...
     if (QtCommon::emu_thread != nullptr)
-        ShutdownGame();
+        ShutdownGame(tr("The next game starts when this finishes"));
 
     if (!render_window->InitRenderTarget())
         return false;
@@ -2835,6 +2836,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
     running_title_bar->SetGameTitle(display_title);
+    current_game_title = display_title;
 
     loading_screen->Prepare(QtCommon::system->GetAppLoader(), display_title,
                             QString::fromStdString(title_version));
@@ -2947,11 +2949,8 @@ bool MainWindow::OnShutdownBegin() {
     return true;
 }
 
-void MainWindow::OnShutdownBeginDialog() {
-    shutdown_dialog =
-        new OverlayDialog(this, *QtCommon::system, QString{}, tr("Closing software..."), QString{},
-                          QString{}, Qt::AlignHCenter | Qt::AlignVCenter);
-    shutdown_dialog->open();
+void MainWindow::OnShutdownBeginDialog(const QString& next) {
+    shutdown_dialog = new Spotlight::StoppingOverlay(render_window, next, this);
 }
 
 /// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
@@ -3158,9 +3157,12 @@ void MainWindow::OnEmulationStopped() {
     }
 }
 
-void MainWindow::ShutdownGame() {
+void MainWindow::ShutdownGame(const QString& next) {
     if (!emulation_running) {
         return;
+    }
+    if (!shutdown_dialog) {
+        OnShutdownBeginDialog(next);
     }
 
     if (bug_report_dialog) {
@@ -4014,7 +4016,7 @@ void MainWindow::OnRestartGame() {
     if (ConfirmShutdownGame()) {
         // Make a copy since ShutdownGame edits game_path
         const auto current_game = QString(current_game_path);
-        ShutdownGame();
+        ShutdownGame(tr("%1 starts again when this finishes").arg(current_game_title));
         BootGame(current_game, ApplicationAppletParameters());
     }
 }
@@ -4041,7 +4043,7 @@ void MainWindow::OnStopGame() {
     if (ConfirmShutdownGame()) {
         play_time_manager->Stop();
         if (OnShutdownBegin()) {
-            OnShutdownBeginDialog();
+            OnShutdownBeginDialog(tr("Returning to the library"));
         } else {
             OnEmulationStopped();
         }
@@ -4090,7 +4092,7 @@ void MainWindow::OnExecuteProgram(std::size_t program_index) {
     LOG_INFO(Frontend, "ExecuteProgram requested, program_index={} previous_program_id={:016X}",
              program_index, previous_program_id);
 
-    ShutdownGame();
+    ShutdownGame(tr("%1 starts again when this finishes").arg(current_game_title));
 
     auto params = ApplicationAppletParameters();
     params.program_index = static_cast<s32>(program_index);
@@ -4149,7 +4151,7 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
     }
     LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
              filename.toStdString());
-    ShutdownGame();
+    ShutdownGame(tr("The next game starts when this finishes"));
 
     auto params = ApplicationAppletParameters();
     params.program_id = program_id;
@@ -7098,7 +7100,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             return;
         }
         if (OnShutdownBegin()) {
-            OnShutdownBeginDialog();
+            OnShutdownBeginDialog({});
         }
         return;
     }

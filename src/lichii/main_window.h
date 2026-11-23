@@ -77,6 +77,7 @@ namespace Spotlight {
 class FullscreenHint;
 class InGameBar;
 class InGameMenu;
+class StoppingOverlay;
 class AudioControls;
 class GraphicsControls;
 } // namespace Spotlight
@@ -292,7 +293,8 @@ private:
     void BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                   StartGameType with_config = StartGameType::Normal);
     void BootGameFromList(const QString& filename, StartGameType with_config);
-    void ShutdownGame();
+    /// Ends the session and waits for it; next says on the stopping overlay what follows.
+    void ShutdownGame(const QString& next = {});
     void ExitIfEmulationThreadStuck();
 
     void SetDiscordEnabled(bool state);
@@ -464,7 +466,7 @@ private slots:
     void OnLanguageChanged(const QString& locale);
     void OnMouseActivity();
     bool OnShutdownBegin();
-    void OnShutdownBeginDialog();
+    void OnShutdownBeginDialog(const QString& next);
     void OnEmulationStopped();
     void OnEmulationStopTimeExpired();
     void OnEmulationStopTimeout();
@@ -615,7 +617,7 @@ private:
     Common::UUID nextendo_profile_user;
     // A forced pull that has to wait for the game to stop or for the running pull.
     bool nextendo_profile_force{};
-    OverlayDialog* shutdown_dialog{};
+    Spotlight::StoppingOverlay* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
 #ifdef HAS_RESHADE
@@ -679,6 +681,7 @@ private:
     bool close_pending = false;
     // The path to the game currently running
     QString current_game_path;
+    QString current_game_title;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
     bool user_flag_cmd_line = false;
 
