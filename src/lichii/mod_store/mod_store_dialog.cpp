@@ -1242,7 +1242,8 @@ private:
         return {};
     }
 
-    void Status(const QString& text, Spotlight::Notice::Tone tone = Spotlight::Notice::Tone::Neutral) {
+    void Status(const QString& text,
+                Spotlight::Notice::Tone tone = Spotlight::Notice::Tone::Neutral) {
         status->SetTone(tone);
         status->setText(text);
         status->setVisible(!text.isEmpty());
@@ -2344,10 +2345,10 @@ private:
     void SetBusy(bool value) {
         busy = value;
         for (QWidget* widget :
-             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(search), static_cast<QWidget*>(preview_strip),
-              static_cast<QWidget*>(browse_page), static_cast<QWidget*>(installed_page),
-              static_cast<QWidget*>(release), static_cast<QWidget*>(target_picker),
-              static_cast<QWidget*>(back)}) {
+             {static_cast<QWidget*>(game_picker), static_cast<QWidget*>(search),
+              static_cast<QWidget*>(preview_strip), static_cast<QWidget*>(browse_page),
+              static_cast<QWidget*>(installed_page), static_cast<QWidget*>(release),
+              static_cast<QWidget*>(target_picker), static_cast<QWidget*>(back)}) {
             widget->setEnabled(!value);
         }
         refresh->setEnabled(!value);
