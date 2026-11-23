@@ -118,7 +118,8 @@ public:
     void SetCategory(int category);
     void ShowAdvancedPage(int category, QWidget* page);
     void SetFooter(QWidget* widget);
-    void SetBanner(QWidget* banner);
+    /// The banner shows only on the given categories and their subpages.
+    void SetBanner(QWidget* widget, QList<int> shown_in);
     void SetGame(const QString& title, const QPixmap& icon);
 
     static QLabel* Text(const QString& text, int size, int weight = 500, bool secondary = false);
@@ -186,6 +187,8 @@ private:
     void UpdateSearch();
 
     QWidget* navigation;
+    QWidget* banner = nullptr;
+    QList<int> banner_categories;
     QVBoxLayout* sidebar;
     QVBoxLayout* content;
     QVBoxLayout* main_column;

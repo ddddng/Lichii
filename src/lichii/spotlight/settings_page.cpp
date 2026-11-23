@@ -1409,6 +1409,9 @@ void SettingsPage::SetCategory(int category) {
     categories[entry.parent == -1 ? category : entry.parent].button->setChecked(true);
     parent_link->setVisible(entry.parent != -1);
     navigation->setVisible(!entry.wide);
+    if (banner != nullptr) {
+        banner->setVisible(banner_categories.contains(entry.parent == -1 ? category : entry.parent));
+    }
     content->setContentsMargins(entry.wide ? 24 : 40, 22, entry.wide ? 24 : 40, 24);
     scroll->setHorizontalScrollBarPolicy(entry.wide ? Qt::ScrollBarAsNeeded
                                                     : Qt::ScrollBarAlwaysOff);
@@ -1443,7 +1446,9 @@ void SettingsPage::SetFooter(QWidget* widget) {
     main_column->addWidget(widget);
 }
 
-void SettingsPage::SetBanner(QWidget* banner) {
+void SettingsPage::SetBanner(QWidget* widget, QList<int> shown_in) {
+    banner = widget;
+    banner_categories = std::move(shown_in);
     banner->setProperty("spotlightTransparent", true);
     content->insertWidget(1, banner);
 }
@@ -1926,20 +1931,15 @@ QWidget* SettingsPage::BindSetting(ConfigurationShared::Widget* source) {
     reset->setToolTip(reset->accessibleName());
     reset->setFocusPolicy(Qt::StrongFocus);
     connect(reset, &QAbstractButton::clicked, source->restore_button, &QAbstractButton::click);
-    auto* spacer = new QWidget;
-    spacer->setFixedSize(32, 32);
-    spacer->setProperty("spotlightTransparent", true);
-    WatchOverride(source, combined, [source, badge, reset, spacer] {
+    WatchOverride(source, combined, [source, badge, reset] {
         const bool custom = source->property("custom").toBool();
         badge->setVisible(custom);
         reset->setVisible(custom);
-        spacer->setVisible(!custom);
     });
     MirrorEnabled(source, reset);
     layout->addWidget(badge);
     layout->addWidget(editor);
     layout->addWidget(reset);
-    layout->addWidget(spacer);
     return combined;
 }
 
