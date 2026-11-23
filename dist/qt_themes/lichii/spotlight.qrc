@@ -43,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/eye.png</file>
         <file>spotlight/icons/file.png</file>
         <file>spotlight/icons/film-strip.png</file>
+        <file>spotlight/icons/floppy-disk.png</file>
         <file>spotlight/icons/folder-open.png</file>
         <file>spotlight/icons/folder.png</file>
         <file>spotlight/icons/frame-corners.png</file>
