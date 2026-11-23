@@ -23,7 +23,4 @@ public:
 protected:
     void drawRow(QPainter* painter, const QStyleOptionViewItem& option,
                  const QModelIndex& index) const override;
-
-private slots:
-    void OnItemExpanded(const QModelIndex& item);
 };
