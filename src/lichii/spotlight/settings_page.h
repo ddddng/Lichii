@@ -249,6 +249,7 @@ private:
         QWidget* chips = nullptr;
         QWidget* columns = nullptr;
         QWidget* basic_columns = nullptr;
+        QLabel* search_heading = nullptr;
         int more_section = -1;
         int advanced_rows = 0;
     };
@@ -262,6 +263,7 @@ private:
     QLabel* PlaceRow(int category, const Slot& slot, const QString& title,
                      const QString& description, const QString& tooltip, QWidget* control);
     bool HasAdvanced(int category) const;
+    QString SearchContext(const Category& entry, const QWidget* row, bool advanced) const;
     bool ShowsAdvanced(int category) const;
     void UpdateMode();
     bool RefreshCategory(int category);

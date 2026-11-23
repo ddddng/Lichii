@@ -1097,6 +1097,49 @@ protected:
     }
 };
 
+void ShowSearchContext(QWidget* row, const QString& context, bool advanced) {
+    auto* detail = qobject_cast<QLabel*>(row->property("detailLabel").value<QObject*>());
+    if (detail == nullptr) {
+        return;
+    }
+    const QString shown = row->property("searchContext").toString();
+    if (context.isEmpty()) {
+        if (!shown.isEmpty() && detail->text() == shown) {
+            const QString plain = row->property("plainDescription").toString();
+            detail->setText(plain);
+            detail->setVisible(!plain.isEmpty());
+        }
+        row->setProperty("searchContext", QString{});
+    } else {
+        if (shown.isEmpty()) {
+            row->setProperty("plainDescription", detail->text());
+        }
+        row->setProperty("searchContext", context);
+        detail->setText(context);
+        detail->show();
+    }
+    auto* title_line = qobject_cast<QHBoxLayout*>(row->property("titleLine").value<QObject*>());
+    if (title_line == nullptr) {
+        return;
+    }
+    auto* badge = qobject_cast<QWidget*>(row->property("searchBadge").value<QObject*>());
+    const bool shown_badge = advanced && !context.isEmpty();
+    if (badge == nullptr && shown_badge) {
+        badge = SettingsPage::Badge(QObject::tr("Advanced"), Color::Fill(), Color::Text());
+        title_line->insertWidget(1, badge, 0, Qt::AlignVCenter);
+        row->setProperty("searchBadge", QVariant::fromValue<QObject*>(badge));
+        row->setProperty("titleStretch", title_line->stretch(0));
+    }
+    if (badge != nullptr) {
+        badge->setVisible(shown_badge);
+        title_line->setStretch(0, shown_badge ? 0 : row->property("titleStretch").toInt());
+        if (auto* name = qobject_cast<QLabel*>(title_line->itemAt(0)->widget())) {
+            name->setMinimumWidth(
+                shown_badge ? name->fontMetrics().horizontalAdvance(name->text()) + 2 : 0);
+        }
+    }
+}
+
 QString BuildLabel() {
     const QString tag = QString::fromUtf8(Common::g_build_release_tag);
     if (tag.startsWith(QStringLiteral("build-"))) {
@@ -1286,6 +1329,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     search = new QLineEdit;
     search->setFont(Font(13));
     search->setClearButtonEnabled(true);
+    search->setFixedHeight(38);
     search->setPlaceholderText(per_game ? tr("Search this game's settings")
                                         : tr("Search settings"));
     search->setAccessibleName(search->placeholderText());
@@ -1425,7 +1469,13 @@ int SettingsPage::AddCategory(const QString& title, const QString& subtitle_, co
     if (page_title.isEmpty()) {
         page_title = title;
     }
+    auto* search_heading = Text(page_title, 13, 600, true);
+    search_heading->setContentsMargins(6, 4, 4, 0);
+    search_heading->hide();
+    layout->addWidget(search_heading);
     Category entry;
+    entry.search_heading = search_heading;
+    entry.basic_count = 1;
     entry.title = title;
     entry.page_title = std::move(page_title);
     entry.subtitle = subtitle_;
@@ -1504,14 +1554,17 @@ QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool a
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(2);
     if (!title.isEmpty() || action != nullptr) {
-        auto* title_row = new QHBoxLayout;
+        auto* header = new QWidget;
+        header->setProperty("spotlightTransparent", true);
+        auto* title_row = new QHBoxLayout(header);
         title_row->setContentsMargins(6, 4, 4, 6);
         auto* label = Text(title, 13, 600, true);
         title_row->addWidget(label, 1);
         if (action != nullptr) {
             title_row->addWidget(action);
         }
-        layout->addLayout(title_row);
+        layout->addWidget(header);
+        section->setProperty("sectionHeader", QVariant::fromValue<QObject*>(header));
     }
     auto* surface = new Surface(Color::FillFaint(), GroupRadius, Color::StrokeSubtle());
     surface->setObjectName(QStringLiteral("settingsGroup"));
@@ -1519,6 +1572,7 @@ QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool a
     rows->setContentsMargins(1, 1, 1, 1);
     rows->setSpacing(0);
     layout->addWidget(surface);
+    section->setProperty("sectionTitle", title);
     if (column < 0) {
         AddBlock(category, section, title, advanced_);
         return rows;
@@ -1590,7 +1644,10 @@ QVBoxLayout* SettingsPage::NewSection(int category, const QString& title, const 
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
     if (!title.isEmpty()) {
-        auto* heading_row = new QHBoxLayout;
+        auto* header = new QWidget;
+        header->setProperty("spotlightTransparent", true);
+        section->setProperty("sectionHeader", QVariant::fromValue<QObject*>(header));
+        auto* heading_row = new QHBoxLayout(header);
         heading_row->setContentsMargins(6, 0, 6, 0);
         heading_row->setSpacing(10);
         heading_row->addWidget(Text(title, 15, 600), 0, Qt::AlignBaseline);
@@ -1604,7 +1661,7 @@ QVBoxLayout* SettingsPage::NewSection(int category, const QString& title, const 
         } else {
             heading_row->addStretch();
         }
-        layout->addLayout(heading_row);
+        layout->addWidget(header);
     }
     auto* surface = new Surface(Color::FillFaint(), 18, Color::StrokeSubtle());
     surface->setObjectName(QStringLiteral("settingsGroup"));
@@ -1628,6 +1685,7 @@ QVBoxLayout* SettingsPage::NewSection(int category, const QString& title, const 
         });
     }
     section->setProperty("chipGroup", chip_label);
+    section->setProperty("sectionTitle", title);
     entry.section_widgets.append(section);
     entry.section_rows.append(rows);
     AddBlock(category, section, title, true);
@@ -2255,8 +2313,10 @@ void SettingsPage::SetCategory(int category) {
     if (category < 0 || category >= categories.size()) {
         return;
     }
-    if (filtering && categories[category].button->isHidden()) {
+    if (filtering) {
+        unfiltered_category = category;
         search->clear();
+        return;
     }
     Build(category, ShowsAdvanced(category) || (filtering && show_advanced));
     if (current_category != -1 && current_category != category) {
@@ -2384,10 +2444,20 @@ bool SettingsPage::RefreshCategory(int index) {
                     (label_match || Matches(row->property("searchText").toString(), query));
                 row->setVisible(shown);
                 visible |= shown;
+                ShowSearchContext(row,
+                                  filtering ? SearchContext(entry, row, block.advanced) : QString{},
+                                  block.advanced);
             }
         }
         block.widget->setVisible(visible);
+        if (auto* header =
+                qobject_cast<QWidget*>(block.widget->property("sectionHeader").value<QObject*>())) {
+            header->setVisible(!filtering);
+        }
         any |= visible;
+    }
+    if (entry.basic_columns != nullptr) {
+        static_cast<SectionColumns*>(entry.basic_columns)->SetSingle(filtering);
     }
     if (entry.columns != nullptr) {
         bool sections = false;
@@ -2410,6 +2480,25 @@ bool SettingsPage::RefreshCategory(int index) {
     return any;
 }
 
+QString SettingsPage::SearchContext(const Category& entry, const QWidget* row,
+                                    bool advanced) const {
+    const QString place =
+        entry.parent == -1
+            ? entry.title
+            : QStringLiteral("%1 › %2").arg(categories[entry.parent].title, entry.title);
+    if (!advanced) {
+        return tr("%1 · Everyday").arg(place);
+    }
+    for (const QWidget* widget = row; widget != nullptr && widget != entry.panel;
+         widget = widget->parentWidget()) {
+        const QString section = widget->property("sectionTitle").toString();
+        if (!section.isEmpty()) {
+            return tr("%1 › Advanced › %2").arg(place, section);
+        }
+    }
+    return tr("%1 › Advanced").arg(place);
+}
+
 void SettingsPage::UpdateSearch() {
     const QString query = search->text().trimmed();
     if (!query.isEmpty() && !filtering) {
@@ -2422,12 +2511,20 @@ void SettingsPage::UpdateSearch() {
             Build(i, true);
         }
         const bool any = RefreshCategory(i) && filtering;
-        auto& entry = categories[i];
-        entry.button->setVisible(
-            filtering ? any : entry.parent == -1 && (!entry.advanced_only || show_advanced));
+        categories[i].panel->setProperty("searchHit", any);
         if (any && first == -1) {
             first = i;
         }
+    }
+    for (int i = 0; i < categories.size(); ++i) {
+        auto& entry = categories[i];
+        const bool shown = filtering && entry.panel->property("searchHit").toBool();
+        entry.search_heading->setVisible(filtering);
+        if (filtering || i != current_category) {
+            entry.panel->setVisible(shown);
+        }
+        entry.button->setVisible(entry.parent == -1 && (!entry.advanced_only || show_advanced));
+        entry.button->setChecked(filtering ? i == first : i == current_category);
     }
     if (!filtering) {
         if (unfiltered_category != -1) {
@@ -2435,23 +2532,15 @@ void SettingsPage::UpdateSearch() {
         }
         return;
     }
-    if (first == -1) {
-        if (current_category != -1) {
-            categories[current_category].panel->hide();
-        }
-        parent_link->hide();
-        heading->setText(tr("Results for “%1”").arg(query));
-        subtitle->setText(show_advanced ? tr("Advanced matches are included when Advanced is on.")
-                                        : tr("Turn on Advanced to include its settings."));
-        subtitle->show();
-        empty->show();
-        return;
-    }
-    if (current_category == -1 || categories[current_category].button->isHidden()) {
-        SetCategory(first);
-    } else {
-        SetCategory(current_category);
-    }
+    parent_link->hide();
+    navigation->show();
+    heading->setText(tr("Results for “%1”").arg(query));
+    subtitle->setText(show_advanced ? tr("Advanced matches are included when Advanced is on.")
+                                    : tr("Turn on Advanced to include its settings."));
+    subtitle->show();
+    empty->setVisible(first == -1);
+    UpdateMode();
+    scroll->verticalScrollBar()->setValue(0);
 }
 
 QLabel* SettingsPage::Text(const QString& text, int size, int weight, bool secondary) {
@@ -2618,6 +2707,8 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     title_line->addStretch();
     group->addWidget(row);
     detail->setVisible(!description.isEmpty());
+    row->setProperty("detailLabel", QVariant::fromValue<QObject*>(detail));
+    row->setProperty("titleLine", QVariant::fromValue<QObject*>(title_line));
     return detail;
 }
 
