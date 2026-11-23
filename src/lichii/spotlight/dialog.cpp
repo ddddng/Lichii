@@ -15,6 +15,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QProgressBar>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QScreen>
 #include <QStyle>
@@ -52,6 +54,11 @@ constexpr int MessageTextWidth = 304;
 constexpr int MessageWideTextWidth = 456;
 constexpr int MessageTitleGap = 6;
 constexpr int MessageButtonGap = 18;
+
+// Progress dialogs: a 520 px card with the label and percentage over an 8 px bar.
+constexpr int ProgressCardWidth = 520;
+constexpr int ProgressRowGap = 10;
+constexpr int ProgressBarHeight = 8;
 
 struct MessageLook {
     QString icon;
@@ -137,7 +144,8 @@ protected:
 class DialogChrome final : public QObject {
 public:
     DialogChrome(QDialog* dialog_, bool close_button)
-        : QObject(dialog_), dialog(dialog_), box(qobject_cast<QMessageBox*>(dialog_)) {
+        : QObject(dialog_), dialog(dialog_), box(qobject_cast<QMessageBox*>(dialog_)),
+          progress(qobject_cast<QProgressDialog*>(dialog_)) {
         title = new QLabel(dialog);
         title->setObjectName(QStringLiteral("spotlightDialogTitle"));
         title->setFont(DisplayFont(box ? 20 : 22));
@@ -179,7 +187,9 @@ protected:
                 PrepareMessageBox();
             }
             PrepareButtons();
+            PrepareProgress();
             Update();
+            PlaceProgress();
             ShowScrim();
             if (!shown) {
                 shown = true;
@@ -196,6 +206,11 @@ protected:
                 UpdateMargins();
             }
             Place();
+            // QProgressDialog::resizeEvent would put its widgets back where its own layout has
+            // them.
+            return PlaceProgress();
+        case QEvent::LayoutRequest:
+            PlaceProgress();
             return false;
         case QEvent::Paint:
             Paint();
@@ -438,6 +453,91 @@ private:
         fitting = false;
     }
 
+    QLabel* ProgressLabel() const {
+        for (auto* label : dialog->findChildren<QLabel*>(Qt::FindDirectChildrenOnly)) {
+            if (label != title && label != subtitle && label != icon && label != percent) {
+                return label;
+            }
+        }
+        return nullptr;
+    }
+
+    void PrepareProgress() {
+        if (!progress || percent) {
+            return;
+        }
+        percent = new QLabel(dialog);
+        percent->setFont(Font(14, 600));
+        SetTextColor(percent, Color::Text());
+        if (QLabel* label = ProgressLabel()) {
+            label->setFont(Font(14, 600));
+            label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            label->setWordWrap(true);
+            SetTextColor(label, Color::Text());
+        }
+        if (auto* bar = dialog->findChild<QProgressBar*>(Qt::FindDirectChildrenOnly)) {
+            bar->setTextVisible(false);
+            bar->style()->unpolish(bar);
+            bar->style()->polish(bar);
+            const auto show_percent = [this, bar] {
+                const int range = bar->maximum() - bar->minimum();
+                percent->setVisible(range > 0);
+                if (range > 0) {
+                    percent->setText(QStringLiteral("%1%").arg(
+                        qRound(100.0 * (bar->value() - bar->minimum()) / range)));
+                }
+            };
+            connect(bar, &QProgressBar::valueChanged, this, show_percent);
+            show_percent();
+        }
+        if (auto* cancel = dialog->findChild<QPushButton*>(Qt::FindDirectChildrenOnly);
+            cancel && cancel->property("kind").isNull()) {
+            cancel->setProperty("kind", QStringLiteral("destructive"));
+            cancel->style()->unpolish(cancel);
+            cancel->style()->polish(cancel);
+        }
+        dialog->setFixedWidth(ProgressCardWidth + ShadowMargins.left() + ShadowMargins.right());
+    }
+
+    // Places a progress dialog's label, percentage, bar and cancel button as Paper's progress
+    // card does, and fits the card's height to them. False when the dialog is no progress dialog.
+    bool PlaceProgress() {
+        if (!progress || !percent) {
+            return false;
+        }
+        const QRect area = dialog->contentsRect();
+        int y = area.top();
+        int row = percent->isHidden() ? 0 : percent->sizeHint().height();
+        if (!percent->isHidden()) {
+            const int width = percent->sizeHint().width();
+            percent->setGeometry(area.right() + 1 - width, y, width, row);
+        }
+        if (QLabel* label = ProgressLabel(); label && !label->text().isEmpty()) {
+            const int width = area.width() - (percent->isHidden() ? 0 : percent->width() + 8);
+            const int height = label->heightForWidth(width);
+            label->setGeometry(area.left(), y, width, height);
+            row = std::max(row, height);
+        }
+        y += row ? row + ProgressRowGap : 0;
+        if (auto* bar = dialog->findChild<QProgressBar*>(Qt::FindDirectChildrenOnly)) {
+            bar->setGeometry(area.left(), y, area.width(), ProgressBarHeight);
+            y += ProgressBarHeight;
+        }
+        if (auto* cancel = dialog->findChild<QPushButton*>(Qt::FindDirectChildrenOnly);
+            cancel && !cancel->isHidden()) {
+            y += HeaderGap + 6;
+            const QSize size = cancel->sizeHint();
+            cancel->setGeometry(area.right() + 1 - size.width(), y, size.width(), size.height());
+            y += size.height();
+        }
+        const int height =
+            y - area.top() + dialog->contentsMargins().top() + dialog->contentsMargins().bottom();
+        if (dialog->height() != height) {
+            dialog->setFixedHeight(height);
+        }
+        return true;
+    }
+
     void PrepareButtons() {
         for (auto* buttons : dialog->findChildren<QDialogButtonBox*>()) {
             if (buttons->layout()) {
@@ -485,6 +585,8 @@ private:
 
     QDialog* dialog;
     QMessageBox* box;
+    QProgressDialog* progress;
+    QLabel* percent = nullptr;
     QLabel* title;
     QLabel* subtitle;
     QLabel* icon;
