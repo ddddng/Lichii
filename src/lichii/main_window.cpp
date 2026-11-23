@@ -1610,7 +1610,6 @@ void MainWindow::InitializeWidgets() {
                                              .effects = post_shader_status_action,
                                              .controls = controls},
                                             this);
-    audio_panel = new Spotlight::AudioControls(controls, this);
     const auto set_docked = [this](bool docked) {
         if (Settings::IsDockedMode() != docked) {
             OnToggleDockedMode();
@@ -1618,12 +1617,6 @@ void MainWindow::InitializeWidgets() {
     };
     connect(ingame_menu, &Spotlight::InGameMenu::DockedChanged, this, set_docked);
     connect(ingame_menu, &Spotlight::InGameMenu::VolumeChanged, this, set_volume);
-    connect(audio_panel, &Spotlight::AudioControls::AboutToOpen, this, [this] {
-        const auto device = Settings::values.audio_output_device_id.GetValue();
-        audio_panel->SetOutput(device.empty() || device == "auto" ? tr("System default")
-                                                                  : QString::fromStdString(device));
-    });
-    connect(audio_panel, &Spotlight::AudioControls::VolumeChanged, this, set_volume);
 
     auto* emulation_menu = new Spotlight::Menu(this);
     emulation_menu->addActions({ui->action_Pause, ui->action_Restart, ui->action_Stop});
@@ -1650,18 +1643,8 @@ void MainWindow::InitializeWidgets() {
     }
     connect(graphics_menu, &QMenu::aboutToShow, this, &MainWindow::UpdateStatusButtons);
     running_title_bar->AddMenu(tr("Graphics"), graphics_menu);
-    const auto add_panel = [this](const QString& name, Spotlight::InGamePopover* panel) {
-        auto* button = running_title_bar->AddPanelButton(name);
-        connect(button, &QAbstractButton::clicked, panel, [button, panel] {
-            button->setChecked(true);
-            panel->Open(button);
-        });
-        connect(panel, &Spotlight::InGamePopover::Dismissed, button,
-                [button] { button->setChecked(false); });
-    };
-    add_panel(tr("Audio"), audio_panel);
+    running_title_bar->AddMenu(tr("Audio"), audio);
     auto* view_menu = new Spotlight::Menu(this);
-    ui->action_Show_Status_Bar->setText(tr("Show bottom bar"));
     view_menu->addActions(
         {ui->action_Show_Performance_Overlay, ingame_menu_action, ui->action_Show_Status_Bar});
     view_menu->addSeparator();
@@ -1671,6 +1654,13 @@ void MainWindow::InitializeWidgets() {
                              {ingame_menu_action, "In-game Menu"},
                              {ui->action_Show_Status_Bar, "Toggle Status Bar"}});
     running_title_bar->AddMenu(tr("View"), view_menu);
+    show_hotkeys(ui->menu_Emulation, {{ui->action_Pause, "Continue/Pause Emulation"},
+                                      {ui->action_Stop, "Stop Emulation"},
+                                      {ui->action_Restart, "Restart Emulation"}});
+    show_hotkeys(ui->menu_View,
+                 {{ui->action_Fullscreen, "Fullscreen"},
+                  {ui->action_Show_Status_Bar, "Toggle Status Bar"},
+                  {ui->action_Show_Performance_Overlay, "Toggle Performance Overlay"}});
     connect(ingame_bar, &Spotlight::InGameBar::ExpandRequested, ui->action_Show_Status_Bar,
             &QAction::trigger);
     auto* shaders = ingame_bar->Shaders();
@@ -7057,7 +7047,6 @@ void MainWindow::UpdateVolumeUI() {
     mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
     mute_action->setChecked(muted);
     ingame_menu->SetVolume(value, muted);
-    audio_panel->SetVolume(value, muted);
 }
 
 void MainWindow::UpdateStatusButtons() {

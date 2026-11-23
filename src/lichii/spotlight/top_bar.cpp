@@ -345,14 +345,9 @@ void RunningTitleBar::SetGameTitle(const QString& value) {
     title->setToolTip(title->text() == value ? QString{} : value);
 }
 
-QAbstractButton* RunningTitleBar::AddPanelButton(const QString& name) {
+void RunningTitleBar::AddMenu(const QString& name, QMenu* menu) {
     auto* button = new TitleMenuButton(name, menus);
     menu_row->addWidget(button);
-    return button;
-}
-
-void RunningTitleBar::AddMenu(const QString& name, QMenu* menu) {
-    auto* button = AddPanelButton(name);
     menu->installEventFilter(new MenuButtonPress(button, menu));
     connect(button, &QAbstractButton::pressed, menu, [button, menu] {
         button->setDown(false);

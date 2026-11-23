@@ -57,23 +57,6 @@ struct InGameSummary {
     bool preset_global = true;
 };
 
-/// A panel that drops down from a running title bar menu button.
-class InGamePopover : public QWidget {
-    Q_OBJECT
-
-public:
-    explicit InGamePopover(QWidget* parent);
-    void Open(QWidget* anchor);
-
-signals:
-    void AboutToOpen();
-    void Dismissed();
-
-protected:
-    void paintEvent(QPaintEvent*) override;
-    void hideEvent(QHideEvent* event) override;
-};
-
 /// The head of the Audio quick controls menu: a caption, the volume slider and its value.
 class VolumeBlock final : public QWidget {
 public:
@@ -86,24 +69,6 @@ protected:
 
 private:
     QAbstractSlider* track;
-};
-
-/// Audio: volume, mute and the output device.
-class AudioControls final : public InGamePopover {
-    Q_OBJECT
-
-public:
-    AudioControls(const InGameControls& controls, QWidget* parent);
-    void SetVolume(int volume, bool muted);
-    void SetOutput(const QString& device);
-
-signals:
-    void VolumeChanged(int volume);
-
-private:
-    VolumeControl* volume;
-    QWidget* mute;
-    QLabel* output;
 };
 
 class InGameMenu final : public QWidget {
