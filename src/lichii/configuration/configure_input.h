@@ -22,6 +22,10 @@ class QString;
 class QTabWidget;
 class QTimer;
 
+namespace Spotlight {
+class SegmentedControl;
+}
+
 class ConfigureInputAdvanced;
 class ConfigureInputPlayer;
 class ConfigureMicrophone;
@@ -59,6 +63,14 @@ public:
     QCheckBox* PlayerConnected(std::size_t player) const;
     ConfigureInputPlayer* Player(std::size_t player) const;
 
+    /// The Map buttons page (Paper: controls-map-buttons): the player picker over the player pages,
+    /// each with the console row under it. Built on the first call.
+    QWidget* MappingPage();
+
+signals:
+    /// The picker's Advanced option was chosen.
+    void AdvancedRequested();
+
 private:
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
@@ -88,6 +100,9 @@ private:
     std::array<QCheckBox*, 8> connected_controller_checkboxes{};
     ConfigureInputAdvanced* advanced = nullptr;
     ConfigureMicrophone* microphone = nullptr;
+    Spotlight::SegmentedControl* console_mode = nullptr;
+    QWidget* mapping_page = nullptr;
+    std::size_t player_count = 8;
 
     Core::System& system;
 };
