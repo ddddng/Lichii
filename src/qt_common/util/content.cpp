@@ -250,7 +250,7 @@ void InstallKeys() {
     const QString resMsg = GetKeyInstallResultString(result);
     switch (result) {
     case FirmwareManager::KeyInstallResult::Success:
-        QtCommon::Frontend::Information(tr("Decryption Keys install succeeded"), resMsg);
+        QtCommon::Frontend::Success(tr("Decryption Keys install succeeded"), resMsg);
         break;
     default:
         QtCommon::Frontend::Critical(tr("Decryption Keys install failed"), resMsg);
