@@ -1051,7 +1051,8 @@ void SettingsPage::BuildPage(int category, Page& page) {
             RefreshCategory(category);
         }
     };
-    if (in_advanced) {
+    if (in_advanced && page.name != categories[category].title &&
+        page.name != categories[category].page_title) {
         auto* heading_label = Text(page.name, 17, 600);
         heading_label->setContentsMargins(6, 10, 6, 0);
         AddBlock(category, heading_label, page.name, true);
