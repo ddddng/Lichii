@@ -34,6 +34,10 @@ public:
     void SetTitleVisible(bool visible);
 };
 
+/// Rounds the corners of a top-level window that draws its own frame (Radius::Tile) while it is
+/// neither maximized nor full screen, for platforms whose window manager leaves it square.
+void RoundWindowCorners(QWidget* window);
+
 /// Shows a message box with the success icon (a green check) instead of its information icon.
 void MarkSuccess(QMessageBox* box);
 
