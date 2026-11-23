@@ -1073,7 +1073,7 @@ void ConfigurePerGame::OnRemoveCustomIcon() {
     if (title_id == 0 || detect_watcher.isRunning()) {
         return;
     }
-    // Drops a picked image that is not saved yet, and the saved artwork on Apply or OK.
+    // Drops a picked image that is not saved yet, and the saved artwork when Game Settings closes.
     pending_custom_icon = {};
     remove_custom_icon = has_custom_icon;
     UpdateIconPreview(file_icon);

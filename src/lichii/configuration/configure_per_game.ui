@@ -96,7 +96,7 @@
               </sizepolicy>
              </property>
              <property name="toolTip">
-              <string>Preview a local icon next to the archive. Online lookup is optional. Apply or OK saves changes.</string>
+              <string>Preview a local icon next to the archive. Online lookup is optional. Saved when you close Game Settings.</string>
              </property>
              <property name="text">
               <string>Detect Icon</string>
@@ -112,7 +112,7 @@
               </sizepolicy>
              </property>
              <property name="toolTip">
-              <string>Preview a local image as the game icon. Apply or OK saves changes.</string>
+              <string>Preview a local image as the game icon. Saved when you close Game Settings.</string>
              </property>
              <property name="text">
               <string>Upload Icon...</string>
@@ -125,14 +125,14 @@
               <string>Browse iiDB Artwork...</string>
              </property>
              <property name="toolTip">
-              <string>Choose online artwork using your own iiDB API key. Apply or OK saves changes.</string>
+              <string>Choose online artwork using your own iiDB API key. Saved when you close Game Settings.</string>
              </property>
             </widget>
            </item>
            <item row="2" column="0" colspan="2">
             <widget class="QPushButton" name="button_remove_icon">
              <property name="toolTip">
-              <string>Show the game's own icon again. Apply or OK saves changes.</string>
+              <string>Show the game's own icon again. Saved when you close Game Settings.</string>
              </property>
              <property name="text">
               <string>Remove Custom Icon</string>
