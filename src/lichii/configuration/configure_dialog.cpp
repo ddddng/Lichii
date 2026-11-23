@@ -151,43 +151,65 @@ QString MappingStyle() {
 
 class BindingButton final : public QAbstractButton {
 public:
-    explicit BindingButton(QString icon_) : icon{std::move(icon_)} {
+    BindingButton(QString icon_, int width) : icon{std::move(icon_)} {
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
         setAttribute(Qt::WA_Hover);
         setFont(Spotlight::Font(11, 600));
-        setFixedHeight(28);
+        setFixedSize(width, 28);
     }
 
-    void SetBinding(const QString& binding, bool set_) {
-        setText(binding);
+    void SetBinding(QStringList keys_, bool set_) {
+        keys = std::move(keys_);
         set = set_;
-        updateGeometry();
         update();
     }
 
-    QSize sizeHint() const override {
-        return {fontMetrics().horizontalAdvance(text()) + 40, 28};
-    }
+    std::function<void(const QPoint&)> menu;
 
 protected:
+    void contextMenuEvent(QContextMenuEvent* event) override {
+        if (menu) {
+            menu(event->globalPos());
+        }
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1.5) : QPen(Color::Stroke(), 1));
-        painter.setBrush(underMouse() ? Color::Fill() : Color::Control());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75),
-                                Spotlight::Radius::KeyCap, Spotlight::Radius::KeyCap);
-        painter.drawPixmap(10, (height() - 14) / 2,
-                           Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
-                                                 devicePixelRatioF()));
-        painter.setPen(set ? Color::Text() : Color::TextSecondary());
         painter.setFont(font());
-        painter.drawText(rect().adjusted(30, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, text());
+        int x = 0;
+        if (!icon.isEmpty()) {
+            painter.drawPixmap(0, (height() - 14) / 2,
+                               Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
+                                                     devicePixelRatioF()));
+            x = 19;
+        }
+        const int start = x;
+        const QColor fill = underMouse() ? QColor(0xff, 0xff, 0xff, 0x2e)
+                                         : QColor(0xff, 0xff, 0xff, 0x1f);
+        for (const QString& key : keys) {
+            const int cap = std::min(fontMetrics().horizontalAdvance(key) + 16, width() - x);
+            const QRectF rect(x + 0.5, 2.5, cap - 1, 23);
+            painter.setPen(QPen(Color::Stroke(), 1));
+            painter.setBrush(fill);
+            painter.drawRoundedRect(rect, 7, 7);
+            painter.setPen(set ? Color::Text() : Color::TextSecondary());
+            painter.drawText(rect, Qt::AlignCenter,
+                             fontMetrics().elidedText(key, Qt::ElideRight, cap - 12));
+            x += cap + 4;
+        }
+        if (hasFocus()) {
+            painter.setPen(QPen(Color::Accent(), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRoundedRect(QRectF(start - 2, 0.75, x - 4 - start + 4, height() - 1.5),
+                                    9, 9);
+        }
     }
 
 private:
     QString icon;
+    QStringList keys;
     bool set = false;
 };
 
@@ -662,9 +684,9 @@ void ConfigureDialog::BuildSettings() {
     const int multiplayer = settings_page->AddCategory(
         tr("Multiplayer"), tr("Local wireless, LAN and online play"),
         QStringLiteral("users"), Tints::Green());
-    const int shortcuts =
-        settings_page->AddCategory(tr("Shortcuts"), tr("Edit keyboard and controller shortcuts"),
-                                   QStringLiteral("keyboard"), Tints::Gold());
+    const int shortcuts = settings_page->AddCategory(
+        tr("Shortcuts"), tr("Click a keyboard or controller binding to change it."),
+        QStringLiteral("keyboard"), Tints::Gold());
 
     settings_page->SetBuilder(general, [this, general, library, controls] {
         BuildGeneral(general, library, controls);
@@ -915,13 +937,10 @@ void ConfigureDialog::BuildShortcuts(int shortcuts) {
     auto* actions = new QWidget;
     actions->setProperty("spotlightTransparent", true);
     auto* actions_layout = new QHBoxLayout(actions);
-    actions_layout->setContentsMargins(6, 0, 0, 0);
+    actions_layout->setContentsMargins(0, 0, 0, 0);
     actions_layout->setSpacing(10);
-    actions_layout->addWidget(SettingsPage::Text(
-        tr("Click a binding to change it; a game controller binding is pressed on the pad"), 13,
-        500, true));
     actions_layout->addStretch();
-    auto* clear_all = new Spotlight::PillButton(tr("Clear all"), QStringLiteral("x"));
+    auto* clear_all = new Spotlight::PillButton(tr("Clear all"));
     connect(clear_all, &QAbstractButton::clicked, this, [this] { hotkeys_tab->ClearAll(); });
     actions_layout->addWidget(clear_all);
     auto* restore = new Spotlight::PillButton(tr("Restore defaults"),
@@ -930,56 +949,138 @@ void ConfigureDialog::BuildShortcuts(int shortcuts) {
     actions_layout->addWidget(restore);
     settings_page->AddBlock(shortcuts, actions, tr("Clear all\nRestore defaults"));
 
+    const std::array<QString, 4> titles{tr("Playing"), tr("Display, speed and audio"),
+                                        tr("Window and library"), tr("Multiplayer and TAS")};
+    static const std::vector<std::pair<QString, int>> order{
+        {QStringLiteral("Continue/Pause Emulation"), 0},
+        {QStringLiteral("Stop Emulation"), 0},
+        {QStringLiteral("Restart Emulation"), 0},
+        {QStringLiteral("Fullscreen"), 0},
+        {QStringLiteral("Exit Fullscreen"), 0},
+        {QStringLiteral("HOME Button"), 0},
+        {QStringLiteral("In-game Menu"), 0},
+        {QStringLiteral("Capture Screenshot"), 0},
+        {QStringLiteral("Load/Remove Amiibo"), 0},
+        {QStringLiteral("Toggle Mouse Panning"), 0},
+        {QStringLiteral("Change Adapting Filter"), 1},
+        {QStringLiteral("Change Docked Mode"), 1},
+        {QStringLiteral("Change GPU Mode"), 1},
+        {QStringLiteral("Toggle Framerate Limit"), 1},
+        {QStringLiteral("Toggle Turbo Speed"), 1},
+        {QStringLiteral("Toggle Slow Speed"), 1},
+        {QStringLiteral("Toggle Performance Overlay"), 1},
+        {QStringLiteral("Audio Mute/Unmute"), 1},
+        {QStringLiteral("Audio Volume Down"), 1},
+        {QStringLiteral("Audio Volume Up"), 1},
+        {QStringLiteral("Browse Public Game Lobby"), 3},
+        {QStringLiteral("Create Room"), 3},
+        {QStringLiteral("Direct Connect to Room"), 3},
+        {QStringLiteral("Leave Room"), 3},
+        {QStringLiteral("Show Current Room"), 3},
+        {QStringLiteral("TAS Start/Stop"), 3},
+        {QStringLiteral("TAS Reset"), 3},
+        {QStringLiteral("TAS Record"), 3},
+    };
+    static const QHash<QString, QString> pad_names{
+        {QStringLiteral("Dpad_Right"), QStringLiteral("D-pad →")},
+        {QStringLiteral("Dpad_Left"), QStringLiteral("D-pad ←")},
+        {QStringLiteral("Dpad_Up"), QStringLiteral("D-pad ↑")},
+        {QStringLiteral("Dpad_Down"), QStringLiteral("D-pad ↓")},
+    };
+    std::array<std::vector<std::pair<std::size_t, QPersistentModelIndex>>, 4> members;
     auto* model = hotkeys_tab->Model();
     for (int group_row = 0; group_row < model->rowCount(); ++group_row) {
         const QStandardItem* group = model->item(group_row);
-        auto* rows = settings_page->AddSection(shortcuts, group->text());
         for (int row = 0; row < group->rowCount(); ++row) {
-            const QPersistentModelIndex action = group->child(row)->index();
+            const QStandardItem* action = group->child(row);
+            const auto found =
+                std::find_if(order.cbegin(), order.cend(), [action](const auto& entry) {
+                    return entry.first == action->data().toString();
+                });
+            const auto rank = static_cast<std::size_t>(found - order.cbegin());
+            members[found == order.cend() ? 2 : static_cast<std::size_t>(found->second)]
+                .emplace_back(rank, action->index());
+        }
+    }
+    for (std::size_t group = 0; group < titles.size(); ++group) {
+        if (members[group].empty()) {
+            continue;
+        }
+        std::stable_sort(members[group].begin(), members[group].end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        auto* rows = settings_page->AddSection(shortcuts, titles[group], false, nullptr,
+                                               static_cast<int>(group % 2));
+        rows->parentWidget()->setProperty("denseRows", true);
+        for (const auto& [rank, action] : members[group]) {
             auto* control = new QWidget;
             auto* layout = new QHBoxLayout(control);
             layout->setContentsMargins(0, 0, 0, 0);
             layout->setSpacing(8);
-            auto* keyboard = new BindingButton(QStringLiteral("keyboard"));
-            auto* pad = new BindingButton(QStringLiteral("game-controller"));
+            auto* keyboard = new BindingButton({}, 98);
+            auto* pad = new BindingButton(QStringLiteral("game-controller"), 133);
             auto* reset =
-                new Spotlight::CircleButton(QStringLiteral("arrow-counter-clockwise"), 32);
+                new Spotlight::CircleButton(QStringLiteral("arrow-counter-clockwise"), 26);
             reset->setToolTip(tr("Restore default"));
             reset->setAccessibleName(reset->toolTip());
             reset->setFocusPolicy(Qt::StrongFocus);
-            keyboard->setMinimumWidth(112);
-            pad->setMinimumWidth(152);
-            for (auto* button : {keyboard, pad}) {
-                layout->addWidget(button);
-            }
+            layout->addWidget(keyboard);
+            layout->addWidget(pad);
             layout->addWidget(reset);
             const auto refresh = [this, action, keyboard, pad, reset] {
                 const QString key = Spotlight::KeyText(QKeySequence::fromString(
                     action.sibling(action.row(), 1).data().toString(), QKeySequence::NativeText));
-                const QString button =
-                    action.sibling(action.row(), 2).data().toString().replace(QLatin1Char('+'),
-                                                                              QLatin1Char(' '));
-                keyboard->SetBinding(key.isEmpty() ? tr("Not set") : key, !key.isEmpty());
+                QStringList buttons = action.sibling(action.row(), 2)
+                                          .data()
+                                          .toString()
+                                          .split(QLatin1Char('+'), Qt::SkipEmptyParts);
+                for (QString& button : buttons) {
+                    button = pad_names.value(button, button);
+                }
+                const QString pad_text = buttons.join(QStringLiteral(" + "));
+                keyboard->SetBinding(key.isEmpty() ? QStringList{tr("Not set")}
+                                                   : key.split(QLatin1Char(' ')),
+                                     !key.isEmpty());
                 keyboard->setToolTip(tr("Keyboard: %1").arg(key.isEmpty() ? tr("not set") : key));
                 keyboard->setAccessibleName(keyboard->toolTip());
-                pad->SetBinding(button.isEmpty() ? tr("Not set") : button, !button.isEmpty());
+                pad->SetBinding({pad_text.isEmpty() ? tr("Not set") : pad_text},
+                                !pad_text.isEmpty());
                 pad->setToolTip(
-                    tr("Controller: %1").arg(button.isEmpty() ? tr("not set") : button));
+                    tr("Controller: %1").arg(pad_text.isEmpty() ? tr("not set") : pad_text));
                 pad->setAccessibleName(pad->toolTip());
-                reset->setVisible(!hotkeys_tab->IsDefault(action));
+                reset->setEnabled(!hotkeys_tab->IsDefault(action));
             };
             refresh();
             connect(model, &QAbstractItemModel::dataChanged, control, refresh);
-            connect(keyboard, &QAbstractButton::clicked, this,
-                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 1)); });
-            connect(pad, &QAbstractButton::clicked, this,
-                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 2)); });
+            for (const auto& [button, column] : {std::pair{keyboard, 1}, std::pair{pad, 2}}) {
+                connect(button, &QAbstractButton::clicked, this, [this, action, column] {
+                    hotkeys_tab->Configure(action.sibling(action.row(), column));
+                });
+                button->menu = [this, button, action, column](const QPoint& at) {
+                    auto* menu = new QMenu(button);
+                    menu->setAttribute(Qt::WA_DeleteOnClose);
+                    menu->addSection(tr("Binding actions"));
+                    menu->addAction(tr("Edit"), this, [this, action, column] {
+                        hotkeys_tab->Configure(action.sibling(action.row(), column));
+                    });
+                    menu->addAction(tr("Clear"), this, [this, action, column] {
+                        hotkeys_tab->Model()->setData(action.sibling(action.row(), column),
+                                                      QString{});
+                    });
+                    menu->addAction(tr("Restore default"), this,
+                                    [this, action] { hotkeys_tab->RestoreAction(action); });
+                    menu->popup(at);
+                };
+            }
             connect(reset, &QAbstractButton::clicked, this,
                     [this, action] { hotkeys_tab->RestoreAction(action); });
-            SettingsPage::AddRow(rows, group->child(row)->text(), {}, QStringLiteral("keyboard"),
-                                 Tints::Gold(), control);
+            SettingsPage::AddRow(rows, action.data().toString(), {}, {}, {}, control);
         }
     }
+    settings_page->AddBlock(
+        shortcuts,
+        SettingsPage::Note(tr("Press a controller chord while its binding is waiting. A timeout or "
+                              "conflict keeps the prior binding.")),
+        tr("Controller chord"));
 }
 
 void ConfigureDialog::AddSettingRow(QVBoxLayout* group, QWidget* page,
