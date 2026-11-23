@@ -112,6 +112,9 @@ class Scrim final : public QWidget {
 public:
     explicit Scrim(QWidget* window) : QWidget(window) {
         setAttribute(Qt::WA_TransparentForMouseEvents);
+        // The style sheet gives a plain QWidget the window background; the scrim only dims.
+        ensurePolished();
+        setAttribute(Qt::WA_StyledBackground, false);
         setGeometry(window->rect());
         window->installEventFilter(this);
         raise();
