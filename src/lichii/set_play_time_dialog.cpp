@@ -80,7 +80,7 @@ SetPlayTimeDialog::SetPlayTimeDialog(QWidget* parent, const QString& title, u64 
 
     error = new Spotlight::Notice;
     error->SetTone(Spotlight::Notice::Tone::Error);
-    error->SetText(tr("Total play time reached maximum."));
+    error->setText(tr("Total play time reached maximum."));
     error->hide();
     layout->addWidget(error);
 
