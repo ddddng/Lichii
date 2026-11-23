@@ -3,12 +3,14 @@
 #pragma once
 
 #include <QByteArray>
-#include <QDialog>
 #include <QList>
 #include <QMap>
 #include <QPointer>
 #include <QString>
 #include <QUrl>
+
+#include "lichii/spotlight/dialog.h"
+#include "lichii/spotlight/notice.h"
 
 class QCheckBox;
 class QComboBox;
@@ -18,6 +20,7 @@ class QNetworkAccessManager;
 class QNetworkReply;
 class QPlainTextEdit;
 class QPushButton;
+class QTabBar;
 class QTabWidget;
 
 namespace CompatibilityReporting {
@@ -46,7 +49,7 @@ struct Session {
     QString updates;
 };
 
-class Dialog final : public QDialog {
+class Dialog final : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
@@ -70,6 +73,8 @@ private:
                   const QByteArray& retry_after, bool network_error);
     QByteArray Payload() const;
     QString ValidationError() const;
+    void SetStatus(const QString& text, Spotlight::Notice::Tone tone);
+    void SetMatch(const QString& text, bool confirmed);
 
     QNetworkAccessManager* network;
     QPointer<QNetworkReply> reply;
@@ -97,8 +102,10 @@ private:
     QPushButton* submit;
     QPushButton* clear;
     QPushButton* open_receipt;
-    QLabel* status;
-    QLabel* match;
+    Spotlight::Notice* status;
+    Spotlight::Notice* match;
+    QLabel* page_label;
+    QTabBar* pages;
     QTabWidget* tabs;
     QPlainTextEdit* preview;
 };

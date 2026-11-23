@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "compatibility_report.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
 #include <cmath>
 #include <memory>
@@ -9,7 +11,9 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
-#include <QFormLayout>
+#include <QFontDatabase>
+#include <QGridLayout>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -21,6 +25,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QUrlQuery>
@@ -47,6 +52,35 @@ const QStringList OptionalFields{QStringLiteral("handle"), QStringLiteral("ram")
 
 QString Known(const QString& value) {
     return value.trimmed().isEmpty() ? QStringLiteral("Unknown") : value.trimmed();
+}
+
+QString Card(const QString& name) {
+    return QStringLiteral("#%1 { background-color: rgba(255, 255, 255, 13); "
+                          "border: 1px solid rgba(255, 255, 255, 20); border-radius: 20px; }")
+        .arg(name);
+}
+
+QLabel* FieldLabel(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setFont(Spotlight::Font(13, 600));
+    Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    return label;
+}
+
+QLabel* Secondary(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setFont(Spotlight::Font(13, 400));
+    label->setWordWrap(true);
+    Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
+    return label;
+}
+
+QWidget* Divider(QWidget* parent) {
+    auto* line = new QWidget(parent);
+    line->setFixedHeight(1);
+    line->setAttribute(Qt::WA_StyledBackground);
+    line->setStyleSheet(QStringLiteral("background-color: rgba(255, 255, 255, 18);"));
+    return line;
 }
 
 bool HasControls(const QString& value) {
@@ -94,127 +128,244 @@ QString SummarizeEnabledAddons(const QList<Addon>& addons) {
 Dialog::Dialog(const Session& session, QWidget* parent) : Dialog(session, nullptr, parent) {}
 
 Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget* parent)
-    : QDialog(parent), network(network_ ? network_ : new QNetworkAccessManager(this)) {
+    : Spotlight::Dialog(parent), network(network_ ? network_ : new QNetworkAccessManager(this)) {
     setWindowTitle(tr("Submit compatibility report"));
-    resize(760, 790);
+    SetSubtitle(tr("Share your experience with the latest completed session. Review the report "
+                   "before submitting."));
+    SetIcon(u"clipboard-text", Spotlight::Color::Accent());
+    resize(1102, 800);
     auto* layout = new QVBoxLayout(this);
-    auto* introduction = new QLabel(
-        tr("Share your experience with the latest completed session. Nothing is sent until you "
-           "choose Search or Submit. Logs are not uploaded. No account is required."),
-        this);
-    introduction->setWordWrap(true);
-    layout->addWidget(introduction);
-    auto* search_row = new QHBoxLayout;
-    query = new QLineEdit(session.title, this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+    auto* body = new QHBoxLayout;
+    body->setSpacing(16);
+    layout->addLayout(body, 1);
+
+    auto* catalog = new QWidget(this);
+    catalog->setObjectName(QStringLiteral("catalogCard"));
+    catalog->setAttribute(Qt::WA_StyledBackground);
+    catalog->setStyleSheet(Card(catalog->objectName()));
+    catalog->setFixedWidth(320);
+    auto* catalog_layout = new QVBoxLayout(catalog);
+    catalog_layout->setContentsMargins(14, 14, 14, 14);
+    catalog_layout->setSpacing(12);
+    auto* catalog_title = new QLabel(tr("Catalog game"), catalog);
+    catalog_title->setFont(Spotlight::Font(15, 600));
+    auto* query_group = new QVBoxLayout;
+    query_group->setSpacing(8);
+    query_group->addWidget(catalog_title);
+    query_group->addWidget(FieldLabel(tr("Game title to search"), catalog));
+    query = new QLineEdit(session.title, catalog);
     query->setObjectName(QStringLiteral("catalogQuery"));
     query->setMaxLength(150);
     query->setPlaceholderText(tr("Game title to search"));
-    search = new QPushButton(tr("Search catalog"), this);
+    query->setFixedHeight(36);
+    query->setFont(Spotlight::Font(14, 500));
+    query->addAction(Spotlight::Icon(QStringLiteral("magnifying-glass"),
+                                     Spotlight::Color::TextSecondary(), 16),
+                     QLineEdit::LeadingPosition);
+    query_group->addWidget(query);
+    catalog_layout->addLayout(query_group);
+    search = new QPushButton(
+        Spotlight::Icon(QStringLiteral("magnifying-glass"), Spotlight::Color::OnAccent(), 16),
+        tr("Search catalog"), catalog);
     search->setObjectName(QStringLiteral("search"));
-    search_row->addWidget(query, 1);
+    search->setProperty("kind", QStringLiteral("primary"));
+    auto* search_row = new QHBoxLayout;
     search_row->addWidget(search);
-    layout->addLayout(search_row);
-    auto* search_notice = new QLabel(tr("Search sends only the text above to lichii.zortos.me. "
-                                        "The service sees your IP address."),
-                                     this);
-    search_notice->setWordWrap(true);
-    layout->addWidget(search_notice);
-    auto* results_row = new QHBoxLayout;
-    games = new QComboBox(this);
+    search_row->addStretch(1);
+    catalog_layout->addLayout(search_row);
+    catalog_layout->addWidget(
+        Secondary(tr("Search sends only this text to lichii.zortos.me, not your local title ID "
+                     "or files. The service sees your IP address."),
+                  catalog));
+    catalog_layout->addWidget(Divider(catalog));
+    games = new QComboBox(catalog);
     games->setObjectName(QStringLiteral("catalogResults"));
-    previous = new QPushButton(tr("Previous"), this);
-    next = new QPushButton(tr("Next"), this);
+    games->setFont(Spotlight::Font(13, 600));
+    catalog_layout->addWidget(games);
+    previous = new QPushButton(
+        Spotlight::Icon(QStringLiteral("caret-left"), Spotlight::Color::Text(), 14), tr("Previous"),
+        catalog);
+    next = new QPushButton(Spotlight::Icon(QStringLiteral("caret-right"), Spotlight::Color::Text(), 14),
+                           tr("Next"), catalog);
     previous->setObjectName(QStringLiteral("previous"));
     next->setObjectName(QStringLiteral("next"));
-    confirm = new QPushButton(tr("Confirm game"), this);
+    auto* paging = new QHBoxLayout;
+    paging->setSpacing(8);
+    paging->addWidget(previous);
+    paging->addWidget(next);
+    paging->addStretch(1);
+    catalog_layout->addLayout(paging);
+    confirm = new QPushButton(tr("Confirm game"), catalog);
     confirm->setObjectName(QStringLiteral("confirm"));
-    results_row->addWidget(games, 1);
-    results_row->addWidget(previous);
-    results_row->addWidget(next);
-    results_row->addWidget(confirm);
-    layout->addLayout(results_row);
-    match = new QLabel(tr("No catalog game confirmed."), this);
-    match->setTextFormat(Qt::PlainText);
-    match->setWordWrap(true);
-    layout->addWidget(match);
+    page_label = new QLabel(catalog);
+    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    mono.setPixelSize(12);
+    page_label->setFont(mono);
+    Spotlight::SetTextColor(page_label, Spotlight::Color::TextSecondary());
+    auto* confirm_row = new QHBoxLayout;
+    confirm_row->setSpacing(12);
+    confirm_row->addWidget(confirm);
+    confirm_row->addWidget(page_label);
+    confirm_row->addStretch(1);
+    catalog_layout->addLayout(confirm_row);
+    match = new Spotlight::Notice(catalog);
+    match->setText(tr("No catalog game confirmed."));
+    catalog_layout->addWidget(match);
+    for (auto* button : {search, previous, next, confirm}) {
+        button->setMinimumHeight(34);
+        button->setFont(Spotlight::Font(12, 600));
+    }
+    body->addWidget(catalog, 0, Qt::AlignTop);
 
+    auto* report = new QVBoxLayout;
+    report->setSpacing(12);
+    auto* page_track = new QWidget(this);
+    page_track->setObjectName(QStringLiteral("pageTrack"));
+    page_track->setAttribute(Qt::WA_StyledBackground);
+    page_track->setStyleSheet(QStringLiteral(
+        "#pageTrack { background-color: rgba(255, 255, 255, 15); border-radius: 19px; }"));
+    auto* track_layout = new QHBoxLayout(page_track);
+    track_layout->setContentsMargins(3, 3, 3, 3);
+    pages = new QTabBar(page_track);
+    pages->setExpanding(false);
+    pages->setDrawBase(false);
+    pages->setDocumentMode(true);
+    pages->setFont(Spotlight::Font(13, 500));
+    pages->setStyleSheet(QStringLiteral(
+        "QTabBar { background: transparent; }"
+        "QTabBar::tab { background: transparent; color: #ffffff; border: 0; border-radius: 16px; "
+        "height: 32px; padding: 0 14px; margin: 0 1px 0 1px; }"
+        "QTabBar::tab:hover { background-color: rgba(255, 255, 255, 20); }"
+        "QTabBar::tab:selected { background-color: #ffffff; color: #14151b; font-weight: 600; }"));
+    track_layout->addWidget(pages);
+    auto* page_row = new QHBoxLayout;
+    page_row->addWidget(page_track);
+    page_row->addStretch(1);
+    report->addLayout(page_row);
     tabs = new QTabWidget(this);
-    layout->addWidget(tabs, 1);
+    tabs->tabBar()->hide();
+    tabs->setDocumentMode(true);
+    tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; top: 0; }"));
+    report->addWidget(tabs, 1);
+    body->addLayout(report, 1);
+
     const auto add_page = [this](const QString& title) {
         auto* content = new QWidget;
-        auto* form = new QFormLayout(content);
-        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        auto* grid = new QGridLayout(content);
+        grid->setContentsMargins(0, 0, 4, 0);
+        grid->setHorizontalSpacing(12);
+        grid->setVerticalSpacing(12);
+        grid->setColumnStretch(0, 1);
+        grid->setColumnStretch(1, 1);
         auto* scroll = new QScrollArea(this);
         scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setWidget(content);
         tabs->addTab(scroll, title);
-        return form;
+        pages->addTab(title);
+        return grid;
     };
-    const auto line = [this](QFormLayout* form, const QString& key, const QString& label,
-                             const QString& value = QString{}) {
+    const auto place = [](QGridLayout* grid, QWidget* field, const QString& label, int row,
+                          int column, int span) {
+        auto* cell = new QVBoxLayout;
+        cell->setSpacing(6);
+        auto* caption = FieldLabel(label, field->parentWidget());
+        caption->setBuddy(field);
+        cell->addWidget(caption);
+        cell->addWidget(field);
+        grid->addLayout(cell, row, column, 1, span);
+    };
+    const auto line = [this, place](QGridLayout* grid, const QString& key, const QString& label,
+                                    int row, int column, int span,
+                                    const QString& value = QString{}) {
         auto* edit = new QLineEdit(value, this);
         edit->setObjectName(key);
         edit->setMaxLength(Limits.value(key));
+        edit->setFixedHeight(34);
+        edit->setFont(Spotlight::Font(14, 500));
         fields.insert(key, edit);
-        form->addRow(label, edit);
+        place(grid, edit, label, row, column, span);
     };
-    const auto paragraph = [this](QFormLayout* form, const QString& key, const QString& label,
-                                  const QString& value = QString{}) {
+    const auto paragraph = [this, place](QGridLayout* grid, const QString& key,
+                                         const QString& label, int row, int column, int span,
+                                         const QString& value = QString{}) {
         auto* edit = new QPlainTextEdit(value, this);
         edit->setObjectName(key);
-        edit->setMinimumHeight(90);
+        edit->setMinimumHeight(62);
+        edit->setFont(Spotlight::Font(13, 400));
         paragraphs.insert(key, edit);
-        form->addRow(label, edit);
+        place(grid, edit, label, row, column, span);
+    };
+    const auto choice = [](QComboBox* box) {
+        box->setFont(Spotlight::Font(13, 600));
+        box->setMinimumHeight(34);
     };
     auto* experience = add_page(tr("Experience"));
-    line(experience, QStringLiteral("name"), tr("Public nickname"), QStringLiteral("Anonymous"));
-    line(experience, QStringLiteral("handle"), tr("X handle (optional)"));
+    line(experience, QStringLiteral("name"), tr("Public nickname"), 0, 0, 1,
+         QStringLiteral("Anonymous"));
+    line(experience, QStringLiteral("handle"), tr("X handle (optional)"), 0, 1, 1);
     outcome = new QComboBox(this);
     outcome->setObjectName(QStringLiteral("outcome"));
     outcome->addItem(tr("Choose your assessment"), QString{});
     for (const auto& value : {"Perfect", "Playable", "Runs", "Loads", "Unplayable"}) {
         outcome->addItem(QString::fromLatin1(value), QString::fromLatin1(value));
     }
-    experience->addRow(tr("Compatibility"), outcome);
-    line(experience, QStringLiteral("summary"), tr("Summary"));
-    paragraph(experience, QStringLiteral("progress"), tr("How far did you play?"));
-    paragraph(experience, QStringLiteral("details"), tr("What worked or failed?"));
-    paragraph(experience, QStringLiteral("reproduction"), tr("Steps to reproduce (optional)"));
+    choice(outcome);
+    place(experience, outcome, tr("Compatibility"), 1, 0, 2);
+    line(experience, QStringLiteral("summary"), tr("Summary"), 2, 0, 2);
+    paragraph(experience, QStringLiteral("progress"), tr("How far did you play?"), 3, 0, 2);
+    paragraph(experience, QStringLiteral("details"), tr("What worked or failed?"), 4, 0, 2);
+    paragraph(experience, QStringLiteral("reproduction"), tr("Steps to reproduce (optional)"), 5,
+              0, 2);
+    experience->setRowStretch(6, 1);
     auto* setup = add_page(tr("System and settings"));
-    auto* setup_notice =
-        new QLabel(tr("Prefilled values describe launch settings, not measured "
-                      "performance. Review changes made during play. Unknown means "
-                      "not collected. Do not paste logs, paths, keys or private details."));
-    setup_notice->setWordWrap(true);
-    setup->addRow(setup_notice);
-    line(setup, QStringLiteral("build"), tr("Lichii build"), Known(session.build));
-    line(setup, QStringLiteral("gameVersion"), tr("Game version"), Known(session.game_version));
-    line(setup, QStringLiteral("cpu"), tr("CPU"), Known(session.cpu));
-    line(setup, QStringLiteral("gpu"), tr("GPU"), Known(session.gpu));
-    line(setup, QStringLiteral("driver"), tr("GPU driver / OpenGL version"), Known(session.driver));
-    line(setup, QStringLiteral("os"), tr("Operating system"), Known(session.os));
-    line(setup, QStringLiteral("ram"), tr("RAM (optional)"), session.ram);
+    setup->addWidget(
+        Secondary(tr("Prefilled values describe launch settings, not measured performance. "
+                     "Review changes made during play. Unknown means not collected. Do not paste "
+                     "logs, paths, keys or private details."),
+                  this),
+        0, 0, 1, 2);
+    line(setup, QStringLiteral("build"), tr("Lichii build"), 1, 0, 1, Known(session.build));
+    line(setup, QStringLiteral("gameVersion"), tr("Game version"), 1, 1, 1,
+         Known(session.game_version));
+    line(setup, QStringLiteral("cpu"), tr("CPU"), 2, 0, 1, Known(session.cpu));
+    line(setup, QStringLiteral("gpu"), tr("GPU"), 2, 1, 1, Known(session.gpu));
+    line(setup, QStringLiteral("driver"), tr("GPU driver / OpenGL version"), 3, 0, 1,
+         Known(session.driver));
+    line(setup, QStringLiteral("os"), tr("Operating system"), 3, 1, 1, Known(session.os));
+    line(setup, QStringLiteral("ram"), tr("RAM (optional)"), 4, 0, 1, session.ram);
     graphics_api = new QComboBox(this);
     graphics_api->setObjectName(QStringLiteral("graphicsApi"));
     graphics_api->addItems(
         {QStringLiteral("Unknown"), QStringLiteral("Vulkan"), QStringLiteral("OpenGL")});
     graphics_api->setCurrentText(Known(session.graphics_api));
-    setup->addRow(tr("Graphics API"), graphics_api);
-    paragraph(setup, QStringLiteral("settings"), tr("Launch settings"), Known(session.settings));
-    paragraph(setup, QStringLiteral("updates"), tr("Updates (optional)"), session.updates);
-    paragraph(setup, QStringLiteral("mods"), tr("Mods (optional)"), session.mods);
+    choice(graphics_api);
+    place(setup, graphics_api, tr("Graphics API"), 4, 1, 1);
+    paragraph(setup, QStringLiteral("settings"), tr("Launch settings"), 5, 0, 2,
+              Known(session.settings));
+    paragraph(setup, QStringLiteral("updates"), tr("Updates (optional)"), 6, 0, 1,
+              session.updates);
+    paragraph(setup, QStringLiteral("mods"), tr("Mods (optional)"), 6, 1, 1, session.mods);
+    setup->setRowStretch(7, 1);
     preview = new QPlainTextEdit(this);
     preview->setObjectName(QStringLiteral("preview"));
     preview->setReadOnly(true);
+    QFont preview_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    preview_font.setPixelSize(12);
+    preview->setFont(preview_font);
     tabs->addTab(preview, tr("Public preview"));
+    pages->addTab(tr("Public preview"));
+    connect(pages, &QTabBar::currentChanged, tabs, &QTabWidget::setCurrentIndex);
+    connect(tabs, &QTabWidget::currentChanged, pages, &QTabBar::setCurrentIndex);
 
-    auto* privacy = new QLabel(tr("All report fields in the preview will be public. Logs, files, "
-                                  "local title IDs and play history are not sent. The server uses "
-                                  "your IP address for rate limiting. Review and clear anything "
-                                  "you do not want to share."),
-                               this);
-    privacy->setWordWrap(true);
-    layout->addWidget(privacy);
+    layout->addWidget(
+        Secondary(tr("All report fields in the preview will be public. Logs, files, local title "
+                     "IDs and play history are not sent. The server uses your IP address for rate "
+                     "limiting. Review and clear anything you do not want to share."),
+                  this));
     public_consent = new QCheckBox(tr("I understand my name, optional X handle, report text, "
                                       "hardware and settings will be public."),
                                    this);
@@ -223,21 +374,33 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
                                        this);
     public_consent->setObjectName(QStringLiteral("publicConsent"));
     safe_files_consent->setObjectName(QStringLiteral("safeFilesConsent"));
-    layout->addWidget(public_consent);
-    layout->addWidget(safe_files_consent);
-    status = new QLabel(this);
+    auto* consents = new QVBoxLayout;
+    consents->setSpacing(8);
+    for (auto* consent : {public_consent, safe_files_consent}) {
+        consent->setFont(Spotlight::Font(14, 600));
+        consents->addWidget(consent);
+    }
+    layout->addLayout(consents);
+    status = new Spotlight::Notice(this);
     status->setObjectName(QStringLiteral("status"));
-    status->setTextFormat(Qt::PlainText);
-    status->setWordWrap(true);
+    status->hide();
     layout->addWidget(status);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
-    clear = buttons->addButton(tr("Clear draft"), QDialogButtonBox::ResetRole);
-    submit = buttons->addButton(tr("Submit report"), QDialogButtonBox::ActionRole);
+    submit = buttons->addButton(tr("Submit report"), QDialogButtonBox::AcceptRole);
+    submit->setProperty("kind", QStringLiteral("primary"));
     open_receipt = buttons->addButton(tr("Open public report"), QDialogButtonBox::ActionRole);
-    clear->setObjectName(QStringLiteral("clear"));
+    open_receipt->setIcon(
+        Spotlight::Icon(QStringLiteral("arrow-square-out"), Spotlight::Color::Text(), 16));
+    clear = new QPushButton(tr("Clear draft"), this);
+    clear->setProperty("kind", QStringLiteral("ghost"));
     submit->setObjectName(QStringLiteral("submit"));
+    clear->setObjectName(QStringLiteral("clear"));
     open_receipt->setVisible(false);
-    layout->addWidget(buttons);
+    auto* button_row = new QHBoxLayout;
+    button_row->setContentsMargins(0, 6, 0, 0);
+    button_row->addWidget(clear);
+    button_row->addWidget(buttons, 1);
+    layout->addLayout(button_row);
     for (auto* button : findChildren<QPushButton*>()) {
         button->setAutoDefault(false);
         button->setDefault(false);
@@ -268,12 +431,13 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
         games->clear();
         confirmed_game = 0;
         page = page_count = 1;
-        match->setText(tr("No catalog game confirmed."));
+        page_label->clear();
+        SetMatch(tr("No catalog game confirmed."), false);
         Edited();
     });
     connect(games, &QComboBox::currentIndexChanged, this, [this] {
         confirmed_game = 0;
-        match->setText(tr("No catalog game confirmed."));
+        SetMatch(tr("No catalog game confirmed."), false);
         Edited();
     });
     for (auto* field : fields) {
@@ -290,6 +454,17 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
     connect(cooldown, &QTimer::timeout, this, &Dialog::Refresh);
     cooldown->start(1000);
     Refresh();
+}
+
+void Dialog::SetStatus(const QString& text, Spotlight::Notice::Tone tone) {
+    status->SetTone(tone);
+    status->setText(text);
+    status->show();
+}
+
+void Dialog::SetMatch(const QString& text, bool confirmed) {
+    match->SetTone(confirmed ? Spotlight::Notice::Tone::Success : Spotlight::Notice::Tone::Neutral);
+    match->setText(text);
 }
 
 Dialog::~Dialog() {
@@ -340,7 +515,7 @@ void Dialog::Clear() {
     outcome->setCurrentIndex(0);
     graphics_api->setCurrentIndex(0);
     Edited();
-    status->setText(tr("Draft cleared. Nothing was sent by clearing it."));
+    SetStatus(tr("Draft cleared. Nothing was sent by clearing it."), Spotlight::Notice::Tone::Neutral);
 }
 
 QByteArray Dialog::Payload() const {
@@ -400,6 +575,7 @@ void Dialog::Refresh() {
     next->setEnabled(editing && page < page_count && !cooling_down);
     clear->setEnabled(editing || searching);
     tabs->setEnabled(editing || searching || state == State::Finished);
+    pages->setEnabled(tabs->isEnabled());
     public_consent->setEnabled(editing);
     safe_files_consent->setEnabled(editing);
     const auto validation = ValidationError();
@@ -418,14 +594,14 @@ void Dialog::Search() {
         return;
     }
     if (HasControls(query->text()) || query->text().trimmed().size() > 150) {
-        status->setText(tr("Check the search text."));
+        SetStatus(tr("Check the search text."), Spotlight::Notice::Tone::Warning);
         return;
     }
     confirmed_game = 0;
     games->clear();
     Edited();
     state = State::Searching;
-    status->setText(tr("Searching catalog… Cancel closes the dialog and stops this request."));
+    SetStatus(tr("Searching catalog… Cancel closes the dialog and stops this request."), Spotlight::Notice::Tone::Neutral);
     Refresh();
     Request(false);
 }
@@ -439,7 +615,7 @@ void Dialog::ConfirmGame() {
     }
     confirmed_game = games->currentData().toLongLong();
     confirmed_title = games->currentText();
-    match->setText(tr("Confirmed: %1 (catalog ID %2)").arg(confirmed_title).arg(confirmed_game));
+    SetMatch(tr("Confirmed: %1 (catalog ID %2)").arg(confirmed_title).arg(confirmed_game), true);
     Edited();
 }
 
@@ -450,7 +626,7 @@ void Dialog::Submit() {
     }
     const auto error = ValidationError();
     if (!error.isEmpty()) {
-        status->setText(error);
+        SetStatus(error, Spotlight::Notice::Tone::Warning);
         return;
     }
     const auto payload = Payload();
@@ -459,8 +635,8 @@ void Dialog::Submit() {
         submission_key = QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8();
     }
     state = State::Submitting;
-    status->setText(tr("Submitting… Closing stops waiting, but cannot retract a report the "
-                       "server already received. There are no automatic retries."));
+    SetStatus(tr("Submitting… Closing stops waiting, but cannot retract a report the "
+                       "server already received. There are no automatic retries."), Spotlight::Notice::Tone::Neutral);
     Refresh();
     Request(true, submitted_payload);
 }
@@ -531,9 +707,9 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
         const auto seconds = retry_after.toLongLong(&valid);
         const auto delay = valid && seconds >= 0 && seconds <= 31536000 ? seconds : 3600;
         retry_at = QDateTime::currentMSecsSinceEpoch() + delay * 1000;
-        status->setText(tr("Rate limit reached. Wait %1 seconds, then retry explicitly. "
+        SetStatus(tr("Rate limit reached. Wait %1 seconds, then retry explicitly. "
                            "Nothing will be retried automatically.")
-                            .arg(delay));
+                            .arg(delay), Spotlight::Notice::Tone::Warning);
     } else if (http_status == 400) {
         const auto errors =
             QJsonDocument::fromJson(body).object().value(QStringLiteral("fields")).toObject();
@@ -547,26 +723,26 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
                 invalid_fields.append(it.key());
             }
         }
-        status->setText(invalid_fields.isEmpty()
+        SetStatus(invalid_fields.isEmpty()
                             ? tr("The server rejected the report. Review the fields and length "
                                  "limits before submitting again.")
                             : tr("The server rejected these fields: %1. Review them before "
                                  "submitting again.")
-                                  .arg(invalid_fields.join(QStringLiteral(", "))));
+                                  .arg(invalid_fields.join(QStringLiteral(", "))), Spotlight::Notice::Tone::Warning);
     } else if (http_status == 409) {
-        status->setText(
+        SetStatus(
             tr("The server rejected this submission identity. Edit the draft to start "
-               "a new submission; first check whether your report was already accepted."));
+               "a new submission; first check whether your report was already accepted."), Spotlight::Notice::Tone::Warning);
     } else if (http_status == 403 || http_status == 413 || http_status == 415) {
-        status->setText(
+        SetStatus(
             tr("The server rejected the request (HTTP %1). No automatic retry was made.")
-                .arg(http_status));
+                .arg(http_status), Spotlight::Notice::Tone::Warning);
     } else if (network_error || (http_status != 200 && !(submission && http_status == 201))) {
-        status->setText(
+        SetStatus(
             submission ? tr("No valid receipt was received. Delivery may have succeeded. "
                             "An explicit retry of this unchanged draft uses the same submission "
                             "identity. Closing loses that identity; do not create a duplicate.")
-                       : tr("Catalog search failed. Check your connection and retry explicitly."));
+                       : tr("Catalog search failed. Check your connection and retry explicitly."), Spotlight::Notice::Tone::Warning);
     } else {
         QJsonParseError parse_error;
         const auto document = QJsonDocument::fromJson(body, &parse_error);
@@ -585,10 +761,10 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
                 state = State::Finished;
                 receipt_url = url;
                 open_receipt->setVisible(true);
-                status->setText(tr("Report submitted. It is public. Thank you."));
+                SetStatus(tr("Report submitted. It is public. Thank you."), Spotlight::Notice::Tone::Success);
             } else {
-                status->setText(tr("The server returned an invalid receipt. The report may have "
-                                   "been accepted. Only retry this unchanged draft explicitly."));
+                SetStatus(tr("The server returned an invalid receipt. The report may have "
+                                   "been accepted. Only retry this unchanged draft explicitly."), Spotlight::Notice::Tone::Warning);
             }
         } else {
             const auto entries = object.value(QStringLiteral("games")).toArray();
@@ -612,12 +788,13 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
                                    game.value(QStringLiteral("sgdbId")).toInteger());
                 }
                 page_count = pages;
-                status->setText(tr("Page %1 of %2. Select the exact game and press Confirm game.")
+                page_label->setText(tr("Page %1 of %2").arg(page).arg(page_count));
+                SetStatus(tr("Page %1 of %2. Select the exact game and press Confirm game.")
                                     .arg(page)
-                                    .arg(page_count));
+                                    .arg(page_count), Spotlight::Notice::Tone::Neutral);
             } else {
-                status->setText(
-                    tr("The catalog returned an invalid response. No game was confirmed."));
+                SetStatus(
+                    tr("The catalog returned an invalid response. No game was confirmed."), Spotlight::Notice::Tone::Warning);
             }
         }
     }
