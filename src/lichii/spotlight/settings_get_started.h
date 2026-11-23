@@ -48,6 +48,7 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
@@ -63,6 +64,8 @@ private:
         QString description;
         QString status;
         bool done;
+        /// Shown dimmed with a gold status: a game is running.
+        bool locked;
         std::function<void()> action;
     };
 
@@ -82,6 +85,8 @@ private:
     QVBoxLayout* page_slot;
     QList<QWidget*> footer;
     Button* continue_button;
+    QWidget* title_bar;
+    QWidget* edges = nullptr;
     int current = 0;
     bool map_buttons = false;
 };

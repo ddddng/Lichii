@@ -56,6 +56,7 @@
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
+#include "lichii/spotlight/startup_prompt.h"
 #include "lichii/spotlight/style.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
@@ -119,6 +120,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QImage>
 #include <QInputDialog>
 #include <QLabel>
@@ -425,6 +427,16 @@ constexpr std::array<std::pair<u32, const char*>, 7> default_game_icon_sizes{
     std::make_pair(256, QT_TRANSLATE_NOOP("MainWindow", "Full Size (256x256)")),
 };
 
+QString ControllerHotkey(std::string_view action) {
+    for (const auto& shortcut : UISettings::values.shortcuts) {
+        if (shortcut.group == "Main Window" && shortcut.name == action) {
+            return QString::fromStdString(shortcut.shortcut.controller_keyseq)
+                .replace(QStringLiteral("Screenshot"), MainWindow::tr("Capture"));
+        }
+    }
+    return {};
+}
+
 QString GetTranslatedGameIconSize(size_t index) {
     return QCoreApplication::translate("MainWindow", default_game_icon_sizes[index].second);
 }
@@ -706,8 +718,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (has_broken_vulkan) {
         UISettings::values.has_broken_vulkan = true;
 
-        QMessageBox::warning(this, tr("Broken Vulkan Installation Detected"),
-                             tr("Vulkan initialization failed during boot."));
+        Spotlight::StartupPrompt::Notify(this, Spotlight::StartupPrompt::Tone::Warning,
+                                         tr("Broken Vulkan Installation Detected"),
+                                         tr("Vulkan initialization failed during boot."));
 #ifdef HAS_OPENGL
         Settings::values.renderer_backend = Settings::RendererBackend::OpenGL_GLSL;
 #else
@@ -1273,8 +1286,20 @@ void MainWindow::InitializeWidgets() {
         ui->menu_Emulation->addAction(tr("In-game Menu"), this, &MainWindow::ToggleInGameMenu);
     ingame_menu_action->setEnabled(false);
 
-    quick_controls = ui->menu_View->addMenu(tr("Quick controls"));
+    quick_controls = new Spotlight::Menu(this);
+    quick_controls->setTitle(tr("Quick controls"));
+    ui->menu_View->addMenu(quick_controls);
     quick_controls->setToolTipsVisible(true);
+    const auto show_hotkeys = [this](QMenu* menu,
+                                     std::vector<std::pair<QAction*, const char*>> hotkeys) {
+        connect(menu, &QMenu::aboutToShow, this, [this, hotkeys] {
+            for (const auto& [action, name] : hotkeys) {
+                Spotlight::SetHotkeyHint(action,
+                                         hotkey_registry.GetKeySequence("Main Window", name),
+                                         ControllerHotkey(name));
+            }
+        });
+    };
     const auto make_submenu = [](QMenu* parent, const QString& name) {
         auto* menu = parent->addMenu(name);
         menu->setToolTipsVisible(true);
@@ -1296,7 +1321,11 @@ void MainWindow::InitializeWidgets() {
         }
     };
     const auto all = [](auto) { return true; };
+    const auto menu_icon = [](QMenu* menu, QStringView name) {
+        menu->menuAction()->setIcon(Spotlight::Icon(name, Spotlight::Color::MenuInk(), 16));
+    };
     auto* renderer = make_submenu(quick_controls, tr("Renderer"));
+    menu_icon(renderer, u"monitor");
     renderer_status_action = renderer->menuAction();
     renderer->addAction(tr("Cycle renderer"), this, &MainWindow::OnToggleGraphicsAPI);
     renderer->addSeparator();
@@ -1316,6 +1345,7 @@ void MainWindow::InitializeWidgets() {
         });
 
     auto* console = make_submenu(quick_controls, tr("Console mode"));
+    menu_icon(console, u"game-controller");
     dock_status_action = console->menuAction();
     add_choices(
         console, ConfigurationShared::use_docked_mode_texts_map, Settings::values.use_docked_mode,
@@ -1327,6 +1357,7 @@ void MainWindow::InitializeWidgets() {
         all);
 
     auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"));
+    menu_icon(accuracy, u"gauge");
     gpu_accuracy_action = accuracy->menuAction();
     add_choices(
         accuracy, ConfigurationShared::gpu_accuracy_texts_map, Settings::values.gpu_accuracy,
@@ -1450,13 +1481,41 @@ void MainWindow::InitializeWidgets() {
 #endif
 
     auto* audio = make_submenu(quick_controls, tr("Audio"));
+    menu_icon(audio, u"speaker-high");
     auto* slider_action = new QWidgetAction(audio);
-    volume_slider = new QSlider(Qt::Horizontal, audio);
+    auto* volume_panel = new QWidget(audio);
+    volume_panel->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* volume_column = new QVBoxLayout(volume_panel);
+    volume_column->setContentsMargins(12, 8, 12, 8);
+    volume_column->setSpacing(7);
+    auto* volume_title = new QLabel(tr("Volume").toUpper(), volume_panel);
+    QFont title_font = Spotlight::Font(11, 600);
+    title_font.setLetterSpacing(QFont::PercentageSpacing, 106);
+    volume_title->setFont(title_font);
+    QPalette title_palette = volume_title->palette();
+    title_palette.setColor(QPalette::WindowText, Spotlight::Color::TextMuted());
+    volume_title->setPalette(title_palette);
+    volume_column->addWidget(volume_title);
+    auto* volume_row = new QHBoxLayout;
+    volume_row->setSpacing(12);
+    volume_slider = new QSlider(Qt::Horizontal, volume_panel);
     volume_slider->setAccessibleName(tr("Volume"));
-    volume_slider->setMinimumWidth(190);
+    volume_slider->setFixedWidth(252);
     volume_slider->setMaximum(200);
     volume_slider->setPageStep(5);
-    slider_action->setDefaultWidget(volume_slider);
+    auto* volume_value = new QLabel(volume_panel);
+    volume_value->setFont(Spotlight::Font(13, 600));
+    volume_value->setFixedWidth(44);
+    volume_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    volume_row->addWidget(volume_slider);
+    volume_row->addWidget(volume_value);
+    volume_column->addLayout(volume_row);
+    const auto show_volume = [this, volume_value] {
+        volume_value->setText(QStringLiteral("%1%").arg(volume_slider->value()));
+    };
+    connect(volume_slider, &QSlider::valueChanged, volume_value, show_volume);
+    connect(audio, &QMenu::aboutToShow, volume_value, show_volume);
+    slider_action->setDefaultWidget(volume_panel);
     audio->addAction(slider_action);
     const auto set_volume = [this](int percentage) {
         Settings::values.audio_muted = false;
@@ -1473,8 +1532,12 @@ void MainWindow::InitializeWidgets() {
         Settings::values.volume.SetValue(100);
         UpdateVolumeUI();
     });
+    show_hotkeys(audio, {{mute_action, "Audio Mute/Unmute"},
+                         {decrease_volume, "Audio Volume Down"},
+                         {increase_volume, "Audio Volume Up"}});
 
     auto* speed = make_submenu(quick_controls, tr("Emulation speed"));
+    menu_icon(speed, u"timer");
     speed_limit_action = speed->addAction(tr("Toggle speed limit"), this, [this] {
         RememberSpeedLimitBeforeHotkey();
         Settings::ToggleStandardMode();
@@ -1495,12 +1558,18 @@ void MainWindow::InitializeWidgets() {
     });
     slow_action->setCheckable(true);
     slow_action->setEnabled(false);
+    show_hotkeys(speed, {{speed_limit_action, "Toggle Framerate Limit"},
+                         {turbo_action, "Toggle Turbo Speed"},
+                         {slow_action, "Toggle Slow Speed"}});
 
     quick_controls->addSeparator();
     refresh_action =
         quick_controls->addAction(tr("Rescan library"), this, &MainWindow::OnGameListRefresh);
     quick_controls->addAction(ui->action_Show_Performance_Overlay);
-    auto* session = make_submenu(quick_controls, tr("Session status"));
+    auto* session = new Spotlight::Menu(quick_controls);
+    session->setTitle(tr("Session status"));
+    session->setToolTipsVisible(true);
+    quick_controls->addMenu(session);
     firmware_action = session->addAction(tr("Firmware not installed"));
     firmware_action->setEnabled(false);
     auto* multiplayer = session->addAction(tr("Multiplayer"), multiplayer_state,
@@ -1573,7 +1642,7 @@ void MainWindow::InitializeWidgets() {
     emulation_menu->addActions(
         {ui->action_Fullscreen, ui->action_Capture_Screenshot, ui->action_Load_Amiibo});
     emulation_menu->AddSharedMenu(speed,
-                                  Spotlight::Icon(u"lightning", Spotlight::Color::MenuInk(), 16));
+                                  Spotlight::Icon(u"timer", Spotlight::Color::MenuInk(), 16));
     emulation_menu->addSeparator();
     emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
     running_title_bar->AddMenu(tr("Emulation"), emulation_menu);
@@ -1664,14 +1733,7 @@ bool ConfirmCard(QWidget* parent, const QString& title, const QString& text, con
 }
 
 QString ControllerKeys(std::string_view action) {
-    for (const auto& shortcut : UISettings::values.shortcuts) {
-        if (shortcut.group == "Main Window" && shortcut.name == action) {
-            return QString::fromStdString(shortcut.shortcut.controller_keyseq)
-                .replace(QStringLiteral("Screenshot"), MainWindow::tr("Capture"))
-                .replace(QLatin1Char('+'), QStringLiteral(" + "));
-        }
-    }
-    return {};
+    return ControllerHotkey(action).replace(QLatin1Char('+'), QStringLiteral(" + "));
 }
 
 } // namespace
@@ -1683,6 +1745,8 @@ void MainWindow::LinkActionShortcut(QAction* action, const QString& action_name,
     action->setShortcutContext(
         hotkey_registry.GetShortcutContext(main_window, action_name.toStdString()));
     action->setAutoRepeat(false);
+    Spotlight::SetHotkeyHint(action, action->shortcut(),
+                             ControllerHotkey(action_name.toStdString()));
 
     this->addAction(action);
 
@@ -7187,13 +7251,15 @@ void MainWindow::OnCheckFirmwareDecryption(bool prompt) {
                     Common::FS::PathToUTF8String(
                         Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir)));
     } else if (!ContentManager::AreKeysPresent()) {
-        const auto res = QtCommon::Frontend::Warning(
-            tr("Derivation Components Missing"),
-            tr("Decryption keys are missing. Install them now?"),
-            QtCommon::Frontend::StandardButton::Yes | QtCommon::Frontend::StandardButton::No);
-
-        if (res == QtCommon::Frontend::StandardButton::Yes)
+        Spotlight::StartupPrompt prompt(this, Spotlight::StartupPrompt::Tone::Warning,
+                                        tr("Derivation Components Missing"),
+                                        tr("Decryption keys are missing. Install them now?"));
+        prompt.AddButton(tr("No"), false);
+        auto* yes = prompt.AddButton(tr("Yes"), true);
+        prompt.exec();
+        if (prompt.ClickedButton() == yes) {
             OnInstallDecryptionKeys();
+        }
     }
 
     SetFirmwareVersion();
@@ -7218,34 +7284,24 @@ void MainWindow::OnCheckGraphicsBackend() {
     if (currently_hidden)
         return;
 
-    QMessageBox msgbox(this);
-    msgbox.setWindowTitle(tr("Wayland Detected!"));
-    msgbox.setText(
-        tr("Wayland is known to have significant performance issues and mysterious bugs.\n"
-           "It's recommended to use X11 instead.\n\n"
-           "Would you like to force it for future launches?"));
-    msgbox.setIcon(QMessageBox::Warning);
+    Spotlight::StartupPrompt prompt(
+        this, Spotlight::StartupPrompt::Tone::Warning, tr("Wayland Detected!"),
+        tr("Wayland can cause performance problems. Use X11 for future launches?"));
+    auto* hide = prompt.AddCheckBox(tr("Don't show again"));
+    prompt.AddButton(tr("Continue with Wayland"), false);
+    auto* use_x11 = prompt.AddButton(tr("Use X11"), true);
+    prompt.exec();
 
-    QPushButton* okButton = msgbox.addButton(tr("Use X11"), QMessageBox::AcceptRole);
-    msgbox.addButton(tr("Continue with Wayland"), QMessageBox::RejectRole);
-    msgbox.setDefaultButton(okButton);
-
-    QCheckBox* cb = new QCheckBox(tr("Don't show again"), &msgbox);
-    cb->setChecked(currently_hidden);
-    msgbox.setCheckBox(cb);
-
-    msgbox.exec();
-
-    const bool hide = cb->isChecked();
-    if (hide != currently_hidden) {
-        UISettings::values.gui_hide_backend_warning.SetValue(hide);
+    if (hide->isChecked()) {
+        UISettings::values.gui_hide_backend_warning.SetValue(true);
     }
 
-    if (msgbox.clickedButton() == okButton) {
+    if (prompt.ClickedButton() == use_x11) {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
-        QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Lichii to apply the X11 backend."));
+        Spotlight::StartupPrompt::Notify(this, Spotlight::StartupPrompt::Tone::Info,
+                                         tr("Restart Required"),
+                                         tr("Restart Lichii to apply the X11 backend."));
     }
 }
 #endif

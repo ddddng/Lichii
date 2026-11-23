@@ -25,6 +25,7 @@ signals:
 protected:
     bool event(QEvent* event) override;
     void changeEvent(QEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
     void focusInEvent(QFocusEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;

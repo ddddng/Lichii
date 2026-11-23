@@ -7,6 +7,7 @@
 
 #include "lichii/game/artwork_image.h"
 #include "lichii/game/game_tree.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/theme.h"
 #include "qt_common/game_list/game_list_p.h"
@@ -110,9 +111,48 @@ private:
     }
 };
 
+class LibraryTreeHeader final : public QHeaderView {
+public:
+    explicit LibraryTreeHeader(QWidget* parent) : QHeaderView(Qt::Horizontal, parent) {}
+
+protected:
+    QSize sizeHint() const override {
+        return {QHeaderView::sizeHint().width(), 36};
+    }
+
+    void paintSection(QPainter* painter, const QRect& rect, int section) const override {
+        using namespace Spotlight;
+        if (!IsLichiiTheme()) {
+            QHeaderView::paintSection(painter, rect, section);
+            return;
+        }
+        painter->save();
+        painter->setPen(QColor(255, 255, 255, 0x12));
+        painter->drawLine(rect.bottomLeft(), rect.bottomRight());
+        const bool sorted = isSortIndicatorShown() && sortIndicatorSection() == section;
+        painter->setFont(Font(12, 600));
+        painter->setPen(sorted ? Color::Text() : Color::TextMuted());
+        const QRect text = rect.adjusted(6, 0, -4, 0);
+        const QString label = painter->fontMetrics().elidedText(
+            model()->headerData(section, orientation()).toString(), Qt::ElideRight,
+            text.width() - (sorted ? 16 : 0));
+        painter->drawText(text, Qt::AlignVCenter | Qt::AlignLeft, label);
+        if (sorted) {
+            painter->drawPixmap(text.left() + painter->fontMetrics().horizontalAdvance(label) + 4,
+                                rect.center().y() - 5,
+                                IconPixmap(sortIndicatorOrder() == Qt::DescendingOrder
+                                               ? u"caret-down"
+                                               : u"caret-up",
+                                           12, Color::Text(), devicePixelRatioF()));
+        }
+        painter->restore();
+    }
+};
+
 } // namespace
 
 GameTree::GameTree(QWidget* parent) : QTreeView(parent) {
+    setHeader(new LibraryTreeHeader(this));
     setItemDelegate(new LibraryRowDelegate(this));
     setSelectionMode(QAbstractItemView::SingleSelection);
     setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -123,6 +163,26 @@ GameTree::GameTree(QWidget* parent) : QTreeView(parent) {
     header()->setSectionsClickable(true);
     header()->setSortIndicatorShown(true);
     header()->setSectionsMovable(true);
+    header()->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(header(), &QHeaderView::customContextMenuRequested, this, [this](const QPoint& point) {
+        Spotlight::Menu menu(this);
+        menu.setMinimumWidth(220);
+        menu.AddHeading(tr("Columns"), Spotlight::Menu::Heading::Caps);
+        const auto add = [&](int column, Settings::Setting<bool>& setting) {
+            auto* action = menu.addAction(model()->headerData(column, Qt::Horizontal).toString());
+            action->setCheckable(true);
+            action->setChecked(setting.GetValue());
+            connect(action, &QAction::toggled, this, [this, &setting](bool shown) {
+                setting.SetValue(shown);
+                UpdateColumnVisibility();
+            });
+        };
+        add(GameListModel::COLUMN_ADD_ONS, UISettings::values.show_add_ons);
+        add(GameListModel::COLUMN_FILE_TYPE, UISettings::values.show_types);
+        add(GameListModel::COLUMN_SIZE, UISettings::values.show_size);
+        add(GameListModel::COLUMN_PLAY_TIME, UISettings::values.show_play_time);
+        menu.exec(header()->mapToGlobal(point));
+    });
     setObjectName(QStringLiteral("spotlightTree"));
     setRootIsDecorated(false);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);

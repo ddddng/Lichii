@@ -4,9 +4,12 @@
 #include <algorithm>
 
 #include <QApplication>
+#include <QLabel>
+#include <QMenuBar>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QStyleOptionMenuItem>
+#include <QWidgetAction>
 
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
@@ -17,23 +20,33 @@ namespace Spotlight {
 namespace {
 
 constexpr char PanelIcon[] = "spotlightIcon";
+constexpr char HotkeyHint[] = "spotlightHotkeyHint";
+constexpr int MinimumWidth = 240;
 
 QString HintOf(const QAction* action) {
     const QString hint = action->text().section(QLatin1Char('\t'), 1);
     if (!hint.isEmpty()) {
         return hint;
     }
-    return action->shortcut()
-        .toString(QKeySequence::NativeText)
-        .replace(QLatin1Char('+'), QLatin1Char(' '));
+    const QVariant hotkey = action->property(HotkeyHint);
+    return hotkey.isValid() ? hotkey.toString()
+                            : action->shortcut().toString(QKeySequence::NativeText);
+}
+
+bool InMenuBar(const QMenu& menu) {
+    const QWidget* parent = menu.parentWidget();
+    while (qobject_cast<const QMenu*>(parent)) {
+        parent = parent->parentWidget();
+    }
+    return qobject_cast<const QMenuBar*>(parent) != nullptr;
 }
 
 int TrailingWidth(const QAction* action, const QFontMetrics& hint_metrics) {
     if (action->menu()) {
-        return 32;
+        return 52;
     }
     const QString hint = HintOf(action);
-    return hint.isEmpty() ? 12 : 22 + hint_metrics.horizontalAdvance(hint);
+    return hint.isEmpty() ? 12 : 36 + hint_metrics.horizontalAdvance(hint);
 }
 
 int ContentWidth(const QMenu& menu) {
@@ -49,7 +62,7 @@ int ContentWidth(const QMenu& menu) {
         width = std::max(width, 43 + label_metrics.horizontalAdvance(label) +
                                     TrailingWidth(action, hint_metrics));
     }
-    return width + 16;
+    return std::max(width + 14, MinimumWidth);
 }
 
 void PaintMenu(QMenu& menu, const QPaintEvent& event) {
@@ -63,6 +76,7 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
     const auto align = (direction == Qt::RightToLeft ? Qt::AlignRight : Qt::AlignLeft) |
                        Qt::AlignVCenter;
     const QFontMetrics hint_metrics(Font(12));
+    const bool in_menu_bar = InMenuBar(menu);
     for (auto* action : menu.actions()) {
         const QRect row = menu.actionGeometry(action);
         if (!action->isVisible() || row.isEmpty() || !event.rect().intersects(row)) {
@@ -90,7 +104,9 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
                          : action->property("spotlightDestructive").toBool() ? Color::AccentLight()
                                                                              : Color::MenuInk();
         const QIcon panel_icon = action->property(PanelIcon).value<QIcon>();
-        const QIcon icon = panel_icon.isNull() ? action->icon() : panel_icon;
+        const QIcon icon = !panel_icon.isNull() ? panel_icon
+                           : in_menu_bar        ? QIcon{}
+                                                : action->icon();
         if (action->isChecked()) {
             painter.drawPixmap(leading.topLeft(), IconPixmap(u"check", 16, Color::Accent(), ratio));
         } else if (!icon.isNull()) {
@@ -178,6 +194,31 @@ Menu* Menu::AddSubmenu(const QIcon& icon, const QString& title) {
 
 void Menu::AddSharedMenu(QMenu* menu, const QIcon& icon) {
     addMenu(menu)->setProperty(PanelIcon, icon);
+}
+
+void Menu::AddHeading(const QString& text, Heading style) {
+    const bool caps = style == Heading::Caps;
+    auto* label = new QLabel(text, this);
+    QFont font = Font(caps ? 11 : 12, 600);
+    if (caps) {
+        font.setCapitalization(QFont::AllUppercase);
+        font.setLetterSpacing(QFont::PercentageSpacing, 106);
+    }
+    label->setFont(font);
+    label->setContentsMargins(12, caps ? 8 : 6, 12, caps ? 4 : 6);
+    label->setStyleSheet(
+        QStringLiteral("color: %1; background: transparent;")
+            .arg((caps ? Color::TextMuted() : Color::TextSecondary()).name(QColor::HexArgb)));
+    auto* action = new QWidgetAction(this);
+    action->setDefaultWidget(label);
+    action->setEnabled(false);
+    addAction(action);
+}
+
+void SetHotkeyHint(QAction* action, const QKeySequence& keys, const QString& controller) {
+    QStringList parts{keys.toString(QKeySequence::NativeText), controller};
+    parts.removeAll(QString{});
+    action->setProperty(HotkeyHint, parts.join(QStringLiteral(" · ")));
 }
 
 void InstallMenuStyle(QApplication& application) {

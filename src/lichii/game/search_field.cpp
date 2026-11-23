@@ -1,11 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <utility>
+
 #include <QKeyEvent>
+#include <QMenu>
 #include <QPainter>
 #include <QToolButton>
 
 #include "lichii/game/search_field.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 
@@ -118,4 +123,26 @@ void GameListSearchField::RetranslateUI() {
     setAccessibleName(tr("Search games"));
     clear_button->setToolTip(tr("Clear search"));
     clear_button->setAccessibleName(tr("Clear search"));
+}
+
+void GameListSearchField::contextMenuEvent(QContextMenuEvent* event) {
+    QMenu* menu = createStandardContextMenu();
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    static constexpr std::array keys{
+        std::pair{"edit-undo", QKeySequence::Undo},
+        std::pair{"edit-redo", QKeySequence::Redo},
+        std::pair{"edit-cut", QKeySequence::Cut},
+        std::pair{"edit-copy", QKeySequence::Copy},
+        std::pair{"edit-paste", QKeySequence::Paste},
+        std::pair{"select-all", QKeySequence::SelectAll},
+    };
+    for (QAction* action : menu->actions()) {
+        for (const auto& [name, key] : keys) {
+            if (action->objectName() == QLatin1StringView(name)) {
+                action->setText(action->text().section(QLatin1Char('\t'), 0, 0));
+                Spotlight::SetHotkeyHint(action, QKeySequence(key), {});
+            }
+        }
+    }
+    menu->popup(event->globalPos());
 }

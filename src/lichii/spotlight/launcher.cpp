@@ -45,9 +45,7 @@ Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* p
     const auto mirror = [add](QAction* source, QStringView icon, const QString& label) {
         auto* entry = add->addAction(Icon(icon, Color::MenuInk(), 16), label);
         const auto sync = [entry, source, label] {
-            const QString keys = source->shortcut()
-                                     .toString(QKeySequence::NativeText)
-                                     .replace(QLatin1Char('+'), QLatin1Char(' '));
+            const QString keys = source->shortcut().toString(QKeySequence::NativeText);
             entry->setText(keys.isEmpty() ? label : label + QLatin1Char('\t') + keys);
             entry->setEnabled(source->isEnabled());
             entry->setVisible(source->isVisible());

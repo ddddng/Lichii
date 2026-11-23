@@ -91,7 +91,7 @@ QRect GameCard::OnlineBadgeRect(const QRect& tile, u64 program_id, bool favorite
     if (size.isEmpty()) {
         return {};
     }
-    return {QPoint(tile.right() - 8 - (favorite ? 22 : 0) - size.width(), tile.top() + 8), size};
+    return {QPoint(tile.right() - 12 - (favorite ? 22 : 0) - size.width(), tile.top() + 12), size};
 }
 
 QString GameCard::OnlineToolTip(const QPoint& point, const QRect& cell,

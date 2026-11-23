@@ -255,9 +255,11 @@ protected:
             int right = row.right() - 12;
             painter.setFont(Font(13, 700));
             painter.setPen(entry.players > 0 ? Color::Text() : QColor(0xff, 0xff, 0xff, 0x9e));
-            painter.drawText(QRect{right - 26, row.y(), 26, row.height()},
-                             Qt::AlignVCenter | Qt::AlignRight, Count(entry.players));
-            right -= 26 + 6 + 7;
+            const QString players = Count(entry.players);
+            const int count_width = std::max(26, painter.fontMetrics().horizontalAdvance(players));
+            painter.drawText(QRect{right - count_width, row.y(), count_width, row.height()},
+                             Qt::AlignVCenter | Qt::AlignRight, players);
+            right -= count_width + 6 + 7;
             PaintDot(painter, {right + 3.5, row.center().y() + 0.5}, 7, entry.players > 0);
             right -= 10;
             if (entry.program_id != 0) {
@@ -817,7 +819,7 @@ void NextendoGameChip::Refresh() {
 }
 
 QSize NextendoGameChip::sizeHint() const {
-    return {10 + 7 + 7 + fontMetrics().horizontalAdvance(text) + 11, 26};
+    return {10 + 7 + 6 + fontMetrics().horizontalAdvance(text) + 10, 26};
 }
 
 void NextendoGameChip::paintEvent(QPaintEvent*) {
@@ -828,8 +830,8 @@ void NextendoGameChip::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
     PaintDot(painter, {13.5, height() / 2.0}, 7, playing);
     painter.setFont(font());
-    painter.setPen(playing ? Color::Text() : QColor(0xff, 0xff, 0xff, 0x9e));
-    painter.drawText(rect().adjusted(24, 0, -11, 0), Qt::AlignVCenter | Qt::AlignLeft, text);
+    painter.setPen(playing ? Ink() : QColor(0xff, 0xff, 0xff, 0x9e));
+    painter.drawText(rect().adjusted(23, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, text);
 }
 
 NextendoBar::NextendoBar(GameList* games_, QWidget* parent)

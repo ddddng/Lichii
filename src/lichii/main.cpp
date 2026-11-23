@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
-#include <QMessageBox>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -31,8 +30,9 @@
 #include <cstring>
 #endif
 
-#include "main_window.h"
+#include "lichii/spotlight/startup_prompt.h"
 #include "lichii/spotlight/theme.h"
+#include "main_window.h"
 
 #ifdef _WIN32
 #include <QScreen>
@@ -260,8 +260,9 @@ int main(int argc, char* argv[]) {
                     &MainWindow::OnAppFocusStateChanged);
         return app.exec();
     } catch (const std::exception& exception) {
-        QMessageBox::critical(nullptr, QObject::tr("Lichii startup stopped"),
-                              QString::fromUtf8(exception.what()));
+        Spotlight::StartupPrompt::Notify(nullptr, Spotlight::StartupPrompt::Tone::Error,
+                                         QObject::tr("Lichii startup stopped"),
+                                         QString::fromUtf8(exception.what()));
         return EXIT_FAILURE;
     }
 }

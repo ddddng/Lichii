@@ -939,7 +939,7 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
         return;
     }
     Spotlight::Menu blank_menu;
-    QAction* add_directory = blank_menu.addAction(MenuIcon("plus"), tr("&Add New Game Directory"));
+    QAction* add_directory = blank_menu.addAction(tr("&Add New Game Directory"));
     connect(add_directory, &QAction::triggered, this, &GameList::AddDirectory);
     blank_menu.exec(position);
 }
@@ -961,7 +961,7 @@ void GameList::AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const
         group(context_menu, tr("Play with a custom setup"), u"sliders-horizontal");
     QAction* start_game_global = custom_setup->addAction(tr("Play with global settings"));
     context_menu.addSeparator();
-    QAction* properties = add(context_menu, tr("Game settings\tCtrl E"), u"gear-six");
+    QAction* properties = add(context_menu, tr("Game settings\tCtrl+E"), u"gear-six");
     QAction* mods = add(context_menu, tr("Mods and cheats"), u"puzzle-piece");
     mods->setVisible(program_id != 0);
     connect(mods, &QAction::triggered, this,
@@ -1020,13 +1020,13 @@ void GameList::AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const
     }
 #endif
     archive->menuAction()->setVisible(!archive->isEmpty());
-    context_menu.addSeparator();
 #if !defined(__APPLE__)
     QMenu* shortcut_menu = group(context_menu, tr("Add to desktop"), u"push-pin");
     QAction* create_desktop_shortcut = shortcut_menu->addAction(tr("Desktop"));
     QAction* create_applications_menu_shortcut = shortcut_menu->addAction(tr("Applications menu"));
 #endif
-    QAction* favorite = add(context_menu, tr("Add to favourites\tF"), u"star");
+    context_menu.addSeparator();
+    QAction* favorite = context_menu.addAction(tr("Add to favourites\tF"));
     QAction* copy_tid = add(context_menu, tr("Copy title ID"), u"copy");
     auto* dump_verify = group(context_menu, tr("Dump and verify"), u"cube");
     auto* more = group(context_menu, tr("More"), u"dots-three");

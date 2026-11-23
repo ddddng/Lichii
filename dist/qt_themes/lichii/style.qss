@@ -50,22 +50,23 @@ QLabel:disabled {
 /* Menus ----------------------------------------------------------------- */
 
 QMenuBar {
-    background-color: #12131a;
-    border-bottom: 1px solid rgba(255, 255, 255, 20);
-    padding: 3px 6px;
+    background-color: #181a24;
+    border-bottom: 1px solid rgba(255, 255, 255, 31);
+    padding: 3px 13px;
+    font-weight: 500;
 }
 
 QMenuBar::item {
     background: transparent;
-    color: rgba(255, 255, 255, 158);
-    padding: 5px 10px;
-    border-radius: 10px;
+    color: #ffffff;
+    margin: 0 2px;
+    padding: 5px 11px;
+    border-radius: 8px;
 }
 
 QMenuBar::item:selected,
 QMenuBar::item:pressed {
-    background-color: rgba(255, 255, 255, 20);
-    color: #ffffff;
+    background-color: rgba(255, 255, 255, 31);
 }
 
 QMenu {
@@ -1051,6 +1052,13 @@ QTreeView#spotlightTree {
     border: 0;
     border-radius: 0;
     padding: 0;
+}
+
+QTreeView#spotlightTree {
+    background-color: rgba(255, 255, 255, 13);
+    border: 1px solid rgba(255, 255, 255, 20);
+    border-radius: 18px;
+    padding: 8px;
 }
 
 QTreeView#spotlightTree QHeaderView,
