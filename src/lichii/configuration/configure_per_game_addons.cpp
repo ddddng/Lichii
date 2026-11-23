@@ -180,8 +180,8 @@ void ConfigurePerGameAddons::InstallMods(const QStringList& mods) {
     }
 
     if (failed.empty()) {
-        QtCommon::Frontend::Information(tr("Mod Install Succeeded"),
-                                        tr("Successfully installed all mods."));
+        QtCommon::Frontend::Success(tr("Mod Install Succeeded"),
+                                    tr("Successfully installed all mods."));
 
         item_model->removeRows(0, item_model->rowCount());
         list_items.clear();
@@ -270,8 +270,8 @@ void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
         std::filesystem::remove_all(index.data(PATCH_LOCATION).toString().toStdString());
     }
 
-    QtCommon::Frontend::Information(tr("Successfully deleted"),
-                                    tr("Successfully deleted all selected mods."));
+    QtCommon::Frontend::Success(tr("Successfully deleted"),
+                                tr("Successfully deleted all selected mods."));
 
     item_model->removeRows(0, item_model->rowCount());
     list_items.clear();
