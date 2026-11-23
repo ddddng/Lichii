@@ -504,7 +504,7 @@ void ConfigurePerGame::BuildSettings() {
         done(QDialog::Rejected);
     });
     banner_layout->addWidget(reset, 0, Qt::AlignVCenter);
-    settings_page->SetBanner(banner, {overview, graphics, frame_rate});
+    settings_page->SetBanner(banner, {overview, graphics});
     connect(ui->display_name, &QLineEdit::textChanged, this, [this] { UpdateSpotlightIdentity(); });
 
     const auto add_setting = [this](QVBoxLayout* section, const Settings::BasicSetting& setting,
@@ -516,45 +516,17 @@ void ConfigurePerGame::BuildSettings() {
             }
         }
     };
-    auto* common = settings_page->AddSection(overview, tr("This game"));
-    auto* picture = settings_page->AddSection(graphics, tr("This game"));
-    if (frame_rate != -1) {
-        for (auto* section :
-             {common, picture, settings_page->AddSection(frame_rate, tr("Frame rate"))}) {
-            add_setting(section, Settings::values.fps_limit, tr("Guest FPS cap"),
-                        tr("Auto follows the game; other values cap how often it presents"),
-                        QStringLiteral("timer"), Tints::Green());
-        }
-    }
-    const auto& values = Settings::values;
-    const int global_preset = Spotlight::PerformancePresetIndex({
-        values.resolution_setup.GetValue(true),
-        values.scaling_filter.GetValue(true),
-        values.anti_aliasing.GetValue(true),
-        values.frame_gen.GetValue(true),
-    });
-    const auto preset_name = Spotlight::PerformancePresetName(global_preset);
-    SettingsPage::AddRow(picture, tr("Global preset"), preset_name, QStringLiteral("lightning"),
-                         Color::Accent(), nullptr);
-    for (auto* section : {common, picture}) {
+    const auto add_fps = [add_setting](QVBoxLayout* section) {
+        add_setting(section, Settings::values.fps_limit, tr("Guest FPS cap"),
+                    tr("Auto follows the game; other values cap how often it presents"),
+                    QStringLiteral("timer"), Tints::Green());
+    };
+    const auto add_resolution = [add_setting](QVBoxLayout* section) {
         add_setting(section, Settings::values.resolution_setup, tr("Resolution"),
                     tr("Internal rendering scale for this game"), QStringLiteral("monitor"),
                     Tints::Blue());
-    }
-    add_setting(picture, Settings::values.scaling_filter, tr("Scaling filter"),
-                tr("How the image fits the window"), QStringLiteral("sliders-horizontal"),
-                Tints::Lavender());
-    add_setting(picture, Settings::values.frame_gen, tr("Frame generation"),
-                tr("Adds displayed frames between game frames"), QStringLiteral("film-strip"),
-                Tints::Gold());
-    const auto add_updates_row = [this, mods](QVBoxLayout* section, const QString& detail) {
-        auto* button = SettingsPage::Manage();
-        connect(button, &QAbstractButton::clicked, this,
-                [this, mods] { settings_page->SetCategory(mods); });
-        return SettingsPage::AddRow(section, tr("Updates and DLC"), detail,
-                                    QStringLiteral("download-simple"), Tints::Lavender(), button);
     };
-    for (const int category : {overview, graphics}) {
+    const auto add_content = [this, mods, updates](int category) {
         auto* content = settings_page->AddSection(category);
         auto* manage_mods = SettingsPage::Manage(tr("Manage"));
         connect(manage_mods, &QAbstractButton::clicked, this,
@@ -563,20 +535,84 @@ void ConfigurePerGame::BuildSettings() {
                                                    tr("Manage installed mods and cheats"),
                                                    QStringLiteral("puzzle-piece"), Tints::Blue(),
                                                    manage_mods));
-        add_updates_row(content, tr("Review installed updates and DLC"));
+        auto* manage_updates = SettingsPage::Manage();
+        connect(manage_updates, &QAbstractButton::clicked, this,
+                [this, updates] { settings_page->SetCategory(updates); });
+        SettingsPage::AddRow(content, tr("Updates and DLC"), tr("Review installed updates and DLC"),
+                             QStringLiteral("download-simple"), Tints::Lavender(), manage_updates);
+        UpdateModsSummary();
+    };
+    settings_page->SetBuilder(overview, [this, overview, frame_rate, add_fps, add_resolution,
+                                         add_content] {
+        auto* common = settings_page->AddSection(overview, tr("This game"));
+        if (frame_rate != -1) {
+            add_fps(common);
+        }
+        add_resolution(common);
+        add_content(overview);
+    });
+    settings_page->SetBuilder(graphics, [this, graphics, frame_rate, add_setting, add_fps,
+                                         add_resolution, add_content] {
+        auto* picture = settings_page->AddSection(graphics, tr("This game"));
+        if (frame_rate != -1) {
+            add_fps(picture);
+        }
+        const auto& values = Settings::values;
+        const int global_preset = Spotlight::PerformancePresetIndex({
+            values.resolution_setup.GetValue(true),
+            values.scaling_filter.GetValue(true),
+            values.anti_aliasing.GetValue(true),
+            values.frame_gen.GetValue(true),
+        });
+        SettingsPage::AddRow(picture, tr("Global preset"),
+                             Spotlight::PerformancePresetName(global_preset),
+                             QStringLiteral("lightning"), Color::Accent(), nullptr);
+        add_resolution(picture);
+        add_setting(picture, Settings::values.scaling_filter, tr("Scaling filter"),
+                    tr("How the image fits the window"), QStringLiteral("sliders-horizontal"),
+                    Tints::Lavender());
+        add_setting(picture, Settings::values.frame_gen, tr("Frame generation"),
+                    tr("Adds displayed frames between game frames"), QStringLiteral("film-strip"),
+                    Tints::Gold());
+        add_content(graphics);
+    });
+    if (frame_rate != -1) {
+        settings_page->SetBuilder(frame_rate, [this, frame_rate, add_fps] {
+            add_fps(settings_page->AddSection(frame_rate, tr("Frame rate")));
+        });
     }
-    update_summary = SettingsPage::AddRow(settings_page->AddSection(updates), tr("Game version"),
-                                          tr("Review installed content"),
-                                          QStringLiteral("info"), Tints::Lavender(), nullptr);
+    for (const int category : {mods, updates}) {
+        settings_page->SetBuilder(category, [this, mods, updates] { BuildAddons(mods, updates); });
+    }
+    settings_page->SetBuilder(saves, [this, saves] {
+        auto* save = SettingsPage::Manage(tr("Open folder"));
+        save->setEnabled(title_id != 0);
+        connect(save, &QAbstractButton::clicked, this, &ConfigurePerGame::OpenSaveDataRequested);
+        SettingsPage::AddRow(settings_page->AddSection(saves), tr("Save data folder"),
+                             tr("Open this game's saves in the file manager"),
+                             QStringLiteral("folder-open"), Tints::Green(), save);
+    });
 
-    auto* save = SettingsPage::Manage(tr("Open folder"));
-    save->setEnabled(title_id != 0);
-    connect(save, &QAbstractButton::clicked, this, &ConfigurePerGame::OpenSaveDataRequested);
-    SettingsPage::AddRow(settings_page->AddSection(saves), tr("Save data folder"),
-                         tr("Open this game's saves in the file manager"),
-                         QStringLiteral("folder-open"), Tints::Green(), save);
-
-    BuildAddons(mods, updates);
+    addons_tab->hide();
+    const auto queue_addons = [this] {
+        if (std::exchange(addons_queued, true)) {
+            return;
+        }
+        QTimer::singleShot(0, this, [this] {
+            addons_queued = false;
+            if (store_rows != nullptr) {
+                RebuildAddons();
+            } else {
+                UpdateModsSummary();
+            }
+        });
+    };
+    auto* addons_model = addons_tab->Model();
+    connect(addons_model, &QAbstractItemModel::rowsInserted, this, queue_addons);
+    connect(addons_model, &QAbstractItemModel::rowsRemoved, this, queue_addons);
+    connect(addons_model, &QAbstractItemModel::modelReset, this, queue_addons);
+    connect(addons_model, &QStandardItemModel::itemChanged, this,
+            &ConfigurePerGame::UpdateModsSummary);
     settings_page->AddPage(controls, input_tab.get(), tr("Input profiles"), false);
     settings_page->AddPage(overview, ui->gameInfo, tr("Game information and artwork"));
     for (const auto& [category, widget, name] :
@@ -627,7 +663,12 @@ void ConfigurePerGame::BuildSettings() {
 
 void ConfigurePerGame::BuildAddons(int mods, int updates) {
     using Spotlight::SettingsPage;
-    addons_tab->hide();
+    if (store_rows != nullptr) {
+        return;
+    }
+    update_summary = SettingsPage::AddRow(settings_page->AddSection(updates), tr("Game version"),
+                                          tr("Review installed content"), QStringLiteral("info"),
+                                          Spotlight::SettingsColor::Lavender(), nullptr);
     store_rows = settings_page->AddSection(mods, tr("From the Mod Store"));
     own_rows = settings_page->AddSection(mods, tr("Your own files"));
 
@@ -655,21 +696,7 @@ void ConfigurePerGame::BuildAddons(int mods, int updates) {
     settings_page->AddBlock(mods, actions, tr("Browse the Mod Store"));
 
     content_rows = settings_page->AddSection(updates, tr("Installed"));
-
-    const auto queue = [this] {
-        if (std::exchange(addons_queued, true)) {
-            return;
-        }
-        QTimer::singleShot(0, this, [this] {
-            addons_queued = false;
-            RebuildAddons();
-        });
-    };
-    auto* model = addons_tab->Model();
-    connect(model, &QAbstractItemModel::rowsInserted, this, queue);
-    connect(model, &QAbstractItemModel::rowsRemoved, this, queue);
-    connect(model, &QAbstractItemModel::modelReset, this, queue);
-    connect(model, &QStandardItemModel::itemChanged, this, &ConfigurePerGame::UpdateModsSummary);
+    UpdateSpotlightIdentity();
     RebuildAddons();
 }
 
@@ -769,7 +796,9 @@ void ConfigurePerGame::RebuildAddons() {
         return static_cast<QLabel*>(rows->parentWidget()->parentWidget()->layout()->itemAt(0)->widget());
     };
     section_label(store_rows)->setText(tr("From the Mod Store · %1").arg(store_count));
-    store_rows->parentWidget()->parentWidget()->setVisible(store_count > 0);
+    auto* store_section = store_rows->parentWidget()->parentWidget();
+    store_section->setProperty("sourceVisible", store_count > 0);
+    store_section->setVisible(store_count > 0);
     section_label(own_rows)->setText(tr("Your own files · %1").arg(own_count));
     if (own_count == 0) {
         SettingsPage::AddRow(own_rows, tr("No mods yet"),
@@ -817,8 +846,10 @@ void ConfigurePerGame::UpdateSpotlightIdentity() {
     game_banner_version->setText(id.isEmpty() || shown_version.isEmpty()
                                      ? shown_version + id
                                      : tr("%1 · %2").arg(shown_version, id));
-    update_summary->setText(version.isEmpty() ? tr("Review installed content")
-                                              : tr("Game version %1").arg(version));
+    if (update_summary != nullptr) {
+        update_summary->setText(version.isEmpty() ? tr("Review installed content")
+                                                  : tr("Game version %1").arg(version));
+    }
 }
 
 ConfigurePerGame::~ConfigurePerGame() {
