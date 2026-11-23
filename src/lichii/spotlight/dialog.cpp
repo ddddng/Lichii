@@ -418,6 +418,35 @@ private:
                 }
             }
         }
+        // Qt moves the default to whichever auto-default button has focus, and the accent with it;
+        // Paper keeps the accent on the dialog's default button, the first accept button unless
+        // one is set.
+        const auto pushes = dialog->findChildren<QPushButton*>();
+        QPushButton* chosen = nullptr;
+        for (auto* push : pushes) {
+            if (push->isDefault()) {
+                chosen = push;
+            }
+        }
+        for (auto* buttons : dialog->findChildren<QDialogButtonBox*>()) {
+            for (auto* button : buttons->buttons()) {
+                const auto role = buttons->buttonRole(button);
+                if (!chosen &&
+                    (role == QDialogButtonBox::AcceptRole || role == QDialogButtonBox::YesRole)) {
+                    chosen = qobject_cast<QPushButton*>(button);
+                }
+            }
+        }
+        if (!chosen) {
+            return;
+        }
+        // A button made default before it joined the dialog is unknown to QDialog, which then
+        // loses the default when focus leaves it.
+        chosen->setDefault(false);
+        chosen->setDefault(true);
+        for (auto* push : pushes) {
+            push->setAutoDefault(push == chosen);
+        }
     }
 
     QDialog* dialog;
