@@ -766,7 +766,6 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     auto* name = Text(title, 15, 600);
     auto* detail = Text(description, 13, 400, true);
     detail->setWordWrap(true);
-    detail->setVisible(!description.isEmpty());
     copy->addStretch();
     copy->addWidget(name);
     copy->addWidget(detail);
@@ -777,6 +776,7 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
         layout->addWidget(control);
     }
     group->addWidget(row);
+    detail->setVisible(!description.isEmpty());
     return detail;
 }
 
