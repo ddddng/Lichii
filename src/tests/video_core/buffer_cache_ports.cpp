@@ -2565,6 +2565,11 @@ TEST_CASE("A write racing an adjacent download keeps its bytes",
         writes.Write(f.bytes + 0x11a20, 0x21a20, NewGuestValue);
         f.cache->FinishReadDownloads(0x20000, 0x1000);
     }
+    SECTION("the write was already applied") {
+        writes.Write(f.bytes + 0x11a20, 0x21a20, NewGuestValue);
+        writes.Apply();
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+    }
     SECTION("the write is collected after the landing checked pending writes") {
         const u64 waits = VideoCore::DownloadLanding::Waits();
         RacingGuestWrite race{f, writes, 0x21a20, 1};
@@ -2592,6 +2597,25 @@ TEST_CASE("An adjacent staged page that becomes CPU-dirty is not downloaded",
     REQUIRE(f.bytes[0x11000] == 0);
     REQUIRE(f.cache->IsRegionGpuModified(0x21000, 0x80));
     REQUIRE_FALSE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+}
+
+TEST_CASE("A new GPU write supersedes an adjacent staged copy",
+          "[buffer_ports][read_runs]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    f.cache->SetReadRunPageFilter([](DAddr, u64) { return true; });
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    WriteByDispatch(f, id, 0x20000, 0x80, 1);
+    WriteByDispatch(f, id, 0x21000, 0x80, 2);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(f.cache->GetFlushArea(0x21010, 4)->in_flight);
+    WriteByDispatch(f, id, 0x21000, 0x80, 3);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x10010] == 1);
+    REQUIRE(f.cache->IsRegionGpuModified(0x21000, 0x80));
+    REQUIRE_FALSE(ReadWord(f, 0x21010).preemtive);
+    REQUIRE(f.bytes[0x11010] == 3);
+    REQUIRE(f.runtime.host_read_waits == 2);
 }
 
 TEST_CASE("Read download check leaves out a guest write stored while it compares",

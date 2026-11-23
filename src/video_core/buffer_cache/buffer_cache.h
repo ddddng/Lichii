@@ -633,6 +633,7 @@ auto BufferCache<P>::AdjacentReadRanges(DAddr addr, u64 size)
     const auto eligible = [&](DAddr page) {
         return gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) &&
                memory_tracker.IsRegionGpuModified(page, DEVICE_PAGESIZE) &&
+               !memory_tracker.IsRegionCpuModified(page, DEVICE_PAGESIZE) &&
                !memory_tracker.IsRegionPreflushable(page, DEVICE_PAGESIZE) &&
                !pending.Intersects(page, DEVICE_PAGESIZE) &&
                read_run_page_allowed(page, DEVICE_PAGESIZE);
@@ -1235,7 +1236,8 @@ void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Land
                     const DAddr page_end = Common::AlignDown(start, DEVICE_PAGESIZE) +
                                            DEVICE_PAGESIZE;
                     const DAddr stop = (std::min)(end, page_end);
-                    if (!memory_tracker.IsRegionGpuModified(start, stop - start)) {
+                    if (!memory_tracker.IsRegionGpuModified(start, stop - start) ||
+                        memory_tracker.IsRegionCpuModified(start, stop - start)) {
                         download.clean_ranges.ForEachInRange(
                             start, stop - start,
                             [&](DAddr lower, DAddr upper) {
