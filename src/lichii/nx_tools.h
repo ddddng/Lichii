@@ -56,6 +56,8 @@ signals:
     void RunningChanged(bool running);
     /// An archive was created or changed: the game list must be refreshed.
     void ArchivesChanged();
+    // The NUP card of Convert to a single file was picked.
+    void ConvertToNupRequested(const std::string& game_path);
     /// A metadata write ended; written is false when it failed or was cancelled.
     void MetadataWriteFinished(bool written);
 
@@ -72,6 +74,8 @@ private:
     void WriteNxMetadata(const std::string& archive_path, const NxMetadata& metadata,
                          const FileSys::Nup::MetadataEdit& edit, const QPixmap& icon,
                          const std::function<bool()>& prepare_write);
+    // Add to NX and Remove from NX: the archive's updates and DLC, to remove or add to.
+    void ManageNx(const std::string& archive_path);
     void Start(std::shared_ptr<Job> job);
     void Finished(std::shared_ptr<Job> job, int code, QString error);
     void ReplyOriginal(Job& job, const QString& text);
