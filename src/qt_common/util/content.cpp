@@ -160,11 +160,10 @@ void InstallFirmware(const QString& location, bool recursive) {
 
     if (results.size() > 0) {
         const auto failed_names =
-            QString::fromStdString(fmt::format("{}", fmt::join(results, "\n")));
+            QString::fromStdString(fmt::format("{}", fmt::join(results, ", ")));
         progress->close();
-        QtCommon::Frontend::Critical(
-            tr("Firmware integrity verification failed!"),
-            tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+        QtCommon::Frontend::Critical(tr("Firmware verification failed"),
+                                     tr("Corrupt or missing: %1").arg(failed_names));
         return;
     }
 
@@ -224,7 +223,7 @@ void VerifyGameContents(const std::string& game_path) {
                                     tr("The operation completed successfully."));
         break;
     case ContentManager::GameVerificationResult::Failed:
-        QtCommon::Frontend::Critical(rootObject, tr("Integrity verification failed!"),
+        QtCommon::Frontend::Critical(rootObject, tr("Verification failed"),
                                      tr("File contents may be corrupt or missing."));
         break;
     case ContentManager::GameVerificationResult::NotImplemented:
@@ -283,10 +282,9 @@ void VerifyInstalledContents() {
                                     tr("The operation completed successfully."));
     } else {
         const auto failed_names =
-            QString::fromStdString(fmt::format("{}", fmt::join(result, "\n")));
-        QtCommon::Frontend::Critical(
-            tr("Integrity verification failed!"),
-            tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+            QString::fromStdString(fmt::format("{}", fmt::join(result, ", ")));
+        QtCommon::Frontend::Critical(tr("Verification failed"),
+                                     tr("Corrupt or missing: %1").arg(failed_names));
     }
 }
 
