@@ -19,6 +19,7 @@
 #include <QListWidget>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -120,6 +121,16 @@ QLabel* Body(const QString& text, QWidget* parent) {
     return label;
 }
 
+// Asks for its whole content, so the dialog only scrolls when the screen is too short for it.
+class FittedScrollArea final : public QScrollArea {
+public:
+    using QScrollArea::QScrollArea;
+
+    QSize sizeHint() const override {
+        return widget()->sizeHint();
+    }
+};
+
 QString CardStyle(const QString& name, int radius) {
     return QStringLiteral("#%1 { background-color: rgba(255, 255, 255, 13); "
                           "border: 1px solid rgba(255, 255, 255, 20); border-radius: %2px; }")
@@ -134,7 +145,14 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     : Spotlight::Dialog(parent), key{key_}, client{client_} {
     setWindowTitle(tr("Browse iiDB Artwork"));
     SetIcon(u"image", Spotlight::Color::Accent());
-    auto* layout = new QVBoxLayout(this);
+    auto* scroll = new FittedScrollArea(this);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(u"QScrollArea, #iidbContent { background: transparent; }"_s);
+    auto* content_widget = new QWidget(scroll);
+    content_widget->setObjectName(u"iidbContent"_s);
+    auto* layout = new QVBoxLayout(content_widget);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
 
@@ -368,7 +386,12 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     auto* button_row = new QHBoxLayout;
     button_row->setContentsMargins(0, 6, 0, 0);
     button_row->addWidget(buttons);
-    layout->addLayout(button_row);
+    scroll->setWidget(content_widget);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    outer->addWidget(scroll, 1);
+    outer->addLayout(button_row);
 
     connect(title, &QLineEdit::textChanged, this, &ArtworkDialog::ResetSearch);
     connect(title, &QLineEdit::returnPressed, this, [this] {
