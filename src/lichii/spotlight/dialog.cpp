@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QStyle>
 #include <QWindow>
 
@@ -337,9 +338,29 @@ private:
     // setupUi sizes a dialog from its form, which was drawn without the card around it, so the
     // dialog grows to the size its layout asks for when the form is too small.
     void MakeRoomForChrome() {
-        if (!box) {
-            dialog->resize(dialog->size().expandedTo(dialog->sizeHint()));
+        if (box) {
+            return;
         }
+        QSize size = dialog->size();
+        if (dialog->testAttribute(Qt::WA_Resized)) {
+            const QMargins margins = dialog->contentsMargins();
+            const QSize minimum = dialog->minimumSize();
+            if (size.width() > minimum.width()) {
+                size.rwidth() += margins.left() + margins.right();
+            }
+            if (size.height() > minimum.height()) {
+                size.rheight() += margins.top() + margins.bottom();
+            }
+        }
+        size = size.expandedTo(dialog->sizeHint()).boundedTo(dialog->maximumSize());
+        // sizeHint ignores word-wrapped labels, which need more height at the final width.
+        if (dialog->hasHeightForWidth()) {
+            size.setHeight(std::max(size.height(), dialog->heightForWidth(size.width())));
+        }
+        if (const QScreen* screen = dialog->screen()) {
+            size = size.boundedTo(screen->availableGeometry().size());
+        }
+        dialog->resize(size.expandedTo(dialog->minimumSizeHint()));
     }
 
     // Runs before QMessageBox::showEvent, which sizes the box from its layout.
