@@ -15,8 +15,8 @@
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDir>
-#include <QFontMetrics>
 #include <QFileDialog>
+#include <QFontMetrics>
 #include <QGroupBox>
 #include <QKeyEvent>
 #include <QLabel>
@@ -41,9 +41,6 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
-#include "qt_common/config/uisettings.h"
-#include "qt_common/util/vk.h"
-#include "ui_configure.h"
 #include "lichii/configuration/configuration_shared.h"
 #include "lichii/configuration/configure_applets.h"
 #include "lichii/configuration/configure_audio.h"
@@ -71,6 +68,9 @@
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/util/vk.h"
+#include "ui_configure.h"
 
 namespace {
 using Spotlight::PresetCard;
@@ -181,14 +181,14 @@ protected:
         painter.setFont(font());
         int x = 0;
         if (!icon.isEmpty()) {
-            painter.drawPixmap(0, (height() - 14) / 2,
-                               Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
-                                                     devicePixelRatioF()));
+            painter.drawPixmap(
+                0, (height() - 14) / 2,
+                Spotlight::IconPixmap(icon, 14, Color::TextSecondary(), devicePixelRatioF()));
             x = 19;
         }
         const int start = x;
-        const QColor fill = underMouse() ? QColor(0xff, 0xff, 0xff, 0x2e)
-                                         : QColor(0xff, 0xff, 0xff, 0x1f);
+        const QColor fill =
+            underMouse() ? QColor(0xff, 0xff, 0xff, 0x2e) : QColor(0xff, 0xff, 0xff, 0x1f);
         for (const QString& key : keys) {
             const int cap = std::min(fontMetrics().horizontalAdvance(key) + 16, width() - x);
             const QRectF rect(x + 0.5, 2.5, cap - 1, 23);
@@ -203,8 +203,8 @@ protected:
         if (hasFocus()) {
             painter.setPen(QPen(Color::Accent(), 1.5));
             painter.setBrush(Qt::NoBrush);
-            painter.drawRoundedRect(QRectF(start - 2, 0.75, x - 4 - start + 4, height() - 1.5),
-                                    9, 9);
+            painter.drawRoundedRect(QRectF(start - 2, 0.75, x - 4 - start + 4, height() - 1.5), 9,
+                                    9);
         }
     }
 
@@ -242,7 +242,8 @@ private:
 
 class VisibilityFollower final : public QObject {
 public:
-    VisibilityFollower(QWidget* source_, QWidget* target_) : QObject(target_), source{source_}, target{target_} {
+    VisibilityFollower(QWidget* source_, QWidget* target_)
+        : QObject(target_), source{source_}, target{target_} {
         target->setVisible(!source->isHidden());
         source->installEventFilter(this);
     }
@@ -295,8 +296,7 @@ protected:
                 painter.setPen(QPen(Color::Text(), 1));
                 painter.setBrush(Qt::NoBrush);
                 painter.drawRoundedRect(QRectF(segment).adjusted(-1.5, -1.5, 1.5, 1.5),
-                                        segment.height() / 2.0 + 1.5,
-                                        segment.height() / 2.0 + 1.5);
+                                        segment.height() / 2.0 + 1.5, segment.height() / 2.0 + 1.5);
             }
             painter.setPen(!usable ? Color::TextFaint() : on ? Color::OnAccent() : Color::Text());
             painter.setFont(Spotlight::Font(13, on ? 600 : 500));
@@ -399,22 +399,23 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing);
         const bool add = avatar.isNull() && !tint.isValid();
         const QRectF frame = QRectF(rect()).adjusted(1, 1, -1, -1);
-        painter.setBrush(add ? QColor(Qt::transparent)
+        painter.setBrush(add                          ? QColor(Qt::transparent)
                          : underMouse() || hasFocus() ? Color::Fill()
                                                       : Color::FillFaint());
         painter.setPen(current ? QPen(Color::Accent(), 2)
-                       : hasFocus() ? QPen(Color::Text(), 1)
-                       : QPen(add ? Color::Stroke() : QColor(0xff, 0xff, 0xff, 0x14), 1));
+                       : hasFocus()
+                           ? QPen(Color::Text(), 1)
+                           : QPen(add ? Color::Stroke() : QColor(0xff, 0xff, 0xff, 0x14), 1));
         painter.drawRoundedRect(frame, 18, 18);
         const QRectF circle(43, 16, 64, 64);
         if (add) {
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(Color::Stroke(), 2, Qt::DashLine));
             painter.drawEllipse(circle.adjusted(1, 1, -1, -1));
-            painter.drawPixmap(QRectF(circle.center() - QPointF(10, 10), QSizeF(20, 20)),
-                               Spotlight::IconPixmap(u"plus", 20, Color::TextSecondary(),
-                                                     devicePixelRatioF()),
-                               QRectF());
+            painter.drawPixmap(
+                QRectF(circle.center() - QPointF(10, 10), QSizeF(20, 20)),
+                Spotlight::IconPixmap(u"plus", 20, Color::TextSecondary(), devicePixelRatioF()),
+                QRectF());
         } else {
             painter.setPen(Qt::NoPen);
             painter.setBrush(tint);
@@ -434,9 +435,9 @@ protected:
         painter.setFont(Spotlight::Font(14, 600));
         painter.setPen(add ? Color::TextSecondary() : Color::Text());
         const QRect name_rect(8, 90, width() - 16, 18);
-        painter.drawText(name_rect, Qt::AlignCenter,
-                         QFontMetrics(painter.font()).elidedText(text(), Qt::ElideRight,
-                                                                 name_rect.width()));
+        painter.drawText(
+            name_rect, Qt::AlignCenter,
+            QFontMetrics(painter.font()).elidedText(text(), Qt::ElideRight, name_rect.width()));
         if (add) {
             return;
         }
@@ -673,18 +674,18 @@ void ConfigureDialog::BuildSettings() {
     const int graphics = settings_page->AddCategory(
         tr("Graphics"), tr("Preset first; everything else follows it unless you change it"),
         QStringLiteral("monitor"), Tints::Gold());
-    const int audio = settings_page->AddCategory(
-        tr("Audio"), tr("What you hear and where it plays"),
-        QStringLiteral("speaker-high"), Tints::Blue());
+    const int audio =
+        settings_page->AddCategory(tr("Audio"), tr("What you hear and where it plays"),
+                                   QStringLiteral("speaker-high"), Tints::Blue());
     const int controls = settings_page->AddCategory(
         tr("Controls"), tr("One controller per player; hotkeys work with keyboard and pad"),
         QStringLiteral("game-controller"), Tints::Lavender());
-    const int system_page = settings_page->AddCategory(
-        tr("System"), tr("The console your games think they run on"),
-        QStringLiteral("cpu"), Color::Accent());
-    const int multiplayer = settings_page->AddCategory(
-        tr("Multiplayer"), tr("Local wireless, LAN and online play"),
-        QStringLiteral("users"), Tints::Green());
+    const int system_page =
+        settings_page->AddCategory(tr("System"), tr("The console your games think they run on"),
+                                   QStringLiteral("cpu"), Color::Accent());
+    const int multiplayer =
+        settings_page->AddCategory(tr("Multiplayer"), tr("Local wireless, LAN and online play"),
+                                   QStringLiteral("users"), Tints::Green());
     const int shortcuts = settings_page->AddCategory(
         tr("Shortcuts"), tr("Click a keyboard or controller binding to change it."),
         QStringLiteral("keyboard"), Tints::Gold());
@@ -808,8 +809,7 @@ void ConfigureDialog::BuildSettings() {
                            "section says when to touch it.")},
              {audio, tr("Set the host audio backend and the sound mode games see.")},
              {system_page, tr("Advanced: CPU, speed, console identity, storage and applets.")},
-             {multiplayer,
-              tr("Advanced: network adapter, custom servers and the public lobby.")},
+             {multiplayer, tr("Advanced: network adapter, custom servers and the public lobby.")},
          }) {
         settings_page->SetAdvancedSubtitle(category, text);
     }
@@ -819,16 +819,16 @@ void ConfigureDialog::BuildSettings() {
     settings_page->SetAdvancedSections(
         general,
         {
-            AdvancedSection{tr("Behaviour"),
-                            tr("Desktop integration"),
-                            0,
-                            {QStringLiteral("hideInactiveMouse|%1").arg(tr("Hide the mouse when idle")),
-                             QStringLiteral("enable_gamemode|%1|%2").arg(tr("Gamemode"), tr("Linux")),
-                             QStringLiteral("gui_force_x11|%1|%2")
-                                 .arg(tr("Force X11"), tr("Linux, when Wayland misbehaves")),
-                             QStringLiteral("button_reset_defaults|%1|%2")
-                                 .arg(tr("Reset all settings"),
-                                      tr("Also removes every game’s own settings"))}},
+            AdvancedSection{
+                tr("Behaviour"),
+                tr("Desktop integration"),
+                0,
+                {QStringLiteral("hideInactiveMouse|%1").arg(tr("Hide the mouse when idle")),
+                 QStringLiteral("enable_gamemode|%1|%2").arg(tr("Gamemode"), tr("Linux")),
+                 QStringLiteral("gui_force_x11|%1|%2")
+                     .arg(tr("Force X11"), tr("Linux, when Wayland misbehaves")),
+                 QStringLiteral("button_reset_defaults|%1|%2")
+                     .arg(tr("Reset all settings"), tr("Also removes every game’s own settings"))}},
             AdvancedSection{tr("Screenshots"),
                             tr("Where captures go"),
                             0,
@@ -852,24 +852,42 @@ void ConfigureDialog::BuildSettings() {
                  QStringLiteral("enable_renderdoc_hotkey|%1").arg(tr("RenderDoc hotkey")),
                  QStringLiteral("perform_vulkan_check|%1").arg(tr("Check Vulkan at startup"))}},
         },
-        {QStringLiteral("select_user_on_boot"), QStringLiteral("toggle_gdbstub"),
-         QStringLiteral("gdbport_spinbox"), QStringLiteral("gpu_log_level"),
-         QStringLiteral("homebrew_args_edit"), QStringLiteral("enable_shader_feedback"),
-         QStringLiteral("enable_nsight_aftermath"), QStringLiteral("disable_loop_safety_checks"),
-         QStringLiteral("disable_buffer_reorder"), QStringLiteral("dump_guest_shaders"),
-         QStringLiteral("gpu_log_shader_dumps"), QStringLiteral("disable_macro_jit"),
-         QStringLiteral("dump_macros"), QStringLiteral("disable_macro_hle"),
-         QStringLiteral("quest_flag"), QStringLiteral("use_dev_keys"),
-         QStringLiteral("use_debug_asserts"), QStringLiteral("disable_web_applet"),
-         QStringLiteral("enable_all_controllers"), QStringLiteral("use_auto_stub"),
-         QStringLiteral("dump_audio_commands"), QStringLiteral("fs_access_log"),
-         QStringLiteral("reporting_services"), QStringLiteral("serial_battery_edit"),
-         QStringLiteral("serial_board_edit"), QStringLiteral("debug_knobs_spinbox"),
-         QStringLiteral("cpuopt_page_tables"), QStringLiteral("cpuopt_block_linking"),
-         QStringLiteral("cpuopt_return_stack_buffer"), QStringLiteral("cpuopt_fast_dispatcher"),
-         QStringLiteral("cpuopt_context_elimination"), QStringLiteral("cpuopt_const_prop"),
-         QStringLiteral("cpuopt_misc_ir"), QStringLiteral("cpuopt_reduce_misalign_checks"),
-         QStringLiteral("cpuopt_fastmem"), QStringLiteral("cpuopt_fastmem_exclusives"),
+        {QStringLiteral("select_user_on_boot"),
+         QStringLiteral("toggle_gdbstub"),
+         QStringLiteral("gdbport_spinbox"),
+         QStringLiteral("gpu_log_level"),
+         QStringLiteral("homebrew_args_edit"),
+         QStringLiteral("enable_shader_feedback"),
+         QStringLiteral("enable_nsight_aftermath"),
+         QStringLiteral("disable_loop_safety_checks"),
+         QStringLiteral("disable_buffer_reorder"),
+         QStringLiteral("dump_guest_shaders"),
+         QStringLiteral("gpu_log_shader_dumps"),
+         QStringLiteral("disable_macro_jit"),
+         QStringLiteral("dump_macros"),
+         QStringLiteral("disable_macro_hle"),
+         QStringLiteral("quest_flag"),
+         QStringLiteral("use_dev_keys"),
+         QStringLiteral("use_debug_asserts"),
+         QStringLiteral("disable_web_applet"),
+         QStringLiteral("enable_all_controllers"),
+         QStringLiteral("use_auto_stub"),
+         QStringLiteral("dump_audio_commands"),
+         QStringLiteral("fs_access_log"),
+         QStringLiteral("reporting_services"),
+         QStringLiteral("serial_battery_edit"),
+         QStringLiteral("serial_board_edit"),
+         QStringLiteral("debug_knobs_spinbox"),
+         QStringLiteral("cpuopt_page_tables"),
+         QStringLiteral("cpuopt_block_linking"),
+         QStringLiteral("cpuopt_return_stack_buffer"),
+         QStringLiteral("cpuopt_fast_dispatcher"),
+         QStringLiteral("cpuopt_context_elimination"),
+         QStringLiteral("cpuopt_const_prop"),
+         QStringLiteral("cpuopt_misc_ir"),
+         QStringLiteral("cpuopt_reduce_misalign_checks"),
+         QStringLiteral("cpuopt_fastmem"),
+         QStringLiteral("cpuopt_fastmem_exclusives"),
          QStringLiteral("cpuopt_recompile_exclusives"),
          QStringLiteral("cpuopt_ignore_memory_aborts")});
     settings_page->SetAdvancedBuilder(general, [this, general] {
@@ -913,11 +931,11 @@ void ConfigureDialog::BuildSettings() {
                             {QStringLiteral("|%1|%2").arg(tr("SteamGridDB API key"),
                                                           tr("Empty disables lookup")),
                              QStringLiteral("iidb_api_key|%1").arg(tr("iiDB artwork API key"))}},
-            AdvancedSection{tr("Maintenance"),
-                            tr("If the library shows stale names or icons"),
-                            0,
-                            {QStringLiteral("cache_game_list"),
-                             QStringLiteral("reset_game_list_cache")}},
+            AdvancedSection{
+                tr("Maintenance"),
+                tr("If the library shows stale names or icons"),
+                0,
+                {QStringLiteral("cache_game_list"), QStringLiteral("reset_game_list_cache")}},
             AdvancedSection{
                 tr("List view"),
                 tr("Columns and text of the list layout"),
@@ -939,7 +957,8 @@ void ConfigureDialog::BuildSettings() {
                                           tr("iiDB artwork API key"), {},
                                           SettingsPage::BindButton(iidb, tr("Add key")));
         }
-        if (auto* cache = filesystem_tab->findChild<QCheckBox*>(QStringLiteral("cache_game_list"))) {
+        if (auto* cache =
+                filesystem_tab->findChild<QCheckBox*>(QStringLiteral("cache_game_list"))) {
             settings_page->AddAdvancedRow(library, QStringLiteral("cache_game_list"),
                                           tr("Cache game list metadata"), {},
                                           SettingsPage::BindToggle(cache));
@@ -955,21 +974,22 @@ void ConfigureDialog::BuildSettings() {
     settings_page->SetAdvancedSections(
         graphics,
         {
-            AdvancedSection{
-                tr("Accuracy"),
-                tr("Higher is closer to the console, lower is faster"),
-                0,
-                {QStringLiteral("gpu_accuracy|%1|%2").arg(tr("GPU mode"), tr("Choose Fast or Accurate")),
-                 QStringLiteral("dma_accuracy|%1").arg(tr("DMA accuracy")),
-                 QStringLiteral("gpu_fence_behavior|%1").arg(tr("GPU fence behaviour")),
-                 QStringLiteral("native_compute_write_mark|%1|%2")
-                     .arg(tr("Switch 2 compute write mark"),
-                          tr("Correctness knob for Switch 2 compute"))}},
+            AdvancedSection{tr("Accuracy"),
+                            tr("Higher is closer to the console, lower is faster"),
+                            0,
+                            {QStringLiteral("gpu_accuracy|%1|%2")
+                                 .arg(tr("GPU mode"), tr("Choose Fast or Accurate")),
+                             QStringLiteral("dma_accuracy|%1").arg(tr("DMA accuracy")),
+                             QStringLiteral("gpu_fence_behavior|%1").arg(tr("GPU fence behaviour")),
+                             QStringLiteral("native_compute_write_mark|%1|%2")
+                                 .arg(tr("Switch 2 compute write mark"),
+                                      tr("Correctness knob for Switch 2 compute"))}},
             AdvancedSection{
                 tr("Shaders"),
                 tr("When games stutter while new effects appear"),
                 0,
-                {QStringLiteral("use_disk_shader_cache|%1").arg(tr("Keep a pipeline cache on disk")),
+                {QStringLiteral("use_disk_shader_cache|%1")
+                     .arg(tr("Keep a pipeline cache on disk")),
                  QStringLiteral("use_vulkan_driver_pipeline_cache|%1")
                      .arg(tr("Use the driver pipeline cache")),
                  QStringLiteral("precache_shaders|%1")
@@ -1052,10 +1072,11 @@ void ConfigureDialog::BuildSettings() {
                             tr("Quality of the Game upscaling choice"),
                             1,
                             {QString{}}},
-            AdvancedSection{tr("Post-processing"),
-                            tr("Filters drawn over the game"),
-                            1,
-                            {QStringLiteral("post_shader_enabled|%1").arg(tr("Post-processing effects"))}},
+            AdvancedSection{
+                tr("Post-processing"),
+                tr("Filters drawn over the game"),
+                1,
+                {QStringLiteral("post_shader_enabled|%1").arg(tr("Post-processing effects"))}},
             AdvancedSection{
                 tr("Performance"),
                 tr("Trade power or stability for speed"),
@@ -1067,7 +1088,8 @@ void ConfigureDialog::BuildSettings() {
                  QStringLiteral(">gpu_unswizzle_stream_size|%1").arg(tr("Stream size")),
                  QStringLiteral(">gpu_unswizzle_chunk_size|%1").arg(tr("Chunk size")),
                  QStringLiteral("pin_gpu_threads|%1").arg(tr("Pin GPU threads to their own cores")),
-                 QStringLiteral("render_thread|%1|%2").arg(tr("Render thread"), tr("Experimental"))}},
+                 QStringLiteral("render_thread|%1|%2")
+                     .arg(tr("Render thread"), tr("Experimental"))}},
         },
         {QStringLiteral("game_dlss_network"), QStringLiteral("amd_fsr4"),
          QStringLiteral("anti_aliasing"), QStringLiteral("ocarina_fsr"),
@@ -1078,18 +1100,18 @@ void ConfigureDialog::BuildSettings() {
          QStringLiteral("use_asynchronous_gpu_emulation"), QStringLiteral("bg_button")});
 
     settings_page->SetAdvancedSections(
-        audio, {AdvancedSection{
-                   tr("Output"),
-                   tr("Changing the engine rebuilds the available output-device list."),
-                   0,
-                   {QStringLiteral("output_engine|%1|%2")
-                        .arg(tr("Output engine"),
-                             tr("Automatic selects the available audio backend.")),
-                    QStringLiteral("sound_index|%1|%2")
-                        .arg(tr("Sound output mode"), tr("Mono, Stereo or Surround.")),
-                    QStringLiteral("muteWhenInBackground|%1|%2")
-                        .arg(tr("Mute audio when in background"),
-                             tr("Silence Lichii while another window has focus."))}}});
+        audio,
+        {AdvancedSection{
+            tr("Output"),
+            tr("Changing the engine rebuilds the available output-device list."),
+            0,
+            {QStringLiteral("output_engine|%1|%2")
+                 .arg(tr("Output engine"), tr("Automatic selects the available audio backend.")),
+             QStringLiteral("sound_index|%1|%2")
+                 .arg(tr("Sound output mode"), tr("Mono, Stereo or Surround.")),
+             QStringLiteral("muteWhenInBackground|%1|%2")
+                 .arg(tr("Mute audio when in background"),
+                      tr("Silence Lichii while another window has focus."))}}});
 
     settings_page->SetAdvancedSections(
         system_page,
@@ -1105,23 +1127,27 @@ void ConfigureDialog::BuildSettings() {
                  QStringLiteral("cpu_accuracy|%1").arg(tr("Accuracy")),
                  QStringLiteral("cpu_backend|%1").arg(tr("Backend")),
                  QStringLiteral("cpu_ticks|%1").arg(tr("Custom CPU ticks")),
-                 QStringLiteral(">cpuopt_unsafe_host_mmu|%1").arg(tr("Host MMU emulation (fastmem)")),
+                 QStringLiteral(">cpuopt_unsafe_host_mmu|%1")
+                     .arg(tr("Host MMU emulation (fastmem)")),
                  QStringLiteral(">cpuopt_unsafe_unfuse_fma|%1").arg(tr("Unfuse FMA")),
                  QStringLiteral(">cpuopt_unsafe_reduce_fp_error|%1")
                      .arg(tr("Faster FRSQRTE and FRECPE")),
                  QStringLiteral(">cpuopt_unsafe_ignore_standard_fpcr|%1")
                      .arg(tr("Faster ASIMD (32-bit)")),
-                 QStringLiteral(">cpuopt_unsafe_inaccurate_nan|%1").arg(tr("Inaccurate NaN handling")),
-                 QStringLiteral(">cpuopt_unsafe_fastmem_check|%1").arg(tr("Skip address space checks")),
+                 QStringLiteral(">cpuopt_unsafe_inaccurate_nan|%1")
+                     .arg(tr("Inaccurate NaN handling")),
+                 QStringLiteral(">cpuopt_unsafe_fastmem_check|%1")
+                     .arg(tr("Skip address space checks")),
                  QStringLiteral(">cpuopt_unsafe_ignore_global_monitor|%1")
                      .arg(tr("Ignore global monitor"))}},
-            AdvancedSection{tr("Speed"),
-                            tr("Speed limits and the Turbo and Slow hotkeys"),
-                            0,
-                            {QStringLiteral("speed_limit|%1").arg(tr("Limit speed")),
-                             QStringLiteral("turbo_speed_limit|%1").arg(tr("Turbo speed")),
-                             QStringLiteral("slow_speed_limit|%1").arg(tr("Slow speed")),
-                             QStringLiteral("sync_core_speed|%1").arg(tr("Synchronise core speed"))}},
+            AdvancedSection{
+                tr("Speed"),
+                tr("Speed limits and the Turbo and Slow hotkeys"),
+                0,
+                {QStringLiteral("speed_limit|%1").arg(tr("Limit speed")),
+                 QStringLiteral("turbo_speed_limit|%1").arg(tr("Turbo speed")),
+                 QStringLiteral("slow_speed_limit|%1").arg(tr("Slow speed")),
+                 QStringLiteral("sync_core_speed|%1").arg(tr("Synchronise core speed"))}},
             AdvancedSection{tr("Performance tweaks"),
                             tr("Clock rates reported to the game"),
                             0,
@@ -1156,10 +1182,8 @@ void ConfigureDialog::BuildSettings() {
                  QStringLiteral("photo_viewer_applet_mode|%1").arg(tr("Photo viewer")),
                  QStringLiteral("cabinet_applet_mode|%1").arg(tr("Amiibo editor")),
                  QStringLiteral("enable_overlay|%1").arg(tr("Enable Overlay Applet"))}},
-            AdvancedSection{tr("Profiles"),
-                            tr("Who plays"),
-                            1,
-                            {QStringLiteral("select_user_on_boot")}},
+            AdvancedSection{
+                tr("Profiles"), tr("Who plays"), 1, {QStringLiteral("select_user_on_boot")}},
         },
         {QStringLiteral("data_erase_applet_mode"), QStringLiteral("net_connect_applet_mode"),
          QStringLiteral("shop_applet_mode"), QStringLiteral("login_share_applet_mode"),
@@ -1170,8 +1194,8 @@ void ConfigureDialog::BuildSettings() {
          QStringLiteral("dump_nso"), QStringLiteral("dump_exefs"),
          QStringLiteral("cache_game_list"), QStringLiteral("reset_game_list_cache")});
     settings_page->SetAdvancedBuilder(system_page, [this, system_page] {
-        if (auto* ask = SettingsPage::Editor(general_tab.get(),
-                                             UISettings::values.select_user_on_boot)) {
+        if (auto* ask =
+                SettingsPage::Editor(general_tab.get(), UISettings::values.select_user_on_boot)) {
             settings_page->AddAdvancedRow(system_page, QStringLiteral("select_user_on_boot"),
                                           tr("Ask for a profile when a game starts"), {},
                                           SettingsPage::BindSetting(ask));
@@ -1188,18 +1212,19 @@ void ConfigureDialog::BuildSettings() {
                              QStringLiteral("nextendo_sync_profile|%1|%2")
                                  .arg(tr("Sync Nextendo name and picture to the profile"),
                                       tr("Requires an enabled, signed-in account"))}},
-            AdvancedSection{tr("Public lobby"),
-                            tr("Locked while hosting a public room"),
-                            0,
-                            {QStringLiteral("edit_username|%1|%2")
-                                 .arg(tr("Lobby username"), tr("4–20 characters")),
-                             QStringLiteral("edit_token|%1|%2").arg(tr("Token"), tr("80 characters")),
-                             QStringLiteral("button_generate|%1").arg(tr("Generate a new token"))}},
-            AdvancedSection{tr("Mod Store"),
-                            tr("Where mods are listed from"),
-                            0,
-                            {QStringLiteral("edit_mod_store_api_url|%1")
-                                 .arg(tr("Mod Store API base URL"))}},
+            AdvancedSection{
+                tr("Public lobby"),
+                tr("Locked while hosting a public room"),
+                0,
+                {QStringLiteral("edit_username|%1|%2")
+                     .arg(tr("Lobby username"), tr("4–20 characters")),
+                 QStringLiteral("edit_token|%1|%2").arg(tr("Token"), tr("80 characters")),
+                 QStringLiteral("button_generate|%1").arg(tr("Generate a new token"))}},
+            AdvancedSection{
+                tr("Mod Store"),
+                tr("Where mods are listed from"),
+                0,
+                {QStringLiteral("edit_mod_store_api_url|%1").arg(tr("Mod Store API base URL"))}},
             AdvancedSection{tr("Custom server"),
                             tr("Host redirect is unavailable while a game runs"),
                             1,
@@ -1676,8 +1701,8 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
     auto* privacy_rows = settings_page->AddSection(general, tr("Updates and privacy"));
 #ifdef ENABLE_UPDATE_CHECKER
     AddSettingRow(privacy_rows, general_tab.get(), UISettings::values.check_for_updates,
-                  tr("Check for updates when Lichii starts"), {},
-                  QStringLiteral("arrow-circle-up"), Tints::Green());
+                  tr("Check for updates when Lichii starts"), {}, QStringLiteral("arrow-circle-up"),
+                  Tints::Green());
 #endif
     if (auto* discord = web_tab->findChild<QCheckBox*>(QStringLiteral("toggle_discordrpc"))) {
         SettingsPage::AddRow(privacy_rows, tr("Show the current game in Discord"),
@@ -1689,8 +1714,10 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
     auto* footer_layout = new QHBoxLayout(footer);
     footer_layout->setContentsMargins(0, 0, 0, 0);
     footer_layout->setSpacing(12);
-    footer_layout->addWidget(SettingsPage::Note(
-        tr("Find screenshots, diagnostics, Gamemode and Reset all settings under Advanced.")), 1);
+    footer_layout->addWidget(
+        SettingsPage::Note(
+            tr("Find screenshots, diagnostics, Gamemode and Reset all settings under Advanced.")),
+        1);
     auto* get_started = new Spotlight::PillButton(tr("Get Started"), QStringLiteral("sparkle"));
     get_started->setToolTip(tr("Run the setup again: keys, firmware, folders, controller, preset"));
     connect(get_started, &QAbstractButton::clicked, this,
@@ -1757,9 +1784,9 @@ void ConfigureDialog::BuildLibrary(int library) {
     }
     connect(external_model, &QAbstractItemModel::modelReset, external_rows->parentWidget(),
             rebuild_external);
-    settings_page->AddBlock(
-        library, SettingsPage::Note(tr("Removing a folder does not delete its files.")),
-        tr("Removing a folder"));
+    settings_page->AddBlock(library,
+                            SettingsPage::Note(tr("Removing a folder does not delete its files.")),
+                            tr("Removing a folder"));
 }
 
 void ConfigureDialog::BuildGraphics(int graphics) {
@@ -1809,8 +1836,9 @@ void ConfigureDialog::BuildGraphics(int graphics) {
 
     auto* picture = settings_page->AddSection(graphics, tr("Picture"));
     if (auto* resolution = SettingsPage::Editor(gfx, values.resolution_setup)) {
-        auto* detail = SettingsPage::AddRow(picture, tr("Resolution"), {}, QStringLiteral("monitor"),
-                                            Tints::Gold(), SettingsPage::BindSetting(resolution));
+        auto* detail =
+            SettingsPage::AddRow(picture, tr("Resolution"), {}, QStringLiteral("monitor"),
+                                 Tints::Gold(), SettingsPage::BindSetting(resolution));
         const auto describe = [detail, combo = resolution->combobox] {
             Settings::ResolutionScalingInfo info{};
             Settings::TranslateResolutionInfo(
@@ -1863,11 +1891,10 @@ void ConfigureDialog::BuildGraphics(int graphics) {
                              Tints::Lavender(), segments);
     }
     QList<std::pair<QString, QCheckBox*>> upscalers;
-    for (const auto& [setting, name] :
-         {std::pair<const Settings::BasicSetting*, QString>{&values.game_dlss_network,
-                                                            tr("Game DLSS")},
-          {&values.nvidia_dlss, tr("NVIDIA DLSS")},
-          {&values.amd_fsr4, tr("FSR 4")}}) {
+    for (const auto& [setting, name] : {std::pair<const Settings::BasicSetting*, QString>{
+                                            &values.game_dlss_network, tr("Game DLSS")},
+                                        {&values.nvidia_dlss, tr("NVIDIA DLSS")},
+                                        {&values.amd_fsr4, tr("FSR 4")}}) {
         if (auto* editor = SettingsPage::Editor(gfx, *setting);
             editor && editor->checkbox && editor->isVisibleTo(gfx)) {
             upscalers.append({name, editor->checkbox});

@@ -145,9 +145,9 @@ protected:
             painter.setBrush(Color::AccentSoft());
             painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), Radius::Panel,
                                     Radius::Panel);
-        } else if (const auto* previous = PreviousRow();
-                   previous != nullptr && !previous->underMouse() &&
-                   !KeyboardFocusWithin(previous)) {
+        } else if (const auto* previous = PreviousRow(); previous != nullptr &&
+                                                         !previous->underMouse() &&
+                                                         !KeyboardFocusWithin(previous)) {
             painter.fillRect(QRect(18, 0, width() - 36, 1), QColor(0xff, 0xff, 0xff, 0x12));
         }
     }
@@ -902,8 +902,8 @@ protected:
 
 private:
     int BadgeWidth() const {
-        return std::max(18, QFontMetrics(Font(11, 600)).horizontalAdvance(QString::number(count)) +
-                                12);
+        return std::max(18,
+                        QFontMetrics(Font(11, 600)).horizontalAdvance(QString::number(count)) + 12);
     }
 
     QString icon;
@@ -1411,9 +1411,8 @@ int SettingsPage::AddCategory(const QString& title, const QString& subtitle_, co
     auto* button = new NavigationButton(title, icon, color);
     button->setVisible(!advanced_only || show_advanced);
     sidebar->insertWidget(sidebar->count() - 2, button);
-    QWidget::setTabOrder(categories.isEmpty() ? static_cast<QWidget*>(search)
-                                             : categories.back().button,
-                         button);
+    QWidget::setTabOrder(
+        categories.isEmpty() ? static_cast<QWidget*>(search) : categories.back().button, button);
     connect(button, &QAbstractButton::clicked, this, [this, index] { SetCategory(index); });
 
     auto* panel = new QWidget;
@@ -1463,7 +1462,8 @@ bool SettingsPage::eventFilter(QObject* watched, QEvent* event) {
         return QWidget::eventFilter(watched, event);
     }
     auto* control = qobject_cast<QWidget*>(watched);
-    const bool value_control = control != nullptr && qobject_cast<QScrollBar*>(control) == nullptr &&
+    const bool value_control = control != nullptr &&
+                               qobject_cast<QScrollBar*>(control) == nullptr &&
                                (qobject_cast<QComboBox*>(control) != nullptr ||
                                 qobject_cast<QAbstractSpinBox*>(control) != nullptr ||
                                 qobject_cast<QAbstractSlider*>(control) != nullptr);
@@ -1543,8 +1543,8 @@ void SettingsPage::AddBlock(int category, QWidget* widget, QString search_label,
     auto* layout = static_cast<QVBoxLayout*>(entry.panel->layout());
     if (advanced_) {
         if (widget->property("advancedSection").toBool()) {
-            static_cast<SectionColumns*>(AdvancedArea(category))->Add(
-                widget, widget->property("advancedColumn").toInt());
+            static_cast<SectionColumns*>(AdvancedArea(category))
+                ->Add(widget, widget->property("advancedColumn").toInt());
         } else {
             layout->insertWidget(layout->indexOf(AdvancedArea(category)->parentWidget()), widget);
         }
@@ -1623,8 +1623,8 @@ QVBoxLayout* SettingsPage::NewSection(int category, const QString& title, const 
         button->setChecked(entry.chip_groups.size() == 1);
         connect(button, &QAbstractButton::clicked, this, [this, section, chips, button] {
             chips->Select(button);
-            scroll->verticalScrollBar()->setValue(
-                section->mapTo(scroll->widget(), QPoint{}).y() - 8);
+            scroll->verticalScrollBar()->setValue(section->mapTo(scroll->widget(), QPoint{}).y() -
+                                                  8);
         });
     }
     section->setProperty("chipGroup", chip_label);
@@ -1690,9 +1690,9 @@ QLabel* SettingsPage::PlaceRow(int category, const Slot& slot, const QString& ti
                                const QString& description, const QString& tooltip,
                                QWidget* control) {
     auto* rows = categories[category].section_rows[slot.section];
-    auto* detail = AddRow(rows, slot.title.isEmpty() ? title : slot.title,
-                          slot.title.isEmpty() ? description : slot.description, {}, {}, control,
-                          tooltip);
+    auto* detail =
+        AddRow(rows, slot.title.isEmpty() ? title : slot.title,
+               slot.title.isEmpty() ? description : slot.description, {}, {}, control, tooltip);
     auto* row = detail->parentWidget();
     row->setProperty("slotOrder", slot.order);
     rows->removeWidget(row);
@@ -1727,9 +1727,8 @@ void SettingsPage::UpdateMode() {
     if (current_category == -1) {
         return;
     }
-    const int top = categories[current_category].parent == -1
-                        ? current_category
-                        : categories[current_category].parent;
+    const int top = categories[current_category].parent == -1 ? current_category
+                                                              : categories[current_category].parent;
     const auto& entry = categories[top];
     int count = 0;
     if (!entry.sections.isEmpty()) {
@@ -1937,8 +1936,7 @@ void SettingsPage::BuildPage(int category, Page& page) {
         } else if (in_advanced) {
             group()->addWidget(block);
         } else {
-            AddBlock(category, block, section_title + QChar::fromLatin1('\n') + page.name,
-                     false);
+            AddBlock(category, block, section_title + QChar::fromLatin1('\n') + page.name, false);
         }
         if (origin != source) {
             new VisibilityMirror({origin}, source, block, changed);
@@ -2286,10 +2284,9 @@ void SettingsPage::SetCategory(int category) {
         parent_name->setText(categories[entry.parent].title);
     }
     heading->setText(entry.page_title);
-    const QString advanced_subtitle =
-        entry.advanced_subtitle.isEmpty() && entry.parent != -1
-            ? categories[entry.parent].advanced_subtitle
-            : entry.advanced_subtitle;
+    const QString advanced_subtitle = entry.advanced_subtitle.isEmpty() && entry.parent != -1
+                                          ? categories[entry.parent].advanced_subtitle
+                                          : entry.advanced_subtitle;
     subtitle->setText(ShowsAdvanced(category) && !advanced_subtitle.isEmpty() ? advanced_subtitle
                                                                               : entry.subtitle);
     subtitle->setVisible(!subtitle->text().isEmpty());
@@ -2368,9 +2365,8 @@ bool SettingsPage::RefreshCategory(int index) {
     const bool advanced_view = ShowsAdvanced(index);
     bool any = false;
     for (const auto& block : entry.blocks) {
-        const bool wanted = entry.advanced_only ||
-                            (filtering ? !block.advanced || show_advanced
-                                       : block.advanced == advanced_view);
+        const bool wanted = entry.advanced_only || (filtering ? !block.advanced || show_advanced
+                                                              : block.advanced == advanced_view);
         if (!source_visible(block.widget) || !wanted) {
             block.widget->hide();
             continue;
@@ -2427,9 +2423,8 @@ void SettingsPage::UpdateSearch() {
         }
         const bool any = RefreshCategory(i) && filtering;
         auto& entry = categories[i];
-        entry.button->setVisible(filtering ? any
-                                           : entry.parent == -1 &&
-                                                 (!entry.advanced_only || show_advanced));
+        entry.button->setVisible(
+            filtering ? any : entry.parent == -1 && (!entry.advanced_only || show_advanced));
         if (any && first == -1) {
             first = i;
         }
@@ -2560,8 +2555,18 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     const bool compact = dense || group->parentWidget()->property("compactRows").toBool();
     row->setMinimumHeight(dense ? 44 : compact ? 54 : 60);
     auto* layout = new QHBoxLayout(row);
-    layout->setContentsMargins(dense ? 12 : compact ? 18 : 14, dense ? 4 : compact ? 10 : 12,
-                               dense ? 12 : compact ? 16 : 18, dense ? 4 : compact ? 10 : 12);
+    layout->setContentsMargins(dense     ? 12
+                               : compact ? 18
+                                         : 14,
+                               dense     ? 4
+                               : compact ? 10
+                                         : 12,
+                               dense     ? 12
+                               : compact ? 16
+                                         : 18,
+                               dense     ? 4
+                               : compact ? 10
+                                         : 12);
     layout->setSpacing(dense ? 8 : 14);
     if (compact) {
     } else if (image.isNull()) {
