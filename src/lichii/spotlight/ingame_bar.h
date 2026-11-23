@@ -7,14 +7,15 @@
 
 class QAbstractButton;
 class QLabel;
-class QMenu;
 
 namespace Spotlight {
 
-class PillButton;
-class ShaderChip;
+class BarChip;
+class BarMetrics;
 class MenuTooltip;
+class ShaderChip;
 
+/// The bottom bar of a windowed game (Paper 14YT-0); it replaces the status bar while a game runs.
 class InGameBar final : public QStatusBar {
     Q_OBJECT
 
@@ -24,12 +25,13 @@ public:
     void SetStats(double game_fps, double generated_fps, double frame_ms, bool at_target,
                   const QString& details);
     void SetSpeedStatus(const QString& description);
-    void SetMenuShortcut(const QKeySequence& shortcut);
+    void SetMenuShortcut(const QString& keyboard, const QString& controller);
     void SetMenuOpen(bool open);
+    void SetQuickControlsOpen(bool open);
+    QWidget* QuickControlsAnchor() const;
     ShaderChip* Shaders() const {
         return shaders;
     }
-    void OpenQuickControls(QMenu* menu);
 
 signals:
     void MenuRequested();
@@ -44,10 +46,10 @@ private:
     QWidget* contents;
     QAbstractButton* configuration;
     ShaderChip* shaders;
-    PillButton* speed;
+    BarChip* speed;
     QLabel* notice;
-    QLabel* metrics;
-    PillButton* menu_button;
+    BarMetrics* metrics;
+    BarChip* menu_button;
     MenuTooltip* menu_tooltip;
 };
 

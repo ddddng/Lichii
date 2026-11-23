@@ -76,6 +76,7 @@ namespace Spotlight {
 class FullscreenHint;
 class InGameBar;
 class InGameMenu;
+class QuickControls;
 } // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
@@ -601,6 +602,7 @@ private:
 
     Spotlight::InGameBar* ingame_bar = nullptr;
     Spotlight::InGameMenu* ingame_menu = nullptr;
+    Spotlight::QuickControls* quick_panel = nullptr;
     Spotlight::FullscreenHint* fullscreen_hint = nullptr;
     Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
     QMenu* quick_controls = nullptr;

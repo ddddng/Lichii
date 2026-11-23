@@ -12,13 +12,70 @@ class QAction;
 class QLabel;
 class QMenu;
 class QScrollArea;
-class QSlider;
 
 namespace Spotlight {
 
-class KeyCap;
-class PillButton;
+class GameArt;
 class SegmentedControl;
+class ValueButton;
+class VolumeControl;
+
+/// The menus behind the in-game dropdowns; each choice applies at once, as in the View menu.
+struct InGameControls {
+    QMenu* renderer;
+    QMenu* filter;
+    QMenu* frame_gen;
+    QMenu* more;
+    QAction* settings;
+    QAction* decrease_volume;
+    QAction* increase_volume;
+};
+
+/// What the in-game panels show, refreshed by MainWindow.
+struct InGameSummary {
+    QString renderer;
+    QString resolution;
+    QString filter;
+    QString frame_gen;
+    QString speed;
+    QString speed_keys;
+    int preset = -1;
+    bool preset_global = true;
+};
+
+/// The bottom bar's "Vulkan · Docked" popover.
+class QuickControls final : public QWidget {
+    Q_OBJECT
+
+public:
+    QuickControls(const InGameControls& controls, QWidget* parent);
+    void Open(QWidget* anchor, QWidget* bar);
+    void SetSummary(const InGameSummary& summary);
+    void SetFrameTime(const QString& text);
+    void SetConsoleMode(bool docked);
+    void SetVolume(int volume, bool muted);
+
+signals:
+    void AboutToOpen();
+    void Dismissed();
+    void DockedChanged(bool docked);
+    void VolumeChanged(int volume);
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void hideEvent(QHideEvent* event) override;
+
+private:
+    ValueButton* renderer;
+    ValueButton* resolution;
+    ValueButton* filter;
+    ValueButton* frame_gen;
+    QLabel* speed;
+    QLabel* speed_keys;
+    QLabel* frame_time;
+    SegmentedControl* console_mode;
+    VolumeControl* volume;
+};
 
 class InGameMenu final : public QWidget {
     Q_OBJECT
@@ -30,22 +87,18 @@ public:
         QAction* stop;
         QAction* capture;
         QAction* fullscreen;
-        QAction* settings;
         QAction* frame_gen;
-        QMenu* frame_gen_options;
-        QMenu* quick_controls;
         QAction* turbo;
         QAction* effects;
-        QAction* decrease_volume;
-        QAction* increase_volume;
+        InGameControls controls;
     };
 
     explicit InGameMenu(const Actions& actions, QWidget* parent);
     void Open(QWidget* anchor, const QKeySequence& shortcut, const QPixmap& icon,
-              const QString& title, const QString& play_time);
+              const QString& title, const QString& play_time, bool paused);
+    void SetSummary(const InGameSummary& summary);
     void SetConsoleMode(bool docked);
     void SetVolume(int volume, bool muted);
-    void SetGraphicsSummary(const QString& resolution, const QString& frame_gen);
 
 signals:
     void Dismissed();
@@ -65,19 +118,20 @@ private:
 
     QKeySequence menu_shortcut;
     std::array<QAction*, 6> popup_actions;
-    QPixmap game_icon;
     QWidget* close_hint;
-    QScrollArea* scroll;
+    GameArt* art;
     QWidget* panel;
-    QWidget* game_art;
+    QScrollArea* scroll;
+    QWidget* content;
     QLabel* title;
     QLabel* play_time;
-    KeyCap* menu_key;
-    PillButton* resolution_button;
-    PillButton* frame_gen_button;
+    QWidget* pause_tile;
+    QLabel* preset_note;
+    SegmentedControl* preset;
+    ValueButton* resolution;
+    ValueButton* frame_gen;
     SegmentedControl* console_mode;
-    QSlider* volume;
-    QLabel* volume_value;
+    VolumeControl* volume;
 };
 
 } // namespace Spotlight
