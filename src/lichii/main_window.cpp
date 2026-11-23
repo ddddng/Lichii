@@ -7281,7 +7281,7 @@ void MainWindow::UpdateMenuIcons() {
         {ui->menuGame_Icon_Size->menuAction(), "image"},
         {ui->action_View_Lobby, "globe"},
         {ui->action_Start_Room, "plus"},
-        {ui->action_Connect_To_Room, "users"},
+        {ui->action_Connect_To_Room, "link"},
         {ui->action_Show_Room, "dot"},
         {ui->action_Leave_Room, "x"},
         {ui->action_Install_Keys, "key"},
