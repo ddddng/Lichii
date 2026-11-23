@@ -88,6 +88,8 @@ public:
     void SetLibrarySort(Lichii::LibrarySort sort);
     void RefreshLibraryOrder();
     void PlaySelected();
+    /// Selects the program's library entry, when the current view shows it.
+    void SelectProgram(u64 program_id);
     void PlaySingleResult();
     void ShowSelectedGameMenu(const QPoint& global_position);
     bool IsPopulating() const;

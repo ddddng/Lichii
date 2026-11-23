@@ -6,6 +6,7 @@
 
 #include "lichii/game/artwork_image.h"
 #include "lichii/game/game_card.h"
+#include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/theme.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/game_list_p.h"
@@ -85,6 +86,23 @@ QRect GameCard::PlayRect(const QRect& cell) const {
     return {tile.right() - 7 - side, tile.bottom() - 7 - side, side, side};
 }
 
+QRect GameCard::OnlineBadgeRect(const QRect& tile, u64 program_id, bool favorite) const {
+    const QSize size = icon_size >= 60 ? Spotlight::OnlineBadgeSize(program_id) : QSize{};
+    if (size.isEmpty()) {
+        return {};
+    }
+    return {QPoint(tile.right() - 8 - (favorite ? 22 : 0) - size.width(), tile.top() + 8), size};
+}
+
+QString GameCard::OnlineToolTip(const QPoint& point, const QRect& cell,
+                                const QModelIndex& index) const {
+    const auto program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
+    const bool favorite = program_id != 0 && UISettings::values.favorited_ids.contains(program_id);
+    return OnlineBadgeRect(CardRect(cell), program_id, favorite).contains(point)
+               ? Spotlight::OnlineBadgeToolTip(program_id)
+               : QString{};
+}
+
 bool GameCard::HitTest(const QPoint& point, const QRect& cell) const {
     QRect target = CardRect(cell);
     if (show_name && icon_size > 0) {
@@ -153,6 +171,8 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
         painter->drawPixmap(corner, IconPixmap(u"star-fill", 14, Color::Accent(),
                                                painter->device()->devicePixelRatioF()));
     }
+    const QRect online = OnlineBadgeRect(tile, program_id, favorite);
+    PaintOnlineBadge(*painter, online, program_id);
     painter->setFont(Font(12));
     if (show_name || icon_size == 0) {
         const QRect name = icon_size > 0 ? QRect(tile.x(), tile.bottom() + 4, tile.width(), 20)
@@ -165,7 +185,8 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
 
     if (hover && icon_size >= 60) {
         painter->setFont(Font(12, 600));
-        const int max_width = tile.width() - 40;
+        const int max_width =
+            (online.isEmpty() ? tile.right() - 9 : online.left() - 6) - tile.x() - 30;
         const QString label = painter->fontMetrics().elidedText(title, Qt::ElideRight, max_width);
         const QRect title_pill(tile.x() + 10, tile.y() + 10,
                                painter->fontMetrics().horizontalAdvance(label) + 20, 26);

@@ -262,6 +262,7 @@ add_executable(lichii
     spotlight/launcher.cpp spotlight/launcher.h
     spotlight/library_header.cpp spotlight/library_header.h
     spotlight/menu.cpp spotlight/menu.h
+    spotlight/nextendo_live.cpp spotlight/nextendo_live.h
     spotlight/settings_page.cpp spotlight/settings_page.h
     spotlight/settings_get_started.cpp spotlight/settings_get_started.h
     spotlight/top_bar.cpp spotlight/top_bar.h
