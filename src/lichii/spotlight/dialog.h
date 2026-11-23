@@ -17,6 +17,9 @@ class Dialog : public QDialog {
 public:
     explicit Dialog(QWidget* parent = nullptr, Qt::WindowFlags flags = {});
 
+    enum class Chrome { Content };
+    Dialog(QWidget* parent, Chrome chrome);
+
     /// A muted line under the title, such as the game a dialog is about. Empty hides it.
     void SetSubtitle(const QString& subtitle);
 
