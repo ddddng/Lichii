@@ -433,6 +433,15 @@ template <u32 GOB_EXTENT>
     if (!IsBlockLinearSizeCompatible(info, new_info, base->level, 0, strict_size)) {
         return std::nullopt;
     }
+    if (base->level != 0 &&
+        (new_info.type != info.type || new_info.size != info.size || new_info.block != info.block ||
+         new_info.num_samples != info.num_samples ||
+         new_info.maxwell_gob_layout != info.maxwell_gob_layout ||
+         new_info.tile_width_spacing != info.tile_width_spacing ||
+         new_info.layer_stride != info.layer_stride ||
+         new_info.maybe_unaligned_layer_stride != info.maybe_unaligned_layer_stride)) {
+        return std::nullopt;
+    }
     if (new_info.block != MipBlockSize(info, base->level)) {
         return std::nullopt;
     }
