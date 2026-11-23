@@ -214,8 +214,6 @@ ConfigureRingController::ConfigureRingController(QWidget* parent,
             return;
         }
     });
-
-    resize(0, 0);
 }
 
 ConfigureRingController::~ConfigureRingController() {
@@ -319,7 +317,7 @@ void ConfigureRingController::EnableRingController() {
         break;
     }
     ui->enable_ring_controller_button->setEnabled(true);
-    ui->enable_ring_controller_button->setText(tr("Enable"));
+    ui->enable_ring_controller_button->setText(tr("Enable Ring-Con with Joy-Con driver"));
 }
 
 void ConfigureRingController::ControllerUpdate(Core::HID::ControllerTriggerType type) {
