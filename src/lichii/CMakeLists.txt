@@ -26,7 +26,6 @@ add_executable(lichii
     Info.plist
     about_dialog.cpp
     about_dialog.h
-    aboutdialog.ui
     compatibility_report.cpp
     compatibility_report.h
     applets/qt_amiibo_settings.cpp
