@@ -372,8 +372,8 @@ public:
         setFixedHeight(6);
         slide.setDuration(Motion::Slide);
         slide.setEasingCurve(QEasingCurve::OutCubic);
-        connect(&slide, &QVariantAnimation::valueChanged, this, [this](const QVariant& current) {
-            value = current.toReal();
+        connect(&slide, &QVariantAnimation::valueChanged, this, [this](const QVariant& animated) {
+            value = animated.toReal();
             update();
         });
     }

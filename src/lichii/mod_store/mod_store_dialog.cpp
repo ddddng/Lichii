@@ -1299,9 +1299,9 @@ private:
     }
 
     void UpdateGamePicker() {
-        const auto name = game_picker->currentText();
+        const auto game_name = game_picker->currentText();
         const auto mods = game_picker->currentData(Qt::ToolTipRole).toString();
-        game_picker->setToolTip(mods.isEmpty() ? name : tr("%1 · %2").arg(name, mods));
+        game_picker->setToolTip(mods.isEmpty() ? game_name : tr("%1 · %2").arg(game_name, mods));
     }
 
     void LoadGames(int offset = 0) {
@@ -1589,8 +1589,8 @@ private:
                 meta->setSpacing(6);
                 const auto entry = catalog.constFind(id);
                 const bool known = entry != catalog.cend();
-                const auto source = known ? std::optional{entry->source} : installed.source;
-                const bool external = source == Source::GameBanana;
+                const auto mod_source = known ? std::optional{entry->source} : installed.source;
+                const bool external = mod_source == Source::GameBanana;
                 const auto author = known ? entry->author : installed.author;
                 QStringList parts;
                 if (!author.isEmpty()) {
@@ -1605,9 +1605,9 @@ private:
                 auto* subtitle = PlainLabel(row, false, Color::TextSecondary(), 12);
                 subtitle->setText(parts.join(QStringLiteral(" · ")));
                 meta->addWidget(subtitle);
-                if (source) {
+                if (mod_source) {
                     meta->addWidget(
-                        new Chip(SourceName(*source), Color::Control(), Color::Text(), row));
+                        new Chip(SourceName(*mod_source), Color::Control(), Color::Text(), row));
                 }
                 if (known ? external : installed.verified == false) {
                     auto tint = Color::Warning();

@@ -150,9 +150,9 @@ LibraryHeader::LibraryHeader(QAction* grid, QAction* list, QWidget* parent)
         std::tuple{PlayTime, tr("Play time"), tr("Play time (most first)")},
         std::tuple{Size, tr("Size"), tr("Size (largest first)")},
     };
-    for (const auto& [key, label, text] : options) {
+    for (const auto& [key, sort_label, text] : options) {
         auto* choice = menu->addAction(text);
-        choice->setData(label);
+        choice->setData(sort_label);
         choice->setCheckable(true);
         choice->setChecked(key == Recent);
         sort_choices->addAction(choice);

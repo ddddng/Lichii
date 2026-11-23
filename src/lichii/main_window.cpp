@@ -7301,13 +7301,13 @@ void MainWindow::OnCheckFirmwareDecryption(bool prompt) {
                     Common::FS::PathToUTF8String(
                         Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir)));
     } else if (!ContentManager::AreKeysPresent()) {
-        Spotlight::StartupPrompt prompt(this, Spotlight::StartupPrompt::Tone::Warning,
-                                        tr("Derivation Components Missing"),
-                                        tr("Decryption keys are missing. Install them now?"));
-        prompt.AddButton(tr("No"), false);
-        auto* yes = prompt.AddButton(tr("Yes"), true);
-        prompt.exec();
-        if (prompt.ClickedButton() == yes) {
+        Spotlight::StartupPrompt keys_prompt(this, Spotlight::StartupPrompt::Tone::Warning,
+                                             tr("Derivation Components Missing"),
+                                             tr("Decryption keys are missing. Install them now?"));
+        keys_prompt.AddButton(tr("No"), false);
+        auto* yes = keys_prompt.AddButton(tr("Yes"), true);
+        keys_prompt.exec();
+        if (keys_prompt.ClickedButton() == yes) {
             OnInstallDecryptionKeys();
         }
     }

@@ -649,10 +649,10 @@ void QtSoftwareKeyboardDialog::RescaleKeyboardElements(float width, float height
         const int wide_column = grid == ui->kbOSKnum ? 5 : 12;
         grid->setSpacing(gap);
         for (int i = 0; i < grid->count(); ++i) {
-            int row, column, row_span, column_span;
-            grid->getItemPosition(i, &row, &column, &row_span, &column_span);
+            int item_row, item_column, row_span, column_span;
+            grid->getItemPosition(i, &item_row, &item_column, &row_span, &column_span);
             int button_width = gap * (column_span - 1);
-            for (int c = column; c < column + column_span; ++c) {
+            for (int c = item_column; c < item_column + column_span; ++c) {
                 button_width += c == wide_column ? wide : key;
             }
             if (auto* widget = grid->itemAt(i)->widget()) {

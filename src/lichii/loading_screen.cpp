@@ -154,17 +154,17 @@ void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QStri
     fade.stop();
     icon = {};
     precompile_requested = false;
-    u64 program_id = 0;
-    if (loader.ReadProgramId(program_id) == Loader::ResultStatus::Success && program_id != 0) {
-        const auto image = QtCommon::Game::ReadCustomArtwork(program_id);
+    u64 title_id = 0;
+    if (loader.ReadProgramId(title_id) == Loader::ResultStatus::Success && title_id != 0) {
+        const auto image = QtCommon::Game::ReadCustomArtwork(title_id);
         if (!image.empty()) {
             icon.loadFromData(image.data(), static_cast<uint>(image.size()));
         }
         if (game_title.isEmpty()) {
-            game_title = QString::fromStdString(QtCommon::Game::ReadCustomTitle(program_id));
+            game_title = QString::fromStdString(QtCommon::Game::ReadCustomTitle(title_id));
         }
         precompile_requested = VideoCommon::ShaderWarm::WarmRequested(
-            VideoCommon::ShaderWarm::ComputeWarmPath(program_id));
+            VideoCommon::ShaderWarm::ComputeWarmPath(title_id));
     }
     std::vector<u8> image;
     if (icon.isNull() && loader.ReadIcon(image) == Loader::ResultStatus::Success) {

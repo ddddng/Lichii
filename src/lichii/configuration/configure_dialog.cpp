@@ -2407,7 +2407,9 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
         settings_page->AddBlock(mapping, input_tab->MappingPage(), tr("Map buttons"));
     });
     connect(input_tab.get(), &ConfigureInput::AdvancedRequested, this,
-            [this, category, devices = pages[8]] { settings_page->ShowAdvancedPage(category, devices); });
+            [this, category, advanced_page = pages[8]] {
+                settings_page->ShowAdvancedPage(category, advanced_page);
+            });
     auto* colours = settings_page->AddSection(category, tr("Controller colours"), true);
     for (int i = 0; i < 8; ++i) {
         auto* swatches = new QWidget;
@@ -2436,7 +2438,7 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
 }
 
 void ConfigureDialog::BuildMicrophone(int category, ConfigureMicrophone* microphone) {
-    auto* devices = microphone->findChild<QComboBox*>(QStringLiteral("microphone_device"));
+    auto* mic_devices = microphone->findChild<QComboBox*>(QStringLiteral("microphone_device"));
     auto* refresh = microphone->findChild<QPushButton*>(QStringLiteral("microphone_refresh"));
     auto* volume = microphone->findChild<QSlider*>(QStringLiteral("microphone_volume"));
     auto* level = microphone->findChild<QProgressBar*>(QStringLiteral("microphone_level"));
@@ -2448,7 +2450,7 @@ void ConfigureDialog::BuildMicrophone(int category, ConfigureMicrophone* microph
     auto* device_layout = new QHBoxLayout(device_control);
     device_layout->setContentsMargins(0, 0, 0, 0);
     device_layout->setSpacing(8);
-    device_layout->addWidget(SettingsPage::BindCombo(devices));
+    device_layout->addWidget(SettingsPage::BindCombo(mic_devices));
     auto* refresh_button = new Spotlight::CircleButton(QStringLiteral("arrow-clockwise"), 32);
     refresh_button->setToolTip(refresh->text());
     refresh_button->setAccessibleName(refresh_button->toolTip());

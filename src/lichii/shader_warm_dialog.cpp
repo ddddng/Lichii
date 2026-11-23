@@ -148,10 +148,10 @@ ShaderWarmDialog::ShaderWarmDialog(Core::System& system_, std::filesystem::path 
     progress_bar->setRange(0, 0);
     layout->addWidget(progress_bar);
 
-    result = new Spotlight::Notice;
-    result->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    result->hide();
-    layout->addWidget(result);
+    result_notice = new Spotlight::Notice;
+    result_notice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    result_notice->hide();
+    layout->addWidget(result_notice);
 
     auto* bottom = new QHBoxLayout;
     bottom->setContentsMargins(0, 6, 0, 0);
@@ -295,7 +295,7 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
     QString text;
     if (result.ok) {
         SetStage(static_cast<int>(stages.size()), {});
-        this->result->SetTone(Spotlight::Notice::Tone::Success);
+        result_notice->SetTone(Spotlight::Notice::Tone::Success);
         text = tr("Shader precache is ready.") + QLatin1Char('\n');
         if (result.compute_programs == 0) {
             text += result.archives == 0 && result.packs == 0
@@ -319,16 +319,16 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
                      : tr("It is built on the loading screen when Precache shaders before game "
                           "start is on."));
     } else if (stopped) {
-        this->result->SetTone(Spotlight::Notice::Tone::Neutral);
+        result_notice->SetTone(Spotlight::Notice::Tone::Neutral);
         text = tr("Shader precache stopped.");
     } else {
-        this->result->SetTone(Spotlight::Notice::Tone::Error);
+        result_notice->SetTone(Spotlight::Notice::Tone::Error);
         text = tr("Shader precache could not be built.") + QLatin1Char('\n') +
                (result.error.empty() ? tr("No details were given.")
                                      : QString::fromStdString(result.error));
     }
-    this->result->setText(text);
-    this->result->setVisible(!text.isEmpty());
+    result_notice->setText(text);
+    result_notice->setVisible(!text.isEmpty());
     footer->clear();
     button->setText(tr("Close"));
     button->setProperty("kind", QStringLiteral("primary"));

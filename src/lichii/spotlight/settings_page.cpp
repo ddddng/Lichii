@@ -1545,8 +1545,8 @@ QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool a
                                       QWidget* action, int column) {
     if (advanced_) {
         auto& entry = categories[category];
-        const int column = static_cast<int>(entry.section_rows.size()) % 2;
-        return NewSection(category, title, {}, column, title);
+        const int next_column = static_cast<int>(entry.section_rows.size()) % 2;
+        return NewSection(category, title, {}, next_column, title);
     }
     auto* section = new QWidget;
     section->setProperty("spotlightTransparent", true);
@@ -2206,15 +2206,15 @@ void SettingsPage::BuildPage(int category, Page& page) {
             } else if (auto* check = qobject_cast<QCheckBox*>(widget)) {
                 if (label == nullptr || !controls.isEmpty()) {
                     flush();
-                    auto* box = new QWidget;
-                    box->setProperty("spotlightTransparent", true);
-                    auto* box_layout = new QHBoxLayout(box);
+                    auto* check_box = new QWidget;
+                    check_box->setProperty("spotlightTransparent", true);
+                    auto* box_layout = new QHBoxLayout(check_box);
                     box_layout->setContentsMargins(0, 0, 0, 0);
                     box_layout->setSpacing(8);
                     auto* toggle = BindToggle(check);
                     toggle->setAccessibleName(CleanLabel(check->text()));
                     box_layout->addWidget(toggle);
-                    add_row(CleanLabel(check->text()), check->toolTip(), {check}, box);
+                    add_row(CleanLabel(check->text()), check->toolTip(), {check}, check_box);
                     toggle_box = box_layout;
                     toggle_source = check;
                 } else {

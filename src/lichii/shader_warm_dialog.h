@@ -88,7 +88,7 @@ private:
     std::array<Stage, 5> stages{};
     int current_stage = -1;
     QProgressBar* progress_bar{};
-    Spotlight::Notice* result{};
+    Spotlight::Notice* result_notice{};
     QLabel* footer{};
     QPushButton* button{};
 
