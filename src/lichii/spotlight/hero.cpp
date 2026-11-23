@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 
 #include "lichii/spotlight/hero.h"
+#include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 
@@ -13,8 +14,9 @@ namespace Spotlight {
 
 Hero::Hero(QWidget* parent)
     : QWidget(parent), platform(new QLabel(this)), playtime(new QLabel(this)),
-      title(new QLabel(this)), play(new PillButton(tr("Play"), QStringLiteral("play-fill"),
-                                                   PillButton::Kind::Accent, 44, this)),
+      online(new NextendoGameLine(this)), title(new QLabel(this)),
+      play(new PillButton(tr("Play"), QStringLiteral("play-fill"), PillButton::Kind::Accent, 44,
+                          this)),
       menu(new CircleButton(QStringLiteral("dots-three"), 44, this)),
       add(new PillButton(tr("Add game folder"), QStringLiteral("plus"), PillButton::Kind::Accent,
                          44, this)) {
@@ -45,6 +47,7 @@ Hero::Hero(QWidget* parent)
     title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     title->setTextFormat(Qt::PlainText);
     column->addWidget(title);
+    column->addWidget(online);
     column->addSpacing(8);
 
     auto* buttons = new QHBoxLayout;
@@ -66,7 +69,9 @@ Hero::Hero(QWidget* parent)
     SetEmpty(false, false);
 }
 
-void Hero::SetGame(const QString& name, Lichii::LibraryPlatform console, u64 seconds) {
+void Hero::SetGame(const QString& name, Lichii::LibraryPlatform console, u64 seconds,
+                   u64 program_id) {
+    online->SetProgramId(program_id);
     using enum Lichii::LibraryPlatform;
     platform->setText(console == Switch2 ? tr("Switch 2") : tr("Switch 1"));
     platform->setVisible(console != All);
@@ -85,6 +90,7 @@ void Hero::SetGame(const QString& name, Lichii::LibraryPlatform console, u64 sec
 }
 
 void Hero::SetEmpty(bool has_library, bool filtered) {
+    online->SetProgramId(0);
     platform->hide();
     playtime->hide();
     play->hide();

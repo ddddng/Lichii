@@ -21,6 +21,7 @@
 #include "lichii/spotlight/launcher.h"
 #include "lichii/spotlight/library_header.h"
 #include "lichii/spotlight/menu.h"
+#include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 
@@ -103,6 +104,7 @@ Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* p
     library_area->addLayout(library_body, 0, 0);
     library_area->addWidget(library, 0, 0, Qt::AlignTop);
     column->addLayout(library_area, 1);
+    column->addWidget(new NextendoBar(games, this));
 
     connect(top, &TopBar::PlatformChanged, games, &GameList::SetPlatform);
     connect(hero, &Hero::PlayRequested, games, &GameList::PlaySelected);
@@ -242,7 +244,7 @@ void Launcher::UpdateSelection(const QModelIndex& game, int count) {
                 QFileInfo(game.data(GameListItemPath::FullPathRole).toString()).completeBaseName();
         }
         const u64 id = game.data(GameListItemPath::ProgramIdRole).toULongLong();
-        hero->SetGame(title, Lichii::PlatformOf(game), playtime.GetPlayTime(id));
+        hero->SetGame(title, Lichii::PlatformOf(game), playtime.GetPlayTime(id), id);
     } else {
         hero->SetEmpty(library_available, count == 0 && !games->IsPopulating());
     }

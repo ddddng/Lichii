@@ -351,6 +351,29 @@ void GameList::PlaySelected() {
     ValidateEntry(SelectedGame());
 }
 
+void GameList::SelectProgram(u64 program_id) {
+    const auto* model = m_currentView->model();
+    const auto find = [&](const QModelIndex& parent, const auto& self) -> QModelIndex {
+        for (int row = 0; row < model->rowCount(parent); ++row) {
+            const QModelIndex index = model->index(row, 0, parent);
+            if (index.data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Game &&
+                index.data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
+                return index;
+            }
+            if (const QModelIndex child = self(index, self); child.isValid()) {
+                return child;
+            }
+        }
+        return {};
+    };
+    if (const QModelIndex index = find({}, find); index.isValid()) {
+        m_currentView->setCurrentIndex(index);
+        m_currentView->scrollTo(index);
+        m_currentView->setFocus();
+    }
+}
+
 void GameList::PlaySingleResult() {
     if (result_count == 1 && !m_populating) {
         ValidateEntry(first_result);

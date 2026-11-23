@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QMouseEvent>
+#include <QToolTip>
 
 #include "lichii/game/game_card.h"
 #include "lichii/game/game_grid.h"
+#include "lichii/spotlight/nextendo_live.h"
 #include "qt_common/config/uisettings.h"
 
 GameGrid::GameGrid(QWidget* parent, Mode mode_)
@@ -29,6 +31,8 @@ GameGrid::GameGrid(QWidget* parent, Mode mode_)
     setObjectName(mode == Mode::Grid ? QStringLiteral("spotlightGrid")
                                      : QStringLiteral("spotlightCarousel"));
     UpdateIconSize();
+    connect(&Spotlight::NextendoLive::Instance(), &Spotlight::NextendoLive::Changed, viewport(),
+            qOverload<>(&QWidget::update));
 }
 
 void GameGrid::UpdateIconSize() {
@@ -70,8 +74,19 @@ void GameGrid::currentChanged(const QModelIndex& current, const QModelIndex& pre
 
 bool GameGrid::viewportEvent(QEvent* event) {
     switch (event->type()) {
-    case QEvent::ToolTip:
+    case QEvent::ToolTip: {
+        const auto* help = static_cast<QHelpEvent*>(event);
+        const QModelIndex index = indexAt(help->pos());
+        const QString tip = index.isValid()
+                                ? m_gameCard->OnlineToolTip(help->pos(), visualRect(index), index)
+                                : QString{};
+        if (tip.isEmpty()) {
+            QToolTip::hideText();
+        } else {
+            QToolTip::showText(help->globalPos(), tip, viewport());
+        }
         return true;
+    }
     case QEvent::HoverEnter:
     case QEvent::HoverMove:
     case QEvent::HoverLeave:

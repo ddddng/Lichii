@@ -13,6 +13,7 @@ class QLabel;
 namespace Spotlight {
 
 class CircleButton;
+class NextendoGameLine;
 class PillButton;
 
 class Hero final : public QWidget {
@@ -20,7 +21,8 @@ class Hero final : public QWidget {
 
 public:
     explicit Hero(QWidget* parent = nullptr);
-    void SetGame(const QString& name, Lichii::LibraryPlatform platform, u64 seconds);
+    void SetGame(const QString& name, Lichii::LibraryPlatform platform, u64 seconds,
+                 u64 program_id);
     void SetEmpty(bool has_library, bool filtered);
 
 signals:
@@ -37,6 +39,7 @@ private:
 
     QLabel* platform;
     QLabel* playtime;
+    NextendoGameLine* online;
     QLabel* title;
     PillButton* play;
     CircleButton* menu;

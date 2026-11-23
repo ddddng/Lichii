@@ -12,6 +12,7 @@
 #include <QPainterPath>
 #include <QVBoxLayout>
 
+#include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/shader_chip.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
@@ -267,6 +268,8 @@ InGameBar::InGameBar(QWidget* parent) : QStatusBar(parent), contents(new QWidget
     speed->hide();
     layout->addWidget(speed);
     connect(speed, &QAbstractButton::clicked, this, &InGameBar::QuickControlsRequested);
+
+    layout->addWidget(new NextendoGameChip(this));
 
     notice = new QLabel(contents);
     notice->setFont(Font(12));

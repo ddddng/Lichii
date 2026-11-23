@@ -5,6 +5,8 @@
 
 #include <QStyledItemDelegate>
 
+#include "common/common_types.h"
+
 class GameCard : public QStyledItemDelegate {
     Q_OBJECT
 public:
@@ -24,6 +26,9 @@ public:
     QRect CardRect(const QRect& cell) const;
     QRect PlayRect(const QRect& cell) const;
     bool HitTest(const QPoint& point, const QRect& cell) const;
+    /// The Nextendo player pill in the tile's top-right corner; empty when it shows none.
+    QRect OnlineBadgeRect(const QRect& tile, u64 program_id, bool favorite) const;
+    QString OnlineToolTip(const QPoint& point, const QRect& cell, const QModelIndex& index) const;
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
     QSize UpdateSize(int viewport_height = 0);
 

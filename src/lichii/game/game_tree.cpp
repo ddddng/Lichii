@@ -7,6 +7,7 @@
 
 #include "lichii/game/artwork_image.h"
 #include "lichii/game/game_tree.h"
+#include "lichii/spotlight/nextendo_live.h"
 #include "lichii/spotlight/theme.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
@@ -53,8 +54,10 @@ public:
         if (lines.size() > 1) {
             primary.setBottom(rect.center().y() + 1);
         }
+        const QSize online = name_column && is_game ? Spotlight::OnlineBadgeSize(id) : QSize{};
+        const int extra = (favorite ? 21 : 0) + (online.isEmpty() ? 0 : online.width() + 10);
         const QString label = painter->fontMetrics().elidedText(
-            lines.value(0), Qt::ElideRight, std::max(0, primary.width() - (favorite ? 21 : 0)));
+            lines.value(0), Qt::ElideRight, std::max(0, primary.width() - extra));
         QRect label_rect;
         painter->drawText(primary,
                           Qt::AlignLeft | (lines.size() > 1 ? Qt::AlignBottom : Qt::AlignVCenter),
@@ -64,13 +67,19 @@ public:
                                 IconPixmap(u"star-fill", 14, Color::Accent(),
                                            painter->device()->devicePixelRatioF()));
         }
+        if (!online.isEmpty()) {
+            const QPoint corner(rect.right() - online.width(),
+                                rect.center().y() - online.height() / 2);
+            PaintOnlineBadge(*painter, QRect(corner, online), id);
+        }
         if (lines.size() > 1) {
             rect.setTop(primary.bottom() + 1);
             painter->setFont(Font(12));
             painter->setPen(IsLichiiTheme() ? Color::TextMuted() : native_text);
             painter->drawText(rect, Qt::AlignLeft | Qt::AlignTop,
-                              painter->fontMetrics().elidedText(lines.value(1).trimmed(),
-                                                                Qt::ElideRight, rect.width()));
+                              painter->fontMetrics().elidedText(
+                                  lines.value(1).trimmed(), Qt::ElideRight,
+                                  rect.width() - (online.isEmpty() ? 0 : online.width() + 10)));
         }
         painter->restore();
     }
@@ -112,6 +121,8 @@ GameTree::GameTree(QWidget* parent) : QTreeView(parent) {
     setObjectName(QStringLiteral("spotlightTree"));
     setRootIsDecorated(false);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    connect(&Spotlight::NextendoLive::Instance(), &Spotlight::NextendoLive::Changed, viewport(),
+            qOverload<>(&QWidget::update));
 }
 
 void GameTree::drawRow(QPainter* painter, const QStyleOptionViewItem& option,
