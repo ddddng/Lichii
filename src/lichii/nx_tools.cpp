@@ -459,13 +459,30 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         suggested = source;
         suggested.replace_extension(".nx");
     }
-    QString chosen = QFileDialog::getSaveFileName(
-        parent_widget, title, ToQString(suggested), tr("NX archive (*.nx)"));
-    if (chosen.isEmpty()) {
+    std::vector<std::filesystem::path> related;
+    std::vector<ArchivePackage> related_packages;
+    if (kind == Kind::Package) {
+        related = RelatedPackages(vfs, source);
+        for (const auto& related_path : related) {
+            std::error_code ec;
+            const auto bytes = std::filesystem::file_size(related_path, ec);
+            related_packages.push_back(
+                {ToQString(related_path.filename()), {}, ec ? 0 : bytes, true});
+        }
+    }
+    NxConvertDialog dialog(ToQString(source), std::move(related_packages), suggested,
+                           kind != Kind::Nup, parent_widget);
+    const int result = dialog.exec();
+    if (result == ArchiveConvertDialog::OtherFormat) {
+        emit ConvertToNupRequested(game_path);
         return;
     }
-    const auto output = FrontendCommon::NxArchive::WithNxExtension(ToUtf8(chosen));
-    chosen = QString::fromStdString(output);
+    if (result != QDialog::Accepted) {
+        return;
+    }
+    const auto output =
+        FrontendCommon::NxArchive::WithNxExtension(ToUtf8(ToQString(dialog.Archive())));
+    const QString chosen = QString::fromStdString(output);
     if (std::error_code ec; std::filesystem::exists(ToPath(output), ec)) {
         ArchiveNotice(parent_widget, title,
                              tr("The archive already exists:\n%1").arg(chosen));
@@ -483,32 +500,17 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         job->originals.push_back(source);
 
         // Updates and DLC of the same game next to it go into the same archive.
-        const auto related = RelatedPackages(vfs, source);
-        if (!related.empty()) {
-            ArchiveMessageDialog dialog(
-                title,
-                tr("Updates and DLC of this game were found in the same folder. The checked ones "
-                   "go into the NX archive too."),
-                parent_widget);
-            std::vector<QCheckBox*> checks;
-            for (const auto& related_path : related) {
-                checks.push_back(dialog.AddCheckBox(ToQString(related_path.filename()), true));
+        const auto included = dialog.IncludedPackages();
+        for (std::size_t i = 0; i < related.size(); ++i) {
+            if (!included[i]) {
+                continue;
             }
-            dialog.AddButton(tr("Cancel"), {}, false);
-            dialog.AddButton(tr("Convert"), QStringLiteral("archive"), true);
-            if (dialog.exec() != QDialog::Accepted) {
+            if (const auto error = job->AddPackage(vfs, related[i]); !error.isEmpty()) {
+                ArchiveNotice(parent_widget, title, CannotDecrypt(related[i], error),
+                              ArchiveTone::Error);
                 return;
             }
-            for (std::size_t i = 0; i < related.size(); ++i) {
-                if (!checks[i]->isChecked()) {
-                    continue;
-                }
-                if (const auto error = job->AddPackage(vfs, related[i]); !error.isEmpty()) {
-                    ArchiveNotice(parent_widget, title, CannotDecrypt(related[i], error));
-                    return;
-                }
-                job->originals.push_back(related[i]);
-            }
+            job->originals.push_back(related[i]);
         }
         job->args.push_back(output);
         job->args.push_back("--frontend");
@@ -541,34 +543,103 @@ void NxTools::ConvertToNx(const std::string& game_path) {
 }
 
 void NxTools::AddToNx(const std::string& archive_path) {
+    ManageNx(archive_path);
+}
+
+void NxTools::RemoveFromNx(const std::string& archive_path) {
+    ManageNx(archive_path);
+}
+
+void NxTools::ManageNx(const std::string& archive_path) {
     if (running || !Loaded()) {
         return;
     }
-    const QString title = tr("Add to NX");
-    const auto archive = vfs->OpenFile(archive_path, FileSys::OpenMode::Read);
-    const auto platform = archive != nullptr ? Loader::AppLoader_NX::ReadPlatform(archive, 0) : 0;
+    const QString title = tr("Updates and DLC");
+    // Read what the card shows and let go of the file: the job locks it for editing.
+    u32 platform = 0;
+    std::string game_title;
+    std::vector<u8> icon_bytes;
+    if (const auto archive = vfs->OpenFile(archive_path, FileSys::OpenMode::Read);
+        archive != nullptr) {
+        platform = Loader::AppLoader_NX::ReadPlatform(archive, 0);
+        if (QtCommon::system != nullptr) {
+            Loader::AppLoader_NX loader(*QtCommon::system, archive);
+            loader.ReadTitle(game_title);
+            loader.ReadIcon(icon_bytes);
+        }
+    }
     if (platform == 0) {
-        ArchiveNotice(parent_widget, title, tr("This NX archive cannot be read."));
+        ArchiveNotice(parent_widget, title, tr("This NX archive cannot be read."),
+                      ArchiveTone::Error);
         return;
     }
     const bool switch2 = platform == 2;
-
-    ArchiveMessageDialog choice(title,
-                                tr("Add an update or DLC to this NX archive. The archive is "
-                                   "changed in place; the content it already holds is kept."),
-                                parent_widget);
-    choice.AddButton(tr("Cancel"), {}, false);
-    auto* folder_button = choice.AddButton(tr("Update folder…"), QStringLiteral("folder-open"), true);
-    auto* file_button = choice.AddButton(tr("NSP or XCI files…"), QStringLiteral("archive"), true);
-    if (switch2) {
-        // Native Switch 1 packages only; a Switch 2 game takes extracted update folders.
-        file_button->setVisible(false);
+    std::vector<Snapshot> snapshots;
+    if (const auto error = ListContents(archive_path, [&](const QStringList& fields) {
+            if (fields.size() >= 8 && fields[0] == QStringLiteral("@SNAPSHOT")) {
+                snapshots.push_back(
+                    {fields[1], fields[2], fields[4], fields[5], fields[6], fields[7]});
+            }
+        });
+        !error.isEmpty()) {
+        ArchiveNotice(parent_widget, title, tr("This NX archive cannot be read: %1").arg(error),
+                      ArchiveTone::Error);
+        return;
     }
-    choice.exec();
+    QPixmap icon;
+    icon.loadFromData(icon_bytes.data(), static_cast<uint>(icon_bytes.size()));
+    std::vector<ArchiveContentsDialog::Entry> entries;
+    for (const auto& s : snapshots) {
+        const QString version = s.display_version.isEmpty() ? s.version : s.display_version;
+        if (s.kind == QStringLiteral("base")) {
+            const QString file_name =
+                QFileInfo(QString::fromStdString(archive_path)).completeBaseName();
+            const QString name =
+                game_title.empty() ? file_name : QString::fromStdString(game_title);
+            entries.push_back(
+                {name, tr("Base game · v%1").arg(version), ArchiveContentsDialog::Kind::Base});
+        } else if (s.kind == QStringLiteral("dlc")) {
+            entries.push_back({s.name.isEmpty() ? tr("DLC %1").arg(s.title_id.toUpper()) : s.name,
+                               tr("DLC · %1").arg(s.title_id.toUpper()),
+                               ArchiveContentsDialog::Kind::Dlc});
+        } else {
+            entries.push_back({tr("Update v%1").arg(version), tr("Version %1").arg(s.version),
+                               ArchiveContentsDialog::Kind::Update});
+        }
+    }
+    std::error_code ec;
+    const auto archive_bytes = std::filesystem::file_size(ToPath(archive_path), ec);
+    // Native Switch 1 packages only; a Switch 2 game takes extracted update folders.
+    ArchiveContentsDialog contents(ToQString(ToPath(archive_path).filename()),
+                                   ec ? 0 : archive_bytes, icon, entries, !switch2, parent_widget);
+    if (contents.exec() != QDialog::Accepted) {
+        return;
+    }
 
     auto job = std::make_shared<Job>();
-    job->title = tr("Adding to NX");
-    if (choice.Clicked() == folder_button) {
+    switch (contents.Chosen()) {
+    case ArchiveContentsDialog::Choice::None:
+        return;
+    case ArchiveContentsDialog::Choice::Remove: {
+        const auto& entry = entries[contents.Removed()];
+        ArchiveMessageDialog confirm(
+            tr("Remove %1?").arg(entry.title),
+            tr("It is removed from the archive in place. The base game and the other content "
+               "stay."),
+            parent_widget, ArchiveTone::Warning);
+        confirm.AddButton(tr("Cancel"), {}, false);
+        confirm.AddButton(tr("Remove"), QStringLiteral("trash"), true);
+        if (confirm.exec() != QDialog::Accepted) {
+            return;
+        }
+        job->title = tr("Removing from NX");
+        job->args = {"remove", archive_path, ToUtf8(snapshots[contents.Removed()].identity),
+                     "--frontend"};
+        job->done_message = tr("%1 was removed from the NX archive.").arg(entry.title);
+        break;
+    }
+    case ArchiveContentsDialog::Choice::AddFolder: {
+        job->title = tr("Adding to NX");
         const QString chosen = QFileDialog::getExistingDirectory(
             parent_widget, tr("Select the Update Folder"),
             ToQString(ToPath(archive_path).parent_path()));
@@ -597,7 +668,11 @@ void NxTools::AddToNx(const std::string& archive_path) {
             job->args.push_back("--update-version");
             job->args.push_back(std::to_string(*version));
         }
-    } else if (choice.Clicked() == file_button) {
+        job->done_message = tr("The NX archive was updated.");
+        break;
+    }
+    case ArchiveContentsDialog::Choice::AddFiles: {
+        job->title = tr("Adding to NX");
         const QStringList files = QFileDialog::getOpenFileNames(
             parent_widget, tr("Select Updates or DLC"),
             ToQString(ToPath(archive_path).parent_path()), tr("Switch packages (*.nsp *.xci)"));
@@ -608,73 +683,20 @@ void NxTools::AddToNx(const std::string& archive_path) {
         for (const auto& name : files) {
             const auto path = ToPath(ToUtf8(name));
             if (const auto error = job->AddPackage(vfs, path); !error.isEmpty()) {
-                ArchiveNotice(parent_widget, title, CannotDecrypt(path, error));
+                ArchiveNotice(parent_widget, title, CannotDecrypt(path, error), ArchiveTone::Error);
                 return;
             }
         }
         job->args.push_back("--frontend");
-    } else {
-        return;
+        job->done_message = tr("The NX archive was updated.");
+        break;
     }
-    job->done_message = tr("The NX archive was updated.");
-    Start(std::move(job));
-}
-
-void NxTools::RemoveFromNx(const std::string& archive_path) {
-    if (running || !Loaded()) {
-        return;
     }
-    const QString title = tr("Remove from NX");
-    std::vector<Snapshot> snapshots;
-    if (const auto error = ListContents(archive_path, [&](const QStringList& fields) {
-            if (fields.size() >= 8 && fields[0] == QStringLiteral("@SNAPSHOT")) {
-                snapshots.push_back(
-                    {fields[1], fields[2], fields[4], fields[5], fields[6], fields[7]});
-            }
-        });
-        !error.isEmpty()) {
-        ArchiveNotice(parent_widget, title,
-                             tr("This NX archive cannot be read: %1").arg(error));
-        return;
+    // The game list's content provider keeps the archive open with a shared lock, which the
+    // job's edit lock waits on. Drop it (the refresh after the job fills it again).
+    if (QtCommon::provider != nullptr && !QtCommon::system->IsPoweredOn()) {
+        QtCommon::provider->ClearAllEntries();
     }
-    std::erase_if(snapshots, [](const Snapshot& s) { return s.kind == QStringLiteral("base"); });
-    if (snapshots.empty()) {
-        ArchiveNotice(parent_widget, title,
-                                 tr("This NX archive holds no update or DLC to remove."));
-        return;
-    }
-
-    ArchiveMessageDialog dialog(title, tr("Pick the updates and DLC to remove from the archive."),
-                                parent_widget);
-    std::vector<std::pair<QCheckBox*, QString>> checks;
-    for (const auto& s : snapshots) {
-        QString text = s.kind == QStringLiteral("dlc")
-                           ? tr("DLC %1 (v%2)").arg(s.title_id.toUpper(), s.version)
-                           : tr("Update %1 (v%2)").arg(s.display_version, s.version);
-        if (s.kind == QStringLiteral("dlc") && !s.name.isEmpty()) {
-            text += QStringLiteral(" - ") + s.name;
-        }
-        checks.emplace_back(dialog.AddCheckBox(text, false), s.identity);
-    }
-    dialog.AddButton(tr("Cancel"), {}, false);
-    dialog.AddButton(tr("Remove"), QStringLiteral("trash"), true);
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
-    }
-
-    auto job = std::make_shared<Job>();
-    job->title = tr("Removing from NX");
-    job->args = {"remove", archive_path};
-    for (const auto& [check, identity] : checks) {
-        if (check->isChecked()) {
-            job->args.push_back(ToUtf8(identity));
-        }
-    }
-    if (job->args.size() == 2) {
-        return;
-    }
-    job->args.push_back("--frontend");
-    job->done_message = tr("The selected content was removed from the NX archive.");
     Start(std::move(job));
 }
 
@@ -901,9 +923,9 @@ void NxTools::ReplyOriginal(Job& job, const QString& text) {
     } else {
         label = tr("Move the original game to the Recycle Bin:\n%1").arg(names.front());
     }
-    ArchiveMessageDialog box(job.title, text, parent_widget);
+    ArchiveMessageDialog box(job.title, text, parent_widget, ArchiveTone::Success);
     auto* remove = box.AddCheckBox(label, false);
-    box.AddButton(tr("OK"), {}, true);
+    box.AddButton(tr("Done"), {}, true);
     box.exec();
     if (remove->isChecked()) {
         // nxformat has returned; close what it read before moving the originals.
@@ -984,7 +1006,7 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
                     tr("Already in the archive: %1").arg(job->skipped.join(QStringLiteral(", ")));
         }
         ArchiveNotice(parent_widget, metadata_write ? tr("Saved into the NX archive") : job->title,
-                      text);
+                      text, ArchiveTone::Success);
         if (!metadata_write) {
             emit ArchivesChanged();
         }
@@ -992,11 +1014,12 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     }
     case NXFORMAT_CANCELLED:
         if (changed) {
-            ArchiveNotice(parent_widget, job->title, tr("Cancelled.") + kept);
+            ArchiveNotice(parent_widget, job->title, tr("Cancelled.") + kept,
+                          ArchiveTone::Warning);
             emit ArchivesChanged();
         } else {
-            ArchiveNotice(parent_widget, job->title,
-                                     tr("Cancelled. Nothing was changed on disk."));
+            ArchiveNotice(parent_widget, job->title, tr("Cancelled. Nothing was changed on disk."),
+                          ArchiveTone::Warning);
         }
         break;
     default: {
@@ -1008,7 +1031,7 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
                    "the original package cannot be rebuilt exactly from it.")
                         .arg(error) +
                     kept,
-                parent_widget);
+                parent_widget, ArchiveTone::Error);
             retry.AddButton(tr("Cancel"), {}, false);
             retry.AddButton(tr("Try again"), QStringLiteral("arrow-counter-clockwise"), true);
             if (retry.exec() == QDialog::Accepted) {
@@ -1019,7 +1042,7 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
             }
         } else {
             ArchiveNotice(parent_widget, job->title,
-                                 tr("The operation failed:\n%1").arg(error) + kept);
+                          tr("The operation failed:\n%1").arg(error) + kept, ArchiveTone::Error);
         }
         if (changed) {
             emit ArchivesChanged();
