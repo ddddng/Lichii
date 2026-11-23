@@ -5,6 +5,7 @@
 #include <QDesktopServices>
 #include <QIcon>
 #include <QPainter>
+#include <QStyle>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <fmt/ranges.h>
@@ -57,9 +58,11 @@ void LinkItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
     doc.setHtml(html);
 
     options.text.clear();
+    options.widget->style()->drawControl(QStyle::CE_ItemViewItem, &options, painter, options.widget);
 
     painter->save();
-    painter->translate(options.rect.topLeft());
+    painter->translate(options.rect.left(),
+                       options.rect.top() + (options.rect.height() - doc.size().height()) / 2);
     doc.drawContents(painter, QRectF(0, 0, options.rect.width(), options.rect.height()));
     painter->restore();
 }

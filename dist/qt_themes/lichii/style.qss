@@ -206,6 +206,13 @@ QDialogButtonBox QPushButton {
     min-width: 72px;
 }
 
+QMessageBox {
+    messagebox-information-icon: url(:/lichii/icons/msgbox_information.png);
+    messagebox-question-icon: url(:/lichii/icons/msgbox_question.png);
+    messagebox-warning-icon: url(:/lichii/icons/msgbox_warning.png);
+    messagebox-critical-icon: url(:/lichii/icons/msgbox_critical.png);
+}
+
 /* Inputs ---------------------------------------------------------------- */
 
 QLineEdit,

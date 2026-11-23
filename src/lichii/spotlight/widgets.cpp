@@ -170,6 +170,12 @@ void PillButton::SetKind(Kind kind_) {
     update();
 }
 
+void PillButton::SetIcon(QString icon) {
+    icon_name = std::move(icon);
+    updateGeometry();
+    update();
+}
+
 void PillButton::SetForegroundColor(const QColor& color) {
     foreground = color;
     update();

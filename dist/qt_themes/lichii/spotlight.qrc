@@ -101,6 +101,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/timer.png</file>
         <file>spotlight/icons/translate.png</file>
         <file>spotlight/icons/trash.png</file>
+        <file>spotlight/icons/upload-simple.png</file>
         <file>spotlight/icons/user.png</file>
         <file>spotlight/icons/users.png</file>
         <file>spotlight/icons/vibrate.png</file>

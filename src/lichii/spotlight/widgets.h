@@ -69,6 +69,7 @@ public:
     explicit PillButton(const QString& text, QString icon = {}, Kind kind = Kind::Control,
                         int height = 36, QWidget* parent = nullptr);
     void SetKind(Kind kind);
+    void SetIcon(QString icon);
     void SetForegroundColor(const QColor& color);
     QSize sizeHint() const override;
 
