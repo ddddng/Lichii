@@ -142,14 +142,19 @@ QSize CircleButton::sizeHint() const {
 void CircleButton::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    const QColor fill = isDown() || isChecked()
-                            ? Color::Stroke()
-                            : Mix(Color::Control(), Color::ControlHover(), hover.Value());
-    FillRounded(painter, rect(), diameter / 2.0, fill,
-                HasKeyboardFocus(this) ? Color::Accent() : Color::Stroke());
-    const int icon = diameter >= 36 ? 20 : 16;
-    const QPixmap pixmap = IconPixmap(icon_name, icon, isEnabled() ? Color::Text() : Color::TextFaint(),
-                                      devicePixelRatioF());
+    const bool outlined = diameter > 32;
+    const QColor rest = outlined ? Color::Control() : Color::Fill();
+    const QColor fill =
+        isDown() || isChecked() ? Color::Stroke() : Mix(rest, Color::ControlHover(), hover.Value());
+    const QColor stroke = HasKeyboardFocus(this) ? Color::Accent()
+                          : outlined             ? Color::Stroke()
+                                                 : QColor();
+    FillRounded(painter, rect(), diameter / 2.0, fill, stroke);
+    const int icon = diameter >= 36 ? 20 : 15;
+    const QColor ink = !isEnabled() ? Color::TextFaint()
+                       : outlined   ? Color::Text()
+                                    : Mix(Color::TextSecondary(), Color::Text(), hover.Value());
+    const QPixmap pixmap = IconPixmap(icon_name, icon, ink, devicePixelRatioF());
     painter.drawPixmap((width() - icon) / 2, (height() - icon) / 2, pixmap);
 }
 
