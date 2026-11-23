@@ -682,9 +682,10 @@ void ConfigurePerGame::BuildSettings() {
     const int info = settings_page->AddCategory(
         tr("Info"), tr("What Lichii knows about this game and its file"), QStringLiteral("info"),
         Tints::Lavender(), tr("Info and file"), true);
-    const int cpu = settings_page->AddCategory(tr("CPU"),
-                                               tr("Only what you change here differs from global."),
-                                               QStringLiteral("lightning"), Tints::Gold(), {}, true);
+    const int cpu = settings_page->AddCategory(
+        tr("CPU"),
+        tr("CPU choices apply to this game only. Available backends depend on the host and build."),
+        QStringLiteral("lightning"), Tints::Gold(), {}, true);
     const int network = settings_page->AddCategory(
         tr("Network"), tr("Only what you change here differs from global."),
         QStringLiteral("globe"), Tints::Green(), {}, true);
@@ -728,7 +729,7 @@ void ConfigurePerGame::BuildSettings() {
         if (QMessageBox::warning(
                 this, tr("Reset game settings"),
                 tr("Remove this game's custom configuration and close Game Settings?"),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) != QMessageBox::Yes) {
             return;
         }
         QtCommon::Game::RemoveCustomConfiguration(title_id,
@@ -866,6 +867,7 @@ void ConfigurePerGame::BuildSettings() {
     settings_page->SetBuilder(graphics, [this, graphics, frame_rate, add_setting, add_fps,
                                          add_resolution, add_content, watch, is_custom] {
         auto* picture = settings_page->AddSection(graphics, tr("Graphics"));
+        picture->parentWidget()->setProperty("compactRows", true);
         AddPresetRow(picture);
         add_resolution(picture, false);
         add_setting(picture, Settings::values.scaling_filter, tr("Scaling filter"), {},
@@ -881,19 +883,25 @@ void ConfigurePerGame::BuildSettings() {
         if (frame_rate == -1) {
             return;
         }
-        add_fps(settings_page->AddSection(graphics, tr("Guest FPS cap · also shown in Frame rate")),
-                false);
+        auto* cap =
+            settings_page->AddSection(graphics, tr("Guest FPS cap · also shown in Frame rate"));
+        cap->parentWidget()->setProperty("compactRows", true);
+        add_fps(cap, false);
         BuildNativeModes(graphics);
     });
     if (frame_rate != -1) {
         settings_page->SetBuilder(frame_rate, [this, frame_rate, add_setting] {
-            add_setting(settings_page->AddSection(frame_rate, tr("Frame rate")),
-                        Settings::values.fps_limit, tr("Guest FPS cap"),
+            auto* section = settings_page->AddSection(frame_rate, tr("Frame rate"));
+            section->parentWidget()->setProperty("compactRows", true);
+            add_setting(section, Settings::values.fps_limit, tr("Guest FPS cap"),
                         tr("Auto follows the game; other values cap how often it presents."),
                         QStringLiteral("lightning"), Tints::Gold());
             settings_page->AddBlock(
                 frame_rate,
-                SettingsPage::Note(tr("The same setting is on Overview and Graphics.")), {});
+                SettingsPage::Note(tr("The Frame rate page appears for Switch 2 games with an "
+                                      "available cap editor. The same setting is on Overview and "
+                                      "Graphics.")),
+                {});
         });
     }
     for (const int category : {mods, updates}) {
@@ -910,6 +918,29 @@ void ConfigurePerGame::BuildSettings() {
             saves, SettingsPage::Note(tr("Unavailable for files without a game title ID.")), {});
     });
     settings_page->SetBuilder(controls, [this, controls] {
+        const auto& profiles = input_tab->ProfileComboBoxes();
+        for (size_t index = 0; index < profiles.size(); ++index) {
+            auto* source = profiles[index];
+            auto* row = new QWidget;
+            row->setFixedHeight(46);
+            auto* layout = new QHBoxLayout(row);
+            layout->setContentsMargins(18, 0, 16, 0);
+            layout->setSpacing(14);
+            auto* copy = new QVBoxLayout;
+            copy->setSpacing(2);
+            const QString title = tr("Player %1 profile").arg(index + 1);
+            copy->addWidget(SettingsPage::Text(title, 14, 600));
+            auto* changed = SettingsPage::Text(tr("Changed for this game"), 12, 400, true);
+            copy->addWidget(changed);
+            layout->addLayout(copy, 1);
+            layout->addWidget(SettingsPage::BindCombo(source));
+            const auto update = [source, changed] {
+                changed->setVisible(source->currentIndex() > 0);
+            };
+            connect(source, &QComboBox::currentIndexChanged, changed, update);
+            update();
+            settings_page->AddBlock(controls, row, title);
+        }
         settings_page->AddBlock(
             controls,
             SettingsPage::Note(
@@ -948,7 +979,7 @@ void ConfigurePerGame::BuildSettings() {
     connect(addons_model, &QAbstractItemModel::modelReset, this, queue_addons);
     connect(addons_model, &QStandardItemModel::itemChanged, this,
             &ConfigurePerGame::UpdateModsSummary);
-    settings_page->AddPage(controls, input_tab.get(), tr("Input profiles"), false);
+    input_tab->hide();
     for (const auto& [category, widget, name] :
          std::initializer_list<std::tuple<int, QWidget*, QString>>{
              {system_category, system_tab.get(), tr("System")},
@@ -1073,6 +1104,28 @@ void ConfigurePerGame::BuildSettings() {
               QStringLiteral("sync_core_speed")}},
         });
     settings_page->SetAdvancedSections(
+        cpu, {
+                 {tr("CPU"),
+                  {},
+                  0,
+                  {QStringLiteral("cpu_backend|%1|%2")
+                       .arg(tr("Backend"), tr("Hypervisor requires multicore.")),
+                   QStringLiteral("cpu_accuracy|%1|%2")
+                       .arg(tr("Accuracy"), tr("Unsafe exposes the Dynarmic options.")),
+                   QStringLiteral("cpu_ticks|%1|%2").arg(tr("Custom CPU ticks"), tr("77–65535"))}},
+                 {tr("Unsafe CPU optimization settings"),
+                  tr("Dynarmic + Unsafe only"),
+                  1,
+                  {QStringLiteral("cpuopt_unsafe_host_mmu"),
+                   QStringLiteral("cpuopt_unsafe_unfuse_fma|%1").arg(tr("Unfuse FMA")),
+                   QStringLiteral("cpuopt_unsafe_reduce_fp_error"),
+                   QStringLiteral("cpuopt_unsafe_ignore_standard_fpcr|%1")
+                       .arg(tr("Faster ASIMD instructions (32-bit)")),
+                   QStringLiteral("cpuopt_unsafe_inaccurate_nan"),
+                   QStringLiteral("cpuopt_unsafe_fastmem_check"),
+                   QStringLiteral("cpuopt_unsafe_ignore_global_monitor")}},
+             });
+    settings_page->SetAdvancedSections(
         audio, {{tr("Audio"),
                  tr("The output engine determines the device list"),
                  0,
@@ -1128,23 +1181,48 @@ void ConfigurePerGame::BuildNativeModes(int category) {
     } else {
         return;
     }
-    auto* section = settings_page->AddSection(category, game);
-    bool added = false;
+    auto* block = new QWidget;
+    block->setProperty("spotlightTransparent", true);
+    auto* columns = new QHBoxLayout(block);
+    columns->setContentsMargins(0, 0, 0, 0);
+    columns->setSpacing(16);
+    auto* column = new QVBoxLayout;
+    column->setSpacing(10);
+    auto* heading = new QHBoxLayout;
+    heading->setContentsMargins(6, 0, 6, 0);
+    heading->setSpacing(10);
+    heading->addWidget(SettingsPage::Text(game, 15, 600), 0, Qt::AlignBaseline);
+    auto* hint = SettingsPage::Text(tr("Native game modes"), 12, 400);
+    Spotlight::SetTextColor(hint, Spotlight::Color::TextMuted());
+    heading->addWidget(hint, 1, Qt::AlignBaseline);
+    column->addLayout(heading);
+    auto* panel =
+        new RoundedBox(Spotlight::Color::FillFaint(), Spotlight::Color::StrokeSubtle(), 18);
+    panel->setProperty("compactRows", true);
+    auto* rows = new QVBoxLayout(panel);
+    rows->setContentsMargins(1, 1, 1, 1);
+    rows->setSpacing(0);
+    column->addWidget(panel);
+    columns->addLayout(column, 1);
+    columns->addStretch(1);
+    QStringList names{game};
     for (const auto& mode : modes) {
         auto* source = SettingsPage::Editor(this, *mode.setting);
         if (auto* control = source != nullptr ? SettingsPage::BindSetting(source) : nullptr) {
-            SettingsPage::AddRow(section, mode.name, {}, QStringLiteral("lightning"),
-                                 Spotlight::SettingsColor::Gold(), control);
-            added = true;
+            SettingsPage::AddRow(rows, mode.name, {}, {}, {}, control);
+            names.append(mode.name);
         }
     }
-    if (added) {
-        settings_page->AddBlock(
-            category,
-            SettingsPage::Note(tr("Native game modes are separate from the guest cap, VSync and "
-                                  "generated display frames.")),
-            {});
+    if (names.size() == 1) {
+        delete block;
+        return;
     }
+    settings_page->AddBlock(category, block, names.join(QLatin1Char('\n')));
+    settings_page->AddBlock(
+        category,
+        SettingsPage::Note(tr("Native game modes are separate from the guest cap, VSync and "
+                              "generated display frames.")),
+        {});
 }
 
 void ConfigurePerGame::BuildInfoPage(int category) {
@@ -1365,12 +1443,13 @@ void ConfigurePerGame::AddPresetRow(QVBoxLayout* section) {
     auto* choices = new QComboBox(this);
     choices->hide();
     choices->addItems({{}, tr("Auto"), tr("Low"), tr("Mid"), tr("High")});
-    auto* summary = SettingsPage::AddRow(section, tr("Preset"), {},
+    auto* summary = SettingsPage::AddRow(section, tr("Preset"),
+                                         tr("Global clears resolution, scaling filter, "
+                                            "anti-aliasing and frame generation overrides."),
                                          QStringLiteral("sliders-horizontal"),
                                          Spotlight::Color::Accent(),
                                          SettingsPage::BindCombo(choices, tr("Custom")));
-    const auto sync = [editors, resolution, filter, aa, frame_generation, suggested_tier, choices,
-                       summary] {
+    const auto sync = [editors, resolution, filter, aa, frame_generation, suggested_tier, choices] {
         const auto& global_values = Settings::values;
         const int global = Spotlight::PerformancePresetIndex({
             global_values.resolution_setup.GetValue(true),
@@ -1378,15 +1457,12 @@ void ConfigurePerGame::AddPresetRow(QVBoxLayout* section) {
             global_values.anti_aliasing.GetValue(true),
             global_values.frame_gen.GetValue(true),
         });
-        summary->show();
         const QStringList tiers{tr("Low"), tr("Mid"), tr("High")};
         choices->setItemText(0, tr("Global (%1)").arg(global == -1 ? tr("Custom") : tiers[global]));
         if (std::ranges::none_of(editors, [](const auto* editor) {
                 return editor->property("custom").toBool();
             })) {
             choices->setCurrentIndex(0);
-            summary->setText(
-                tr("Following global: %1").arg(Spotlight::PerformancePresetName(global)));
             return;
         }
         const int tier = Spotlight::PerformancePresetIndex({
@@ -1397,11 +1473,9 @@ void ConfigurePerGame::AddPresetRow(QVBoxLayout* section) {
         });
         if (tier == -1) {
             choices->setCurrentIndex(-1);
-            summary->setText(tr("Custom graphics settings for this game"));
             return;
         }
         choices->setCurrentIndex(tier == suggested_tier() ? 1 : tier + 2);
-        summary->setText(tr("%1 for this game").arg(Spotlight::PerformancePresetName(tier)));
     };
     connect(choices, &QComboBox::activated, this,
             [editors, resolution, filter, aa, frame_generation, suggested_tier](int selection) {
