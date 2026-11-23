@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <map>
 #include <utility>
 #include <QAbstractButton>
 #include <QAbstractItemView>
@@ -654,6 +655,9 @@ private:
 };
 
 QWidget* RadioControl(const QList<QRadioButton*>& radios) {
+    for (auto* radio : radios) {
+        radio->setProperty("spotlightBound", true);
+    }
     QStringList names;
     for (auto* radio : radios) {
         names.append(CleanLabel(radio->text()));
@@ -1141,6 +1145,28 @@ void SettingsPage::BuildPage(int category, Page& page) {
         if (control == nullptr) {
             return;
         }
+        const auto buttons = setting->findChildren<QPushButton*>(Qt::FindDirectChildrenOnly);
+        if (std::any_of(buttons.cbegin(), buttons.cend(),
+                        [setting](QPushButton* button) { return button != setting->restore_button; })) {
+            auto* box = new QWidget;
+            box->setProperty("spotlightTransparent", true);
+            auto* box_layout = new QHBoxLayout(box);
+            box_layout->setContentsMargins(0, 0, 0, 0);
+            box_layout->setSpacing(8);
+            for (auto* button : buttons) {
+                if (button == setting->restore_button) {
+                    continue;
+                }
+                auto* proxy = BindButton(button);
+                proxy->setProperty("sourceVisible", true);
+                new VisibilityMirror({button}, setting, proxy, [proxy] {
+                    proxy->setVisible(proxy->property("sourceVisible").toBool());
+                });
+                box_layout->addWidget(proxy);
+            }
+            box_layout->addWidget(control);
+            control = box;
+        }
         QString title;
         if (auto* label = setting->findChild<QLabel*>()) {
             title = label->text();
@@ -1211,6 +1237,7 @@ void SettingsPage::BuildPage(int category, Page& page) {
                 !static_cast<QPushButton*>(first)->isCheckable() &&
                 !CleanLabel(static_cast<QPushButton*>(first)->text()).isEmpty()) {
                 auto* button = static_cast<QAbstractButton*>(first);
+                button->setProperty("spotlightBound", true);
                 auto* manage = Manage();
                 MirrorEnabled(button, manage);
                 connect(manage, &QAbstractButton::clicked, button, &QAbstractButton::click);
@@ -1272,15 +1299,15 @@ void SettingsPage::BuildPage(int category, Page& page) {
                 flush();
                 for (int i = 0; i < tabs->count(); ++i) {
                     start_section(CleanLabel(tabs->tabText(i)));
-                    if (tabs->widget(i)->layout() != nullptr) {
-                        walk_layout(tabs->widget(i)->layout());
-                    }
+                    process({tabs->widget(i)});
                 }
                 start_section({});
             } else if (auto* area = qobject_cast<QScrollArea*>(widget)) {
                 flush();
                 if (area->widget() != nullptr && area->widget()->layout() != nullptr) {
                     walk_layout(area->widget()->layout());
+                } else if (area->layout() != nullptr) {
+                    walk_layout(area->layout());
                 }
             } else if (auto* view = qobject_cast<QAbstractItemView*>(widget)) {
                 flush();
@@ -1324,22 +1351,20 @@ void SettingsPage::BuildPage(int category, Page& page) {
     };
     walk_layout = [&](QLayout* layout) {
         if (auto* grid = qobject_cast<QGridLayout*>(layout)) {
-            for (int row = 0; row < grid->rowCount(); ++row) {
+            std::map<int, std::vector<std::pair<int, QLayoutItem*>>> grid_rows;
+            for (int index = 0; index < grid->count(); ++index) {
+                int row = 0;
+                int column = 0;
+                int row_span = 0;
+                int column_span = 0;
+                grid->getItemPosition(index, &row, &column, &row_span, &column_span);
+                grid_rows[row].emplace_back(column, grid->itemAt(index));
+            }
+            for (auto& [row, items] : grid_rows) {
+                std::stable_sort(items.begin(), items.end(),
+                                 [](const auto& a, const auto& b) { return a.first < b.first; });
                 QList<QWidget*> unit;
-                for (int column = 0; column < grid->columnCount(); ++column) {
-                    auto* item = grid->itemAtPosition(row, column);
-                    if (item == nullptr) {
-                        continue;
-                    }
-                    int item_row = 0;
-                    int item_column = 0;
-                    int row_span = 0;
-                    int column_span = 0;
-                    grid->getItemPosition(grid->indexOf(item), &item_row, &item_column, &row_span,
-                                          &column_span);
-                    if (item_row != row || item_column != column) {
-                        continue;
-                    }
+                for (const auto& [column, item] : items) {
                     if (auto* widget = item->widget()) {
                         unit.append(widget);
                     } else if (auto* nested = item->layout()) {
@@ -2060,6 +2085,7 @@ QWidget* SettingsPage::BindLineEdit(QLineEdit* source) {
 }
 
 QAbstractButton* SettingsPage::BindButton(QAbstractButton* source, const QString& text) {
+    source->setProperty("spotlightBound", true);
     const QString label = text.isEmpty() ? CleanLabel(source->text()) : text;
     QAbstractButton* proxy = nullptr;
     if (!label.isEmpty()) {
