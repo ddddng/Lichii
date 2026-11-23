@@ -126,31 +126,6 @@ using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
 
-QString MappingStyle() {
-    return QStringLiteral(
-        "QTabWidget#spotlightMapping::pane { border: none; background: transparent; }"
-        "QTabWidget#spotlightMapping > QStackedWidget > QWidget { background: transparent; }"
-        "QTabWidget#spotlightMapping QGroupBox { background: rgba(255,255,255,13);"
-        " border: 1px solid rgba(255,255,255,20); border-radius: 14px; margin-top: 22px;"
-        " padding: 8px 4px 4px 4px; font-size: 12px; font-weight: 600; }"
-        "QTabWidget#spotlightMapping QGroupBox::title { subcontrol-origin: margin; left: 8px;"
-        " top: 2px; color: rgba(255,255,255,158); background: transparent; font-size: 13px; }"
-        "QTabWidget#spotlightMapping QGroupBox QGroupBox { background: transparent; border: none;"
-        " margin-top: 16px; padding: 2px; }"
-        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,31);"
-        " color: #ffffff;"
-        " border: 1px solid rgba(255,255,255,46); border-radius: 7px; min-height: 28px;"
-        " min-width: 52px; padding: 0 6px;"
-        " font-size: 12px; font-weight: 600; }"
-        "QTabWidget#spotlightMapping QPushButton:hover { background: rgba(255,255,255,46); }"
-        "QTabWidget#spotlightMapping QPushButton:focus { border-color: #ff6b95; }"
-        "QTabWidget#spotlightMapping QComboBox { background: rgba(255,255,255,20); color: #ffffff;"
-        " border: 1px solid transparent; border-radius: 12px; min-height: 30px;"
-        " padding: 0 12px; font-size: 13px; font-weight: 600; }"
-        "QTabWidget#spotlightMapping QLabel { color: rgba(255,255,255,158);"
-        " background: transparent; }");
-}
-
 class BindingButton final : public QAbstractButton {
 public:
     BindingButton(QString icon_, int width) : icon{std::move(icon_)} {
@@ -2213,7 +2188,8 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
     EnsureInput();
     const auto pages = input_tab->GetSubTabs();
     auto* input_tabs = input_tab->PlayerTabs();
-    const int mapping = settings_page->AddSubPage(category, tr("Map buttons"), {}, true);
+    const int mapping = settings_page->AddSubPage(
+        category, tr("Map buttons"), tr("Click a binding, then press the button on your controller"));
     mapping_page = mapping;
     auto* player_pages = new QStackedWidget;
     QStringList player_names;
@@ -2427,113 +2403,11 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
                                                 : hotkey_names.join(QStringLiteral(", ")),
                          QStringLiteral("keyboard"), Tints::Gold(), edit_hotkeys);
 
-    settings_page->SetBuilder(mapping, [this, mapping, input_tabs, player_names] {
-        auto* picker_row = new QWidget;
-        auto* picker_row_layout = new QHBoxLayout(picker_row);
-        picker_row_layout->setContentsMargins(0, 0, 0, 0);
-        picker_row_layout->setSpacing(8);
-        auto* players_control = new Spotlight::SegmentedControl(
-            player_names, Spotlight::SegmentedControl::Kind::Accent, 38);
-        players_control->SetCurrentIndex(input_tabs->currentIndex());
-        connect(players_control, &Spotlight::SegmentedControl::CurrentChanged, input_tabs,
-                &QTabWidget::setCurrentIndex);
-        connect(input_tabs, &QTabWidget::currentChanged, players_control,
-                [players_control](int index) {
-                    const QSignalBlocker blocker(players_control);
-                    players_control->SetCurrentIndex(index);
-                });
-        picker_row_layout->addWidget(players_control);
-        picker_row_layout->addStretch();
-        for (const auto& name : {QStringLiteral("buttonRestoreDefaults"),
-                                 QStringLiteral("buttonClearAll")}) {
-            picker_row_layout->addWidget(
-                SettingsPage::BindButton(input_tab->findChild<QPushButton*>(name)));
-        }
-        auto* header = SettingsPage::Card();
-        auto* header_layout = new QVBoxLayout(header);
-        header_layout->setContentsMargins(16, 14, 16, 14);
-        header_layout->setSpacing(14);
-        header_layout->addWidget(picker_row);
-        picker_row->setProperty("spotlightTransparent", true);
-        auto* player_rows = new QStackedWidget;
-        player_rows->setProperty("spotlightTransparent", true);
-        for (int i = 0; i < player_names.size(); ++i) {
-            QWidget* const page = input_tabs->widget(i);
-            auto* connected_box =
-                page->findChild<QGroupBox*>(QStringLiteral("groupConnectedController"));
-            auto* devices = page->findChild<QComboBox*>(QStringLiteral("comboDevices"));
-            auto* profiles = page->findChild<QComboBox*>(QStringLiteral("comboProfiles"));
-            for (const char* name : {"groupConnectedController", "devicesGroup", "profilesGroup"}) {
-                page->findChild<QWidget*>(QLatin1String(name))->hide();
-            }
-            auto* line = new QWidget;
-            line->setProperty("spotlightTransparent", true);
-            auto* line_layout = new QHBoxLayout(line);
-            line_layout->setContentsMargins(0, 0, 0, 0);
-            line_layout->setSpacing(10);
-            line_layout->addWidget(SettingsPage::Text(tr("Connected"), 13, 600, true));
-            line_layout->addWidget(SettingsPage::BindToggle(connected_box));
-            line_layout->addSpacing(18);
-            line_layout->addWidget(SettingsPage::Text(tr("Device"), 13, 600, true));
-            line_layout->addWidget(SettingsPage::BindCombo(devices));
-            line_layout->addSpacing(18);
-            line_layout->addWidget(SettingsPage::Text(tr("Profile"), 13, 600, true));
-            line_layout->addWidget(SettingsPage::BindCombo(profiles, tr("No profile")));
-            auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
-            more->setToolTip(tr("Profile actions"));
-            more->setAccessibleName(more->toolTip());
-            auto* menu = new QMenu(more);
-            for (const auto& [name, label] : std::array{
-                     std::pair{"buttonProfilesSave", tr("Save profile")},
-                     std::pair{"buttonProfilesNew", tr("New profile")},
-                     std::pair{"buttonProfilesDelete", tr("Delete profile")},
-                 }) {
-                auto* source = page->findChild<QPushButton*>(QLatin1String(name));
-                auto* action = menu->addAction(label, source, &QAbstractButton::click);
-                connect(menu, &QMenu::aboutToShow, action,
-                        [action, source] { action->setEnabled(source->isEnabled()); });
-            }
-            connect(more, &QAbstractButton::clicked, menu, [menu, more] {
-                menu->popup(more->mapToGlobal(QPoint(0, more->height())));
-            });
-            line_layout->addWidget(more);
-            line_layout->addStretch();
-            player_rows->addWidget(line);
-        }
-        player_rows->setCurrentIndex(input_tabs->currentIndex());
-        connect(input_tabs, &QTabWidget::currentChanged, player_rows,
-                &QStackedWidget::setCurrentIndex);
-        header_layout->addWidget(player_rows);
-        settings_page->AddBlock(mapping, header, tr("Players"));
-        input_tabs->tabBar()->hide();
-        input_tabs->setDocumentMode(true);
-        input_tab->findChild<QWidget*>(QStringLiteral("consoleInputSettings"))->hide();
-        for (auto* combo : input_tabs->findChildren<QComboBox*>()) {
-            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-            combo->setMinimumContentsLength(10);
-        }
-        input_tabs->setProperty("spotlightTransparent", true);
-        for (auto* child : input_tabs->findChildren<QWidget*>()) {
-            if (!qobject_cast<QAbstractButton*>(child) && !qobject_cast<QComboBox*>(child) &&
-                !qobject_cast<QGroupBox*>(child) && !qobject_cast<QAbstractSlider*>(child)) {
-                child->setAutoFillBackground(false);
-                child->setProperty("spotlightTransparent", true);
-            }
-        }
-        input_tabs->setObjectName(QStringLiteral("spotlightMapping"));
-        input_tabs->setStyleSheet(MappingStyle());
-        input_tabs->setMinimumHeight(560);
-        const auto size_to_current = [input_tabs] {
-            for (int i = 0; i < input_tabs->count(); ++i) {
-                const auto policy = i == input_tabs->currentIndex() ? QSizePolicy::Preferred
-                                                                    : QSizePolicy::Ignored;
-                input_tabs->widget(i)->setSizePolicy(policy, policy);
-            }
-        };
-        size_to_current();
-        connect(input_tabs, &QTabWidget::currentChanged, input_tabs, size_to_current);
-        settings_page->AddBlock(mapping, input_tabs, tr("Map buttons"));
+    settings_page->SetBuilder(mapping, [this, mapping] {
+        settings_page->AddBlock(mapping, input_tab->MappingPage(), tr("Map buttons"));
     });
+    connect(input_tab.get(), &ConfigureInput::AdvancedRequested, this,
+            [this, category, devices = pages[8]] { settings_page->ShowAdvancedPage(category, devices); });
     auto* colours = settings_page->AddSection(category, tr("Controller colours"), true);
     for (int i = 0; i < 8; ++i) {
         auto* swatches = new QWidget;

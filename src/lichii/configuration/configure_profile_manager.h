@@ -13,6 +13,7 @@
 #include <QList>
 #include <QWidget>
 #include "core/file_sys/vfs/vfs_types.h"
+#include "lichii/spotlight/dialog.h"
 
 class ProfileAvatarDialog;
 namespace Common {
@@ -41,21 +42,18 @@ class ConfigureProfileManager;
 }
 
 // TODO(crueter): Move this to a .ui def
-class ConfigureProfileManagerDeleteDialog : public QDialog {
+class ConfigureProfileManagerDeleteDialog : public Spotlight::Dialog {
     Q_OBJECT
 public:
     explicit ConfigureProfileManagerDeleteDialog(QWidget* parent);
     ~ConfigureProfileManagerDeleteDialog();
 
-    void SetInfo(const QString& username, const Common::UUID& uuid, int index);
+    void SetInfo(const QString& username, int index);
 
 signals:
     void deleteUser(int index);
 
 private:
-    QDialogButtonBox* dialog_button_box;
-    QGraphicsScene* icon_scene;
-    QLabel* label_info;
     int m_index = 0;
 };
 

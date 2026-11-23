@@ -11,12 +11,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/arrow-circle-up.png</file>
         <file>spotlight/icons/arrow-clockwise.png</file>
         <file>spotlight/icons/arrow-counter-clockwise.png</file>
+        <file>spotlight/icons/arrow-down-right.png</file>
         <file>spotlight/icons/arrow-down.png</file>
         <file>spotlight/icons/arrow-left.png</file>
         <file>spotlight/icons/arrow-right.png</file>
         <file>spotlight/icons/arrow-square-out.png</file>
+        <file>spotlight/icons/arrow-up-left.png</file>
         <file>spotlight/icons/arrow-up.png</file>
+        <file>spotlight/icons/arrows-down-up.png</file>
         <file>spotlight/icons/arrows-in.png</file>
+        <file>spotlight/icons/arrows-left-right.png</file>
         <file>spotlight/icons/arrows-out-cardinal.png</file>
         <file>spotlight/icons/arrows-out.png</file>
         <file>spotlight/icons/broadcast.png</file>
@@ -39,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/copy.png</file>
         <file>spotlight/icons/cpu.png</file>
         <file>spotlight/icons/crop.png</file>
+        <file>spotlight/icons/crosshair.png</file>
         <file>spotlight/icons/cube.png</file>
         <file>spotlight/icons/desktop.png</file>
         <file>spotlight/icons/dots-three.png</file>
@@ -60,6 +65,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/globe.png</file>
         <file>spotlight/icons/graphics-card.png</file>
         <file>spotlight/icons/hand-pointing.png</file>
+        <file>spotlight/icons/hand-tap.png</file>
         <file>spotlight/icons/hard-drives.png</file>
         <file>spotlight/icons/house.png</file>
         <file>spotlight/icons/image.png</file>
@@ -111,7 +117,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/storefront.png</file>
         <file>spotlight/icons/sun.png</file>
         <file>spotlight/icons/tag.png</file>
+        <file>spotlight/icons/target.png</file>
+        <file>spotlight/icons/text-aa.png</file>
         <file>spotlight/icons/timer.png</file>
+        <file>spotlight/icons/toggle-left.png</file>
         <file>spotlight/icons/translate.png</file>
         <file>spotlight/icons/trash.png</file>
         <file>spotlight/icons/upload-simple.png</file>
@@ -119,6 +128,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/users.png</file>
         <file>spotlight/icons/vibrate.png</file>
         <file>spotlight/icons/warning-circle.png</file>
+        <file>spotlight/icons/wave-sine.png</file>
         <file>spotlight/icons/wifi-high.png</file>
         <file>spotlight/icons/wrench.png</file>
         <file>spotlight/icons/x.png</file>
