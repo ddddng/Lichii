@@ -8,7 +8,7 @@
 #include <QIcon>
 #include <QImageReader>
 #include <QPainter>
-#include <QPainterPath>
+#include <QPixmapCache>
 
 namespace ArtworkImage {
 
@@ -55,14 +55,28 @@ void PaintIcon(QPainter& painter, const QRectF& bounds, const QPixmap& source, q
     }
     const QSizeF size = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
     const QRectF target(bounds.center() - QPointF(size.width() / 2, size.height() / 2), size);
-    QPainterPath clip;
-    clip.addRoundedRect(target, radius, radius);
-    painter.save();
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.setClipPath(clip, Qt::IntersectClip);
-    painter.drawPixmap(target, source, source.rect());
-    painter.restore();
+    const qreal ratio = painter.device()->devicePixelRatioF();
+    const QSize pixels = (size * ratio).toSize().expandedTo({1, 1});
+    const QString key = QStringLiteral("artwork-icon:%1:%2x%3:%4")
+                            .arg(source.cacheKey())
+                            .arg(pixels.width())
+                            .arg(pixels.height())
+                            .arg(radius * ratio);
+    QPixmap rounded;
+    if (!QPixmapCache::find(key, &rounded)) {
+        rounded = QPixmap(pixels);
+        rounded.fill(Qt::transparent);
+        {
+            QPainter canvas(&rounded);
+            canvas.setRenderHint(QPainter::Antialiasing);
+            canvas.setPen(Qt::NoPen);
+            canvas.setBrush(source.scaled(pixels, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+            canvas.drawRoundedRect(QRectF(rounded.rect()), radius * ratio, radius * ratio);
+        }
+        rounded.setDevicePixelRatio(ratio);
+        QPixmapCache::insert(key, rounded);
+    }
+    painter.drawPixmap(target.topLeft(), rounded);
 }
 
 QIcon Icon(const QPixmap& source, int size, qreal radius) {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QPainter>
+#include <QPixmapCache>
 
 #include "lichii/game/artwork_image.h"
 #include "lichii/game/game_card.h"
@@ -10,6 +11,49 @@
 #include "qt_common/game_list/game_list_p.h"
 
 using namespace Spotlight;
+
+namespace {
+
+QPixmap SoftShadow(QSizeF size, qreal radius, int blur, const QColor& color, qreal ratio) {
+    const QString key = QStringLiteral("card-shadow:%1x%2:%3:%4:%5:%6")
+                            .arg(size.width())
+                            .arg(size.height())
+                            .arg(radius)
+                            .arg(blur)
+                            .arg(color.rgba(), 0, 16)
+                            .arg(ratio);
+    QPixmap shadow;
+    if (QPixmapCache::find(key, &shadow)) {
+        return shadow;
+    }
+    const QSize canvas = ((size + QSizeF(blur * 2, blur * 2)) * ratio).toSize();
+    QImage image(canvas, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawRoundedRect(QRectF(QPointF(blur, blur) * ratio, size * ratio), radius * ratio,
+                                radius * ratio);
+    }
+    const int step = std::max(1, qRound(blur * ratio / 2));
+    image = image.scaled(canvas / step, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                .scaled(canvas, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    shadow = QPixmap::fromImage(std::move(image));
+    shadow.setDevicePixelRatio(ratio);
+    QPixmapCache::insert(key, shadow);
+    return shadow;
+}
+
+void PaintShadow(QPainter& painter, const QRectF& rect, qreal radius, int blur, int offset,
+                 const QColor& color) {
+    painter.drawPixmap(rect.topLeft() + QPointF(-blur, offset - blur),
+                       SoftShadow(rect.size(), radius, blur, color,
+                                  painter.device()->devicePixelRatioF()));
+}
+
+} // namespace
 
 GameCard::GameCard(QObject* parent) : QStyledItemDelegate(parent) {}
 
@@ -30,7 +74,8 @@ QSize GameCard::sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const 
 QRect GameCard::CardRect(const QRect& cell) const {
     const int height = icon_size == 0 ? 48 : tile_size;
     const int content_height = height + (show_name && icon_size > 0 ? 22 : 0) + 16;
-    return {cell.x() + 4, cell.y() + 4 + std::max(0, (cell.height() - content_height) / 2),
+    return {cell.x() + TileOffset,
+            cell.y() + TileOffset + std::max(0, (cell.height() - content_height - TileOffset) / 2),
             tile_size, height};
 }
 
@@ -64,18 +109,16 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
     painter->setRenderHint(QPainter::Antialiasing);
     painter->setRenderHint(QPainter::SmoothPixmapTransform);
     if (selected) {
-        painter->setPen(Qt::NoPen);
-        for (int spread = 12; spread >= 4; --spread) {
-            auto glow = Color::Accent();
-            glow.setAlpha(4 + (12 - spread) * 2);
-            painter->setBrush(glow);
-            painter->drawRoundedRect(tile.adjusted(-spread, -spread, spread, spread),
-                                     radius + spread, radius + spread);
-        }
+        auto glow = Color::Accent();
+        glow.setAlpha(0x8c);
+        PaintShadow(*painter, tile, radius, GlowBlur, 0, glow);
         painter->setPen(QPen(Color::Accent(), 3));
         painter->setBrush(light);
         painter->drawRoundedRect(QRectF(tile).adjusted(-1.5, -1.5, 1.5, 1.5), radius, radius);
     } else if (hover || focused) {
+        if (hover) {
+            PaintShadow(*painter, tile, radius, 30, 14, QColor(0, 0, 0, 0x8c));
+        }
         painter->setPen(focused ? Color::Accent() : Qt::transparent);
         painter->setBrush(shade);
         painter->drawRoundedRect(tile, radius, radius);
@@ -108,6 +151,7 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
     }
 
     if (hover && icon_size >= 60) {
+        painter->setFont(Font(12, 600));
         const int max_width = tile.width() - 40;
         const QString label = painter->fontMetrics().elidedText(title, Qt::ElideRight, max_width);
         const QRect title_pill(tile.x() + 10, tile.y() + 10,
@@ -119,9 +163,8 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
         painter->drawText(title_pill, Qt::AlignCenter, label);
 
         const QRect play = PlayRect(option.rect);
+        PaintShadow(*painter, play, play.width() / 2.0, 12, 4, QColor(0, 0, 0, 0x59));
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(0, 0, 0, 0x59));
-        painter->drawEllipse(play.translated(0, 3));
         painter->setBrush(Color::Accent());
         painter->drawEllipse(play);
         painter->drawPixmap(play.center() - QPoint(6, 6),

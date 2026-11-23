@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmapCache>
 
 namespace Spotlight {
 
@@ -34,6 +35,14 @@ QFont DisplayFont(int pixel_size) {
 }
 
 QPixmap IconPixmap(QStringView name, int size, const QColor& color, qreal device_pixel_ratio) {
+    const QString cache_key = QStringLiteral("spotlight-icon:%1:%2:%3:%4")
+                                  .arg(name)
+                                  .arg(size)
+                                  .arg(color.rgba(), 0, 16)
+                                  .arg(device_pixel_ratio);
+    if (QPixmap cached; QPixmapCache::find(cache_key, &cached)) {
+        return cached;
+    }
     static QHash<QString, QImage> masks;
     const QString key = name.toString();
     auto it = masks.find(key);
@@ -55,6 +64,7 @@ QPixmap IconPixmap(QStringView name, int size, const QColor& color, qreal device
     }
     QPixmap pixmap = QPixmap::fromImage(std::move(image));
     pixmap.setDevicePixelRatio(device_pixel_ratio);
+    QPixmapCache::insert(cache_key, pixmap);
     return pixmap;
 }
 

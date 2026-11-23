@@ -21,14 +21,12 @@
 #include <QList>
 #include <QListView>
 #include <QMenu>
-#include <QPainter>
 #include <QScrollBar>
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSortFilterProxyModel>
-#include <QStyleOptionMenuItem>
 #include <QVariantAnimation>
 #include <QtConcurrent/QtConcurrentRun>
 #include <qlayoutitem.h>
@@ -50,6 +48,7 @@
 #include "lichii/game/search_field.h"
 #include "lichii/main_window.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 #include "lichii/util/controller_navigation.h"
@@ -64,98 +63,6 @@
 namespace {
 // A few at a time keeps SteamGridDB happy and the scan of a large library short.
 constexpr int MaxParallelLookups = 2;
-
-class GameContextMenu final : public QMenu {
-public:
-    explicit GameContextMenu(QWidget* parent) : QMenu(parent) {
-        setMinimumWidth(270);
-    }
-
-protected:
-    void paintEvent(QPaintEvent* event) override {
-        using namespace Spotlight;
-        if (!IsLichiiTheme()) {
-            QMenu::paintEvent(event);
-            return;
-        }
-        const auto items = actions();
-        for (auto* action : items) {
-            const QRect row = actionGeometry(action);
-            if (action->isVisible() && !row.isEmpty() && !rect().contains(row)) {
-                QMenu::paintEvent(event);
-                return;
-            }
-        }
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        QStyleOption panel;
-        panel.initFrom(this);
-        style()->drawPrimitive(QStyle::PE_PanelMenu, &panel, &painter, this);
-        for (auto* action : items) {
-            const QRect row = actionGeometry(action);
-            if (!action->isVisible() || row.isEmpty()) {
-                continue;
-            }
-            if (action->isSeparator()) {
-                QStyleOptionMenuItem item;
-                initStyleOption(&item, action);
-                item.rect = row;
-                style()->drawControl(QStyle::CE_MenuItem, &item, &painter, this);
-                continue;
-            }
-            if (action == activeAction()) {
-                auto fill = Color::Text();
-                fill.setAlpha(0x1a);
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(fill);
-                painter.drawRoundedRect(row, 10, 10);
-            }
-            const auto ratio = devicePixelRatioF();
-            const bool right_to_left = layoutDirection() == Qt::RightToLeft;
-            const auto visual = [&](const QRect& logical) {
-                return QStyle::visualRect(layoutDirection(), row, logical);
-            };
-            const auto align = right_to_left ? Qt::AlignRight : Qt::AlignLeft;
-            const QRect leading = visual({row.left() + 12, row.center().y() - 7, 16, 16});
-            const bool enabled = action->isEnabled();
-            const auto ink = action->property("spotlightDestructive").toBool()
-                                 ? Color::AccentLight()
-                             : enabled ? Color::Text()
-                                       : Color::TextFaint();
-            if (action->isChecked()) {
-                painter.drawPixmap(leading.topLeft(),
-                                   IconPixmap(u"check", 16, Color::Accent(), ratio));
-            } else {
-                painter.drawPixmap(leading.topLeft(),
-                                   action->icon().pixmap(
-                                       {16, 16}, ratio, enabled ? QIcon::Normal : QIcon::Disabled));
-            }
-            const auto text = action->text().split(QLatin1Char('\t'));
-            const QString hint = text.value(1);
-            int trailing = 12;
-            if (action->menu()) {
-                trailing += 20;
-                const QRect arrow = visual({row.right() - 28, row.center().y() - 7, 16, 16});
-                painter.drawPixmap(arrow.topLeft(),
-                                   IconPixmap(right_to_left ? u"caret-left" : u"caret-right", 16,
-                                              Color::TextMuted(), ratio));
-            } else if (!hint.isEmpty()) {
-                painter.setFont(Font(12));
-                painter.setPen(Color::TextMuted());
-                const int width = painter.fontMetrics().horizontalAdvance(hint);
-                painter.drawText(visual({row.right() - 12 - width, row.top(), width, row.height()}),
-                                 align | Qt::AlignVCenter, hint);
-                trailing += width + 10;
-            }
-            painter.setFont(Font(14));
-            painter.setPen(ink);
-            const QRect label = row.adjusted(39, 0, -trailing, 0);
-            painter.drawText(
-                visual(label), align | Qt::AlignVCenter,
-                painter.fontMetrics().elidedText(text.first(), Qt::ElideRight, label.width()));
-        }
-    }
-};
 } // namespace
 
 class GameListViewModel final : public QSortFilterProxyModel {
@@ -344,6 +251,7 @@ void GameList::SetupViews() {
         view->setMouseTracking(true);
         connect(view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this, view] {
             if (view == m_currentView && !m_populating) {
+                RememberSelection();
                 emit LibraryChanged(SelectedGame(), result_count);
             }
         });
@@ -445,7 +353,8 @@ void GameList::ShowSelectedGameMenu(const QPoint& position) {
     if (!game.isValid()) {
         return;
     }
-    GameContextMenu menu(this);
+    Spotlight::Menu menu(this);
+    menu.setMinimumWidth(270);
     AddGamePopup(menu, game.data(GameListItemPath::ProgramIdRole).toULongLong(),
                  game.data(GameListItemPath::FullPathRole).toString().toStdString());
     menu.exec(position);
@@ -460,7 +369,9 @@ void GameList::OnPopulate() {
     first_result = QModelIndex{};
     result_count = 0;
     emit LibraryChanged({}, 0);
+    const bool view_focused = window()->focusWidget() == m_currentView;
     m_currentView->setEnabled(false);
+    focus_fallback = view_focused ? window()->focusWidget() : nullptr;
 
     switch (game_list_mode) {
     case Settings::GameListMode::TreeView:
@@ -504,6 +415,8 @@ void GameList::UnloadController() {
 void GameList::ResetViewMode() {
     const auto mode = UISettings::values.game_list_mode.GetValue();
     game_list_mode = mode;
+    const bool view_focused = m_currentView && m_currentView->hasFocus();
+    const QModelIndex selected = SelectedGame();
 
     if (m_currentView)
         layout->removeWidget(m_currentView);
@@ -541,11 +454,18 @@ void GameList::ResetViewMode() {
     m_currentView->setVisible(true);
     Spotlight::FadeIn(m_currentView);
     const int side_margin = newTreeMode ? 36 : 0;
-    layout->setContentsMargins(side_margin, 0, side_margin, 0);
+    layout->setContentsMargins(side_margin, newTreeMode ? GameGrid::HeaderOverlap : 0, side_margin,
+                               0);
     // MainWindow switches the view right after starting the first populate; keep it disabled
     // until that finishes, as OnPopulate does for every other populate.
     m_currentView->setEnabled(!m_populating);
     layout->insertWidget(0, m_currentView);
+    if (selected.isValid()) {
+        m_currentView->setCurrentIndex(selected);
+    }
+    if (view_focused) {
+        m_currentView->setFocus();
+    }
 
     auto view = m_currentView->viewport();
 
@@ -595,6 +515,12 @@ void GameList::ApplyFilter() {
     UpdateLibrary();
 }
 
+void GameList::RememberSelection() {
+    if (const auto game = SelectedGame(); game.isValid()) {
+        selected_path = game.data(GameListItemPath::FullPathRole).toString();
+    }
+}
+
 void GameList::UpdateLibrary() {
     if (m_populating || !m_currentView) {
         return;
@@ -603,6 +529,7 @@ void GameList::UpdateLibrary() {
     result_count = 0;
     first_result = QModelIndex{};
     QModelIndex first_visible;
+    QModelIndex previous;
     const auto visit = [&](const auto& self, const QModelIndex& parent, bool expanded) -> void {
         for (int row = 0; row < library_model->rowCount(parent); ++row) {
             const auto item = library_model->index(row, 0, parent);
@@ -614,6 +541,10 @@ void GameList::UpdateLibrary() {
                 if (expanded && !first_visible.isValid()) {
                     first_visible = item;
                 }
+                if (expanded && !previous.isValid() && !selected_path.isEmpty() &&
+                    item.data(GameListItemPath::FullPathRole).toString() == selected_path) {
+                    previous = item;
+                }
                 ++result_count;
             } else if (type != GameListItemType::Favorites) {
                 self(self, item, expanded && tree_view->isExpanded(item));
@@ -622,8 +553,9 @@ void GameList::UpdateLibrary() {
     };
     visit(visit, {}, true);
     if (!SelectedGame().isValid() && first_visible.isValid()) {
-        m_currentView->setCurrentIndex(first_visible);
+        m_currentView->setCurrentIndex(previous.isValid() ? previous : first_visible);
     }
+    RememberSelection();
     emit LibraryChanged(SelectedGame(), result_count);
 }
 
@@ -667,8 +599,11 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
 
     m_populating = false;
     m_currentView->setEnabled(true);
-
     ApplyFilter();
+    if (focus_fallback && window()->focusWidget() == focus_fallback) {
+        m_currentView->setFocus();
+    }
+    focus_fallback = nullptr;
 
     // Artwork a lookup saved while this scan ran can be missing from rows added after the save.
     for (const u64 program_id : std::as_const(artwork_saved)) {
@@ -1026,14 +961,13 @@ void GameList::SetReportableProgramId(u64 program_id) {
     reportable_program_id = program_id;
 }
 
-void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path) {
-    const auto group = [](QMenu& parent, const QString& label, QStringView icon,
-                          const QColor& color = Spotlight::Color::TextSecondary()) {
-        return parent.addMenu(Spotlight::Icon(icon, color, 16), label);
+void GameList::AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const std::string& path) {
+    const auto group = [](Spotlight::Menu& parent, const QString& label, QStringView icon,
+                          const QColor& color = Spotlight::Color::MenuInk()) {
+        return parent.AddSubmenu(Spotlight::Icon(icon, color, 16), label);
     };
     const auto add = [](QMenu& parent, const QString& label, QStringView icon) {
-        return parent.addAction(Spotlight::Icon(icon, Spotlight::Color::TextSecondary(), 16),
-                                label);
+        return parent.addAction(Spotlight::Icon(icon, Spotlight::Color::MenuInk(), 16), label);
     };
     QAction* start_game = add(context_menu, tr("Play\tEnter"), u"play-fill");
     QMenu* custom_setup =
@@ -1063,7 +997,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
 #endif
     QAction* favorite = add(context_menu, tr("Add to favourites\tF"), u"star");
     QAction* copy_tid = add(context_menu, tr("Copy title ID"), u"copy");
-    QMenu* dump_verify = group(context_menu, tr("Dump and verify"), u"cube");
+    auto* dump_verify = group(context_menu, tr("Dump and verify"), u"cube");
     QMenu* shaders = group(context_menu, tr("Shaders"), u"cpu");
     const bool has_shader_warm = ShaderWarmFilesExist(program_id);
     QAction* prepare_shaders = shaders->addAction(has_shader_warm ? tr("Rebuild Shader Precache")
@@ -1112,7 +1046,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         convert_nx->setEnabled(!nx_tool_running);
     }
     if (NxTools::IsNxArchive(path)) {
-        QMenu* nx_menu = dump_verify->addMenu(tr("Manage NX Archive"));
+        QMenu* nx_menu = dump_verify->AddSubmenu({}, tr("Manage NX Archive"));
         add_to_nx = nx_menu->addAction(tr("Add Update or DLC..."));
         remove_from_nx = nx_menu->addAction(tr("Remove Update or DLC..."));
         nx_menu->addSeparator();
@@ -1349,6 +1283,10 @@ void GameList::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange) {
         RetranslateUI();
     } else if (event->type() == QEvent::EnabledChange) {
+        const QWidget* focus = window()->focusWidget();
+        if (isEnabled() && (!focus || !focus->isVisible())) {
+            m_currentView->setFocus();
+        }
         emit LibraryEnabledChanged(isEnabled());
     }
 

@@ -10,6 +10,7 @@
 #include <QLineEdit>
 #include <QHash>
 #include <QList>
+#include <QPointer>
 #include <QSet>
 #include <QPushButton>
 #include <QStandardItemModel>
@@ -40,11 +41,16 @@ class GameListViewModel;
 class ControllerNavigation;
 class GameListWorker;
 class GameListDir;
+
 class MainWindow;
 enum class AmLaunchType;
 enum class StartGameType;
 
 class GameCarousel;
+
+namespace Spotlight {
+class Menu;
+}
 
 class QAbstractItemView;
 namespace Core {
@@ -161,6 +167,7 @@ private:
     void SetupScrollAnimation();
     void ApplyFilter();
     void ApplySort();
+    void RememberSelection();
     void UpdateLibrary();
     QModelIndex SelectedGame() const;
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -171,7 +178,7 @@ private:
     void ToggleFavorite(u64 program_id);
 
     void PopupContextMenu(const QPoint& menu_location);
-    void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);
+    void AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const std::string& path);
     void AddCustomDirPopup(QMenu& context_menu, QModelIndex selected);
     void AddPermDirPopup(QMenu& context_menu, QModelIndex selected);
     void AddFavoritesPopup(QMenu& context_menu);
@@ -212,6 +219,8 @@ private:
 
     bool m_isTreeMode = true;
     bool m_populating = false;
+    QPointer<QWidget> focus_fallback;
+    QString selected_path;
     bool nup_conversion_running{};
     bool nx_tool_running{};
     u64 reportable_program_id{};

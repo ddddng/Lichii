@@ -10,6 +10,14 @@ class GameCard : public QStyledItemDelegate {
 public:
     explicit GameCard(QObject* parent = nullptr);
 
+    static constexpr int GlowBlur = 32;
+    /// Where a tile starts in its cell, leaving the first row and column room for the glow. A tile
+    /// reaches up to HitShift past its cell's right and bottom edges.
+    static constexpr int TileOffset = 36;
+    static constexpr int HitShift = 20;
+    /// How far the glow and the hover shadow reach outside a cell.
+    static constexpr int EffectMargin = 48 + TileOffset;
+
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
 

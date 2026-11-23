@@ -99,6 +99,10 @@ void FadeInOnShow(QWidget* window, int duration) {
     new ShowFade(window, duration);
 }
 
+bool HasKeyboardFocus(const QWidget* widget) {
+    return widget->hasFocus() && widget->window()->testAttribute(Qt::WA_KeyboardFocusChange);
+}
+
 HoverFade::HoverFade(QWidget* owner) {
     animation.setDuration(Motion::Hover);
     animation.setEasingCurve(QEasingCurve::OutCubic);
@@ -141,7 +145,8 @@ void CircleButton::paintEvent(QPaintEvent*) {
     const QColor fill = isDown() || isChecked()
                             ? Color::Stroke()
                             : Mix(Color::Control(), Color::ControlHover(), hover.Value());
-    FillRounded(painter, rect(), diameter / 2.0, fill, hasFocus() ? Color::Accent() : Color::Stroke());
+    FillRounded(painter, rect(), diameter / 2.0, fill,
+                HasKeyboardFocus(this) ? Color::Accent() : Color::Stroke());
     const int icon = diameter >= 36 ? 20 : 16;
     const QPixmap pixmap = IconPixmap(icon_name, icon, isEnabled() ? Color::Text() : Color::TextFaint(),
                                       devicePixelRatioF());
@@ -216,7 +221,7 @@ void PillButton::paintEvent(QPaintEvent*) {
         fill.setAlphaF(fill.alphaF() * 0.4f);
         ink.setAlphaF(0.45f);
     }
-    if (hasFocus()) {
+    if (HasKeyboardFocus(this)) {
         stroke = Color::Text();
     }
     FillRounded(painter, rect(), height / 2.0, fill, stroke);

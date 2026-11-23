@@ -32,7 +32,7 @@ public:
     enum class Kind { Minimize, Maximize, Close };
 
     WindowButton(Kind kind_, QWidget* parent) : QAbstractButton(parent), kind(kind_) {
-        setFixedSize(20, 28);
+        setFixedSize(28, 28);
         setFocusPolicy(Qt::TabFocus);
         setMouseTracking(true);
         connect(this, &QAbstractButton::clicked, this, [this] {
@@ -55,10 +55,11 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         const bool hover = underMouse();
+        const bool focused = HasKeyboardFocus(this);
         auto ink = Color::Text();
         ink.setAlphaF(hover ? 1.0f : 0.72f);
-        if (hover || hasFocus()) {
-            painter.setPen(hasFocus() ? Color::Accent() : Qt::transparent);
+        if (hover || focused) {
+            painter.setPen(focused ? Color::Accent() : Qt::transparent);
             painter.setBrush(hover && kind == Kind::Close ? QColor(0xe5, 0x48, 0x4d)
                                                           : Color::Fill());
             painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
@@ -92,8 +93,8 @@ void WindowDragBar::AddWindowControls(QHBoxLayout* row) {
         return;
     }
     auto* controls = new QHBoxLayout;
-    controls->setContentsMargins(10, 0, 0, 0);
-    controls->setSpacing(9);
+    controls->setContentsMargins(5, 0, 0, 0);
+    controls->setSpacing(3);
     using enum WindowButton::Kind;
     const auto add = [&](WindowButton::Kind kind, const QString& description) {
         auto* button = new WindowButton(kind, this);
@@ -153,7 +154,7 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
     setObjectName(QStringLiteral("spotlightTopBar"));
     setFixedHeight(64);
     auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(22, 0, 20, 0);
+    row->setContentsMargins(22, 0, ClientFrame ? 14 : 20, 0);
     row->setSpacing(10);
 
     auto* logo = new QLabel(this);
@@ -204,14 +205,16 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
     AddWindowControls(row);
 }
 
-RunningTitleBar::RunningTitleBar(QWidget* parent) : WindowDragBar(parent), title(new QLabel(this)) {
+RunningTitleBar::RunningTitleBar(QWidget* parent)
+    : WindowDragBar(parent), title(new QLabel(this)), row(new QHBoxLayout(this)) {
     setFixedHeight(36);
-    auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(14, 0, 16, 0);
+    row->setContentsMargins(14, 0, 10, 0);
     row->setSpacing(9);
     title->setFont(Font(13, 600));
     title->setStyleSheet(QStringLiteral("color: white;"));
-    title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    QSizePolicy title_policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    title_policy.setRetainSizeWhenHidden(true);
+    title->setSizePolicy(title_policy);
     title->setAttribute(Qt::WA_TransparentForMouseEvents);
     row->addWidget(title, 1);
     AddWindowControls(row);
@@ -222,10 +225,49 @@ void RunningTitleBar::SetGameTitle(const QString& value) {
     title->setText(value);
 }
 
+void RunningTitleBar::FloatOver(QWidget* screen) {
+    floating_screen = screen;
+    screen->installEventFilter(this);
+    parentWidget()->installEventFilter(this);
+    SetFloating(screen->isVisible());
+}
+
+bool RunningTitleBar::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == floating_screen &&
+        (event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+        SetFloating(event->type() == QEvent::Show);
+    } else if (floating && watched == parentWidget() && event->type() == QEvent::Resize) {
+        setGeometry(0, 0, parentWidget()->width(), height());
+    }
+    return WindowDragBar::eventFilter(watched, event);
+}
+
+void RunningTitleBar::SetFloating(bool value) {
+    auto* frame = qobject_cast<QBoxLayout*>(parentWidget()->layout());
+    if (floating == value || !frame) {
+        return;
+    }
+    floating = value;
+    title->setVisible(!floating);
+    setFixedHeight(floating ? 52 : 36);
+    row->setContentsMargins(14, 0, floating ? 14 : 10, 0);
+    if (floating) {
+        frame->removeWidget(this);
+        setGeometry(0, 0, parentWidget()->width(), height());
+        raise();
+    } else {
+        frame->insertWidget(0, this);
+    }
+    update();
+}
+
 void RunningTitleBar::paintEvent(QPaintEvent*) {
+    if (floating) {
+        return;
+    }
     QPainter painter(this);
     painter.fillRect(rect(), Color::Panel());
-    painter.setPen(Color::StrokeSubtle());
+    painter.setPen(QColor(0xff, 0xff, 0xff, 0x12));
     painter.drawLine(rect().bottomLeft(), rect().bottomRight());
 }
 
