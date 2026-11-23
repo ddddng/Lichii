@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <map>
 #include <utility>
+#include <vector>
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
@@ -23,6 +24,7 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
@@ -368,7 +370,8 @@ QWidget* NumberField(QAbstractSpinBox* editor) {
     layout->addWidget(plus);
     const auto sync_width = [field, editor] {
         const int text = editor->fontMetrics().horizontalAdvance(editor->text());
-        field->setFixedWidth(qBound(132, text + 96, 260));
+        const int extra = qobject_cast<QDateTimeEdit*>(editor) != nullptr ? 124 : 96;
+        field->setFixedWidth(qBound(132, text + extra, 300));
     };
     sync_width();
     if (auto* spin = qobject_cast<QSpinBox*>(editor)) {
@@ -500,6 +503,79 @@ bool OnSameLine(const QWidget* first, const QWidget* second) {
         return first_row == second_row;
     }
     return false;
+}
+
+QString RowIcon(const QString& title, const QString& section, const QString& fallback) {
+    struct Rule {
+        QRegularExpression pattern;
+        QString icon;
+    };
+    const auto rules = [](std::initializer_list<std::pair<const char*, const char*>> entries) {
+        std::vector<Rule> out;
+        for (const auto& [words, icon] : entries) {
+            const QString pattern = QStringLiteral("\\b(%1)\\b").arg(QLatin1String(words));
+            out.push_back({QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption),
+                           QLatin1String(icon)});
+        }
+        return out;
+    };
+    static const std::vector<Rule> by_title = rules({
+        {"log|logs|logging", "file"},
+        {"dump|dumps", "export"},
+        {"directory|directories|path|root|location", "folder"},
+        {"nand|sd card|save data|storage", "hard-drives"},
+        {"shader|shaders|spir-v|macro|pipeline", "cube"},
+        {"vulkan|gpu|api|device", "graphics-card"},
+        {"cpu|cores?|multicore|ticks", "cpu"},
+        {"memory|ram", "memory"},
+        {"speed|fps|frame rate|limit", "timer"},
+        {"clock|clocks|time|date|rtc|time zone", "clock"},
+        {"language|translation", "translate"},
+        {"region|web|online|host|hosts|server", "globe"},
+        {"keyboard", "keyboard"},
+        {"mouse|touch|touchscreen|motion|panning", "hand-pointing"},
+        {"amiibo", "tag"},
+        {"camera|screenshot|screenshots", "camera"},
+        {"mute|muted", "speaker-x"},
+        {"audio|sound|volume|output", "speaker-high"},
+        {"network|airplane|lan|interface", "wifi-high"},
+        {"token|key|keys|certificate", "key"},
+        {"user|username|profile|nickname", "user"},
+        {"fullscreen", "arrows-out"},
+        {"resolution|vsync|hdr|display|monitor|aspect", "monitor"},
+        {"filter|anti-aliasing|sharpness|anisotropic", "sliders-horizontal"},
+        {"applet|applets", "squares-four"},
+        {"debug|debugging|debugger|stub|assert|asserts|gdb", "bug"},
+        {"controller|controllers|joycon|pro controller|gamepad", "game-controller"},
+        {"vibration|rumble", "vibrate"},
+        {"cache|caching|metadata", "stack"},
+        {"homebrew|arguments", "cube"},
+    });
+    static const std::vector<Rule> by_section = rules({
+        {"debug|debugger|debugging", "bug"},
+        {"logging", "file"},
+        {"graphics|gpu|api settings|renderer", "graphics-card"},
+        {"cpu|core", "cpu"},
+        {"audio|output", "speaker-high"},
+        {"network|nextendo|web|host redirect", "globe"},
+        {"storage directories|filesystem|patch manager|gamecard", "hard-drives"},
+        {"caching", "stack"},
+        {"applet mode preference|applets", "squares-four"},
+        {"homebrew", "cube"},
+        {"advanced", "wrench"},
+        {"emulated devices|input devices", "game-controller"},
+        {"console|system", "desktop"},
+        {"ui|interface|screenshots", "palette"},
+    });
+    for (const auto* list : {&by_title, &by_section}) {
+        const QString& text = list == &by_title ? title : section;
+        for (const auto& rule : *list) {
+            if (rule.pattern.match(text).hasMatch()) {
+                return rule.icon;
+            }
+        }
+    }
+    return fallback;
 }
 
 bool IsBound(const QWidget* widget) {
@@ -1123,7 +1199,9 @@ void SettingsPage::BuildPage(int category, Page& page) {
                              const QList<QWidget*>& sources, QWidget* control) {
         toggle_box = nullptr;
         auto* layout = group();
-        AddRow(layout, title.isEmpty() ? page.name : title, Summary(tooltip), icon, color, control,
+        AddRow(layout, title.isEmpty() ? page.name : title, Summary(tooltip),
+               RowIcon(title, section_title.isEmpty() ? page.name : section_title, icon), color,
+               control,
                PlainText(tooltip));
         auto* row = layout->itemAt(layout->count() - 1)->widget();
         row->setProperty("sourceVisible", true);

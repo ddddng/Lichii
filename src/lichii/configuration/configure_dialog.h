@@ -28,6 +28,7 @@ class ConfigureGraphicsAdvanced;
 class ConfigureGraphicsExtensions;
 class ConfigureHotkeys;
 class ConfigureInput;
+class ConfigureMicrophone;
 class ConfigureProfileManager;
 class ConfigureSystem;
 class ConfigureNetwork;
@@ -126,6 +127,7 @@ private:
     void ApplyPreset(const PresetSources& sources, int selection);
     void WatchPreset(const PresetSources& sources, QObject* context,
                      const std::function<void()>& sync);
+    void BuildMicrophone(int category, ConfigureMicrophone* microphone);
     void RebuildGameFolders();
     QString GameFolderSummary() const;
     void AddGameFolder();

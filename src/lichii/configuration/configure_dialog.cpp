@@ -21,10 +21,12 @@
 #include <QLocale>
 #include <QMenu>
 #include <QPainter>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QTabWidget>
@@ -48,6 +50,7 @@
 #include "lichii/configuration/configure_graphics_extensions.h"
 #include "lichii/configuration/configure_hotkeys.h"
 #include "lichii/configuration/configure_input.h"
+#include "lichii/configuration/configure_microphone.h"
 #include "lichii/configuration/configure_network.h"
 #include "lichii/configuration/configure_profile_manager.h"
 #include "lichii/configuration/configure_system.h"
@@ -139,13 +142,13 @@ QString MappingStyle() {
         " border: 1px solid rgba(255,255,255,20); border-radius: 14px; margin-top: 22px;"
         " padding: 8px 4px 4px 4px; font-size: 12px; font-weight: 600; }"
         "QTabWidget#spotlightMapping QGroupBox::title { subcontrol-origin: margin; left: 8px;"
-        " top: 2px; color: rgba(255,255,255,158); background: transparent; }"
+        " top: 2px; color: rgba(255,255,255,158); background: transparent; font-size: 13px; }"
         "QTabWidget#spotlightMapping QGroupBox QGroupBox { background: transparent; border: none;"
         " margin-top: 16px; padding: 2px; }"
-        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,20);"
+        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,31);"
         " color: #ffffff;"
-        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; min-width: 52px;"
-        " padding: 0 6px;"
+        " border: 1px solid rgba(255,255,255,46); border-radius: 7px; min-height: 28px;"
+        " min-width: 52px; padding: 0 6px;"
         " font-size: 12px; font-weight: 600; }"
         "QTabWidget#spotlightMapping QPushButton:hover { background: rgba(255,255,255,46); }"
         "QTabWidget#spotlightMapping QPushButton:focus { border-color: #ff6b95; }"
@@ -162,35 +165,66 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
         setAttribute(Qt::WA_Hover);
-        setProperty("spotlightTransparent", true);
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(30, 5, 6, 5);
-        cap = new Spotlight::KeyCap({});
-        cap->setAttribute(Qt::WA_TransparentForMouseEvents);
-        layout->addWidget(cap);
+        setFont(Spotlight::Font(11, 600));
+        setFixedHeight(28);
     }
 
-    void SetBinding(const QString& text, bool set) {
-        cap->SetText(text);
-        cap->setEnabled(set);
+    void SetBinding(const QString& binding, bool set_) {
+        setText(binding);
+        set = set_;
         updateGeometry();
+        update();
+    }
+
+    QSize sizeHint() const override {
+        return {fontMetrics().horizontalAdvance(text()) + 40, 28};
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1.5) : Qt::NoPen);
-        painter.setBrush(underMouse() ? Color::Fill() : Color::FillFaint());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75), 12, 12);
-        painter.drawPixmap(9, (height() - 14) / 2,
+        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1.5) : QPen(Color::Stroke(), 1));
+        painter.setBrush(underMouse() ? Color::Fill() : Color::Control());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+                                Spotlight::Radius::KeyCap, Spotlight::Radius::KeyCap);
+        painter.drawPixmap(10, (height() - 14) / 2,
                            Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
                                                  devicePixelRatioF()));
+        painter.setPen(set ? Color::Text() : Color::TextSecondary());
+        painter.setFont(font());
+        painter.drawText(rect().adjusted(30, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, text());
     }
 
 private:
     QString icon;
-    Spotlight::KeyCap* cap;
+    bool set = false;
+};
+
+class LevelMeter final : public QWidget {
+public:
+    explicit LevelMeter(QProgressBar* source_) : source{source_} {
+        setFixedSize(120, 8);
+        connect(source, &QProgressBar::valueChanged, this, [this] { update(); });
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()), 4, 4);
+        const int span = source->maximum() - source->minimum();
+        const qreal ratio = span > 0 ? qreal(source->value() - source->minimum()) / span : 0.0;
+        if (ratio > 0) {
+            painter.setBrush(Color::Accent());
+            painter.drawRoundedRect(QRectF(0, 0, width() * ratio, height()), 4, 4);
+        }
+    }
+
+private:
+    QProgressBar* source;
 };
 
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
@@ -317,7 +351,8 @@ void ConfigureDialog::OnLanguageChanged(const QString& locale) {
 void ConfigureDialog::BuildSettings() {
     settings_page = new SettingsPage(this, false);
     for (const char* name :
-         {"external_content_list", "add_external_dir_button", "remove_external_dir_button"}) {
+         {"label_external_desc", "external_content_list", "add_external_dir_button",
+          "remove_external_dir_button"}) {
         general_tab->findChild<QWidget*>(QLatin1String(name))->setProperty("spotlightBound", true);
     }
     ui->verticalLayout->setContentsMargins(0, 0, 0, 0);
@@ -524,15 +559,18 @@ void ConfigureDialog::BuildShortcuts(int shortcuts) {
             reset->setToolTip(tr("Restore default"));
             reset->setAccessibleName(reset->toolTip());
             reset->setFocusPolicy(Qt::StrongFocus);
-            keyboard->setMinimumWidth(128);
-            pad->setMinimumWidth(184);
+            keyboard->setMinimumWidth(112);
+            pad->setMinimumWidth(152);
             for (auto* button : {keyboard, pad}) {
                 layout->addWidget(button);
             }
             layout->addWidget(reset);
             const auto refresh = [this, action, keyboard, pad, reset] {
-                const QString key = action.sibling(action.row(), 1).data().toString();
-                const QString button = action.sibling(action.row(), 2).data().toString();
+                const QString key = Spotlight::KeyText(QKeySequence::fromString(
+                    action.sibling(action.row(), 1).data().toString(), QKeySequence::NativeText));
+                const QString button =
+                    action.sibling(action.row(), 2).data().toString().replace(QLatin1Char('+'),
+                                                                              QLatin1Char(' '));
                 keyboard->SetBinding(key.isEmpty() ? tr("Not set") : key, !key.isEmpty());
                 keyboard->setToolTip(tr("Keyboard: %1").arg(key.isEmpty() ? tr("not set") : key));
                 keyboard->setAccessibleName(keyboard->toolTip());
@@ -1158,7 +1196,62 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
             picker_row_layout->addWidget(
                 SettingsPage::BindButton(input_tab->findChild<QPushButton*>(name)));
         }
-        settings_page->AddBlock(mapping, picker_row, tr("Players"));
+        auto* header = SettingsPage::Card();
+        auto* header_layout = new QVBoxLayout(header);
+        header_layout->setContentsMargins(16, 14, 16, 14);
+        header_layout->setSpacing(14);
+        header_layout->addWidget(picker_row);
+        picker_row->setProperty("spotlightTransparent", true);
+        auto* player_rows = new QStackedWidget;
+        player_rows->setProperty("spotlightTransparent", true);
+        for (int i = 0; i < player_names.size(); ++i) {
+            QWidget* const page = input_tabs->widget(i);
+            auto* connected_box =
+                page->findChild<QGroupBox*>(QStringLiteral("groupConnectedController"));
+            auto* devices = page->findChild<QComboBox*>(QStringLiteral("comboDevices"));
+            auto* profiles = page->findChild<QComboBox*>(QStringLiteral("comboProfiles"));
+            for (const char* name : {"groupConnectedController", "devicesGroup", "profilesGroup"}) {
+                page->findChild<QWidget*>(QLatin1String(name))->hide();
+            }
+            auto* line = new QWidget;
+            line->setProperty("spotlightTransparent", true);
+            auto* line_layout = new QHBoxLayout(line);
+            line_layout->setContentsMargins(0, 0, 0, 0);
+            line_layout->setSpacing(10);
+            line_layout->addWidget(SettingsPage::Text(tr("Connected"), 13, 600, true));
+            line_layout->addWidget(SettingsPage::BindToggle(connected_box));
+            line_layout->addSpacing(18);
+            line_layout->addWidget(SettingsPage::Text(tr("Device"), 13, 600, true));
+            line_layout->addWidget(SettingsPage::BindCombo(devices));
+            line_layout->addSpacing(18);
+            line_layout->addWidget(SettingsPage::Text(tr("Profile"), 13, 600, true));
+            line_layout->addWidget(SettingsPage::BindCombo(profiles, tr("No profile")));
+            auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
+            more->setToolTip(tr("Profile actions"));
+            more->setAccessibleName(more->toolTip());
+            auto* menu = new QMenu(more);
+            for (const auto& [name, label] : std::array{
+                     std::pair{"buttonProfilesSave", tr("Save profile")},
+                     std::pair{"buttonProfilesNew", tr("New profile")},
+                     std::pair{"buttonProfilesDelete", tr("Delete profile")},
+                 }) {
+                auto* source = page->findChild<QPushButton*>(QLatin1String(name));
+                auto* action = menu->addAction(label, source, &QAbstractButton::click);
+                connect(menu, &QMenu::aboutToShow, action,
+                        [action, source] { action->setEnabled(source->isEnabled()); });
+            }
+            connect(more, &QAbstractButton::clicked, menu, [menu, more] {
+                menu->popup(more->mapToGlobal(QPoint(0, more->height())));
+            });
+            line_layout->addWidget(more);
+            line_layout->addStretch();
+            player_rows->addWidget(line);
+        }
+        player_rows->setCurrentIndex(input_tabs->currentIndex());
+        connect(input_tabs, &QTabWidget::currentChanged, player_rows,
+                &QStackedWidget::setCurrentIndex);
+        header_layout->addWidget(player_rows);
+        settings_page->AddBlock(mapping, header, tr("Players"));
         input_tabs->tabBar()->hide();
         input_tabs->setDocumentMode(true);
         input_tab->findChild<QWidget*>(QStringLiteral("consoleInputSettings"))->hide();
@@ -1212,7 +1305,65 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
                              QStringLiteral("palette"), Tints::Lavender(), swatches);
     }
     settings_page->AddPage(category, pages[8], tr("Input devices"));
-    settings_page->AddPage(category, pages[9], tr("Microphone"));
+    BuildMicrophone(category, static_cast<ConfigureMicrophone*>(pages[9]));
+}
+
+void ConfigureDialog::BuildMicrophone(int category, ConfigureMicrophone* microphone) {
+    auto* devices = microphone->findChild<QComboBox*>(QStringLiteral("microphone_device"));
+    auto* refresh = microphone->findChild<QPushButton*>(QStringLiteral("microphone_refresh"));
+    auto* volume = microphone->findChild<QSlider*>(QStringLiteral("microphone_volume"));
+    auto* level = microphone->findChild<QProgressBar*>(QStringLiteral("microphone_level"));
+    auto* test = microphone->findChild<QPushButton*>(QStringLiteral("microphone_test"));
+    auto* status = microphone->findChild<QLabel*>(QStringLiteral("microphone_status"));
+    auto* rows = settings_page->AddSection(category, tr("Microphone"), true);
+
+    auto* device_control = new QWidget;
+    auto* device_layout = new QHBoxLayout(device_control);
+    device_layout->setContentsMargins(0, 0, 0, 0);
+    device_layout->setSpacing(8);
+    device_layout->addWidget(SettingsPage::BindCombo(devices));
+    auto* refresh_button = new Spotlight::CircleButton(QStringLiteral("arrow-clockwise"), 32);
+    refresh_button->setToolTip(refresh->text());
+    refresh_button->setAccessibleName(refresh_button->toolTip());
+    refresh_button->setEnabled(refresh->isEnabled());
+    connect(refresh_button, &QAbstractButton::clicked, refresh, &QAbstractButton::click);
+    device_layout->addWidget(refresh_button);
+    SettingsPage::AddRow(rows, tr("Input device"), tr("The microphone games hear"),
+                         QStringLiteral("record"), Tints::Blue(), device_control);
+
+    auto* volume_control = new QWidget;
+    auto* volume_layout = new QHBoxLayout(volume_control);
+    volume_layout->setContentsMargins(0, 0, 0, 0);
+    volume_layout->setSpacing(10);
+    volume_layout->addWidget(SettingsPage::BindSlider(volume));
+    auto* volume_value = SettingsPage::Text(tr("%1%").arg(volume->value()), 13, 600);
+    volume_value->setMinimumWidth(44);
+    volume_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    connect(volume, &QSlider::valueChanged, volume_value,
+            [volume_value](int value) { volume_value->setText(tr("%1%").arg(value)); });
+    volume_layout->addWidget(volume_value);
+    SettingsPage::AddRow(rows, tr("Microphone volume"), tr("Gain applied to the input"),
+                         QStringLiteral("speaker-high"), Tints::Blue(), volume_control);
+
+    auto* level_control = new QWidget;
+    auto* level_layout = new QHBoxLayout(level_control);
+    level_layout->setContentsMargins(0, 0, 0, 0);
+    level_layout->setSpacing(14);
+    level_layout->addWidget(new LevelMeter(level), 0, Qt::AlignVCenter);
+    auto* test_button = new Spotlight::PillButton(test->text());
+    connect(test_button, &QAbstractButton::clicked, test, &QAbstractButton::click);
+    level_layout->addWidget(test_button);
+    const QString idle_detail = tr("Start a test and speak to check the input level");
+    auto* detail = SettingsPage::AddRow(rows, tr("Input level"), idle_detail,
+                                        QStringLiteral("sliders-horizontal"), Tints::Blue(),
+                                        level_control);
+    const auto sync = [test, status, test_button, detail, idle_detail] {
+        test_button->setText(test->text());
+        test_button->updateGeometry();
+        detail->setText(status->text().isEmpty() ? idle_detail : status->text());
+    };
+    sync();
+    connect(microphone, &ConfigureMicrophone::StateChanged, detail, sync);
 }
 
 void ConfigureDialog::RebuildGameFolders() {
