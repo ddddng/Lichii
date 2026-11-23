@@ -115,6 +115,7 @@ private:
     void BuildGraphics(int graphics);
     void BuildControls(int category, int shortcuts);
     void BuildShortcuts(int shortcuts);
+    void BuildSystem(int system_page);
     void BuildProfiles(int profiles);
     void RebuildProfiles();
     void EnsureInput();
