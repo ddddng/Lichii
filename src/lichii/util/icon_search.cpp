@@ -546,7 +546,8 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
 } // namespace
 
 ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
-                                             const std::atomic_bool& cancel, bool prefer_newest) {
+                                             const std::atomic_bool& cancel, bool prefer_newest,
+                                             SteamGridDbArt art) {
     ArtworkLookupResult out;
     // A trailing "(2026)" is not part of the name SteamGridDB knows; it says which release.
     std::string search_title = title;
@@ -662,10 +663,14 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
             out.status = ArtworkLookupStatus::NotFound;
             return out;
         }
-        // Square grids first, then icons.
-        for (const auto& list_path :
-             {fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
-              fmt::format("/icons/game/{}", game_id)}) {
+        const std::vector<std::string> list_paths =
+            art == SteamGridDbArt::Hero
+                ? std::vector{fmt::format("/heroes/game/{}?dimensions=1920x620,3840x1240,1600x650"
+                                          "&types=static&nsfw=false&humor=false",
+                                          game_id)}
+                : std::vector{fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
+                              fmt::format("/icons/game/{}", game_id)};
+        for (const auto& list_path : list_paths) {
             const auto list = sgdb_get(list_path);
             if (list.status != HttpStatus::Ok) {
                 return failed(list);
