@@ -985,12 +985,47 @@ void GameList::AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const
     const bool can_convert_nup =
         is_loose_dump || suffix == QStringLiteral("nsp") || suffix == QStringLiteral("xci") ||
         suffix == QStringLiteral("nca");
-    context_menu.addSeparator();
+    auto* archive = group(context_menu, tr("Archive"), u"archive");
+    QAction* convert_nup = nullptr;
+    if (can_convert_nup) {
+        convert_nup = archive->addAction(tr("Convert to NUP…"));
+        convert_nup->setEnabled(!nup_conversion_running);
+    }
+    QAction* convert_nx = nullptr;
+    QAction* add_to_nx = nullptr;
+    QAction* remove_from_nx = nullptr;
+    QAction* edit_nx_metadata = nullptr;
+#ifdef LICHII_NX_TOOLS
+    if (NxTools::CanConvert(path)) {
+        convert_nx = archive->addAction(tr("Convert to NX…"));
+        convert_nx->setEnabled(!nx_tool_running);
+    }
+#endif
+    QAction* extract_nup = nullptr;
+    QAction* edit_nup = nullptr;
+    if (is_nup_archive) {
+        extract_nup = archive->addAction(tr("Dump NUP…"));
+        extract_nup->setEnabled(!nup_conversion_running);
+        edit_nup = archive->addAction(tr("Edit title and icon…"));
+        edit_nup->setEnabled(!nup_conversion_running);
+    }
+#ifdef LICHII_NX_TOOLS
+    if (NxTools::IsNxArchive(path)) {
+        edit_nx_metadata = archive->addAction(tr("Edit title and icon…"));
+        QMenu* nx_menu = archive->AddSubmenu({}, tr("Manage NX archive"));
+        add_to_nx = nx_menu->addAction(tr("Add update or DLC…"));
+        remove_from_nx = nx_menu->addAction(tr("Remove update or DLC…"));
+        edit_nx_metadata->setEnabled(!nx_tool_running);
+        nx_menu->setEnabled(!nx_tool_running);
+    }
+#endif
+    archive->menuAction()->setVisible(!archive->isEmpty());
 #if !defined(__APPLE__)
     QMenu* shortcut_menu = group(context_menu, tr("Add to desktop"), u"push-pin");
     QAction* create_desktop_shortcut = shortcut_menu->addAction(tr("Desktop"));
     QAction* create_applications_menu_shortcut = shortcut_menu->addAction(tr("Applications menu"));
 #endif
+    context_menu.addSeparator();
     QAction* favorite = context_menu.addAction(tr("Add to favourites\tF"));
     QAction* copy_tid = add(context_menu, tr("Copy title ID"), u"copy");
     auto* dump_verify = group(context_menu, tr("Dump and verify"), u"cube");
@@ -1014,44 +1049,9 @@ void GameList::AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const
     QMenu* play_time_menu = group(*more, tr("Play time"), u"clock");
     QAction* set_play_time = play_time_menu->addAction(tr("Set play time"));
     QAction* remove_play_time_data = play_time_menu->addAction(tr("Remove play time"));
-    QAction* extract_nup = nullptr;
-    if (is_nup_archive) {
-        extract_nup = dump_verify->addAction(tr("Dump NUP…"));
-        extract_nup->setEnabled(!nup_conversion_running);
-    }
     QAction* dump_romfs = dump_verify->addAction(tr("Dump RomFS"));
     QAction* dump_romfs_sdmc = dump_verify->addAction(tr("Dump RomFS to SDMC"));
     QAction* verify_integrity = dump_verify->addAction(tr("Verify integrity"));
-    QAction* convert_nup = nullptr;
-    if (can_convert_nup) {
-        convert_nup = dump_verify->addAction(tr("Convert to NUP…"));
-        convert_nup->setEnabled(!nup_conversion_running);
-    }
-    QAction* convert_nx = nullptr;
-    QAction* add_to_nx = nullptr;
-    QAction* remove_from_nx = nullptr;
-    QAction* edit_nx_metadata = nullptr;
-#ifdef LICHII_NX_TOOLS
-    if (NxTools::CanConvert(path)) {
-        convert_nx = dump_verify->addAction(tr("Convert to NX…"));
-        convert_nx->setEnabled(!nx_tool_running);
-    }
-#endif
-    QAction* edit_nup = nullptr;
-    if (is_nup_archive) {
-        edit_nup = dump_verify->addAction(tr("Edit NUP Metadata…"));
-        edit_nup->setEnabled(!nup_conversion_running);
-    }
-#ifdef LICHII_NX_TOOLS
-    if (NxTools::IsNxArchive(path)) {
-        QMenu* nx_menu = dump_verify->AddSubmenu({}, tr("Manage NX Archive"));
-        add_to_nx = nx_menu->addAction(tr("Add Update or DLC…"));
-        remove_from_nx = nx_menu->addAction(tr("Remove Update or DLC…"));
-        nx_menu->addSeparator();
-        edit_nx_metadata = nx_menu->addAction(tr("Edit Title and Icon…"));
-        nx_menu->setEnabled(!nx_tool_running);
-    }
-#endif
     QMenu* artwork = group(*more, tr("Artwork"), u"image");
     artwork->menuAction()->setVisible(program_id != 0);
     QAction* lookup_artwork = artwork->addAction(tr("Look up artwork on SteamGridDB"));
