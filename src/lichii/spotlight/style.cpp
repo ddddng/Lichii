@@ -64,6 +64,7 @@ public:
         case SH_MessageBox_CenterButtons:
         case SH_ToolTip_Mask:
         case SH_Menu_Mask:
+        case SH_UnderlineShortcut:
             return 0;
         default:
             return QProxyStyle::styleHint(hint, option, widget, data);
