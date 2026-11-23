@@ -25,6 +25,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/caret-up.png</file>
         <file>spotlight/icons/chat-circle.png</file>
         <file>spotlight/icons/check-circle-fill.png</file>
+        <file>spotlight/icons/check-circle.png</file>
         <file>spotlight/icons/check.png</file>
         <file>spotlight/icons/circle-fill.png</file>
         <file>spotlight/icons/circle-notch.png</file>
@@ -48,6 +49,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/game-controller-fill.png</file>
         <file>spotlight/icons/game-controller.png</file>
         <file>spotlight/icons/gear-six.png</file>
+        <file>spotlight/icons/github-logo.png</file>
         <file>spotlight/icons/globe-fill.png</file>
         <file>spotlight/icons/globe.png</file>
         <file>spotlight/icons/graphics-card.png</file>
@@ -68,6 +70,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/minus.png</file>
         <file>spotlight/icons/monitor-fill.png</file>
         <file>spotlight/icons/monitor.png</file>
+        <file>spotlight/icons/newspaper.png</file>
         <file>spotlight/icons/paint-brush.png</file>
         <file>spotlight/icons/palette.png</file>
         <file>spotlight/icons/pause-fill.png</file>
