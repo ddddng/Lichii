@@ -61,7 +61,7 @@ SequenceDialog::SequenceDialog(QWidget* parent, const QString& action)
     footer->addWidget(okay);
     layout->addLayout(footer);
 
-    const auto render_keys = [this, caps, okay](const QKeySequence& sequence) {
+    const auto render_keys = [caps, okay](const QKeySequence& sequence) {
         while (auto* item = caps->takeAt(0)) {
             delete item->widget();
             delete item;
