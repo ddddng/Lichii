@@ -30,9 +30,9 @@
 #include <cstring>
 #endif
 
-#include "main_window.h"
 #include "lichii/spotlight/startup_prompt.h"
 #include "lichii/spotlight/theme.h"
+#include "main_window.h"
 
 #ifdef _WIN32
 #include <QScreen>

@@ -1740,7 +1740,8 @@ void MainWindow::LinkActionShortcut(QAction* action, const QString& action_name,
     action->setShortcutContext(
         hotkey_registry.GetShortcutContext(main_window, action_name.toStdString()));
     action->setAutoRepeat(false);
-    Spotlight::SetHotkeyHint(action, action->shortcut(), ControllerHotkey(action_name.toStdString()));
+    Spotlight::SetHotkeyHint(action, action->shortcut(),
+                             ControllerHotkey(action_name.toStdString()));
 
     this->addAction(action);
 
