@@ -262,8 +262,15 @@ void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
                 "you want to delete them?")
                  .trimmed();
 
-    QMessageBox prompt(QMessageBox::Warning, tr("Delete add-on(s)?"), lines.join(u'\n'),
+    QString text;
+    for (const auto& line : lines) {
+        text += QStringLiteral("<p style=\"margin-top:%1px; margin-bottom:0\">%2</p>")
+                    .arg(text.isEmpty() ? 0 : 7)
+                    .arg(line.toHtmlEscaped());
+    }
+    QMessageBox prompt(QMessageBox::Warning, tr("Delete add-on(s)?"), text,
                        QMessageBox::Yes | QMessageBox::No, this);
+    prompt.setTextFormat(Qt::RichText);
     auto* yes = prompt.button(QMessageBox::Yes);
     yes->setProperty("kind", QStringLiteral("destructive"));
     yes->style()->unpolish(yes);
