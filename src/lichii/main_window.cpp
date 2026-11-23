@@ -4545,6 +4545,11 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
 }
 
 void MainWindow::OnExit() {
+    // Core can call System::Exit thousands of times while its applets tear down. Once a stop is
+    // under way (the stopping overlay is up), a nested ShutdownGame per call overflows the stack.
+    if (shutdown_dialog) {
+        return;
+    }
     ShutdownGame();
 }
 
