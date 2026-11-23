@@ -801,10 +801,10 @@ void ConfigurePerGame::RebuildAddons() {
             }
             if (found->file_date.isValid()) {
                 const QDate date = found->file_date.toLocalTime().date();
-                facts << tr("file from %1")
-                             .arg(QLocale().toString(date, date.year() == QDate::currentDate().year()
-                                                               ? QStringLiteral("MMM d")
-                                                               : QStringLiteral("MMM d, yyyy")));
+                const QString format = date.year() == QDate::currentDate().year()
+                                           ? QStringLiteral("MMM d")
+                                           : QStringLiteral("MMM d, yyyy");
+                facts << tr("file from %1").arg(QLocale().toString(date, format));
             }
             if (facts.isEmpty() && !found->version.isEmpty()) {
                 facts << tr("Version %1").arg(found->version);
@@ -824,8 +824,9 @@ void ConfigurePerGame::RebuildAddons() {
                 auto* glyph = new QLabel;
                 glyph->setPixmap(Spotlight::IconPixmap(icon, 14, color, line->devicePixelRatioF()));
                 auto* label = SettingsPage::Text(text, 12, weight);
-                label->setStyleSheet(QStringLiteral("QLabel { background: transparent; color: %1; }")
-                                         .arg(color.name(QColor::HexArgb)));
+                label->setStyleSheet(
+                    QStringLiteral("QLabel { background: transparent; color: %1; }")
+                        .arg(color.name(QColor::HexArgb)));
                 auto* fact = new QHBoxLayout;
                 fact->setSpacing(5);
                 fact->addWidget(glyph);
