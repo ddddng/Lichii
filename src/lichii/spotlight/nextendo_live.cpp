@@ -255,9 +255,11 @@ protected:
             int right = row.right() - 12;
             painter.setFont(Font(13, 700));
             painter.setPen(entry.players > 0 ? Color::Text() : QColor(0xff, 0xff, 0xff, 0x9e));
-            painter.drawText(QRect{right - 26, row.y(), 26, row.height()},
-                             Qt::AlignVCenter | Qt::AlignRight, Count(entry.players));
-            right -= 26 + 6 + 7;
+            const QString players = Count(entry.players);
+            const int count_width = std::max(26, painter.fontMetrics().horizontalAdvance(players));
+            painter.drawText(QRect{right - count_width, row.y(), count_width, row.height()},
+                             Qt::AlignVCenter | Qt::AlignRight, players);
+            right -= count_width + 6 + 7;
             PaintDot(painter, {right + 3.5, row.center().y() + 0.5}, 7, entry.players > 0);
             right -= 10;
             if (entry.program_id != 0) {
