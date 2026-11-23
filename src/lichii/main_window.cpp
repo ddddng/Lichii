@@ -48,6 +48,7 @@
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
 #include "lichii/spotlight/confirm.h"
+#include "lichii/spotlight/dialog.h"
 #include "lichii/spotlight/fullscreen_hint.h"
 #include "lichii/spotlight/ingame_bar.h"
 #include "lichii/spotlight/ingame_menu.h"
@@ -102,11 +103,14 @@
 #include <QStyleHints>
 #endif
 
+#include <optional>
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDate>
 #include <QDesktopServices>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -116,6 +120,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QInputDialog>
+#include <QLabel>
 #include <QMimeData>
 #include <QPalette>
 #include <QProgressDialog>
@@ -3460,7 +3465,13 @@ void MainWindow::OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRe
 void MainWindow::OnGameListSetPlayTime(u64 program_id) {
     const u64 current_play_time = play_time_manager->GetPlayTime(program_id);
 
-    SetPlayTimeDialog dialog(this, current_play_time);
+    const auto* const library = game_list->GetModel();
+    const auto games = library->match(library->index(0, 0), GameListItemPath::ProgramIdRole,
+                                      QVariant::fromValue(qulonglong(program_id)), 1,
+                                      Qt::MatchExactly | Qt::MatchRecursive);
+    const QString title =
+        games.isEmpty() ? QString{} : games.first().data(GameListItemPath::TitleRole).toString();
+    SetPlayTimeDialog dialog(this, title, current_play_time);
 
     if (dialog.exec() == QDialog::Accepted) {
         const u64 total_seconds = dialog.GetTotalSeconds();
@@ -3480,6 +3491,167 @@ void MainWindow::OnGameListRemovePlayTimeData(u64 program_id) {
     game_list->PopulateAsync(UISettings::values.game_dirs);
 }
 
+namespace {
+
+QString GameTitleName(const std::string& game_path);
+
+/// A field of a content card: a muted label over its control.
+void AddContentField(QVBoxLayout* layout, const QString& label, QWidget* field) {
+    auto* column = new QVBoxLayout;
+    column->setSpacing(8);
+    auto* title = new QLabel(label);
+    title->setFont(Spotlight::Font(13, 600));
+    Spotlight::SetTextColor(title, Spotlight::Color::TextSecondary());
+    column->addWidget(title);
+    column->addWidget(field);
+    layout->addLayout(column);
+}
+
+/// A content card's buttons: Cancel and the accept button named `accept`.
+void AddContentButtons(QDialog* dialog, QVBoxLayout* layout, const QString& accept) {
+    auto* buttons = new QDialogButtonBox;
+    buttons->addButton(QDialogButtonBox::Cancel);
+    auto* accept_button = buttons->addButton(accept, QDialogButtonBox::AcceptRole);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    layout->addSpacing(6);
+    layout->addWidget(buttons);
+    accept_button->setFocus();
+}
+
+struct RomFSContent {
+    u64 title_id;
+    FileSys::ContentRecordType record_type;
+    QString label;
+};
+
+/// The installed RomFS of the game, its updates and its DLC that can be dumped.
+std::vector<RomFSContent> ListRomFSContents(const FileSys::ContentProvider& installed,
+                                            u64 program_id) {
+    using ContentInfo = std::tuple<u64, FileSys::TitleType, FileSys::ContentRecordType>;
+    boost::container::flat_set<ContentInfo> available_title_ids;
+
+    std::vector<u64> add_on_content;
+    for (const auto& entry :
+         installed.ListEntriesFilter(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data)) {
+        add_on_content.push_back(entry.title_id);
+    }
+    const u64 add_on_base = FileSys::GetAddOnApplicationID(program_id, add_on_content);
+
+    const auto RetrieveEntries = [&](FileSys::TitleType title_type,
+                                     FileSys::ContentRecordType record_type) {
+        const u64 base = title_type == FileSys::TitleType::AOC ? add_on_base : program_id;
+        const auto entries = installed.ListEntriesFilter(title_type, record_type);
+        for (const auto& entry : entries) {
+            if (FileSys::GetBaseTitleID(entry.title_id) == base &&
+                installed.GetEntry(entry)->GetStatus() == Loader::ResultStatus::Success) {
+                available_title_ids.insert({entry.title_id, title_type, record_type});
+            }
+        }
+    };
+
+    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::Program);
+    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::HtmlDocument);
+    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::LegalInformation);
+    RetrieveEntries(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data);
+
+    std::vector<RomFSContent> contents;
+    for (const auto& [title_id, title_type, record_type] : available_title_ids) {
+        const auto hex_title_id = QString::fromStdString(fmt::format("{:X}", title_id));
+        QString label;
+        if (record_type == FileSys::ContentRecordType::Program) {
+            label = QStringLiteral("Program [%1]").arg(hex_title_id);
+        } else if (record_type == FileSys::ContentRecordType::HtmlDocument) {
+            label = QStringLiteral("HTML document [%1]").arg(hex_title_id);
+        } else if (record_type == FileSys::ContentRecordType::LegalInformation) {
+            label = QStringLiteral("Legal information [%1]").arg(hex_title_id);
+        } else {
+            label = QStringLiteral("DLC %1 [%2]").arg(title_id & 0x7FF).arg(hex_title_id);
+        }
+        contents.push_back({title_id, record_type, label});
+    }
+    return contents;
+}
+
+struct RomFSDumpChoice {
+    std::size_t content;
+    bool full;
+    DumpRomFSTarget target;
+};
+
+/// The Dump RomFS card: which content (when there is more than one), the mode and the
+/// destination, which starts on the one the menu asked for.
+std::optional<RomFSDumpChoice> AskRomFSDump(QWidget* parent, const QString& game,
+                                            const std::vector<RomFSContent>& contents,
+                                            DumpRomFSTarget target) {
+    Spotlight::Dialog dialog(parent);
+    dialog.setWindowTitle(MainWindow::tr("Dump RomFS"));
+    dialog.SetSubtitle(game);
+    dialog.SetIcon(u"folder-open", Spotlight::Color::Accent());
+    dialog.SetCardWidth(440);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+
+    QComboBox* content = nullptr;
+    if (contents.size() > 1) {
+        content = new QComboBox;
+        for (const auto& entry : contents) {
+            content->addItem(entry.label);
+        }
+        AddContentField(layout, MainWindow::tr("Content"), content);
+    }
+    auto* mode = new Spotlight::SegmentedControl(
+        {MainWindow::tr("Full copy"), MainWindow::tr("Folders only")},
+        Spotlight::SegmentedControl::Kind::Accent, 38);
+    mode->SetCurrentIndex(0);
+    mode->setToolTip(MainWindow::tr("Full copy copies every file into the new folder; folders "
+                                    "only creates the folder structure."));
+    AddContentField(layout, MainWindow::tr("Mode"), mode);
+    auto* destination = new Spotlight::SegmentedControl(
+        {MainWindow::tr("Dump folder"), MainWindow::tr("SD card (atmosphere)")},
+        Spotlight::SegmentedControl::Kind::Accent, 38);
+    destination->SetCurrentIndex(target == DumpRomFSTarget::Normal ? 0 : 1);
+    AddContentField(layout, MainWindow::tr("Destination"), destination);
+    AddContentButtons(&dialog, layout, MainWindow::tr("Dump"));
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return std::nullopt;
+    }
+    return RomFSDumpChoice{
+        content ? static_cast<std::size_t>(content->currentIndex()) : 0,
+        mode->CurrentIndex() == 0,
+        destination->CurrentIndex() == 0 ? DumpRomFSTarget::Normal : DumpRomFSTarget::SDMC,
+    };
+}
+
+/// The "What is this file?" card for an NCA: the type to install it as, or -1 when cancelled.
+int AskNcaType(QWidget* parent, const QStringList& types, int initial) {
+    Spotlight::Dialog dialog(parent);
+    dialog.setWindowTitle(MainWindow::tr("What is this file?"));
+    dialog.SetSubtitle(MainWindow::tr("An .nca needs a type before installing"));
+    dialog.SetIcon(u"file", Spotlight::Color::Accent());
+    dialog.SetCardWidth(420);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
+
+    auto* type = new QComboBox;
+    type->addItems(types);
+    type->setCurrentIndex(initial);
+    layout->addWidget(type);
+    auto* hint = new QLabel(MainWindow::tr("In most instances, the default 'Game' is fine."));
+    hint->setWordWrap(true);
+    hint->setFont(Spotlight::Font(12, 400));
+    Spotlight::SetTextColor(hint, Spotlight::Color::TextMuted());
+    layout->addWidget(hint);
+    AddContentButtons(&dialog, layout, MainWindow::tr("Install"));
+
+    return dialog.exec() == QDialog::Accepted ? type->currentIndex() : -1;
+}
+
+} // namespace
+
 void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_path,
                                      DumpRomFSTarget target) {
     const auto failed = [this] {
@@ -3496,6 +3668,23 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
     }
 
     const auto& installed = QtCommon::system->GetContentProvider();
+
+    // NX archives and NUPs are never installed: they give their own RomFS.
+    const bool archive = loader->GetFileType() == Loader::FileType::NX ||
+                         loader->GetFileType() == Loader::FileType::NUP;
+    std::vector<RomFSContent> contents;
+    if (!archive) {
+        contents = ListRomFSContents(installed, program_id);
+        if (contents.empty()) {
+            failed();
+            return;
+        }
+    }
+    const auto choice = AskRomFSDump(this, GameTitleName(game_path), contents, target);
+    if (!choice) {
+        failed();
+        return;
+    }
 
     u64 title_id{};
     FileSys::VirtualFile romfs;
@@ -3521,13 +3710,8 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
         FileSys::VirtualFile packed_update_raw{};
         loader->ReadUpdateRaw(packed_update_raw);
 
-        u8 raw_type{};
-        if (!SelectRomFSDumpTarget(installed, program_id, &title_id, &raw_type)) {
-            failed();
-            return;
-        }
-
-        const auto type = static_cast<FileSys::ContentRecordType>(raw_type);
+        title_id = contents[choice->content].title_id;
+        const auto type = contents[choice->content].record_type;
         const auto base_nca = installed.GetEntry(title_id, type);
         if (!base_nca) {
             failed();
@@ -3547,7 +3731,7 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
     }
 
     const auto dump_dir =
-        target == DumpRomFSTarget::Normal
+        choice->target == DumpRomFSTarget::Normal
             ? Common::FS::GetEdenPath(Common::FS::EdenPath::DumpDir)
             : Common::FS::GetEdenPath(Common::FS::EdenPath::SDMCDir) / "atmosphere" / "contents";
     const auto romfs_dir = fmt::format("{:016X}/romfs", title_id);
@@ -3562,27 +3746,13 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
         return;
     }
 
-    bool ok = false;
-    const QStringList selections{tr("Full"), tr("Skeleton")};
-    const auto res = QInputDialog::getItem(
-        this, tr("Select RomFS Dump Mode"),
-        tr("Please select the how you would like the RomFS dumped.<br>Full will copy all of the "
-           "files into the new directory while <br>skeleton will only create the directory "
-           "structure."),
-        selections, 0, false, &ok);
-    if (!ok) {
-        failed();
-        QtCommon::vfs->DeleteDirectory(path);
-        return;
-    }
-
     const auto extracted = FileSys::ExtractRomFS(romfs);
     if (extracted == nullptr) {
         failed();
         return;
     }
 
-    const auto full = res == selections.constFirst();
+    const bool full = choice->full;
 
     // The expected required space is the size of the RomFS + 1 GiB
     const auto minimum_free_space = romfs->GetSize() + 0x40000000;
@@ -3737,8 +3907,15 @@ void MainWindow::OnLinkToRyujinx(const u64& program_id) {
         }
         UISettings::values.ryujinx_link_paths.remove(program_id);
     } else {
+        const auto* const library = game_list->GetModel();
+        const auto games = library->match(library->index(0, 0), GameListItemPath::ProgramIdRole,
+                                          QVariant::fromValue(qulonglong(program_id)), 1,
+                                          Qt::MatchExactly | Qt::MatchRecursive);
+        const QModelIndex game = games.isEmpty() ? QModelIndex{} : games.first();
         RyujinxDialog dialog(lichii_dir, save->path,
-                             QString::fromStdString(fmt::format("{:016x}", save->save_id)), this);
+                             QString::fromStdString(fmt::format("{:016x}", save->save_id)),
+                             game.data(GameListItemPath::TitleRole).toString(),
+                             game.data(Qt::DecorationRole).value<QPixmap>(), this);
         if (dialog.exec() != QDialog::Accepted) {
             return;
         }
@@ -3823,7 +4000,7 @@ void MainWindow::OnMenuInstallToNAND() {
     // Save folder location of the first selected file
     UISettings::values.roms_path = QFileInfo(filenames[0]).path().toStdString();
 
-    int remaining = filenames.size();
+    int remaining = files.size();
 
     // This would only overflow above 2^51 bytes (2.252 PB)
     int total_size = 0;
@@ -3849,9 +4026,9 @@ void MainWindow::OnMenuInstallToNAND() {
     install_progress->show();
 
     for (const QString& file : files) {
-        install_progress->setWindowTitle(tr("%n file(s) remaining", "", remaining));
-        install_progress->setLabelText(
-            tr("Installing file \"%1\"...").arg(QFileInfo(file).fileName()));
+        install_progress->setWindowTitle(
+            tr("Installing %1 of %2").arg(files.size() - remaining + 1).arg(files.size()));
+        install_progress->setLabelText(QFileInfo(file).fileName());
 
         QFuture<ContentManager::InstallResult> future;
         ContentManager::InstallResult result;
@@ -3913,16 +4090,21 @@ void MainWindow::OnMenuInstallToNAND() {
                "NAND.\nPlease, only use this feature to install updates and DLC."));
     }
 
-    const QString install_results =
-        (new_files.isEmpty() ? QString{}
-                             : tr("%n file(s) were newly installed\n", "", new_files.size())) +
-        (overwritten_files.isEmpty()
-             ? QString{}
-             : tr("%n file(s) were overwritten\n", "", overwritten_files.size())) +
-        (failed_files.isEmpty() ? QString{}
-                                : tr("%n file(s) failed to install\n", "", failed_files.size()));
-
-    QMessageBox::information(this, tr("Install Results"), install_results);
+    const auto installed_count = static_cast<int>(new_files.size() + overwritten_files.size());
+    QMessageBox results(
+        failed_files.isEmpty() ? QMessageBox::Information : QMessageBox::Warning,
+        installed_count == 0 ? tr("Nothing was installed")
+                             : tr("Installed %n file(s)", "", installed_count),
+        QStringList{tr("%n new", "", static_cast<int>(new_files.size())),
+                    tr("%n replaced", "", static_cast<int>(overwritten_files.size())),
+                    tr("%n failed", "", static_cast<int>(failed_files.size()))}
+            .join(QStringLiteral(" \u00b7 ")),
+        QMessageBox::NoButton, this);
+    results.addButton(tr("Done"), QMessageBox::AcceptRole);
+    if (failed_files.isEmpty()) {
+        Spotlight::MarkSuccess(&results);
+    }
+    results.exec();
     Common::FS::RemoveDirRecursively(Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) /
                                      "game_list");
     game_list->PopulateAsync(UISettings::values.game_dirs);
@@ -3939,15 +4121,8 @@ ContentManager::InstallResult MainWindow::InstallNCA(const QString& filename) {
                                  tr("Game Update"),
                                  tr("Game DLC"),
                                  tr("Delta Title")};
-    bool ok;
-    const auto item = QInputDialog::getItem(
-        this, tr("Select NCA Install Type..."),
-        tr("Please select the type of title you would like to install this NCA as:\n(In "
-           "most instances, the default 'Game' is fine.)"),
-        tt_options, 5, false, &ok);
-
-    auto index = tt_options.indexOf(item);
-    if (!ok || index == -1) {
+    auto index = AskNcaType(this, tt_options, 5);
+    if (index == -1) {
         QMessageBox::warning(this, tr("Failed to Install"),
                              tr("The title type you selected for the NCA is invalid."));
         return ContentManager::InstallResult::Failure;
@@ -7022,74 +7197,6 @@ void MainWindow::SetFPSSuffix() {
         m_fpsSuffix = limited ? QString{} : tr("Unlocked");
         break;
     }
-}
-
-bool MainWindow::SelectRomFSDumpTarget(const FileSys::ContentProvider& installed, u64 program_id,
-                                       u64* selected_title_id, u8* selected_content_record_type) {
-    using ContentInfo = std::tuple<u64, FileSys::TitleType, FileSys::ContentRecordType>;
-    boost::container::flat_set<ContentInfo> available_title_ids;
-
-    std::vector<u64> add_on_content;
-    for (const auto& entry :
-         installed.ListEntriesFilter(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data)) {
-        add_on_content.push_back(entry.title_id);
-    }
-    const u64 add_on_base = FileSys::GetAddOnApplicationID(program_id, add_on_content);
-
-    const auto RetrieveEntries = [&](FileSys::TitleType title_type,
-                                     FileSys::ContentRecordType record_type) {
-        const u64 base = title_type == FileSys::TitleType::AOC ? add_on_base : program_id;
-        const auto entries = installed.ListEntriesFilter(title_type, record_type);
-        for (const auto& entry : entries) {
-            if (FileSys::GetBaseTitleID(entry.title_id) == base &&
-                installed.GetEntry(entry)->GetStatus() == Loader::ResultStatus::Success) {
-                available_title_ids.insert({entry.title_id, title_type, record_type});
-            }
-        }
-    };
-
-    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::Program);
-    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::HtmlDocument);
-    RetrieveEntries(FileSys::TitleType::Application, FileSys::ContentRecordType::LegalInformation);
-    RetrieveEntries(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data);
-
-    if (available_title_ids.empty()) {
-        return false;
-    }
-
-    size_t title_index = 0;
-
-    if (available_title_ids.size() > 1) {
-        QStringList list;
-        for (auto& [title_id, title_type, record_type] : available_title_ids) {
-            const auto hex_title_id = QString::fromStdString(fmt::format("{:X}", title_id));
-            if (record_type == FileSys::ContentRecordType::Program) {
-                list.push_back(QStringLiteral("Program [%1]").arg(hex_title_id));
-            } else if (record_type == FileSys::ContentRecordType::HtmlDocument) {
-                list.push_back(QStringLiteral("HTML document [%1]").arg(hex_title_id));
-            } else if (record_type == FileSys::ContentRecordType::LegalInformation) {
-                list.push_back(QStringLiteral("Legal information [%1]").arg(hex_title_id));
-            } else {
-                list.push_back(
-                    QStringLiteral("DLC %1 [%2]").arg(title_id & 0x7FF).arg(hex_title_id));
-            }
-        }
-
-        bool ok;
-        const auto res = QInputDialog::getItem(
-            this, tr("Select RomFS Dump Target"),
-            tr("Please select which RomFS you would like to dump."), list, 0, false, &ok);
-        if (!ok) {
-            return false;
-        }
-
-        title_index = list.indexOf(res);
-    }
-
-    const auto& [title_id, title_type, record_type] = *available_title_ids.nth(title_index);
-    *selected_title_id = title_id;
-    *selected_content_record_type = static_cast<u8>(record_type);
-    return true;
 }
 
 bool MainWindow::ConfirmClose() {

@@ -22,12 +22,19 @@ class Dialog : public QDialog {
 public:
     explicit Dialog(QWidget* parent = nullptr, Qt::WindowFlags flags = {});
 
+    /// Content chrome draws only the card: the contents bring their own header and buttons.
+    enum class Chrome { Content };
+    Dialog(QWidget* parent, Chrome chrome);
+
     /// A muted line under the title, such as what the dialog does. Empty hides it.
     void SetSubtitle(const QString& subtitle);
 
     /// A Phosphor icon, such as "download-simple", in a tile before the title, drawn in `tint`.
     /// An empty name hides the tile.
     void SetIcon(QStringView name, const QColor& tint);
+
+    /// Fixes the width of the card, shadow excluded, to the width Paper draws it, such as 600.
+    void SetCardWidth(int width);
 
     /// Hides the title, for a dialog whose contents start with their own heading. The close button
     /// stays.

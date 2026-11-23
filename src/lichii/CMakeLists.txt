@@ -276,9 +276,8 @@ add_executable(lichii
     spotlight/shader_chip.cpp spotlight/shader_chip.h
     spotlight/style.cpp spotlight/style.h
 
-    data_dialog.h data_dialog.cpp data_dialog.ui
-    data_widget.ui
-    ryujinx_dialog.h ryujinx_dialog.cpp ryujinx_dialog.ui
+    data_dialog.h data_dialog.cpp
+    ryujinx_dialog.h ryujinx_dialog.cpp
     main_window.h main_window.cpp main.ui
 
     configuration/system/new_user_dialog.h configuration/system/new_user_dialog.cpp configuration/system/new_user_dialog.ui

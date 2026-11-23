@@ -135,6 +135,11 @@ void CircleButton::SetIcon(QString icon) {
     update();
 }
 
+void CircleButton::SetTint(const QColor& tint_) {
+    tint = tint_;
+    update();
+}
+
 QSize CircleButton::sizeHint() const {
     return {diameter, diameter};
 }
@@ -143,17 +148,24 @@ void CircleButton::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     const bool outlined = diameter > 32;
-    const QColor rest = outlined ? Color::Control() : Color::Fill();
-    const QColor fill =
-        isDown() || isChecked() ? Color::Stroke() : Mix(rest, Color::ControlHover(), hover.Value());
+    const auto tinted = [this](int alpha) {
+        QColor color = tint;
+        color.setAlpha(alpha);
+        return color;
+    };
+    const QColor rest = tint.isValid() ? tinted(0x1f) : outlined ? Color::Control() : Color::Fill();
+    const QColor active = tint.isValid() ? tinted(0x3d) : Color::ControlHover();
+    const QColor fill = isDown() || isChecked() ? (tint.isValid() ? tinted(0x52) : Color::Stroke())
+                                                : Mix(rest, active, hover.Value());
     const QColor stroke = HasKeyboardFocus(this) ? Color::Accent()
                           : outlined             ? Color::Stroke()
                                                  : QColor();
     FillRounded(painter, rect(), diameter / 2.0, fill, stroke);
     const int icon = diameter >= 36 ? 20 : 15;
-    const QColor ink = !isEnabled() ? Color::TextFaint()
-                       : outlined   ? Color::Text()
-                                    : Mix(Color::TextSecondary(), Color::Text(), hover.Value());
+    const QColor ink = !isEnabled()     ? Color::TextFaint()
+                       : tint.isValid() ? tint
+                       : outlined       ? Color::Text()
+                                        : Mix(Color::TextSecondary(), Color::Text(), hover.Value());
     const QPixmap pixmap = IconPixmap(icon_name, icon, ink, devicePixelRatioF());
     painter.drawPixmap((width() - icon) / 2, (height() - icon) / 2, pixmap);
 }

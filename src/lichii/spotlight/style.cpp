@@ -12,11 +12,15 @@
 #include <QFocusEvent>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPointer>
 #include <QProgressDialog>
 #include <QProxyStyle>
+#include <QPushButton>
 #include <QScreen>
 #include <QStyleFactory>
+#include <QStyleOptionButton>
+#include <QStylePainter>
 
 #include "lichii/spotlight/dialog.h"
 
@@ -25,6 +29,7 @@ namespace Spotlight {
 namespace {
 
 constexpr char KeyboardFocusProperty[] = "keyboardFocus";
+constexpr int ButtonIconGap = 8;
 
 bool IsPopupWindow(const QWidget* widget) {
     return widget->isWindow() &&
@@ -65,12 +70,23 @@ public:
         case SH_MessageBox_CenterButtons:
         case SH_ToolTip_Mask:
         case SH_Menu_Mask:
+        case SH_UnderlineShortcut:
             return 0;
         case SH_DialogButtonLayout:
             return QDialogButtonBox::GnomeLayout;
         default:
             return QProxyStyle::styleHint(hint, option, widget, data);
         }
+    }
+
+    QSize sizeFromContents(ContentsType type, const QStyleOption* option, const QSize& size,
+                           const QWidget* widget) const override {
+        QSize result = QProxyStyle::sizeFromContents(type, option, size, widget);
+        const auto* button = qstyleoption_cast<const QStyleOptionButton*>(option);
+        if (type == CT_PushButton && button && !button->icon.isNull() && !button->text.isEmpty()) {
+            result.rwidth() += ButtonIconGap - 4;
+        }
+        return result;
     }
 
     void polish(QWidget* widget) override {
@@ -91,6 +107,51 @@ public:
     using QObject::QObject;
     bool active = false;
 
+private:
+    // The style sheet lays out a button's icon and text with Qt's fixed 4 px between them, without
+    // asking the Spotlight style; Paper leaves 8. The button is painted with an icon that carries
+    // the rest of the gap as transparent space.
+    static bool PaintIconButton(QPushButton* button) {
+        if (button->icon().isNull() || button->text().isEmpty() || button->menu()) {
+            return false;
+        }
+        QStyleOptionButton option;
+        option.initFrom(button);
+        if (button->isFlat()) {
+            option.features |= QStyleOptionButton::Flat;
+        }
+        if (button->autoDefault()) {
+            option.features |= QStyleOptionButton::AutoDefaultButton;
+        }
+        if (button->isDefault()) {
+            option.features |= QStyleOptionButton::DefaultButton;
+        }
+        if (button->isDown()) {
+            option.state |= QStyle::State_Sunken;
+        }
+        if (button->isChecked()) {
+            option.state |= QStyle::State_On;
+        }
+        if (!button->isFlat() && !button->isDown()) {
+            option.state |= QStyle::State_Raised;
+        }
+        option.text = button->text();
+        const QSize size = button->iconSize();
+        const qreal ratio = button->devicePixelRatioF();
+        QPixmap padded(QSize(size.width() + ButtonIconGap - 4, size.height()) * ratio);
+        padded.setDevicePixelRatio(ratio);
+        padded.fill(Qt::transparent);
+        QPainter(&padded).drawPixmap(
+            0, 0,
+            button->icon().pixmap(size, ratio,
+                                  button->isEnabled() ? QIcon::Normal : QIcon::Disabled));
+        option.icon.addPixmap(padded, QIcon::Normal);
+        option.icon.addPixmap(padded, QIcon::Disabled);
+        option.iconSize = QSize(size.width() + ButtonIconGap - 4, size.height());
+        QStylePainter(button).drawControl(QStyle::CE_PushButton, option);
+        return true;
+    }
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
         if (!active) {
@@ -103,6 +164,11 @@ protected:
                 (qobject_cast<QMessageBox*>(dialog) || qobject_cast<QInputDialog*>(dialog) ||
                  qobject_cast<QProgressDialog*>(dialog))) {
                 AdoptDialogChrome(dialog, false);
+            }
+            return false;
+        case QEvent::Paint:
+            if (auto* button = qobject_cast<QPushButton*>(watched)) {
+                return PaintIconButton(button);
             }
             return false;
         case QEvent::Show:

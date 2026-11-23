@@ -160,11 +160,10 @@ void InstallFirmware(const QString& location, bool recursive) {
 
     if (results.size() > 0) {
         const auto failed_names =
-            QString::fromStdString(fmt::format("{}", fmt::join(results, "\n")));
+            QString::fromStdString(fmt::format("{}", fmt::join(results, ", ")));
         progress->close();
-        QtCommon::Frontend::Critical(
-            tr("Firmware integrity verification failed!"),
-            tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+        QtCommon::Frontend::Critical(tr("Firmware verification failed"),
+                                     tr("Corrupt or missing: %1").arg(failed_names));
         return;
     }
 
@@ -176,8 +175,8 @@ void InstallFirmware(const QString& location, bool recursive) {
     const std::string display_version(firmware_data.display_version.data());
 
     result = FirmwareInstallResult::Success;
-    QtCommon::Frontend::Information(successTitle, GetFirmwareInstallResultString(result).arg(
-                                                      QString::fromStdString(display_version)));
+    QtCommon::Frontend::Success(successTitle, GetFirmwareInstallResultString(result).arg(
+                                                  QString::fromStdString(display_version)));
 }
 
 QString UnzipFirmwareToTmp(const QString& location) {
@@ -220,11 +219,11 @@ void VerifyGameContents(const std::string& game_path) {
 
     switch (result) {
     case ContentManager::GameVerificationResult::Success:
-        QtCommon::Frontend::Information(rootObject, tr("Integrity verification succeeded!"),
-                                        tr("The operation completed successfully."));
+        QtCommon::Frontend::Success(rootObject, tr("Integrity verification succeeded!"),
+                                    tr("The operation completed successfully."));
         break;
     case ContentManager::GameVerificationResult::Failed:
-        QtCommon::Frontend::Critical(rootObject, tr("Integrity verification failed!"),
+        QtCommon::Frontend::Critical(rootObject, tr("Verification failed"),
                                      tr("File contents may be corrupt or missing."));
         break;
     case ContentManager::GameVerificationResult::NotImplemented:
@@ -250,7 +249,7 @@ void InstallKeys() {
     const QString resMsg = GetKeyInstallResultString(result);
     switch (result) {
     case FirmwareManager::KeyInstallResult::Success:
-        QtCommon::Frontend::Information(tr("Decryption Keys install succeeded"), resMsg);
+        QtCommon::Frontend::Success(tr("Decryption Keys install succeeded"), resMsg);
         break;
     default:
         QtCommon::Frontend::Critical(tr("Decryption Keys install failed"), resMsg);
@@ -279,14 +278,13 @@ void VerifyInstalledContents() {
     progress->close();
 
     if (result.empty()) {
-        QtCommon::Frontend::Information(tr("Integrity verification succeeded!"),
-                                        tr("The operation completed successfully."));
+        QtCommon::Frontend::Success(tr("Integrity verification succeeded!"),
+                                    tr("The operation completed successfully."));
     } else {
         const auto failed_names =
-            QString::fromStdString(fmt::format("{}", fmt::join(result, "\n")));
-        QtCommon::Frontend::Critical(
-            tr("Integrity verification failed!"),
-            tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+            QString::fromStdString(fmt::format("{}", fmt::join(result, ", ")));
+        QtCommon::Frontend::Critical(tr("Verification failed"),
+                                     tr("Corrupt or missing: %1").arg(failed_names));
     }
 }
 
@@ -403,7 +401,7 @@ void ExportDataDir(FrontendCommon::DataManager::DataDir data_dir, const std::str
         progress->close();
 
         if (watcher->result()) {
-            Information(tr("Exported Successfully"), tr("Data was exported successfully."));
+            Success(tr("Exported Successfully"), tr("Data was exported successfully."));
         } else if (progress->wasCanceled()) {
             Information(tr("Export Cancelled"), tr("Export was cancelled by the user."));
         } else {
@@ -478,7 +476,7 @@ void ImportDataDir(FrontendCommon::DataManager::DataDir data_dir, const std::str
 
             // this sucks
             if (watcher->result()) {
-                Information(tr("Imported Successfully"), tr("Data was imported successfully."));
+                Success(tr("Imported Successfully"), tr("Data was imported successfully."));
             } else if (progress->wasCanceled()) {
                 Information(tr("Import Cancelled"), tr("Import was cancelled by the user."));
             } else {
