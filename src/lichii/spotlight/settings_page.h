@@ -51,6 +51,9 @@ inline QColor BackdropBottom() {
 inline QColor Sidebar() {
     return QColor(0x20, 0x21, 0x25);
 }
+inline QColor SidebarBottom() {
+    return QColor(0x1e, 0x1b, 0x1f);
+}
 } // namespace SettingsColor
 
 struct PerformancePreset {

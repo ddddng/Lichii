@@ -4422,6 +4422,10 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnGameListOpenDirectory);
     connect(&configure_dialog, &ConfigureDialog::FullscreenOnStartChanged,
             ui->action_Fullscreen, &QAction::setChecked);
+    connect(&configure_dialog, &ConfigureDialog::ContentInstalled, this, [this] {
+        game_list->PopulateAsync(UISettings::values.game_dirs);
+        OnCheckFirmwareDecryption(false);
+    });
 
     const auto result = configure_dialog.exec();
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&

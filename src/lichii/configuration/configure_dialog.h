@@ -42,6 +42,7 @@ class Builder;
 }
 
 namespace Spotlight {
+class PresetCard;
 class SettingsPage;
 class ToggleSwitch;
 }
@@ -82,6 +83,8 @@ signals:
     void ExternalContentDirsChanged();
     void FullscreenOnStartChanged(bool enabled);
     void OpenGameFolderRequested(const QString& folder);
+    /// The Get Started wizard installed keys or firmware.
+    void ContentInstalled();
 
 private:
     void changeEvent(QEvent* event) override;
@@ -89,6 +92,8 @@ private:
     void BuildSettings(const std::vector<VkDeviceInfo::Record>& devices);
     void BuildControls(int category, int shortcuts);
     void RebuildGameFolders();
+    void AddGameFolder();
+    void OpenGetStarted(int controls, const QList<Spotlight::PresetCard*>& presets);
 
     std::unique_ptr<Ui::ConfigureDialog> ui;
     HotkeyRegistry& registry;

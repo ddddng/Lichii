@@ -51,6 +51,7 @@
 #include "lichii/configuration/configure_web.h"
 #include "lichii/configuration/shared_widget.h"
 #include "lichii/hotkeys.h"
+#include "lichii/spotlight/settings_get_started.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
@@ -422,6 +423,12 @@ void ConfigureDialog::BuildSettings(const std::vector<VkDeviceInfo::Record>& dev
         connect(frame_check, &QCheckBox::toggled, this, sync_preset);
         sync_preset();
     }
+    auto* get_started = SettingsPage::Manage();
+    connect(get_started, &QAbstractButton::clicked, this,
+            [this, controls, cards] { OpenGetStarted(controls, {cards.cbegin(), cards.cend()}); });
+    SettingsPage::AddRow(options, tr("Get Started"),
+                         tr("Run the setup again: keys, firmware, folders, controller, preset"),
+                         QStringLiteral("sparkle"), Tints::Lavender(), get_started);
 
     const auto add_setting = [](QVBoxLayout* group, QWidget* page,
                                 const Settings::BasicSetting& setting, const QString& title,
@@ -756,16 +763,51 @@ void ConfigureDialog::RebuildGameFolders() {
                              QStringLiteral("folder"), Tints::Green(), menu_button);
     }
     auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
-    connect(add, &QAbstractButton::clicked, this, [this] {
-        const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
-        const UISettings::GameDir dir{path.toStdString(), false, true};
-        if (!path.isEmpty() && !game_dirs.contains(dir)) {
-            game_dirs.append(dir);
-            game_dirs_changed = true;
-            RebuildGameFolders();
-        }
-    });
+    connect(add, &QAbstractButton::clicked, this, &ConfigureDialog::AddGameFolder);
     SettingsPage::AddRow(folders_layout, tr("Add a game folder"), tr("Scan a folder for games"),
                          QStringLiteral("folder-open"), Tints::Green(), add);
     folder_summary->setText(tr("Game folders added: %1").arg(custom_count));
+}
+
+void ConfigureDialog::AddGameFolder() {
+    const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
+    const UISettings::GameDir dir{path.toStdString(), false, true};
+    if (!path.isEmpty() && !game_dirs.contains(dir)) {
+        game_dirs.append(dir);
+        game_dirs_changed = true;
+        RebuildGameFolders();
+    }
+}
+
+void ConfigureDialog::OpenGetStarted(int controls, const QList<PresetCard*>& presets) {
+    auto* player = input_tab->GetSubTabs().front();
+    auto* type = player->findChild<QComboBox*>(QStringLiteral("comboControllerType"));
+    auto* device = player->findChild<QComboBox*>(QStringLiteral("comboDevices"));
+    auto* connected = input_tab->findChild<QCheckBox*>(QStringLiteral("checkboxPlayer1Connected"));
+    Spotlight::GetStarted wizard(this, system,
+                                 {
+                                     .game_folders =
+                                         [this] {
+                                             QStringList folders;
+                                             for (const auto& folder : game_dirs) {
+                                                 if (!IsBuiltInFolder(folder)) {
+                                                     folders.append(
+                                                         QString::fromStdString(folder.path));
+                                                 }
+                                             }
+                                             return folders;
+                                         },
+                                     .add_game_folder = [this] { AddGameFolder(); },
+                                     .controller = type->currentText(),
+                                     .controller_device = device->currentText(),
+                                     .controller_connected = connected->isChecked(),
+                                     .presets = presets,
+                                 });
+    connect(&wizard, &Spotlight::GetStarted::ContentInstalled, this,
+            &ConfigureDialog::ContentInstalled);
+    wizard.exec();
+    if (wizard.MapButtonsRequested()) {
+        input_tab->findChild<QTabWidget*>(QStringLiteral("tabWidget"))->setCurrentIndex(0);
+        settings_page->ShowAdvancedPage(controls, input_tab.get());
+    }
 }
