@@ -3742,8 +3742,15 @@ void MainWindow::OnLinkToRyujinx(const u64& program_id) {
         }
         UISettings::values.ryujinx_link_paths.remove(program_id);
     } else {
+        const auto* const library = game_list->GetModel();
+        const auto games = library->match(library->index(0, 0), GameListItemPath::ProgramIdRole,
+                                          QVariant::fromValue(qulonglong(program_id)), 1,
+                                          Qt::MatchExactly | Qt::MatchRecursive);
+        const QModelIndex game = games.isEmpty() ? QModelIndex{} : games.first();
         RyujinxDialog dialog(lichii_dir, save->path,
-                             QString::fromStdString(fmt::format("{:016x}", save->save_id)), this);
+                             QString::fromStdString(fmt::format("{:016x}", save->save_id)),
+                             game.data(GameListItemPath::TitleRole).toString(),
+                             game.data(Qt::DecorationRole).value<QPixmap>(), this);
         if (dialog.exec() != QDialog::Accepted) {
             return;
         }
