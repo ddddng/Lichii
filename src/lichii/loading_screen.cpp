@@ -14,6 +14,7 @@
 #include "common/settings.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/loader/loader.h"
+#include "lichii/spotlight/hero_art.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 #include "qt_common/util/game.h"
@@ -108,6 +109,13 @@ LoadingScreen::LoadingScreen(QWidget* parent) : QWidget(parent), stage(LoadCallb
     fade.setEndValue(0.0);
     fade.setEasingCurve(QEasingCurve::OutCubic);
     connect(&fade, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+    connect(&HeroArt::Instance(), &HeroArt::Ready, this, [this](u64 id) {
+        if (id == program_id) {
+            hero_art = HeroArt::Instance().Image(id);
+            UpdateBackdrop();
+            update();
+        }
+    });
     connect(&fade, &QVariantAnimation::finished, this, [this] {
         hide();
         emit Hidden();
@@ -172,6 +180,11 @@ void LoadingScreen::Prepare(Loader::AppLoader& loader, QString game_title, QStri
         loader.ReadDisplayVersion(metadata);
         game_version = QString::fromStdString(metadata);
     }
+    program_id = 0;
+    loader.ReadProgramId(program_id);
+    HeroArt::Instance().Request(program_id, game_title);
+    hero_art = HeroArt::Instance().Image(program_id);
+    tint = HeroArt::Tint(icon);
     title = game_title.isEmpty() ? tr("Starting game") : std::move(game_title);
     version = game_version.isEmpty() ? QString{} : tr("v%1").arg(game_version);
     switch2 = Settings::CurrentProgramIsSwitch2();
@@ -186,6 +199,9 @@ void LoadingScreen::Clear() {
     repaint.stop();
     icon = {};
     art = {};
+    hero_art = {};
+    tint = {};
+    program_id = 0;
     backdrop = {};
     title.clear();
     version.clear();
@@ -284,26 +300,12 @@ void LoadingScreen::UpdateBackdrop() {
     backdrop = QPixmap(size() * ratio);
     backdrop.setDevicePixelRatio(ratio);
     backdrop.fill(Color::Scrim());
-    if (icon.isNull()) {
-        return;
-    }
-    auto cover = icon.deviceIndependentSize();
-    cover.scale(size(), Qt::KeepAspectRatioByExpanding);
-    cover *= 2;
-    const QPointF center{width() * 0.65, height() * 0.5};
-    const QRectF placement{center - QPointF{cover.width() / 2, cover.height() / 2}, cover};
-    QPixmap blur(size().scaled(16, 16, Qt::KeepAspectRatio));
-    blur.fill(Color::Scrim());
-    {
-        QPainter painter(&blur);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.scale(qreal(blur.width()) / width(), qreal(blur.height()) / height());
-        painter.drawPixmap(placement, icon, QRectF(icon.rect()));
-    }
-
     QPainter painter(&backdrop);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawPixmap(rect(), blur);
+    if (!hero_art.isNull()) {
+        HeroArt::Paint(painter, QRectF(rect()), hero_art);
+    } else if (tint.isValid()) {
+        painter.fillRect(rect(), tint);
+    }
     auto shade = Color::Scrim();
     QLinearGradient horizontal(0, 0, width(), 0);
     shade.setAlpha(0xf5);

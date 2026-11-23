@@ -19,6 +19,7 @@ inline constexpr int IconSize = 256;
 QImage Decode(const QByteArray& bytes, QSize fit = {});
 QImage SquareIcon(const QImage& source);
 void PaintIcon(QPainter& painter, const QRectF& bounds, const QPixmap& source, qreal radius);
+void PaintMissingArt(QPainter& painter, const QRectF& bounds, qreal radius);
 QIcon Icon(const QPixmap& source, int size, qreal radius);
 
 } // namespace ArtworkImage

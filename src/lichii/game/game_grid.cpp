@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <QMouseEvent>
 
 #include "lichii/game/game_card.h"
@@ -96,6 +97,26 @@ bool GameGrid::viewportEvent(QEvent* event) {
 void GameGrid::paintEvent(QPaintEvent* event) {
     QPaintEvent reach(event->rect().adjusted(-GameCard::HitShift, -GameCard::HitShift, 0, 0));
     QListView::paintEvent(&reach);
+}
+
+void GameGrid::resizeEvent(QResizeEvent* event) {
+    QListView::resizeEvent(event);
+    ClipUnderHeader();
+}
+
+void GameGrid::scrollContentsBy(int dx, int dy) {
+    QListView::scrollContentsBy(dx, dy);
+    ClipUnderHeader();
+}
+
+// Once scrolled, tiles stop at the header's bottom edge instead of sliding under its text; at the
+// top the first row's glow still reaches up under the header.
+void GameGrid::ClipUnderHeader() {
+    if (mode != Mode::Grid) {
+        return;
+    }
+    const int top = std::min(verticalOffset(), HeaderOverlap);
+    viewport()->setMask(QRegion(0, top, viewport()->width(), viewport()->height() - top));
 }
 
 void GameGrid::mousePressEvent(QMouseEvent* event) {

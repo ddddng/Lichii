@@ -4,10 +4,14 @@
 #pragma once
 
 #include <chrono>
+#include <QColor>
+#include <QImage>
 #include <QPixmap>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QWidget>
+
+#include "common/common_types.h"
 
 namespace Loader {
 class AppLoader;
@@ -48,6 +52,9 @@ private:
     std::size_t total = 0;
     QPixmap icon;
     QPixmap art;
+    QImage hero_art;
+    QColor tint;
+    u64 program_id = 0;
     QPixmap backdrop;
     QString title;
     QString version;

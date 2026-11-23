@@ -10,7 +10,6 @@
 #include <QLineEdit>
 #include <QHash>
 #include <QList>
-#include <QPointer>
 #include <QSet>
 #include <QPushButton>
 #include <QStandardItemModel>
@@ -216,7 +215,7 @@ private:
 
     bool m_isTreeMode = true;
     bool m_populating = false;
-    QPointer<QWidget> focus_fallback;
+    bool refocus_view = false;
     QString selected_path;
     bool nup_conversion_running{};
     bool nx_tool_running{};

@@ -34,9 +34,14 @@ public:
         if (name_column) {
             const QPixmap image = index.data(Qt::DecorationRole).value<QPixmap>();
             const int side = is_game ? GameIconSize() : 16;
-            if (side > 0 && !image.isNull()) {
+            const bool missing = is_game && !index.data(GameListItemPath::HasIconRole).toBool();
+            if (side > 0 && (missing || !image.isNull())) {
                 const QRect square(rect.x(), rect.center().y() - side / 2, side, side);
-                ArtworkImage::PaintIcon(*painter, square, image, is_game ? 8 : 0);
+                if (missing) {
+                    ArtworkImage::PaintMissingArt(*painter, square, 8);
+                } else {
+                    ArtworkImage::PaintIcon(*painter, square, image, is_game ? 8 : 0);
+                }
                 rect.setLeft(square.right() + 13);
             }
         }

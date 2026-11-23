@@ -124,12 +124,25 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
         painter->drawRoundedRect(tile, radius, radius);
     }
 
+    const QString title = index.data(Qt::DisplayRole).toString();
     if (icon_size > 0) {
-        ArtworkImage::PaintIcon(*painter, tile.adjusted(4, 4, -4, -4),
-                                index.data(Qt::DecorationRole).value<QPixmap>(), Radius::Tile);
+        const QRect art = tile.adjusted(4, 4, -4, -4);
+        if (index.data(GameListItemPath::HasIconRole).toBool()) {
+            ArtworkImage::PaintIcon(*painter, art, index.data(Qt::DecorationRole).value<QPixmap>(),
+                                    Radius::Tile);
+        } else {
+            ArtworkImage::PaintMissingArt(*painter, art, Radius::Tile);
+            if (!show_name && !hover) {
+                painter->setFont(Font(12, 600));
+                painter->setPen(Color::TextSecondary());
+                const QRect label = art.adjusted(8, art.height() - 30, -8, -8);
+                painter->drawText(label, Qt::AlignCenter,
+                                  painter->fontMetrics().elidedText(title, Qt::ElideRight,
+                                                                    label.width()));
+            }
+        }
     }
 
-    const QString title = index.data(Qt::DisplayRole).toString();
     const auto program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
     const bool favorite = program_id != 0 && UISettings::values.favorited_ids.contains(program_id);
     if (favorite && icon_size > 0) {
