@@ -18,8 +18,8 @@ Hero::Hero(QWidget* parent)
       play(new PillButton(tr("Play"), QStringLiteral("play-fill"), PillButton::Kind::Accent, 44,
                           this)),
       menu(new CircleButton(QStringLiteral("dots-three"), 44, this)),
-      add(new PillButton(tr("Add game folder"), QStringLiteral("plus"), PillButton::Kind::Accent,
-                         44, this)) {
+      add(new PillButton(tr("Add game folder"), QStringLiteral("folder-open"),
+                         PillButton::Kind::Accent, 44, this)) {
     setObjectName(QStringLiteral("spotlightHero"));
     setFixedHeight(290);
     auto* column = new QVBoxLayout(this);
@@ -86,6 +86,7 @@ void Hero::SetGame(const QString& name, Lichii::LibraryPlatform console, u64 sec
     play->show();
     menu->show();
     add->hide();
+    layout()->setContentsMargins(40, 60, 40, 0);
     SetTitle(name);
 }
 
@@ -96,6 +97,7 @@ void Hero::SetEmpty(bool has_library, bool filtered) {
     play->hide();
     menu->hide();
     add->setVisible(!has_library);
+    layout()->setContentsMargins(40, 80, 40, 0);
     SetTitle(!has_library ? tr("Add your games")
              : filtered   ? tr("No games found")
                           : tr("Select a game"));
