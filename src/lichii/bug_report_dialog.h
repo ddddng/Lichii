@@ -17,6 +17,10 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 
+namespace Spotlight {
+class Notice;
+}
+
 namespace Core {
 class System;
 }
@@ -50,7 +54,8 @@ private:
     QFutureWatcher<Written> writer;
     bool writing = false;
 
-    QLabel* status{};
+    Spotlight::Notice* status{};
+    QLabel* details{};
     QPlainTextEdit* description{};
     QDialogButtonBox* buttons{};
     QPushButton* save{};
