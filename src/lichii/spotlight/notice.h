@@ -3,15 +3,13 @@
 
 #pragma once
 
-#include <QWidget>
-
-class QLabel;
+#include <QLabel>
 
 namespace Spotlight {
 
 /// An inline status box under a form: a tinted icon and wrapped text in a rounded card, such as
-/// "Testing iiDB access…" or "Check or replace your iiDB API key."
-class Notice final : public QWidget {
+/// "Testing iiDB access…" or "Check or replace your iiDB API key." The text is the label's own.
+class Notice final : public QLabel {
     Q_OBJECT
 public:
     enum class Tone { Neutral, Success, Error, Warning };
@@ -19,20 +17,11 @@ public:
     explicit Notice(QWidget* parent = nullptr);
 
     void SetTone(Tone tone);
-    void SetText(const QString& text);
-    QString Text() const;
-    /// Lets the text open links instead of showing plain text.
-    void SetOpenExternalLinks(bool open);
 
 protected:
-    void paintEvent(QPaintEvent*) override;
-    void changeEvent(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
 
 private:
-    void UpdateIcon();
-
-    QLabel* icon;
-    QLabel* label;
     Tone tone = Tone::Neutral;
 };
 
