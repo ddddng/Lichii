@@ -136,7 +136,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     SetIcon(u"image", Spotlight::Color::Accent());
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(14);
+    layout->setSpacing(8);
 
     auto* title_group = new QVBoxLayout;
     title_group->setSpacing(8);
@@ -321,6 +321,9 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     layout->addWidget(Body(tr("Cancel or a failed download leaves your artwork intact. Use "
                               "Artwork stages the icon; closing Game Settings saves it."),
                            this));
+    const QString catalog_credit =
+        tr("Catalog data from iiDB, adapted from the Libretro Database and its upstream sources "
+           "(No-Intro and Redump).");
     auto* credits = new QHBoxLayout;
     credits->setSpacing(12);
     const std::pair<QString, QString> sources[] = {
@@ -337,7 +340,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
         link->setFont(Spotlight::Font(13, 600));
         link->setOpenExternalLinks(true);
         link->setTextInteractionFlags(Qt::TextBrowserInteraction);
-        link->setToolTip(url);
+        link->setToolTip(url == sources[3].second ? catalog_credit : url);
         auto* icon = new QLabel(this);
         icon->setPixmap(Spotlight::IconPixmap(u"arrow-square-out", 12, Spotlight::Color::Info(),
                                               devicePixelRatioF()));
@@ -349,9 +352,6 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     }
     credits->addStretch(1);
     layout->addLayout(credits);
-    layout->addWidget(Body(tr("Catalog data from iiDB, adapted from the Libretro Database and its "
-                              "upstream sources (No-Intro and Redump)."),
-                           this));
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     use = buttons->addButton(tr("Use Artwork"), QDialogButtonBox::AcceptRole);
