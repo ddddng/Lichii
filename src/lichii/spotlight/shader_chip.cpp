@@ -73,8 +73,9 @@ protected:
         painter.setFont(Font(13));
         painter.setPen(Color::Text());
         painter.drawText(QRect{0, 0, width() - 26, height()}, Qt::AlignVCenter, text());
-        painter.drawPixmap(width() - 16, 12,
-                           IconPixmap(u"caret-right", 16, Color::TextSecondary(), devicePixelRatioF()));
+        painter.drawPixmap(
+            width() - 16, 12,
+            IconPixmap(u"caret-right", 16, Color::TextSecondary(), devicePixelRatioF()));
     }
 
     void enterEvent(QEnterEvent*) override {
@@ -156,9 +157,9 @@ void ShaderChip::SetProgress(int building, int remaining) {
         setText(label);
         updateGeometry();
     }
-    summary->setText(remaining == building
-                         ? tr("Building: %n shader(s)", "", building)
-                         : tr("Building: %n shader(s), %1 left", "", building).arg(remaining));
+    const QString count =
+        building == 1 ? tr("Building: 1 shader") : tr("Building: %1 shaders").arg(building);
+    summary->setText(remaining == building ? count : tr("%1, %2 left").arg(count).arg(remaining));
     show();
 }
 
@@ -173,7 +174,8 @@ void ShaderChip::paintEvent(QPaintEvent*) {
     painter.setPen(hasFocus() ? QPen(Color::Warning()) : Qt::NoPen);
     painter.setBrush(underMouse() || isDown() ? Color::ControlHover() : Color::Fill());
     painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
-    painter.drawPixmap(10, 5, IconPixmap(u"circle-notch", 16, Color::Warning(), devicePixelRatioF()));
+    painter.drawPixmap(10, 5,
+                       IconPixmap(u"circle-notch", 16, Color::Warning(), devicePixelRatioF()));
     painter.setFont(font());
     painter.setPen(Color::Warning());
     painter.drawText(QRect{32, 0, width() - 32, height()}, Qt::AlignVCenter, text());

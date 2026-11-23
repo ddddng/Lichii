@@ -199,7 +199,8 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(hasFocus() ? QPen(Color::Accent()) : Qt::NoPen);
-        painter.setBrush(underMouse() ? QColor(0x08, 0x09, 0x0d, 0xcc) : QColor(0x08, 0x09, 0x0d, 0x99));
+        painter.setBrush(underMouse() ? QColor(0x08, 0x09, 0x0d, 0xcc)
+                                      : QColor(0x08, 0x09, 0x0d, 0x99));
         painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16);
         painter.setFont(Font(12, 600));
         painter.setPen(Color::Text());
@@ -251,8 +252,7 @@ protected:
                          painter.fontMetrics().elidedText(text(), Qt::ElideRight, width()));
         painter.setFont(Font(11));
         painter.setPen(Color::TextSecondary());
-        painter.drawText(QRect{0, 66, width(), 15}, Qt::AlignCenter,
-                         KeyText(action->shortcut()));
+        painter.drawText(QRect{0, 66, width(), 15}, Qt::AlignCenter, KeyText(action->shortcut()));
     }
 
 private:
@@ -324,7 +324,8 @@ protected:
         painter.setPen(Color::Text());
         painter.drawText(QRect{39, 0, width() - 39, height()}, Qt::AlignVCenter, text());
         int right = width() - 14 - 16;
-        painter.drawPixmap(right, 15, IconPixmap(u"caret-right", 16, Color::TextSecondary(), ratio));
+        painter.drawPixmap(right, 15,
+                           IconPixmap(u"caret-right", 16, Color::TextSecondary(), ratio));
         const QString key = KeyText(action->shortcut());
         if (!key.isEmpty()) {
             right -= 9 + KeyWidth(key);
@@ -415,8 +416,8 @@ protected:
 
 private:
     void Seek(qreal x) {
-        setSliderPosition(minimum() + qRound(std::clamp(x / width(), 0.0, 1.0) *
-                                             (maximum() - minimum())));
+        setSliderPosition(minimum() +
+                          qRound(std::clamp(x / width(), 0.0, 1.0) * (maximum() - minimum())));
     }
 };
 
@@ -452,8 +453,9 @@ protected:
         painter.setPen(isEnabled() ? Color::Text() : Color::TextFaint());
         painter.drawText(QRect{14, 0, width() - 40, height()}, Qt::AlignVCenter,
                          fontMetrics().elidedText(text(), Qt::ElideRight, width() - 46));
-        painter.drawPixmap(width() - 26, 9,
-                           IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
+        painter.drawPixmap(
+            width() - 26, 9,
+            IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
     }
 };
 
@@ -510,8 +512,9 @@ protected:
         painter.setFont(Font(13));
         painter.setPen(Color::Text());
         painter.drawText(QRect{0, 0, width() - 24, height()}, Qt::AlignVCenter, text());
-        painter.drawPixmap(width() - 16, 12,
-                           IconPixmap(u"caret-right", 16, Color::TextSecondary(), devicePixelRatioF()));
+        painter.drawPixmap(
+            width() - 16, 12,
+            IconPixmap(u"caret-right", 16, Color::TextSecondary(), devicePixelRatioF()));
     }
 };
 
@@ -570,8 +573,7 @@ QuickControls::QuickControls(const InGameControls& controls, QWidget* parent)
         layout->addWidget(holder);
         return item;
     };
-    const auto dropdown = [&](QStringView icon, const QString& name, QMenu* menu,
-                              QAction* action) {
+    const auto dropdown = [&](QStringView icon, const QString& name, QMenu* menu, QAction* action) {
         auto* button = new ValueButton(this);
         row(icon, name, button);
         connect(button, &QAbstractButton::clicked, this, [this, button, menu, action] {
@@ -812,8 +814,8 @@ InGameMenu::InGameMenu(const Actions& actions, QWidget* parent)
     row(tr("Console mode"), console_mode);
     connect(console_mode, &SegmentedControl::CurrentChanged, this,
             [this](int index) { emit DockedChanged(index == 0); });
-    volume = new VolumeControl(actions.controls.decrease_volume,
-                               actions.controls.increase_volume, content);
+    volume = new VolumeControl(actions.controls.decrease_volume, actions.controls.increase_volume,
+                               content);
     row(tr("Volume"), volume);
     connect(volume->track, &QAbstractSlider::valueChanged, this, &InGameMenu::VolumeChanged);
     layout->addLayout(rows);
@@ -844,8 +846,8 @@ void InGameMenu::Open(QWidget* anchor, const QKeySequence& shortcut, const QPixm
     title->setText(name);
     play_time->setText(played);
     play_time->setVisible(!played.isEmpty());
-    static_cast<ActionTile*>(pause_tile)->SetIcon(paused ? QStringLiteral("play")
-                                                         : QStringLiteral("pause"));
+    static_cast<ActionTile*>(pause_tile)
+        ->SetIcon(paused ? QStringLiteral("play") : QStringLiteral("pause"));
     QString pause_text = popup_actions[0]->text();
     pause_tile->setAccessibleName(pause_text.remove(QLatin1Char('&')));
     static_cast<ActionTile*>(pause_tile)->setText(pause_text);
@@ -854,10 +856,10 @@ void InGameMenu::Open(QWidget* anchor, const QKeySequence& shortcut, const QPixm
     close_hint->move(margin, margin);
     const int panel_width = std::min(420, anchor->width() - 2 * margin);
     const int left = anchor->width() - panel_width - margin;
-    const int top = left < close_hint->width() + 2 * margin ? close_hint->height() + 2 * margin
-                                                            : margin;
-    const int panel_height = std::min(content->heightForWidth(panel_width - 2) + 2,
-                                      anchor->height() - top - margin);
+    const int top =
+        left < close_hint->width() + 2 * margin ? close_hint->height() + 2 * margin : margin;
+    const int panel_height =
+        std::min(content->heightForWidth(panel_width - 2) + 2, anchor->height() - top - margin);
     panel->setGeometry(left, top, panel_width, std::max(panel_height, 0));
     setGeometry(QRect{anchor->mapToGlobal(QPoint{}), anchor->size()});
     show();

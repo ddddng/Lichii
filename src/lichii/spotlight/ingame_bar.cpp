@@ -103,8 +103,8 @@ protected:
         painter.drawPixmap(padding, 5, IconPixmap(icon_name, 16, foreground, devicePixelRatioF()));
         painter.setFont(font());
         painter.setPen(foreground);
-        painter.drawText(QRect{padding + 22, 0, width() - padding - 22, height()},
-                         Qt::AlignVCenter, text());
+        painter.drawText(QRect{padding + 22, 0, width() - padding - 22, height()}, Qt::AlignVCenter,
+                         text());
     }
 
     void enterEvent(QEnterEvent*) override {

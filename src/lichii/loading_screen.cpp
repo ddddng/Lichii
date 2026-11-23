@@ -76,8 +76,8 @@ protected:
         if (!hint.isEmpty()) {
             painter.setFont(Font(12));
             painter.setPen(Secondary());
-            painter.drawText(QRect{50 + label, 0, width() - 50 - label, height()},
-                             Qt::AlignVCenter, hint);
+            painter.drawText(QRect{50 + label, 0, width() - 50 - label, height()}, Qt::AlignVCenter,
+                             hint);
         }
     }
 
@@ -133,7 +133,8 @@ void LoadingScreen::SetCancelAction(QAction* action) {
     cancel_action = action;
     const auto update_cancel = [this] {
         static_cast<LoadingButton*>(cancel_button)->SetHint(KeyText(cancel_action->shortcut()));
-        cancel_button->setVisible(cancel_action->isEnabled() && fade.state() != QAbstractAnimation::Running);
+        cancel_button->setVisible(cancel_action->isEnabled() &&
+                                  fade.state() != QAbstractAnimation::Running);
         LayoutButtons();
     };
     connect(action, &QAction::changed, this, update_cancel);
@@ -389,14 +390,13 @@ void LoadingScreen::paintEvent(QPaintEvent*) {
             painter.setBrush(QColor(0xff, 0xff, 0xff, 0x24));
             painter.drawEllipse(marker);
         }
-        const int label = draw_line(QRectF{32, y, qreal(available - 32), 30}, steps[i],
-                                    Font(14, i == active ? 600 : 500),
-                                    i <= active ? Color::Text() : Secondary());
+        const int label =
+            draw_line(QRectF{32, y, qreal(available - 32), 30}, steps[i],
+                      Font(14, i == active ? 600 : 500), i <= active ? Color::Text() : Secondary());
         if (i == 1 && total > 0) {
             draw_line(QRectF{qreal(42 + label), y, qreal(available - 42 - label), 30},
-                      tr("%1 / %2")
-                          .arg(locale().toString(static_cast<qulonglong>(current)),
-                               locale().toString(static_cast<qulonglong>(total))),
+                      tr("%1 / %2").arg(locale().toString(static_cast<qulonglong>(current)),
+                                        locale().toString(static_cast<qulonglong>(total))),
                       Font(13), Secondary());
         }
     }
@@ -411,18 +411,17 @@ void LoadingScreen::paintEvent(QPaintEvent*) {
         painter.drawRoundedRect(QRectF{0, 196, std::round(track * progress), 8}, 4, 4);
         draw_line(QRectF{0, 212, 56, 17}, tr("%1%").arg(qRound(progress * 100)), Font(13, 700),
                   Color::Text());
-        draw_line(QRectF{56, 212, track - 56, 17}, estimate, Font(13), Secondary(),
-                  Qt::AlignRight);
+        draw_line(QRectF{56, 212, track - 56, 17}, estimate, Font(13), Secondary(), Qt::AlignRight);
     }
 
-    const QString note =
-        !warm                  ? tr("First launch after a driver update takes longer")
-        : precompile_requested ? tr("Precompile All Shaders is on for this game · right-click it "
-                                    "in the library to turn off")
-                               : tr("Precache Shaders is on in Graphics settings");
-    painter.drawPixmap(QPointF{0, 311}, IconPixmap(warm ? u"cpu" : u"info", 16,
-                                                   QColor(0xff, 0xff, 0xff, 0xb8),
-                                                   devicePixelRatioF()));
+    const QString note = !warm ? tr("First launch after a driver update takes longer")
+                         : precompile_requested
+                             ? tr("Precompile All Shaders is on for this game · right-click it "
+                                  "in the library to turn off")
+                             : tr("Precache Shaders is on in Graphics settings");
+    painter.drawPixmap(QPointF{0, 311},
+                       IconPixmap(warm ? u"cpu" : u"info", 16, QColor(0xff, 0xff, 0xff, 0xb8),
+                                  devicePixelRatioF()));
     painter.setFont(Font(12));
     painter.setPen(Secondary());
     painter.drawText(QRect{24, 311, available - 24, 40}, Qt::TextWordWrap, note);

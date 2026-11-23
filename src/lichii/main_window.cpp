@@ -6258,9 +6258,9 @@ void MainWindow::UpdateStatusBar() {
             fullscreen_shader_toast->ShowShaders(ui->action_Single_Window_Mode->isChecked()
                                                      ? static_cast<QWidget*>(this)
                                                      : render_window,
-                                                 shaders_building);
+                                                 shaders_building > 0 ? shaders_building : left);
         } else {
-            fullscreen_shader_toast->SetShaderCount(shaders_building);
+            fullscreen_shader_toast->SetShaderCount(shaders_building > 0 ? shaders_building : left);
         }
     } else {
         fullscreen_shader_active = false;
@@ -6359,7 +6359,11 @@ void MainWindow::UpdateInGameGraphicsSummary() {
         return Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", action));
     };
     const QString turbo_key = key("Toggle Turbo Speed");
-    const QString slow_key = key("Toggle Slow Speed");
+    QString slow_key = key("Toggle Slow Speed");
+    if (const auto modifiers = turbo_key.lastIndexOf(QLatin1Char(' ')) + 1;
+        modifiers > 0 && slow_key.startsWith(turbo_key.left(modifiers))) {
+        slow_key.remove(0, modifiers);
+    }
     QString speed = tr("%1%").arg(Settings::SpeedLimit());
     switch (values.current_speed_mode.GetValue()) {
     case Settings::SpeedMode::Turbo:
@@ -6378,17 +6382,16 @@ void MainWindow::UpdateInGameGraphicsSummary() {
         .renderer = text(ConfigurationShared::renderer_backend_texts_map,
                          values.renderer_backend.GetValue()),
         .resolution = tr("%1×").arg(values.resolution_info.up_factor),
-        .filter = text(ConfigurationShared::scaling_filter_texts_map,
-                       values.scaling_filter.GetValue()),
+        .filter =
+            text(ConfigurationShared::scaling_filter_texts_map, values.scaling_filter.GetValue()),
         .frame_gen = frame_gen_status_text,
         .speed = speed,
         .speed_keys = turbo_key.isEmpty() || slow_key.isEmpty()
                           ? turbo_key + slow_key
                           : tr("%1 / %2").arg(turbo_key, slow_key),
-        .preset = Spotlight::PerformancePresetIndex({values.resolution_setup.GetValue(),
-                                                     values.scaling_filter.GetValue(),
-                                                     values.anti_aliasing.GetValue(),
-                                                     values.frame_gen.GetValue()}),
+        .preset = Spotlight::PerformancePresetIndex(
+            {values.resolution_setup.GetValue(), values.scaling_filter.GetValue(),
+             values.anti_aliasing.GetValue(), values.frame_gen.GetValue()}),
         .preset_global = values.resolution_setup.UsingGlobal() &&
                          values.scaling_filter.UsingGlobal() &&
                          values.anti_aliasing.UsingGlobal() && values.frame_gen.UsingGlobal(),

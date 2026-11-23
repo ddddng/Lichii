@@ -64,7 +64,8 @@ void FullscreenHint::ShowShaders(QWidget* widget, int count) {
 }
 
 void FullscreenHint::SetShaderCount(int count) {
-    const QString label = tr("Building %n shader(s)", "", count);
+    const QString label =
+        count == 1 ? tr("Building 1 shader") : tr("Building %1 shaders").arg(count);
     if (label == text) {
         return;
     }
@@ -137,7 +138,8 @@ void FullscreenHint::paintEvent(QPaintEvent*) {
     painter.drawPixmap(16, (height() - 24) / 2, IconPixmap(u"keyboard", 24, Color::Text(), ratio));
     painter.setFont(Font(14, 700));
     painter.setPen(Color::Text());
-    painter.drawText(QRect{52, 14, width() - 52, 19}, Qt::AlignVCenter, tr("Open the in-game menu"));
+    painter.drawText(QRect{52, 14, width() - 52, 19}, Qt::AlignVCenter,
+                     tr("Open the in-game menu"));
 
     int x = 52;
     const int y = 39;

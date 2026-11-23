@@ -13,7 +13,6 @@
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QStringList>
 #include <QWindow>
 
@@ -33,7 +32,7 @@ using Common::DkbCpuTrace::Role;
 using namespace Spotlight;
 
 constexpr int OverlayWidth = 256;
-constexpr int OverlayHeight = 152;
+constexpr int OverlayHeight = 174;
 constexpr auto HistoryWindow = std::chrono::seconds{5};
 constexpr auto StatsWindow = std::chrono::milliseconds{500};
 
@@ -41,6 +40,10 @@ constexpr std::array CpuRoles{
     Role::GuestCore0, Role::GuestCore1,      Role::GuestCore2, Role::GuestCore3, Role::GuestCore4,
     Role::GuestCore5, Role::GuestSingleCore, Role::GpuCommand, Role::GpuBack,
 };
+
+QColor Readout() {
+    return QColor(0xff, 0xff, 0xff, 0xbf);
+}
 
 QString Number(const std::optional<double>& value, int precision = 0) {
     return value ? QString::number(*value, 'f', precision) : QStringLiteral("—");
@@ -194,61 +197,57 @@ void PerformanceOverlay::paintEvent(QPaintEvent*) {
     line(QRect{12, 10, fps_width + 1, 35}, fps, m_at_target ? Color::Success() : Color::Text(), 26,
          700);
     const int label_x = 20 + fps_width;
-    line(QRect{label_x, 12, 96, 15}, tr("FPS"), Color::TextSecondary(), 11, 600);
+    line(QRect{label_x, 12, 96, 15}, tr("FPS"), QColor(0xff, 0xff, 0xff, 0xb3), 11, 600);
     line(QRect{label_x, 27, 96, 15}, tr("1% low %1").arg(Number(m_low_fps)), Color::TextMuted());
     if (m_fps && m_generated >= 0.5) {
         line(QRect{164, 11, 80, 20}, QString::number(*m_fps + m_generated, 'f', 0), Color::Text(),
              15, 700, Qt::AlignRight);
-        line(QRect{164, 31, 80, 13}, tr("with frame gen"), Color::TextMuted(), 10, 500,
+        line(QRect{164, 31, 80, 13}, tr("generated"), Color::TextMuted(), 10, 500, Qt::AlignRight);
+    }
+
+    paintGraph(painter, QRectF{12, 53, 232, 46});
+
+    line(QRect{12, 105, 120, 15}, tr("Frame %1 ms").arg(Number(m_frameMs, 1)), Readout());
+    if (m_speed) {
+        line(QRect{132, 105, 112, 15}, tr("Speed %1%").arg(Number(m_speed)), Readout(), 11, 500,
              Qt::AlignRight);
     }
 
-    paintGraph(painter, QRectF{12, 50, 232, 30});
-
-    line(QRect{12, 85, 120, 15}, tr("Frame %1 ms").arg(Number(m_frameMs, 1)),
-         Color::TextSecondary());
-    if (m_speed) {
-        line(QRect{132, 85, 112, 15}, tr("Speed %1%").arg(Number(m_speed)), Color::TextSecondary(),
-             11, 500, Qt::AlignRight);
-    }
-
     const int tags_width = m_shaders > 0 ? 150 : 232;
-    line(QRect{12, 105, tags_width, 15}, m_tags, Color::TextSecondary());
+    line(QRect{12, 126, tags_width, 15}, m_tags, Readout());
     if (m_shaders > 0) {
-        line(QRect{164, 105, 80, 15}, tr("Shaders %1").arg(m_shaders), Color::Warning(), 11, 600,
+        line(QRect{164, 126, 80, 15}, tr("Shaders %1").arg(m_shaders), Color::Warning(), 11, 600,
              Qt::AlignRight);
     }
     const QString gpu = m_gpuPercent ? tr("GPU %1%").arg(Number(m_gpuPercent)) : tr("GPU —");
     const QString cpu = m_cpuPercent ? tr("CPU %1%").arg(Number(m_cpuPercent)) : tr("CPU —");
-    line(QRect{12, 125, 232, 15}, tr("%1  %2").arg(gpu, cpu), Color::TextFaint());
+    line(QRect{12, 147, 232, 15}, tr("%1 %2").arg(gpu, cpu), Color::TextFaint());
 }
 
 void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
+    const qreal target_ms =
+        1000.0 /
+        (Settings::CurrentProgramIsSwitch2() ? Settings::values.frame_rate_limit.GetValue() : 60);
+    const qreal scale = area.height() / (2.5 * target_ms);
+    const qreal target_y = std::round(area.bottom() - target_ms * scale) + 0.5;
+    QPen dash(QColor(0xff, 0xff, 0xff, 0x2e), 1);
+    dash.setDashPattern({3, 3});
+    painter.setPen(dash);
+    painter.drawLine(QPointF{area.left(), target_y}, QPointF{area.right(), target_y});
     if (m_frames.size() < 2) {
         return;
     }
-    auto [min, max] = std::minmax_element(m_frames.begin(), m_frames.end(),
-                                          [](const auto& a, const auto& b) { return a.ms < b.ms; });
-    const qreal span = std::max(2.0f, max->ms - min->ms);
-    const qreal floor = (max->ms + min->ms - span) / 2;
     const auto newest = m_frames.back().end;
     const double window = std::chrono::duration<double>(HistoryWindow).count();
     QPolygonF points;
     points.reserve(static_cast<qsizetype>(m_frames.size()));
     for (const auto& frame : m_frames) {
         const double age = std::chrono::duration<double>(newest - frame.end).count();
-        points << QPointF{area.right() - area.width() * std::clamp(age / window, 0.0, 1.0),
-                          area.bottom() - 2 - (area.height() - 6) * (frame.ms - floor) / span};
+        points << QPointF{
+            area.right() - area.width() * std::clamp(age / window, 0.0, 1.0),
+            std::clamp(area.bottom() - frame.ms * scale, area.top() + 1, area.bottom() - 1)};
     }
-    QPainterPath fill;
-    fill.addPolygon(points);
-    fill.lineTo(points.back().x(), area.bottom());
-    fill.lineTo(points.front().x(), area.bottom());
-    fill.closeSubpath();
-    auto ink = Color::Success();
-    ink.setAlpha(36);
-    painter.fillPath(fill, ink);
-    painter.setPen(QPen(Color::Success(), 1.25, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setPen(QPen(Color::Success(), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.drawPolyline(points);
 }
 
