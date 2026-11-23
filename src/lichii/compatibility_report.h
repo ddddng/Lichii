@@ -72,8 +72,10 @@ private:
     void Finished(bool submission, int status, const QByteArray& body,
                   const QByteArray& retry_after, bool network_error);
     QByteArray Payload() const;
-    QString ValidationError() const;
+    QString ValidationError(Spotlight::Notice::Tone* tone = nullptr) const;
     void SetStatus(const QString& text, Spotlight::Notice::Tone tone);
+    void SetCatalogStatus(const QString& text, Spotlight::Notice::Tone tone);
+    void ShowReceipt();
     void SetMatch(const QString& text, bool confirmed);
 
     QNetworkAccessManager* network;
@@ -101,10 +103,13 @@ private:
     QPushButton* next;
     QPushButton* submit;
     QPushButton* clear;
-    QPushButton* open_receipt;
+    QPushButton* open_receipt{};
     Spotlight::Notice* status;
+    Spotlight::Notice* catalog_status;
     Spotlight::Notice* match;
     QLabel* page_label;
+    QLabel* page_hint;
+    bool validation_shown{};
     QTabBar* pages;
     QTabWidget* tabs;
     QPlainTextEdit* preview;
