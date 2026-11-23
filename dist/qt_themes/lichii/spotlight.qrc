@@ -15,6 +15,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/arrows-in.png</file>
         <file>spotlight/icons/arrows-out-cardinal.png</file>
         <file>spotlight/icons/arrows-out.png</file>
+        <file>spotlight/icons/backspace.png</file>
         <file>spotlight/icons/broadcast.png</file>
         <file>spotlight/icons/bug.png</file>
         <file>spotlight/icons/camera.png</file>
