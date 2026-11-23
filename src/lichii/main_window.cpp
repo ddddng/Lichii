@@ -2360,7 +2360,7 @@ protected:
                            Spotlight::IconPixmap(icon, 18, tint, ratio));
         painter.drawPixmap(
             QPointF(width() - 15 - 14, (height() - 14) / 2.0),
-            Spotlight::IconPixmap(u"caret-right", 14, Spotlight::Color::TextMuted(), ratio));
+            Spotlight::IconPixmap(u"caret-right", 14, Spotlight::Color::TextSecondary(), ratio));
 
         const QFont title_font = Spotlight::Font(14, 600);
         const QFont detail_font = Spotlight::Font(12, 400);
@@ -2403,7 +2403,7 @@ FirmwareSource AskFirmwareSource(QWidget* parent) {
     auto* folder =
         new ChoiceRow(u"folder", Spotlight::Color::Success(), MainWindow::tr("From a folder"),
                       MainWindow::tr("The folder with the .nca files"));
-    auto* zip = new ChoiceRow(u"archive", Spotlight::Color::Info(), MainWindow::tr("From a ZIP"),
+    auto* zip = new ChoiceRow(u"archive", Spotlight::Color::Purple(), MainWindow::tr("From a ZIP"),
                               MainWindow::tr("A zipped firmware dump"));
     QObject::connect(folder, &QAbstractButton::clicked, &dialog, [&dialog] { dialog.done(1); });
     QObject::connect(zip, &QAbstractButton::clicked, &dialog, [&dialog] { dialog.done(2); });
