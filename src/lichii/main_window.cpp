@@ -1196,6 +1196,21 @@ void MainWindow::WebBrowserRequestExit() {
 #endif
 }
 
+namespace {
+
+QString ControllerKeys(std::string_view action) {
+    for (const auto& shortcut : UISettings::values.shortcuts) {
+        if (shortcut.group == "Main Window" && shortcut.name == action) {
+            return QString::fromStdString(shortcut.shortcut.controller_keyseq)
+                .replace(QStringLiteral("Screenshot"), MainWindow::tr("Capture"))
+                .replace(QLatin1Char('+'), QStringLiteral(" + "));
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
@@ -1490,6 +1505,25 @@ void MainWindow::InitializeWidgets() {
     });
     slow_action->setCheckable(true);
     slow_action->setEnabled(false);
+    const auto show_hotkeys = [this](QMenu* menu,
+                                     std::vector<std::pair<QAction*, const char*>> hotkeys) {
+        connect(menu, &QMenu::aboutToShow, this, [this, hotkeys] {
+            for (const auto& [action, name] : hotkeys) {
+                QStringList keys{
+                    Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", name)),
+                    ControllerKeys(name)};
+                keys.removeAll(QString{});
+                action->setText(action->text().section(QLatin1Char('\t'), 0, 0) +
+                                QLatin1Char('\t') + keys.join(QStringLiteral(" · ")));
+            }
+        });
+    };
+    show_hotkeys(speed, {{speed_limit_action, "Toggle Framerate Limit"},
+                         {turbo_action, "Toggle Turbo Speed"},
+                         {slow_action, "Toggle Slow Speed"}});
+    show_hotkeys(audio, {{mute_action, "Audio Mute/Unmute"},
+                         {decrease_volume, "Audio Volume Down"},
+                         {increase_volume, "Audio Volume Up"}});
 
     quick_controls->addSeparator();
     refresh_action =
@@ -1656,17 +1690,6 @@ bool ConfirmCard(QWidget* parent, const QString& title, const QString& text, con
     const bool accepted = dialog.exec() == QDialog::Accepted;
     navigation->UnloadController();
     return accepted;
-}
-
-QString ControllerKeys(std::string_view action) {
-    for (const auto& shortcut : UISettings::values.shortcuts) {
-        if (shortcut.group == "Main Window" && shortcut.name == action) {
-            return QString::fromStdString(shortcut.shortcut.controller_keyseq)
-                .replace(QStringLiteral("Screenshot"), MainWindow::tr("Capture"))
-                .replace(QLatin1Char('+'), QStringLiteral(" + "));
-        }
-    }
-    return {};
 }
 
 } // namespace
@@ -6817,7 +6840,9 @@ void MainWindow::UpdateVolumeUI() {
     const bool muted = Settings::values.audio_muted.GetValue();
     const QSignalBlocker blocker(volume_slider);
     volume_slider->setValue(value);
-    mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
+    const QString mute_hint = mute_action->text().section(QLatin1Char('\t'), 1);
+    mute_action->setText((muted ? tr("Unmute") : tr("Mute")) +
+                         (mute_hint.isEmpty() ? QString{} : QLatin1Char('\t') + mute_hint));
     mute_action->setChecked(muted);
     ingame_menu->SetVolume(value, muted);
     audio_panel->SetVolume(value, muted);
