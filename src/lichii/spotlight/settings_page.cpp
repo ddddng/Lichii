@@ -1952,6 +1952,13 @@ void SettingsPage::BuildPage(int category, Page& page) {
         new VisibilityMirror({label}, source, note, changed);
     };
     const auto add_view = [&](QAbstractItemView* view) {
+        std::optional<Slot> slot;
+        if (curated) {
+            slot = curated_slot({view});
+            if (!slot) {
+                return;
+            }
+        }
         QWidget* const origin = view->parentWidget();
         auto* block = new QWidget;
         auto* block_layout = new QVBoxLayout(block);
@@ -1985,12 +1992,8 @@ void SettingsPage::BuildPage(int category, Page& page) {
         card_layout->addLayout(tools);
         block_layout->addWidget(card);
         block->setProperty("sourceVisible", true);
-        if (curated) {
-            if (const auto slot = curated_slot({view})) {
-                categories[category].section_rows[slot->section]->addWidget(block);
-            } else {
-                block->deleteLater();
-            }
+        if (slot) {
+            categories[category].section_rows[slot->section]->addWidget(block);
         } else if (in_advanced) {
             group()->addWidget(block);
         } else {
