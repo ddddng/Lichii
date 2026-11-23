@@ -847,8 +847,6 @@ ArchiveCardDialog::ArchiveCardDialog(const QString& title, int width, QWidget* p
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(card);
-    // The header measures its subtitle at the dialog's width, so start at the card's.
-    resize(card->width() + contentsMargins().left() + contentsMargins().right(), 1);
 }
 
 void ArchiveCardDialog::SetHeader(const QString& icon, const QString& subtitle) {
@@ -1003,28 +1001,37 @@ void ArchiveConvertDialog::AddFiles(const QString& packages_title,
     package_checks.assign(packages.size(), nullptr);
     if (std::ranges::any_of(packages, &ArchivePackage::optional)) {
         auto* group = new QVBoxLayout;
-        group->setSpacing(10);
+        group->setSpacing(8);
         group->addWidget(TextLabel(packages_title, 13, 600, Spotlight::Color::TextSecondary()));
         auto* list = new Box(Spotlight::Color::FillFaint(), Spotlight::Color::StrokeSubtle(),
                              Spotlight::Radius::Panel, card);
-        auto* rows = new QVBoxLayout(list);
-        rows->setContentsMargins(14, 4, 14, 4);
+        auto* frame = new QVBoxLayout(list);
+        frame->setContentsMargins(0, 3, 0, 3);
+        auto* scroll = new QScrollArea(list);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* inner = new QWidget;
+        auto* rows = new QVBoxLayout(inner);
+        rows->setContentsMargins(14, 0, 14, 0);
         rows->setSpacing(0);
+        int shown = 0;
         for (size_t i = 0; i < packages.size(); ++i) {
             const auto& package = packages[i];
             if (!package.optional) {
                 continue;
             }
+            ++shown;
             auto* row = new QHBoxLayout;
-            row->setContentsMargins(0, 8, 0, 8);
+            row->setContentsMargins(0, 5, 0, 5);
             row->setSpacing(10);
-            auto* check = new QCheckBox(package.label, list);
+            auto* check = new QCheckBox(package.label, inner);
             check->setFont(Spotlight::Font(14, 600));
             check->setChecked(true);
             connect(check, &QAbstractButton::toggled, this, &ArchiveConvertDialog::UpdateSpace);
             row->addWidget(check);
             auto* detail = new ElidedLabel(Spotlight::Font(12, 400), Spotlight::Color::TextMuted(),
-                                           list);
+                                           inner);
             detail->SetText(package.detail);
             row->addWidget(detail, 1);
             row->addWidget(TextLabel(HumanSize(package.bytes), 12, 500,
@@ -1032,12 +1039,16 @@ void ArchiveConvertDialog::AddFiles(const QString& packages_title,
             rows->addLayout(row);
             package_checks[i] = check;
         }
+        scroll->setWidget(inner);
+        // Two rows show and the rest scroll, so the card fits an 800 px window.
+        scroll->setFixedHeight(inner->sizeHint().height() * std::min(shown, 2) / shown);
+        frame->addWidget(scroll);
         group->addWidget(list);
         body->addLayout(group);
     }
 
     auto* files = new QVBoxLayout;
-    files->setSpacing(10);
+    files->setSpacing(8);
     files->addWidget(TextLabel(tr("Files"), 13, 600, Spotlight::Color::TextSecondary()));
     const auto add_file_row = [&](const QString& label, QWidget* field) {
         auto* row = new QHBoxLayout;
@@ -1057,21 +1068,21 @@ void ArchiveConvertDialog::AddFiles(const QString& packages_title,
     target = to;
     add_file_row(tr("From"), from);
     add_file_row(tr("To"), to);
-    auto* space_row = new QHBoxLayout;
-    space_row->setSpacing(10);
     space_label = Hint({});
-    space_row->addWidget(space_label, 1);
     if (offer_delete) {
+        auto* space_row = new QHBoxLayout;
+        space_row->setSpacing(10);
+        space_row->addWidget(space_label, 1);
         delete_sources = new QCheckBox(tr("Delete the original files while packing"), card);
         delete_sources->setToolTip(
             tr("Deletes each loose file once it is in the archive. This cannot be undone."));
         connect(delete_sources, &QAbstractButton::toggled, this,
                 &ArchiveConvertDialog::UpdateSpace);
         space_row->addWidget(delete_sources);
+        files->addLayout(space_row);
     }
-    files->addLayout(space_row);
     body->addLayout(files);
-    AddButtons(action, QStringLiteral("archive"));
+    AddButtons(action, QStringLiteral("archive"), offer_delete ? nullptr : space_label);
     UpdateSpace();
 }
 
@@ -1170,7 +1181,7 @@ NupConvertDialog::NupConvertDialog(NupConvertSummary summary_, QWidget* parent)
     details->addLayout(column);
 
     auto* fields = new QVBoxLayout;
-    fields->setSpacing(16);
+    fields->setSpacing(12);
     name_edit = new QLineEdit(QString::fromStdString(detected.title_name), card);
     name_edit->setPlaceholderText(tr("Game name"));
     name_edit->setClearButtonEnabled(true);
@@ -1188,14 +1199,18 @@ NupConvertDialog::NupConvertDialog(NupConvertSummary summary_, QWidget* parent)
             : tr("Auto-detect: %1").arg(QString::fromStdString(detected.display_version)),
         card);
     auto_version->setFont(Spotlight::Font(14, 600));
-    version->addWidget(auto_version);
+    auto* auto_row = new QHBoxLayout;
+    auto_row->setSpacing(8);
+    auto_row->addWidget(auto_version);
     if (!detected.version_source.empty()) {
-        auto* source = TextLabel(
-            tr("Read from the %1").arg(QString::fromStdString(detected.version_source)), 13, 400,
-            Spotlight::Color::TextSecondary());
-        source->setContentsMargins(32, 0, 0, 0);
-        version->addWidget(source);
+        auto* source = new ElidedLabel(Spotlight::Font(13, 400), Spotlight::Color::TextSecondary(),
+                                       card);
+        source->SetText(tr("from the %1").arg(QString::fromStdString(detected.version_source)));
+        auto_row->addWidget(source, 1);
+    } else {
+        auto_row->addStretch();
     }
+    version->addLayout(auto_row);
     auto* manual_row = new QHBoxLayout;
     manual_row->setSpacing(12);
     manual_version = new QRadioButton(tr("Set manually"), card);
