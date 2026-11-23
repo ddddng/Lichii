@@ -401,27 +401,6 @@ RoundedBox* NoteStrip(QLabel* text, NoteKind kind) {
     return box;
 }
 
-/// A muted line with an info icon under a page's rows (Paper: 12 px, 8 px side padding).
-QWidget* Footnote(const QString& text) {
-    auto* line = new QWidget;
-    line->setProperty("spotlightTransparent", true);
-    auto* layout = new QHBoxLayout(line);
-    layout->setContentsMargins(8, 2, 8, 2);
-    layout->setSpacing(8);
-    auto* icon = new QLabel;
-    icon->setFixedSize(15, 16);
-    icon->setPixmap(Spotlight::IconPixmap(QStringLiteral("info"), 15,
-                                          Spotlight::Color::TextSecondary(),
-                                          line->devicePixelRatioF()));
-    layout->addWidget(icon, 0, Qt::AlignTop);
-    auto* label = new QLabel(text);
-    label->setFont(Spotlight::Font(12, 400));
-    label->setWordWrap(true);
-    Spotlight::SetTextColor(label, Spotlight::Color::TextSecondary());
-    layout->addWidget(label, 1);
-    return line;
-}
-
 /// A pill with an optional leading icon (Paper: secondary action, 36 px, 13/600 text, 18 side
 /// padding; 30 px rows use 12 px text).
 class ActionPill final : public QAbstractButton {
@@ -910,7 +889,7 @@ void ConfigurePerGame::BuildSettings() {
                         QStringLiteral("lightning"), Tints::Gold());
             settings_page->AddBlock(
                 frame_rate,
-                Footnote(tr("The same setting is on Overview and Graphics.")), {});
+                SettingsPage::Note(tr("The same setting is on Overview and Graphics.")), {});
         });
     }
     for (const int category : {mods, updates}) {
@@ -924,12 +903,12 @@ void ConfigurePerGame::BuildSettings() {
                              tr("Opens the saves for the applicable profile."),
                              QStringLiteral("folder-open"), Tints::Green(), save);
         settings_page->AddBlock(
-            saves, Footnote(tr("Unavailable for files without a game title ID.")), {});
+            saves, SettingsPage::Note(tr("Unavailable for files without a game title ID.")), {});
     });
     settings_page->SetBuilder(controls, [this, controls] {
         settings_page->AddBlock(
             controls,
-            Footnote(
+            SettingsPage::Note(
                 tr("If a profile no longer exists, Lichii falls back to its usual input "
                    "configuration.")),
             {});
@@ -1158,7 +1137,7 @@ void ConfigurePerGame::BuildNativeModes(int category) {
     if (added) {
         settings_page->AddBlock(
             category,
-            Footnote(tr("Native game modes are separate from the guest cap, VSync and "
+            SettingsPage::Note(tr("Native game modes are separate from the guest cap, VSync and "
                                   "generated display frames.")),
             {});
     }
@@ -1520,7 +1499,7 @@ void ConfigurePerGame::BuildAddons(int mods, int updates) {
     store_rows = add_group(store_header);
     own_rows = add_group(own_header);
     settings_page->AddBlock(mods,
-                            Footnote(tr("Removing a mod asks for confirmation. Installed updates "
+                            SettingsPage::Note(tr("Removing a mod asks for confirmation. Installed updates "
                                         "and DLC are managed separately.")),
                             {});
     UpdateSpotlightIdentity();
