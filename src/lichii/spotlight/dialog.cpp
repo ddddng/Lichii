@@ -372,9 +372,15 @@ private:
         QSize size = dialog->size();
         if (dialog->testAttribute(Qt::WA_Resized)) {
             const QMargins margins = dialog->contentsMargins();
-            size = size.grownBy(margins);
+            const QSize minimum = dialog->minimumSize();
+            if (size.width() > minimum.width()) {
+                size.rwidth() += margins.left() + margins.right();
+            }
+            if (size.height() > minimum.height()) {
+                size.rheight() += margins.top() + margins.bottom();
+            }
         }
-        size = size.expandedTo(dialog->sizeHint());
+        size = size.expandedTo(dialog->sizeHint()).boundedTo(dialog->maximumSize());
         // sizeHint ignores word-wrapped labels, which need more height at the final width.
         if (dialog->hasHeightForWidth()) {
             size.setHeight(std::max(size.height(), dialog->heightForWidth(size.width())));
