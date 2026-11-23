@@ -52,6 +52,7 @@
 #include "lichii/spotlight/ingame_bar.h"
 #include "lichii/spotlight/ingame_menu.h"
 #include "lichii/spotlight/launcher.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
 #include "lichii/spotlight/theme.h"
@@ -1408,8 +1409,9 @@ void MainWindow::InitializeWidgets() {
 #endif
     }
 
+    QMenu* effects = nullptr;
 #ifdef HAS_RESHADE
-    auto* effects = make_submenu(quick_controls, tr("Post-processing"));
+    effects = make_submenu(quick_controls, tr("Post-processing"));
     post_shader_status_action = effects->addAction(tr("Enable effects"), this, [this] {
         Settings::values.post_shader_enabled.SetValue(
             !Settings::values.post_shader_enabled.GetValue());
@@ -1448,7 +1450,7 @@ void MainWindow::InitializeWidgets() {
     auto* decrease_volume =
         audio->addAction(tr("Volume down"), this, &MainWindow::OnDecreaseVolume);
     auto* increase_volume = audio->addAction(tr("Volume up"), this, &MainWindow::OnIncreaseVolume);
-    audio->addAction(tr("Reset volume"), this, [this] {
+    auto* reset_volume = audio->addAction(tr("Reset volume"), this, [this] {
         Settings::values.volume.SetValue(100);
         UpdateVolumeUI();
     });
@@ -1505,13 +1507,16 @@ void MainWindow::InitializeWidgets() {
     });
 
     const Spotlight::InGameControls controls{.renderer = renderer,
-                                             .console = console,
                                              .filter = filter,
                                              .frame_gen = frame_gen,
-                                             .more = quick_controls,
+                                             .accuracy = accuracy,
+                                             .anti_aliasing = antialiasing,
+                                             .effects = effects,
                                              .settings = ui->action_Configure_Current_Game,
                                              .decrease_volume = decrease_volume,
-                                             .increase_volume = increase_volume};
+                                             .increase_volume = increase_volume,
+                                             .mute = mute_action,
+                                             .reset_volume = reset_volume};
     ingame_menu = new Spotlight::InGameMenu({.pause = ui->action_Pause,
                                              .restart = ui->action_Restart,
                                              .stop = ui->action_Stop,
@@ -1522,32 +1527,56 @@ void MainWindow::InitializeWidgets() {
                                              .effects = post_shader_status_action,
                                              .controls = controls},
                                             this);
-    quick_panel = new Spotlight::QuickControls(controls, this);
+    graphics_panel = new Spotlight::GraphicsControls(controls, this);
+    audio_panel = new Spotlight::AudioControls(controls, this);
     const auto set_docked = [this](bool docked) {
         if (Settings::IsDockedMode() != docked) {
             OnToggleDockedMode();
         }
     };
-    connect(ingame_menu, &Spotlight::InGameMenu::Dismissed, this,
-            [this] { ingame_bar->SetMenuOpen(false); });
     connect(ingame_menu, &Spotlight::InGameMenu::DockedChanged, this, set_docked);
     connect(ingame_menu, &Spotlight::InGameMenu::VolumeChanged, this, set_volume);
-    connect(quick_panel, &Spotlight::QuickControls::Dismissed, this,
-            [this] { ingame_bar->SetQuickControlsOpen(false); });
-    connect(quick_panel, &Spotlight::QuickControls::AboutToOpen, this, [this] {
+    connect(graphics_panel, &Spotlight::GraphicsControls::AboutToOpen, this, [this] {
         UpdateStatusButtons();
         UpdateInGameGraphicsSummary();
     });
-    connect(quick_panel, &Spotlight::QuickControls::DockedChanged, this, set_docked);
-    connect(quick_panel, &Spotlight::QuickControls::VolumeChanged, this, set_volume);
-    for (auto* menu : {renderer, filter, static_cast<QMenu*>(frame_gen)}) {
-        connect(menu, &QMenu::triggered, this, &MainWindow::UpdateInGameGraphicsSummary);
-    }
-    connect(ingame_bar, &Spotlight::InGameBar::QuickControlsRequested, this, [this] {
-        ingame_bar->SetQuickControlsOpen(true);
-        quick_panel->Open(ingame_bar->QuickControlsAnchor(), ingame_bar);
+    connect(graphics_panel, &Spotlight::GraphicsControls::DockedChanged, this, set_docked);
+    connect(audio_panel, &Spotlight::AudioControls::AboutToOpen, this, [this] {
+        const auto device = Settings::values.audio_output_device_id.GetValue();
+        audio_panel->SetOutput(device.empty() || device == "auto" ? tr("System default")
+                                                                  : QString::fromStdString(device));
     });
-    connect(ingame_bar, &Spotlight::InGameBar::MenuRequested, this, &MainWindow::ToggleInGameMenu);
+    connect(audio_panel, &Spotlight::AudioControls::VolumeChanged, this, set_volume);
+
+    auto* emulation_menu = new Spotlight::Menu(this);
+    emulation_menu->addActions({ui->action_Pause, ui->action_Restart, ui->action_Stop});
+    emulation_menu->addSeparator();
+    emulation_menu->addActions(
+        {ui->action_Fullscreen, ui->action_Capture_Screenshot, ui->action_Load_Amiibo});
+    emulation_menu->AddSharedMenu(speed,
+                                  Spotlight::Icon(u"lightning", Spotlight::Color::MenuInk(), 16));
+    emulation_menu->addSeparator();
+    emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
+    running_title_bar->AddMenu(tr("Emulation"), emulation_menu);
+    const auto add_panel = [this](const QString& name, Spotlight::InGamePopover* panel) {
+        auto* button = running_title_bar->AddPanelButton(name);
+        connect(button, &QAbstractButton::clicked, panel, [button, panel] {
+            button->setChecked(true);
+            panel->Open(button);
+        });
+        connect(panel, &Spotlight::InGamePopover::Dismissed, button,
+                [button] { button->setChecked(false); });
+    };
+    add_panel(tr("Graphics"), graphics_panel);
+    add_panel(tr("Audio"), audio_panel);
+    auto* view_menu = new Spotlight::Menu(this);
+    ui->action_Show_Status_Bar->setText(tr("Show bottom bar"));
+    view_menu->addActions(
+        {ui->action_Show_Performance_Overlay, ingame_menu_action, ui->action_Show_Status_Bar});
+    view_menu->addSeparator();
+    view_menu->AddSharedMenu(session, Spotlight::Icon(u"info", Spotlight::Color::MenuInk(), 16));
+    view_menu->addAction(refresh_action);
+    running_title_bar->AddMenu(tr("View"), view_menu);
     connect(ingame_bar, &Spotlight::InGameBar::ExpandRequested, ui->action_Show_Status_Bar,
             &QAction::trigger);
     auto* shaders = ingame_bar->Shaders();
@@ -1681,8 +1710,6 @@ void MainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Configure, QStringLiteral("Configure"));
     LinkActionShortcut(ui->action_Configure_Current_Game, QStringLiteral("Configure Current Game"));
     LinkActionShortcut(ingame_menu_action, QStringLiteral("In-game Menu"), true);
-    ingame_bar->SetMenuShortcut(Spotlight::KeyText(ingame_menu_action->shortcut()),
-                                ControllerKeys("In-game Menu"));
 
     static const QString main_window = QStringLiteral("Main Window");
     const auto connect_shortcut = [&]<typename Fn>(const QString& action_name, const Fn& function) {
@@ -6328,9 +6355,6 @@ void MainWindow::UpdateStatusBar() {
                                                     : QString{});
     ingame_bar->SetStats(results.average_game_fps, frame_gen_fps, results.frametime * 1000.0,
                          at_target, session_status_text);
-    quick_panel->SetFrameTime(std::isfinite(results.frametime) && results.frametime > 0
-                                  ? tr("%1 ms").arg(results.frametime * 1000.0, 0, 'f', 1)
-                                  : QStringLiteral("—"));
     UpdateFrameGenButton();
     UpdateInGameGraphicsSummary();
 }
@@ -6369,7 +6393,6 @@ void MainWindow::ToggleInGameMenu() {
     UpdateInGameGraphicsSummary();
     ingame_menu->Open(render_window, ingame_menu_action->shortcut(), icon, title, play_time,
                       !QtCommon::emu_thread->IsRunning());
-    ingame_bar->SetMenuOpen(true);
 }
 
 void MainWindow::UpdateInGameGraphicsSummary() {
@@ -6377,29 +6400,13 @@ void MainWindow::UpdateInGameGraphicsSummary() {
     const auto text = [this](const auto& texts, auto value) {
         return ConfigurationShared::TranslateMapText(translator, texts.at(value));
     };
-    const auto key = [this](const char* action) {
-        return Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", action));
-    };
-    const QString turbo_key = key("Toggle Turbo Speed");
-    QString slow_key = key("Toggle Slow Speed");
-    if (const auto modifiers = turbo_key.lastIndexOf(QLatin1Char(' ')) + 1;
-        modifiers > 0 && slow_key.startsWith(turbo_key.left(modifiers))) {
-        slow_key.remove(0, modifiers);
+    QString effects = values.post_shader_enabled.GetValue() ? tr("On") : tr("Off");
+#ifdef HAS_RESHADE
+    if (const auto preset = VideoCore::GetActiveFxPreset();
+        values.post_shader_enabled.GetValue() && !preset.empty()) {
+        effects = QString::fromStdString(preset);
     }
-    QString speed = tr("%1%").arg(Settings::SpeedLimit());
-    switch (values.current_speed_mode.GetValue()) {
-    case Settings::SpeedMode::Turbo:
-        speed = tr("Turbo");
-        break;
-    case Settings::SpeedMode::Slow:
-        speed = tr("Slow");
-        break;
-    case Settings::SpeedMode::Standard:
-        if (!values.use_speed_limit.GetValue()) {
-            speed = tr("Unlocked");
-        }
-        break;
-    }
+#endif
     const int preset = Spotlight::PerformancePresetIndex(
         {values.resolution_setup.GetValue(), values.scaling_filter.GetValue(),
          values.anti_aliasing.GetValue(), values.frame_gen.GetValue()});
@@ -6413,10 +6420,11 @@ void MainWindow::UpdateInGameGraphicsSummary() {
         .filter =
             text(ConfigurationShared::scaling_filter_texts_map, values.scaling_filter.GetValue()),
         .frame_gen = frame_gen_status_text,
-        .speed = speed,
-        .speed_keys = turbo_key.isEmpty() || slow_key.isEmpty()
-                          ? turbo_key + slow_key
-                          : tr("%1 / %2").arg(turbo_key, slow_key),
+        .accuracy =
+            text(ConfigurationShared::gpu_accuracy_texts_map, values.gpu_accuracy.GetValue()),
+        .anti_aliasing =
+            text(ConfigurationShared::anti_aliasing_texts_map, values.anti_aliasing.GetValue()),
+        .effects = effects,
         .preset = preset == -1          ? -1
                   : preset == auto_tier ? 0
                                         : preset + 1,
@@ -6425,7 +6433,7 @@ void MainWindow::UpdateInGameGraphicsSummary() {
                          values.anti_aliasing.UsingGlobal() && values.frame_gen.UsingGlobal(),
     };
     ingame_menu->SetSummary(summary);
-    quick_panel->SetSummary(summary);
+    graphics_panel->SetSummary(summary);
 }
 
 void MainWindow::UpdateGPUAccuracyButton() {
@@ -6440,7 +6448,7 @@ void MainWindow::UpdateDockedButton() {
     const QString mode = docked ? tr("Docked") : tr("Handheld");
     dock_status_action->setText(tr("Console mode: %1").arg(mode));
     ingame_menu->SetConsoleMode(docked);
-    quick_panel->SetConsoleMode(docked);
+    graphics_panel->SetConsoleMode(docked);
     UpdateAPIText();
 }
 
@@ -6592,7 +6600,7 @@ void MainWindow::UpdateVolumeUI() {
     mute_action->setText(muted ? tr("Unmute") : tr("Mute"));
     mute_action->setChecked(muted);
     ingame_menu->SetVolume(value, muted);
-    quick_panel->SetVolume(value, muted);
+    audio_panel->SetVolume(value, muted);
 }
 
 void MainWindow::UpdateStatusButtons() {

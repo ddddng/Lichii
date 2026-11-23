@@ -4,123 +4,80 @@
 #include "lichii/spotlight/ingame_bar.h"
 
 #include <cmath>
-#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QVBoxLayout>
 
 #include "lichii/spotlight/shader_chip.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 
 namespace Spotlight {
-namespace {
 
-class ConfigurationButton final : public QAbstractButton {
+class ConfigurationStatus final : public QWidget {
 public:
-    explicit ConfigurationButton(QWidget* parent) : QAbstractButton(parent) {
-        setFont(Font(12, 600));
+    explicit ConfigurationStatus(QWidget* parent) : QWidget(parent) {
         setFixedHeight(26);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::TabFocus);
-        setCheckable(true);
     }
 
-    QSize sizeHint() const override {
-        return {fontMetrics().horizontalAdvance(text()) + 54, 26};
+    void SetText(QString value) {
+        text = std::move(value);
+        setFixedWidth(QFontMetrics(Font(12, 600)).horizontalAdvance(text) + 32);
+        update();
     }
 
 protected:
-    void nextCheckState() override {}
-
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(hasFocus() || isChecked() ? QPen(Color::Accent()) : Qt::NoPen);
-        painter.setBrush(isChecked()                ? Color::AccentSoft()
-                         : underMouse() || isDown() ? Color::ControlHover()
-                                                    : Color::Fill());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
         painter.setPen(Qt::NoPen);
         painter.setBrush(Color::Success());
         painter.drawEllipse(QRect{10, 9, 8, 8});
-        painter.setFont(font());
+        painter.setFont(Font(12, 600));
         painter.setPen(Color::Text());
-        painter.drawText(QRect{24, 0, width() - 54, height()}, Qt::AlignVCenter, text());
-        painter.drawPixmap(
-            width() - 24, 5,
-            IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
+        painter.drawText(QRect{24, 0, width() - 24, height()}, Qt::AlignVCenter, text);
     }
 
-    void enterEvent(QEnterEvent*) override {
-        update();
-    }
-    void leaveEvent(QEvent*) override {
-        update();
-    }
+private:
+    QString text;
 };
 
-} // namespace
-
-class BarChip final : public QAbstractButton {
+class BarChip final : public QWidget {
 public:
-    BarChip(const QString& text, QString icon, int padding, QWidget* parent)
-        : QAbstractButton(parent), icon_name(std::move(icon)), padding(padding) {
-        setText(text);
-        setFont(Font(12, 700));
+    BarChip(QString icon, const QColor& ink, QWidget* parent)
+        : QWidget(parent), icon_name(std::move(icon)), ink(ink) {
         setFixedHeight(26);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::TabFocus);
     }
 
-    void SetInk(const QColor& color) {
-        ink = color;
+    QString Text() const {
+        return text;
+    }
+
+    void SetText(QString value) {
+        text = std::move(value);
+        setFixedWidth(10 + 16 + 6 + QFontMetrics(Font(12, 700)).horizontalAdvance(text) + 10);
         update();
-    }
-
-    void SetAccent(bool on) {
-        accent = on;
-        update();
-    }
-
-    QSize sizeHint() const override {
-        return {2 * padding + 16 + 6 + fontMetrics().horizontalAdvance(text()), 26};
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        const bool hovered = underMouse() || isDown();
-        const QColor fill = accent    ? (hovered ? Color::AccentLight() : Color::Accent())
-                            : hovered ? Color::ControlHover()
-                                      : Color::Fill();
-        const QColor foreground = accent ? Color::OnAccent() : ink;
-        painter.setPen(hasFocus() ? QPen(accent ? Color::Text() : Color::Accent()) : Qt::NoPen);
-        painter.setBrush(fill);
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
-        painter.drawPixmap(padding, 5, IconPixmap(icon_name, 16, foreground, devicePixelRatioF()));
-        painter.setFont(font());
-        painter.setPen(foreground);
-        painter.drawText(QRect{padding + 22, 0, width() - padding - 22, height()}, Qt::AlignVCenter,
-                         text());
-    }
-
-    void enterEvent(QEnterEvent*) override {
-        update();
-    }
-    void leaveEvent(QEvent*) override {
-        update();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()), 13, 13);
+        painter.drawPixmap(10, 5, IconPixmap(icon_name, 16, ink, devicePixelRatioF()));
+        painter.setFont(Font(12, 700));
+        painter.setPen(ink);
+        painter.drawText(QRect{32, 0, width() - 32, height()}, Qt::AlignVCenter, text);
     }
 
 private:
     QString icon_name;
-    int padding;
-    QColor ink = Color::Text();
-    bool accent = false;
+    QColor ink;
+    QString text;
 };
 
 /// "60 → 120 FPS · 16.6 ms", painted so that a stats update only repaints.
@@ -190,61 +147,6 @@ private:
     bool on_target = false;
 };
 
-class MenuTooltip final : public QWidget {
-public:
-    explicit MenuTooltip(QWidget* parent)
-        : QWidget(parent, Qt::ToolTip | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint |
-                              Qt::WindowTransparentForInput | Qt::WindowDoesNotAcceptFocus) {
-        setAttribute(Qt::WA_TranslucentBackground);
-        setFixedWidth(250);
-    }
-
-    void SetKeys(QString keyboard_key, QString controller_key) {
-        keyboard = std::move(keyboard_key);
-        controller = std::move(controller_key);
-        setFixedHeight(10 + 17 + (keyboard.isEmpty() ? 0 : 30) + (controller.isEmpty() ? 0 : 30) +
-                       10);
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(Color::Menu());
-        painter.drawRoundedRect(rect(), 12, 12);
-        painter.setFont(Font(13, 600));
-        painter.setPen(Color::Text());
-        painter.drawText(QRect{12, 10, width() - 24, 17}, Qt::AlignVCenter,
-                         InGameBar::tr("In-game menu"));
-        int y = 33;
-        const auto row = [&](const QString& name, const QString& key) {
-            if (key.isEmpty()) {
-                return;
-            }
-            painter.setFont(Font(12));
-            painter.setPen(QColor(0xff, 0xff, 0xff, 0xbf));
-            painter.drawText(QRect{12, y, 120, 24}, Qt::AlignVCenter, name);
-            painter.setFont(Font(11, 600));
-            const int key_width = painter.fontMetrics().horizontalAdvance(key) + 16;
-            const QRectF cap{qreal(width() - 12 - key_width), qreal(y), qreal(key_width), 24};
-            painter.setPen(QPen(QColor(0xff, 0xff, 0xff, 0x33), 1));
-            painter.setBrush(Color::Control());
-            painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -0.5), Radius::KeyCap,
-                                    Radius::KeyCap);
-            painter.setPen(Color::Text());
-            painter.drawText(cap, Qt::AlignCenter, key);
-            y += 30;
-        };
-        row(InGameBar::tr("Keyboard"), keyboard);
-        row(InGameBar::tr("Controller"), controller);
-    }
-
-private:
-    QString keyboard;
-    QString controller;
-};
-
 InGameBar::InGameBar(QWidget* parent) : QStatusBar(parent), contents(new QWidget(this)) {
     setStyleSheet(QStringLiteral("QWidget { background: transparent; }"));
     setFixedHeight(36);
@@ -253,20 +155,15 @@ InGameBar::InGameBar(QWidget* parent) : QStatusBar(parent), contents(new QWidget
     layout->setContentsMargins(6, 1, 6, 0);
     layout->setSpacing(8);
 
-    configuration = new ConfigurationButton(contents);
-    configuration->setToolTip(tr("Quick controls"));
+    configuration = new ConfigurationStatus(contents);
     layout->addWidget(configuration);
-    connect(configuration, &QAbstractButton::clicked, this, &InGameBar::QuickControlsRequested);
 
     shaders = new ShaderChip(contents);
     layout->addWidget(shaders);
 
-    speed = new BarChip({}, QStringLiteral("lightning"), 10, contents);
-    speed->SetInk(Color::Info());
-    speed->setToolTip(tr("Quick controls"));
+    speed = new BarChip(QStringLiteral("lightning"), Color::Info(), contents);
     speed->hide();
     layout->addWidget(speed);
-    connect(speed, &QAbstractButton::clicked, this, &InGameBar::QuickControlsRequested);
 
     notice = new QLabel(contents);
     notice->setFont(Font(12));
@@ -281,17 +178,11 @@ InGameBar::InGameBar(QWidget* parent) : QStatusBar(parent), contents(new QWidget
 
     metrics = new BarMetrics(contents);
     layout->addWidget(metrics);
-
-    menu_button = new BarChip(tr("Menu"), QStringLiteral("sliders-horizontal"), 11, contents);
-    menu_button->installEventFilter(this);
-    menu_tooltip = new MenuTooltip(menu_button);
-    connect(menu_button, &QAbstractButton::clicked, this, &InGameBar::MenuRequested);
-    layout->addWidget(menu_button);
+    layout->addSpacing(4);
 }
 
 void InGameBar::SetConfiguration(const QString& renderer, const QString& mode) {
-    configuration->setText(tr("%1 · %2").arg(renderer, mode));
-    configuration->updateGeometry();
+    configuration->SetText(tr("%1 · %2").arg(renderer, mode));
 }
 
 void InGameBar::SetStats(double fps, double generated, double frame_ms, bool at_target,
@@ -306,30 +197,10 @@ void InGameBar::SetStats(double fps, double generated, double frame_ms, bool at_
 }
 
 void InGameBar::SetSpeedStatus(const QString& description) {
-    if (speed->text() != description) {
-        speed->setText(description);
-        speed->updateGeometry();
+    if (speed->Text() != description) {
+        speed->SetText(description);
     }
     speed->setVisible(!description.isEmpty());
-}
-
-void InGameBar::SetMenuShortcut(const QString& keyboard, const QString& controller) {
-    menu_tooltip->SetKeys(keyboard, controller);
-    menu_button->setToolTip(keyboard.isEmpty() ? tr("In-game menu")
-                                               : tr("In-game menu (%1)").arg(keyboard));
-}
-
-void InGameBar::SetMenuOpen(bool open) {
-    menu_tooltip->hide();
-    menu_button->SetAccent(open);
-}
-
-void InGameBar::SetQuickControlsOpen(bool open) {
-    configuration->setChecked(open);
-}
-
-QWidget* InGameBar::QuickControlsAnchor() const {
-    return configuration;
 }
 
 void InGameBar::SetCollapsed(bool collapsed_) {
@@ -378,29 +249,6 @@ void InGameBar::resizeEvent(QResizeEvent* event) {
     contents->setGeometry(rect());
     notice->setText(
         notice->fontMetrics().elidedText(currentMessage(), Qt::ElideRight, notice->width()));
-}
-
-bool InGameBar::eventFilter(QObject* watched, QEvent* event) {
-    if (watched != menu_button) {
-        return QStatusBar::eventFilter(watched, event);
-    }
-    switch (event->type()) {
-    case QEvent::ToolTip: {
-        const QPoint corner = menu_button->mapToGlobal(QPoint{menu_button->width(), 0});
-        menu_tooltip->move(corner.x() - 14 - menu_tooltip->width(),
-                           mapToGlobal(QPoint{}).y() - 10 - menu_tooltip->height());
-        menu_tooltip->show();
-        return true;
-    }
-    case QEvent::Leave:
-    case QEvent::Hide:
-    case QEvent::MouseButtonPress:
-        menu_tooltip->hide();
-        break;
-    default:
-        break;
-    }
-    return QStatusBar::eventFilter(watched, event);
 }
 
 } // namespace Spotlight
