@@ -31,6 +31,7 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     bool viewportEvent(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
     void setSelection(const QRect& rect, QItemSelectionModel::SelectionFlags command) override;
     void currentChanged(const QModelIndex& current, const QModelIndex& previous) override;
     void dataChanged(const QModelIndex& top_left, const QModelIndex& bottom_right,

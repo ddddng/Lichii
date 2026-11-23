@@ -93,6 +93,11 @@ bool GameGrid::viewportEvent(QEvent* event) {
     return QListView::viewportEvent(event);
 }
 
+void GameGrid::paintEvent(QPaintEvent* event) {
+    QPaintEvent reach(event->rect().adjusted(-GameCard::HitShift, -GameCard::HitShift, 0, 0));
+    QListView::paintEvent(&reach);
+}
+
 void GameGrid::mousePressEvent(QMouseEvent* event) {
     const auto index = indexAt(event->pos());
     if (event->button() == Qt::LeftButton && index.isValid() &&
