@@ -116,24 +116,6 @@ using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
 
-int SuggestedTier(const VkDeviceInfo::Record* device) {
-    if (device == nullptr) {
-        return 0;
-    }
-    const QString name = QString::fromStdString(device->name);
-    static const QRegularExpression high(
-        QStringLiteral(R"(RTX\s+[345]\d{3}\b|RX\s+[67][789]\d{2}\b)"),
-        QRegularExpression::CaseInsensitiveOption);
-    static const QRegularExpression mid(
-        QStringLiteral(
-            R"(RTX\s+\d{4}\b|GTX\s+\d{4}\b|RX\s+\d{3,4}\b|Arc\s+[AB]\d{3}\b|Apple M[1-9])"),
-        QRegularExpression::CaseInsensitiveOption);
-    if (device->fsr4_capable || high.match(name).hasMatch()) {
-        return 2;
-    }
-    return mid.match(name).hasMatch() ? 1 : 0;
-}
-
 QString MappingStyle() {
     return QStringLiteral(
         "QTabWidget#spotlightMapping::pane { border: none; background: transparent; }"
@@ -640,13 +622,14 @@ int ConfigureDialog::CurrentPreset(const PresetSources& sources) const {
     if (selected == -1) {
         return -1;
     }
-    return selected == SuggestedTier(SelectedGpu(sources)) ? 0 : selected + 1;
+    return selected == Spotlight::SuggestedPresetTier(SelectedGpu(sources)) ? 0 : selected + 1;
 }
 
 void ConfigureDialog::ApplyPreset(const PresetSources& sources, int selection) {
     const auto& preset =
-        Spotlight::PerformancePresets[selection == 0 ? SuggestedTier(SelectedGpu(sources))
-                                                     : selection - 1];
+        Spotlight::PerformancePresets[selection == 0
+                                          ? Spotlight::SuggestedPresetTier(SelectedGpu(sources))
+                                          : selection - 1];
     SettingsPage::SetComboIndex(sources.resolution,
                                 sources.resolution->findData(static_cast<u32>(preset.resolution)));
     SettingsPage::SetComboIndex(sources.filter,
@@ -705,7 +688,8 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
             const auto* gpu = SelectedGpu(sources);
             cards[0]->SetSuggestion(
                 gpu ? QString::fromStdString(gpu->name) : tr("No GPU identified"),
-                tr(" → %1").arg(Spotlight::PerformancePresetName(SuggestedTier(gpu))));
+                tr(" → %1").arg(
+                    Spotlight::PerformancePresetName(Spotlight::SuggestedPresetTier(gpu))));
             const int selected = CurrentPreset(sources);
             const bool enabled = sources.CanApply();
             for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
@@ -883,7 +867,8 @@ void ConfigureDialog::BuildGraphics(int graphics) {
             presets_control->SetOptionEnabled(4, false);
             presets_control->SetCurrentIndex(selected == -1 ? 4 : selected);
             presets_control->setEnabled(sources.CanApply());
-            const int tier = selected == 0 ? SuggestedTier(SelectedGpu(sources)) : selected - 1;
+            const int tier =
+                selected == 0 ? Spotlight::SuggestedPresetTier(SelectedGpu(sources)) : selected - 1;
             const QString resolution = SettingsPage::ClosedSettingLabel(
                 sources.resolution, Settings::values.resolution_setup.Id(),
                 sources.resolution->currentIndex());

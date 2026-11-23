@@ -262,20 +262,20 @@ SegmentedControl::SegmentedControl(QStringList options_, Kind kind_, int height_
 void SegmentedControl::SetOptions(QStringList options_) {
     options = std::move(options_);
     enabled = QList<bool>(options.size(), true);
-    current = qBound(0, current, qMax(0, int(options.size()) - 1));
+    current = current < 0 ? -1 : qBound(0, current, qMax(0, int(options.size()) - 1));
     setFont(Font(height >= 40 ? 14 : 13, 500));
     updateGeometry();
     update();
 }
 
 void SegmentedControl::SetCurrentIndex(int index) {
-    if (index < 0 || index >= options.size() || index == current) {
+    if (index < -1 || index >= options.size() || index == current) {
         return;
     }
     const QRectF from = SelectionRect();
     current = index;
     slide.stop();
-    if (isVisible()) {
+    if (isVisible() && index >= 0 && !from.isEmpty()) {
         slide.setStartValue(from);
         slide.setEndValue(QRectF(SegmentRect(current)));
         slide.start();
@@ -331,8 +331,7 @@ void SegmentedControl::paintEvent(QPaintEvent*) {
     const QRect frame(0, 0, sizeHint().width(), height);
     FillRounded(painter, frame, height / 2.0, kind == Kind::Light ? Color::Control() : Color::Fill(),
                 kind == Kind::Light ? Color::Stroke() : QColor{});
-    if (!options.isEmpty()) {
-        const QRectF selection = SelectionRect();
+    if (const QRectF selection = SelectionRect(); !selection.isEmpty()) {
         FillRounded(painter, selection, selection.height() / 2.0,
                     kind == Kind::Light ? Color::Text() : Color::Accent());
     }

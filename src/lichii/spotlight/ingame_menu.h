@@ -23,6 +23,7 @@ class VolumeControl;
 /// The menus behind the in-game dropdowns; each choice applies at once, as in the View menu.
 struct InGameControls {
     QMenu* renderer;
+    QMenu* console;
     QMenu* filter;
     QMenu* frame_gen;
     QMenu* more;
@@ -39,6 +40,7 @@ struct InGameSummary {
     QString frame_gen;
     QString speed;
     QString speed_keys;
+    /// 0 Auto, 1 Low, 2 Mid, 3 High; -1 when the values match no preset.
     int preset = -1;
     bool preset_global = true;
 };
@@ -66,6 +68,16 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
+    void ShowMore(bool more);
+    void BuildMore();
+    void Reposition();
+
+    InGameControls menus;
+    QWidget* main_page;
+    QWidget* more_page;
+    QScrollArea* more_scroll;
+    int left = 0;
+    int bar_top = 0;
     ValueButton* renderer;
     ValueButton* resolution;
     ValueButton* filter;

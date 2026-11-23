@@ -24,6 +24,10 @@ namespace Settings {
 class BasicSetting;
 }
 
+namespace VkDeviceInfo {
+class Record;
+}
+
 namespace ConfigurationShared {
 class Widget;
 }
@@ -76,6 +80,8 @@ inline constexpr std::array PerformancePresets{
 };
 
 int PerformancePresetIndex(const PerformancePreset& values);
+/// The preset Auto picks for a GPU: 0 Low, 1 Mid, 2 High. Without a GPU it is Low.
+int SuggestedPresetTier(const VkDeviceInfo::Record* device);
 QString PerformancePresetName(int index);
 
 /// A performance preset choice of Settings > General: Auto, Low-end, Mid-range or High-end.

@@ -266,6 +266,7 @@ add_executable(lichii
     spotlight/settings_get_started.cpp spotlight/settings_get_started.h
     spotlight/top_bar.cpp spotlight/top_bar.h
     spotlight/widgets.cpp spotlight/widgets.h
+    spotlight/confirm.cpp spotlight/confirm.h
     spotlight/fullscreen_hint.cpp spotlight/fullscreen_hint.h
     spotlight/ingame_bar.cpp spotlight/ingame_bar.h
     spotlight/ingame_menu.cpp spotlight/ingame_menu.h

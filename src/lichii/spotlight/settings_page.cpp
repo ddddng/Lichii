@@ -42,6 +42,7 @@
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
+#include "qt_common/util/vk.h"
 
 namespace Spotlight {
 namespace {
@@ -809,6 +810,24 @@ int PerformancePresetIndex(const PerformancePreset& values) {
         }
     }
     return -1;
+}
+
+int SuggestedPresetTier(const VkDeviceInfo::Record* device) {
+    if (device == nullptr) {
+        return 0;
+    }
+    const QString name = QString::fromStdString(device->name);
+    static const QRegularExpression high(
+        QStringLiteral(R"(RTX\s+[345]\d{3}\b|RX\s+[67][789]\d{2}\b)"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression mid(
+        QStringLiteral(
+            R"(RTX\s+\d{4}\b|GTX\s+\d{4}\b|RX\s+\d{3,4}\b|Arc\s+[AB]\d{3}\b|Apple M[1-9])"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (device->fsr4_capable || high.match(name).hasMatch()) {
+        return 2;
+    }
+    return mid.match(name).hasMatch() ? 1 : 0;
 }
 
 QString PerformancePresetName(int index) {
