@@ -539,7 +539,7 @@ void ArchiveCardDialog::paintEvent(QPaintEvent*) {
     painter.setPen(QPen(Spotlight::Color::StrokeSubtle(), 1));
     painter.setBrush(Spotlight::Color::Popover());
     painter.drawRoundedRect(QRectF(card->geometry()).adjusted(0.5, 0.5, -0.5, -0.5),
-                            Spotlight::Radius::InGamePanel, Spotlight::Radius::InGamePanel);
+                            Spotlight::Radius::Dialog, Spotlight::Radius::Dialog);
 }
 
 void ArchiveCardDialog::keyPressEvent(QKeyEvent* event) {
