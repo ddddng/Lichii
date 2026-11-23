@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
+
 #include <QCloseEvent>
 #include <QMessageBox>
 
@@ -51,6 +53,7 @@ void ConfigureMousePanning::SetConfiguration(float right_stick_deadzone, float r
         ui->warning_label->setText(
             tr("Emulated mouse is enabled. This is incompatible with mouse panning."));
     }
+    ui->warning_label->setVisible(!ui->warning_label->text().isEmpty());
 }
 
 void ConfigureMousePanning::SetDefaultConfiguration() {
@@ -63,6 +66,20 @@ void ConfigureMousePanning::SetDefaultConfiguration() {
 }
 
 void ConfigureMousePanning::ConnectEvents() {
+    const std::pair<QSlider*, QLabel*> sliders[] = {
+        {ui->x_sensitivity, ui->x_sensitivity_value},
+        {ui->y_sensitivity, ui->y_sensitivity_value},
+        {ui->deadzone_counterweight, ui->deadzone_counterweight_value},
+        {ui->decay_strength, ui->decay_strength_value},
+        {ui->min_decay, ui->min_decay_value},
+    };
+    for (const auto& [slider, label] : sliders) {
+        const auto show = [slider, label] {
+            label->setText(QStringLiteral("%1%").arg(slider->value()));
+        };
+        connect(slider, &QSlider::valueChanged, label, show);
+        show();
+    }
     connect(ui->default_button, &QPushButton::clicked, this,
             &ConfigureMousePanning::SetDefaultConfiguration);
     connect(ui->button_box, &QDialogButtonBox::accepted, this,
