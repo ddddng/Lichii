@@ -488,7 +488,7 @@ GetStarted::GetStarted(QWidget* parent, Core::System& system_, Setup setup_)
         }
         const auto keyboard = QKeySequence(QString::fromStdString(shortcut.shortcut.keyseq));
         if (!keyboard.isEmpty()) {
-            keys.append(keyboard.toString(QKeySequence::NativeText));
+            keys.append(KeyText(keyboard));
         }
         if (!shortcut.shortcut.controller_keyseq.empty()) {
             keys.append(QString::fromStdString(shortcut.shortcut.controller_keyseq)
