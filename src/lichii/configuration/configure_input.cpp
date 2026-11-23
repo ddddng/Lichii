@@ -256,12 +256,13 @@ QWidget* ConfigureInput::MappingPage() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(16);
     const int advanced_index = static_cast<int>(player_count);
-    const auto options = [this, advanced_index](int current) {
+    const auto options = [advanced_index](int current) {
         QStringList labels;
         for (int i = 0; i < advanced_index; ++i) {
-            labels.append(i == current ? tr("Player %1").arg(i + 1) : QString::number(i + 1));
+            labels.append(i == current ? ConfigureInput::tr("Player %1").arg(i + 1)
+                                       : QString::number(i + 1));
         }
-        labels.append(tr("Advanced"));
+        labels.append(ConfigureInput::tr("Advanced"));
         return labels;
     };
     auto* players = new Spotlight::SegmentedControl(
