@@ -84,6 +84,27 @@ private:
     Kind kind;
 };
 
+/// Keeps a press on the button that opened a menu from reopening it: the press closes the menu,
+/// and Qt would otherwise replay it to the button.
+class MenuButtonPress final : public QObject {
+public:
+    MenuButtonPress(QWidget* button_, QMenu* menu) : QObject(menu), button(button_) {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::MouseButtonPress) {
+            const auto* press = static_cast<QMouseEvent*>(event);
+            if (button->rect().contains(button->mapFromGlobal(press->globalPosition().toPoint()))) {
+                static_cast<QWidget*>(watched)->setAttribute(Qt::WA_NoMouseReplay);
+            }
+        }
+        return false;
+    }
+
+private:
+    QWidget* button;
+};
+
 } // namespace
 
 FrameEdges::FrameEdges(QWidget* parent) : QWidget(parent) {
@@ -236,7 +257,9 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
         return button;
     };
     const auto link_menu = [this](CircleButton* button, QMenu* menu) {
-        connect(button, &QAbstractButton::clicked, this, [button, menu] {
+        menu->installEventFilter(new MenuButtonPress(button, menu));
+        connect(button, &QAbstractButton::pressed, this, [button, menu] {
+            button->setDown(false);
             menu->popup(button->mapToGlobal(
                 QPoint(button->width() - menu->sizeHint().width(), button->height() + 5)));
         });

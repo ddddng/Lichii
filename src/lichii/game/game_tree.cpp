@@ -110,9 +110,8 @@ GameTree::GameTree(QWidget* parent) : QTreeView(parent) {
     header()->setSortIndicatorShown(true);
     header()->setSectionsMovable(true);
     setObjectName(QStringLiteral("spotlightTree"));
-
-    connect(this, &QTreeView::expanded, this, &GameTree::OnItemExpanded);
-    connect(this, &QTreeView::collapsed, this, &GameTree::OnItemExpanded);
+    setRootIsDecorated(false);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 }
 
 void GameTree::drawRow(QPainter* painter, const QStyleOptionViewItem& option,
@@ -145,27 +144,6 @@ void GameTree::SetModel(QAbstractItemModel* model) {
     UpdateColumnVisibility();
 }
 
-void GameTree::OnItemExpanded(const QModelIndex& item) {
-    const auto type = item.data(GameListItem::TypeRole).value<GameListItemType>();
-    switch (type) {
-    case GameListItemType::Favorites:
-        UISettings::values.favorites_expanded = isExpanded(item);
-        break;
-    case GameListItemType::CustomDir:
-    case GameListItemType::SdmcDir:
-    case GameListItemType::UserNandDir:
-    case GameListItemType::SysNandDir: {
-        const int dir = item.data(GameListDir::GameDirRole).toInt();
-        if (dir >= 0 && dir < UISettings::values.game_dirs.size()) {
-            UISettings::values.game_dirs[dir].expanded = isExpanded(item);
-        }
-        break;
-    }
-    default:
-        break;
-    }
-}
-
 void GameTree::SaveInterfaceLayout() {
     UISettings::values.gamelist_header_state = header()->saveState();
 }
@@ -175,6 +153,7 @@ void GameTree::LoadInterfaceLayout() {
         header()->resizeSection(GameListModel::COLUMN_NAME, 540);
         header()->setSortIndicator(-1, Qt::AscendingOrder);
     }
+    header()->setSectionResizeMode(GameListModel::COLUMN_NAME, QHeaderView::Stretch);
 }
 
 void GameTree::UpdateColumnVisibility() {

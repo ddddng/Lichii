@@ -179,9 +179,6 @@ private:
 
     void PopupContextMenu(const QPoint& menu_location);
     void AddGamePopup(Spotlight::Menu& context_menu, u64 program_id, const std::string& path);
-    void AddCustomDirPopup(QMenu& context_menu, QModelIndex selected);
-    void AddPermDirPopup(QMenu& context_menu, QModelIndex selected);
-    void AddFavoritesPopup(QMenu& context_menu);
 
     void RetranslateUI();
 
