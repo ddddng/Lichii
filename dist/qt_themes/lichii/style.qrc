@@ -278,6 +278,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_wand@2x.png</file>
         <file>icons/menu_wand_white.png</file>
         <file>icons/menu_wand_white@2x.png</file>
+        <file>icons/menu_wave.png</file>
+        <file>icons/menu_wave@2x.png</file>
+        <file>icons/menu_wave_white.png</file>
+        <file>icons/menu_wave_white@2x.png</file>
         <file>icons/menu_x.png</file>
         <file>icons/menu_x@2x.png</file>
         <file>icons/menu_x_white.png</file>

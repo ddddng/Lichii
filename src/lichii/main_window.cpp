@@ -7261,7 +7261,7 @@ void MainWindow::UpdateMenuIcons() {
         {ui->action_Load_File, "file"},
         {ui->action_Load_Folder, "folder"},
         {ui->menu_recent_files->menuAction(), "clock"},
-        {ui->action_Load_Amiibo, "star"},
+        {ui->action_Load_Amiibo, "wave"},
         {ui->menuOpen_Eden_Folders->menuAction(), "folder"},
         {ui->action_Exit, "x"},
         {ui->action_Root_Data_Folder, "folder"},
