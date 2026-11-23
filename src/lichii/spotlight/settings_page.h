@@ -138,8 +138,9 @@ public:
     /// Builds the category's rows the first time it is shown or searched.
     void SetBuilder(int category, std::function<void()> build);
     /// `action` sits at the right of the section's title, such as an "Add folder" button.
+    /// Everyday sections given a column of 0 or 1 share a two-column layout.
     QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false,
-                            QWidget* action = nullptr);
+                            QWidget* action = nullptr, int column = -1);
     /// Adds the category's hand-built Advanced rows the first time its Advanced view is built.
     void SetAdvancedBuilder(int category, std::function<void()> build);
     void AddBlock(int category, QWidget* widget, QString search_label, bool advanced = false);
@@ -247,6 +248,7 @@ private:
         QList<QVBoxLayout*> section_rows;
         QWidget* chips = nullptr;
         QWidget* columns = nullptr;
+        QWidget* basic_columns = nullptr;
         int more_section = -1;
         int advanced_rows = 0;
     };

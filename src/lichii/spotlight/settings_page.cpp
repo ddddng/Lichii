@@ -1489,7 +1489,7 @@ void SettingsPage::SetAdvancedBuilder(int category, std::function<void()> build)
 }
 
 QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool advanced_,
-                                      QWidget* action) {
+                                      QWidget* action, int column) {
     if (advanced_) {
         auto& entry = categories[category];
         const int column = static_cast<int>(entry.section_rows.size()) % 2;
@@ -1516,7 +1516,22 @@ QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool a
     rows->setContentsMargins(1, 1, 1, 1);
     rows->setSpacing(0);
     layout->addWidget(surface);
-    AddBlock(category, section, title, advanced_);
+    if (column < 0) {
+        AddBlock(category, section, title, advanced_);
+        return rows;
+    }
+    auto& entry = categories[category];
+    if (entry.basic_columns == nullptr) {
+        entry.basic_columns = new SectionColumns;
+        static_cast<QVBoxLayout*>(entry.panel->layout())
+            ->insertWidget(entry.basic_count++, entry.basic_columns);
+    }
+    static_cast<SectionColumns*>(entry.basic_columns)->Add(section, column);
+    entry.blocks.push_back({section, title, false});
+    if (!building) {
+        RefreshCategory(category);
+        UpdateMode();
+    }
     return rows;
 }
 
@@ -2538,12 +2553,13 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     if (!tooltip.isEmpty() && tooltip != description) {
         row->setToolTip(tooltip);
     }
-    const bool compact = group->parentWidget()->property("compactRows").toBool();
-    row->setMinimumHeight(compact ? 54 : 60);
+    const bool dense = group->parentWidget()->property("denseRows").toBool();
+    const bool compact = dense || group->parentWidget()->property("compactRows").toBool();
+    row->setMinimumHeight(dense ? 44 : compact ? 54 : 60);
     auto* layout = new QHBoxLayout(row);
-    layout->setContentsMargins(compact ? 18 : 14, compact ? 10 : 12, compact ? 16 : 18,
-                               compact ? 10 : 12);
-    layout->setSpacing(14);
+    layout->setContentsMargins(dense ? 12 : compact ? 18 : 14, dense ? 4 : compact ? 10 : 12,
+                               dense ? 12 : compact ? 16 : 18, dense ? 4 : compact ? 10 : 12);
+    layout->setSpacing(dense ? 8 : 14);
     if (compact) {
     } else if (image.isNull()) {
         layout->addWidget(new IconTile(icon, color), 0, Qt::AlignVCenter);
@@ -2558,7 +2574,7 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     copy->setSpacing(compact ? 2 : 3);
     auto* title_line = new QHBoxLayout;
     title_line->setSpacing(8);
-    auto* name = Text(title, compact ? 14 : 15, 600);
+    auto* name = Text(title, dense ? 13 : compact ? 14 : 15, dense ? 500 : 600);
     name->setWordWrap(compact);
     title_line->addWidget(name, compact ? 1 : 0);
     auto* detail = new DescriptionLabel;
@@ -2570,10 +2586,11 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
             .arg(CssColor(Color::TextSecondary())));
     detail->setWordWrap(true);
     detail->setMaximumWidth(420);
+    copy->addStretch();
     copy->addLayout(title_line);
     copy->addWidget(detail);
+    copy->addStretch();
     layout->addLayout(copy, 1);
-    copy->setAlignment(Qt::AlignVCenter);
     if (control != nullptr) {
         if (control->metaObject() == &QWidget::staticMetaObject) {
             control->setProperty("spotlightTransparent", true);
