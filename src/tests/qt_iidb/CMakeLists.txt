@@ -17,6 +17,7 @@ add_executable(iidb_artwork_tests
     ../../lichii/configuration/iidb_key_dialog.cpp
     ../../lichii/game/artwork_image.cpp
     ../../lichii/game/iidb_client.cpp
+    ../../lichii/spotlight/theme.cpp
 )
 target_compile_features(iidb_artwork_tests PRIVATE cxx_std_20)
 target_compile_definitions(iidb_artwork_tests PRIVATE
