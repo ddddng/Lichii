@@ -7,7 +7,9 @@
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QVBoxLayout>
 
 #include "lichii/spotlight/shader_chip.h"
@@ -330,10 +332,45 @@ QWidget* InGameBar::QuickControlsAnchor() const {
     return configuration;
 }
 
+void InGameBar::SetCollapsed(bool collapsed_) {
+    if (collapsed == collapsed_) {
+        return;
+    }
+    collapsed = collapsed_;
+    contents->setVisible(!collapsed);
+    setFixedHeight(collapsed ? 16 : 36);
+    setCursor(collapsed ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    setToolTip(collapsed ? tr("Show the bar") : QString{});
+    update();
+}
+
 void InGameBar::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    painter.fillRect(rect(), Color::Panel());
-    painter.fillRect(QRect{0, 0, width(), 1}, QColor(0xff, 0xff, 0xff, 0x12));
+    const QColor border(0xff, 0xff, 0xff, 0x12);
+    if (!collapsed) {
+        painter.fillRect(rect(), Color::Panel());
+        painter.fillRect(QRect{0, 0, width(), 1}, border);
+        return;
+    }
+    painter.fillRect(rect(), Color::Window());
+    painter.fillRect(QRect{0, 10, width(), 6}, Color::Panel());
+    painter.fillRect(QRect{0, 10, width(), 1}, border);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRectF handle{(width() - 48) / 2 + 0.5, 0.5, 47, 20};
+    QPainterPath tab;
+    tab.addRoundedRect(handle, 6, 6);
+    painter.setClipRect(QRect{0, 0, width(), 11});
+    painter.setPen(QPen(border, 1));
+    painter.setBrush(Color::Panel());
+    painter.drawPath(tab);
+}
+
+void InGameBar::mousePressEvent(QMouseEvent* event) {
+    if (collapsed && event->button() == Qt::LeftButton) {
+        emit ExpandRequested();
+        return;
+    }
+    QStatusBar::mousePressEvent(event);
 }
 
 void InGameBar::resizeEvent(QResizeEvent* event) {

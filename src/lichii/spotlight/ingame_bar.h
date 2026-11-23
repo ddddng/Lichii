@@ -28,6 +28,8 @@ public:
     void SetMenuShortcut(const QString& keyboard, const QString& controller);
     void SetMenuOpen(bool open);
     void SetQuickControlsOpen(bool open);
+    /// Collapsed, the bar is a 6 px strip with a handle (bar-states 15AJ-0); a click expands it.
+    void SetCollapsed(bool collapsed);
     QWidget* QuickControlsAnchor() const;
     ShaderChip* Shaders() const {
         return shaders;
@@ -36,10 +38,12 @@ public:
 signals:
     void MenuRequested();
     void QuickControlsRequested();
+    void ExpandRequested();
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -51,6 +55,7 @@ private:
     BarMetrics* metrics;
     BarChip* menu_button;
     MenuTooltip* menu_tooltip;
+    bool collapsed = false;
 };
 
 } // namespace Spotlight

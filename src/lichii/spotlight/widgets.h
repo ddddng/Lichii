@@ -100,6 +100,7 @@ public:
     explicit SegmentedControl(QStringList options, Kind kind = Kind::Accent, int height = 40,
                               QWidget* parent = nullptr);
     int CurrentIndex() const { return current; }
+    /// -1 selects no option.
     void SetCurrentIndex(int index);
     /// Selects no option, for a state none of the options describes.
     void ClearSelection();

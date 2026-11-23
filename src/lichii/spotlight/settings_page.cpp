@@ -43,6 +43,7 @@
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
+#include "qt_common/util/vk.h"
 
 namespace Spotlight {
 namespace {
@@ -836,6 +837,12 @@ int PerformancePresetIndex(const PerformancePreset& values) {
         }
     }
     return -1;
+}
+
+int SuggestedPresetTier(const VkDeviceInfo::Record* device) {
+    return device == nullptr
+               ? 0
+               : SuggestedPresetTier(QString::fromStdString(device->name), device->fsr4_capable);
 }
 
 QString PerformancePresetName(int index) {

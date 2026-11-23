@@ -47,6 +47,7 @@
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/spotlight/confirm.h"
 #include "lichii/spotlight/fullscreen_hint.h"
 #include "lichii/spotlight/ingame_bar.h"
 #include "lichii/spotlight/ingame_menu.h"
@@ -1504,6 +1505,7 @@ void MainWindow::InitializeWidgets() {
     });
 
     const Spotlight::InGameControls controls{.renderer = renderer,
+                                             .console = console,
                                              .filter = filter,
                                              .frame_gen = frame_gen,
                                              .more = quick_controls,
@@ -1546,6 +1548,8 @@ void MainWindow::InitializeWidgets() {
         quick_panel->Open(ingame_bar->QuickControlsAnchor(), ingame_bar);
     });
     connect(ingame_bar, &Spotlight::InGameBar::MenuRequested, this, &MainWindow::ToggleInGameMenu);
+    connect(ingame_bar, &Spotlight::InGameBar::ExpandRequested, ui->action_Show_Status_Bar,
+            &QAction::trigger);
     auto* shaders = ingame_bar->Shaders();
     connect(shaders, &Spotlight::ShaderChip::AboutToOpen, this, [shaders] {
         const u64 program = QtCommon::system->GetApplicationProcessProgramID();
@@ -1596,6 +1600,20 @@ void MainWindow::InitializeRecentFileMenuActions() {
 }
 
 namespace {
+
+bool ConfirmCard(QWidget* parent, const QString& title, const QString& text, const QString& action,
+                 const QString& icon) {
+    Spotlight::ConfirmDialog dialog(parent, title, text, action, icon);
+    auto* navigation = new ControllerNavigation(QtCommon::system->HIDCore(), &dialog);
+    QObject::connect(navigation, &ControllerNavigation::TriggerKeyboardEvent, &dialog,
+                     [&dialog](Qt::Key key) {
+                         QCoreApplication::postEvent(
+                             &dialog, new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier));
+                     });
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    navigation->UnloadController();
+    return accepted;
+}
 
 QString ControllerKeys(std::string_view action) {
     for (const auto& shortcut : UISettings::values.shortcuts) {
@@ -4327,8 +4345,7 @@ void MainWindow::ResetWindowSize(u32 width, u32 height) {
             render_window->showNormal();
         }
     }
-    const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
-    const auto status_bar_height = (single_window && show_status_bar) ? statusBar()->height() : 0;
+    const auto status_bar_height = single_window ? statusBar()->height() : 0;
     const auto menu_bar_height = single_window && menuBar()->isVisible() ? menuBar()->height() : 0;
     const auto title_bar_height = running_title_bar->isVisible() ? running_title_bar->height() : 0;
     const auto extra_height = menu_bar_height + title_bar_height + status_bar_height;
@@ -5215,8 +5232,8 @@ void MainWindow::OnFocusLibrarySearch() {
 }
 
 void MainWindow::OnToggleStatusBar() {
-    ingame_bar->setVisible(emulation_running && !ingame_fullscreen &&
-                           !loading_screen->isVisible() && ui->action_Show_Status_Bar->isChecked());
+    ingame_bar->SetCollapsed(!ui->action_Show_Status_Bar->isChecked());
+    ingame_bar->setVisible(emulation_running && !ingame_fullscreen && !loading_screen->isVisible());
 }
 
 void MainWindow::OnTogglePerfOverlay() {
@@ -6383,6 +6400,12 @@ void MainWindow::UpdateInGameGraphicsSummary() {
         }
         break;
     }
+    const int preset = Spotlight::PerformancePresetIndex(
+        {values.resolution_setup.GetValue(), values.scaling_filter.GetValue(),
+         values.anti_aliasing.GetValue(), values.frame_gen.GetValue()});
+    const u32 device = values.vulkan_device.GetValue();
+    const int auto_tier = Spotlight::SuggestedPresetTier(
+        device < vk_device_records.size() ? &vk_device_records[device] : nullptr);
     const Spotlight::InGameSummary summary{
         .renderer = text(ConfigurationShared::renderer_backend_texts_map,
                          values.renderer_backend.GetValue()),
@@ -6394,9 +6417,9 @@ void MainWindow::UpdateInGameGraphicsSummary() {
         .speed_keys = turbo_key.isEmpty() || slow_key.isEmpty()
                           ? turbo_key + slow_key
                           : tr("%1 / %2").arg(turbo_key, slow_key),
-        .preset = Spotlight::PerformancePresetIndex(
-            {values.resolution_setup.GetValue(), values.scaling_filter.GetValue(),
-             values.anti_aliasing.GetValue(), values.frame_gen.GetValue()}),
+        .preset = preset == -1          ? -1
+                  : preset == auto_tier ? 0
+                                        : preset + 1,
         .preset_global = values.resolution_setup.UsingGlobal() &&
                          values.scaling_filter.UsingGlobal() &&
                          values.anti_aliasing.UsingGlobal() && values.frame_gen.UsingGlobal(),
@@ -6825,8 +6848,9 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Lichii?");
-    return question(this, tr("Lichii"), text);
+    return ConfirmCard(this, tr("Close Lichii?"),
+                       tr("The game is still running. Any unsaved progress will be lost."),
+                       tr("Close"), QStringLiteral("x"));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -6930,21 +6954,18 @@ bool MainWindow::ConfirmChangeGame() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    // Use custom question to link controller navigation
-    return question(
-        this, tr("Lichii"),
-        tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    return ConfirmCard(this, tr("Stop the game?"), tr("Any unsaved progress will be lost."),
+                       tr("Stop"), QStringLiteral("stop-fill"));
 }
 
 bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Lichii to not exit.\n\n"
-                         "Would you like to bypass this and exit anyway?");
-
-    return question(this, tr("Lichii"), text);
+    return ConfirmCard(this, tr("Exit anyway?"),
+                       tr("The running game asked Lichii not to exit. Any unsaved progress will "
+                          "be lost."),
+                       tr("Exit anyway"), QStringLiteral("stop-fill"));
 }
 
 void MainWindow::RequestGameExit() {
