@@ -187,18 +187,13 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);
     game_dirs = UISettings::values.game_dirs;
-    general_tab->SetResetCallback([this] { close(); });
+    general_tab->SetResetCallback([this] { done(QDialog::Rejected); });
     connect(ui_tab.get(), &ConfigureUi::LanguageChanged, this, &ConfigureDialog::OnLanguageChanged);
     connect(general_tab.get(), &ConfigureGeneral::ExternalContentDirsChanged, this,
             &ConfigureDialog::ExternalContentDirsChanged);
 
-    if (system.IsPoweredOn()) {
-        auto* apply = ui->buttonBox->addButton(QDialogButtonBox::Apply);
-        connect(apply, &QPushButton::clicked, this, &ConfigureDialog::HandleApplyButtonClicked);
-    }
-    ui->label->setVisible(system.IsPoweredOn());
+    ui->footer->setVisible(system.IsPoweredOn());
     BuildSettings();
-    ui->buttonBox->setFocus();
     ConfigurationShared::FitToScreen(this, QSize(1280, 800));
 }
 
@@ -230,7 +225,7 @@ void ConfigureDialog::ApplyConfiguration() {
     if (check_updates != nullptr) {
         UISettings::values.check_for_updates.SetValue(check_updates->isChecked());
     }
-    if (start_fullscreen->isEnabled() &&
+    if (start_fullscreen != nullptr && start_fullscreen->isEnabled() &&
         UISettings::values.fullscreen.GetValue() != start_fullscreen->isChecked()) {
         UISettings::values.fullscreen.SetValue(start_fullscreen->isChecked());
         emit FullscreenOnStartChanged(start_fullscreen->isChecked());
@@ -257,9 +252,8 @@ void ConfigureDialog::changeEvent(QEvent* event) {
     QDialog::changeEvent(event);
 }
 
-void ConfigureDialog::HandleApplyButtonClicked() {
-    UISettings::values.configuration_applied = true;
-    ApplyConfiguration();
+void ConfigureDialog::reject() {
+    accept();
 }
 
 void ConfigureDialog::OnLanguageChanged(const QString& locale) {
@@ -276,7 +270,7 @@ void ConfigureDialog::BuildSettings() {
     ui->verticalLayout->setSpacing(0);
     ui->verticalLayout->addWidget(settings_page);
     settings_page->SetFooter(ui->footer);
-    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::reject);
+    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::accept);
 
     const int general =
         settings_page->AddCategory(tr("General"), tr("Preset, look, folders and updates"),

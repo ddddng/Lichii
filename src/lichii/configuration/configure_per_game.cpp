@@ -400,10 +400,6 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         ui->button_browse_iidb->setEnabled(true);
         ui->display_name->setEnabled(true);
         ui->allow_online_detection->setEnabled(true);
-        ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(true);
-        if (auto* apply = ui->buttonBox->button(QDialogButtonBox::Apply)) {
-            apply->setEnabled(true);
-        }
         auto out = detect_watcher.result();
         if (out.icon.isNull()) {
             UpdateRemoveIconButton();
@@ -416,13 +412,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         StageCustomIcon(std::move(out.icon));
     });
 
-    if (system.IsPoweredOn()) {
-        QPushButton* apply_button = ui->buttonBox->addButton(QDialogButtonBox::Apply);
-        connect(apply_button, &QAbstractButton::clicked, this,
-                &ConfigurePerGame::HandleApplyButtonClicked);
-    }
-
-    ui->label_8->setVisible(system.IsPoweredOn());
+    ui->footer->setVisible(system.IsPoweredOn());
     BuildSettings();
     UpdateIconPreview({});
     ConfigurationShared::FitToScreen(this, QSize(1280, 800));
@@ -437,7 +427,7 @@ void ConfigurePerGame::BuildSettings() {
     ui->verticalLayout_3->setSpacing(0);
     ui->verticalLayout_3->addWidget(settings_page);
     settings_page->SetFooter(ui->footer);
-    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::reject);
+    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::accept);
 
     const int overview = settings_page->AddCategory(
         tr("Overview"), tr("Only what you change here differs from global"),
@@ -511,7 +501,7 @@ void ConfigurePerGame::BuildSettings() {
         }
         QtCommon::Game::RemoveCustomConfiguration(title_id,
                                                   Common::FS::PathToUTF8String(file_path));
-        reject();
+        done(QDialog::Rejected);
     });
     banner_layout->addWidget(reset, 0, Qt::AlignVCenter);
     settings_page->SetBanner(banner, {overview, graphics, frame_rate});
@@ -847,6 +837,10 @@ void ConfigurePerGame::done(int result) {
     QDialog::done(result);
 }
 
+void ConfigurePerGame::reject() {
+    accept();
+}
+
 void ConfigurePerGame::ApplyConfiguration() {
     for (const auto tab : *tab_group) {
         tab->ApplyConfiguration();
@@ -880,14 +874,6 @@ void ConfigurePerGame::RetranslateUI() {
     setWindowTitle(tr("Game Settings"));
 }
 
-void ConfigurePerGame::HandleApplyButtonClicked() {
-    if (detect_watcher.isRunning() || !SaveCustomMetadata(true)) {
-        return;
-    }
-    UISettings::values.configuration_applied = true;
-    ApplyConfiguration();
-}
-
 void ConfigurePerGame::LoadFromFile(FileSys::VirtualFile file_) {
     file = std::move(file_);
     LoadConfiguration();
@@ -913,11 +899,6 @@ void ConfigurePerGame::LoadConfiguration() {
     const auto loader = Loader::GetLoader(system, file, title_id);
 
     is_nup_file = loader != nullptr && loader->GetFileType() == Loader::FileType::NUP;
-    if (is_nup_file && !ui->buttonBox->button(QDialogButtonBox::Apply)) {
-        auto* apply_button = ui->buttonBox->addButton(QDialogButtonBox::Apply);
-        connect(apply_button, &QAbstractButton::clicked, this,
-                &ConfigurePerGame::HandleApplyButtonClicked);
-    }
     // Custom artwork is stored per program ID, outside the game file, so it works for every
     // format and while a game runs.
     ui->nup_icon_widget->setVisible(title_id != 0);
@@ -1097,10 +1078,6 @@ void ConfigurePerGame::OnDetectNupIcon() {
     ui->button_remove_icon->setEnabled(false);
     ui->display_name->setEnabled(false);
     ui->allow_online_detection->setEnabled(false);
-    ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
-    if (auto* apply = ui->buttonBox->button(QDialogButtonBox::Apply)) {
-        apply->setEnabled(false);
-    }
 
     detect_cancel = std::make_shared<std::atomic_bool>(false);
     const bool allow_online = ui->allow_online_detection->isChecked();

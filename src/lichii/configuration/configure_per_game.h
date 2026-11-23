@@ -97,10 +97,10 @@ signals:
 
 private:
     void done(int result) override;
+    void reject() override;
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
 
-    void HandleApplyButtonClicked();
     void BuildSettings();
     void BuildAddons(int mods, int updates);
     void RebuildAddons();

@@ -97,7 +97,7 @@ signals:
 
 private:
     void changeEvent(QEvent* event) override;
-    void HandleApplyButtonClicked();
+    void reject() override;
     struct PresetSources {
         QComboBox* resolution = nullptr;
         QComboBox* filter = nullptr;
