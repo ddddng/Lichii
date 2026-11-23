@@ -62,7 +62,8 @@ protected:
 private:
     void UpdateChrome();
     void UpdateSelection(const QModelIndex& game, int count);
-    QPixmap RenderBackdrop(const QImage& image) const;
+    void ShowArt(const QImage& image, const QColor& color);
+    QPixmap RenderBackdrop(const QImage& image, const QColor& color) const;
 
     QMainWindow* owner;
     GameList* games;
@@ -81,8 +82,10 @@ private:
     bool temporary_menu = false;
 
     QImage art;
+    QColor tint;
     QPixmap backdrop;
     QPixmap previous_backdrop;
+    u64 art_id = 0;
     qint64 art_key = 0;
     QVariantAnimation fade;
 };

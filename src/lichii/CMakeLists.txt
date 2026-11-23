@@ -258,6 +258,7 @@ add_executable(lichii
 
     spotlight/theme.cpp spotlight/theme.h
     spotlight/hero.cpp spotlight/hero.h
+    spotlight/hero_art.cpp spotlight/hero_art.h
     spotlight/launcher.cpp spotlight/launcher.h
     spotlight/library_header.cpp spotlight/library_header.h
     spotlight/menu.cpp spotlight/menu.h

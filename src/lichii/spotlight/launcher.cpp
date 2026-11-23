@@ -18,6 +18,7 @@
 #include "lichii/game/game_list.h"
 #include "lichii/game/search_field.h"
 #include "lichii/spotlight/hero.h"
+#include "lichii/spotlight/hero_art.h"
 #include "lichii/spotlight/launcher.h"
 #include "lichii/spotlight/library_header.h"
 #include "lichii/spotlight/menu.h"
@@ -119,6 +120,11 @@ Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* p
     fade.setEndValue(1.0);
     fade.setDuration(150);
     connect(&fade, &QVariantAnimation::valueChanged, this, qOverload<>(&QWidget::update));
+    connect(&HeroArt::Instance(), &HeroArt::Ready, this, [this](u64 program_id) {
+        if (program_id == art_id) {
+            ShowArt(HeroArt::Instance().Image(program_id), tint);
+        }
+    });
     SetLibraryAvailable(false);
     UpdateChrome();
 }
@@ -235,33 +241,37 @@ void Launcher::UpdateSelection(const QModelIndex& game, int count) {
     }
     showing_game = game.isValid();
     library->SetCount(count);
+    QString title = game.data(GameListItemPath::TitleRole).toString();
+    if (title.isEmpty()) {
+        title = QFileInfo(game.data(GameListItemPath::FullPathRole).toString()).completeBaseName();
+    }
+    const u64 id = game.data(GameListItemPath::ProgramIdRole).toULongLong();
     if (game.isValid()) {
-        QString title = game.data(GameListItemPath::TitleRole).toString();
-        if (title.isEmpty()) {
-            title =
-                QFileInfo(game.data(GameListItemPath::FullPathRole).toString()).completeBaseName();
-        }
-        const u64 id = game.data(GameListItemPath::ProgramIdRole).toULongLong();
         hero->SetGame(title, Lichii::PlatformOf(game), playtime.GetPlayTime(id));
     } else {
         hero->SetEmpty(library_available, count == 0 && !games->IsPopulating());
     }
 
-    const QPixmap image = game.data(Qt::DecorationRole).value<QPixmap>();
-    if (image.cacheKey() != art_key) {
-        art_key = image.cacheKey();
-        art = image.isNull() ? QImage{}
-                             : image.toImage()
-                                   .scaled(8, 8, Qt::KeepAspectRatio, Qt::SmoothTransformation)
-                                   .scaled(144, 144, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        previous_backdrop = backdrop;
-        backdrop = {};
-        fade.stop();
-        fade.start();
+    const QPixmap icon = game.data(Qt::DecorationRole).value<QPixmap>();
+    if (id != art_id || icon.cacheKey() != art_key) {
+        art_id = id;
+        art_key = icon.cacheKey();
+        HeroArt::Instance().Request(id, title);
+        ShowArt(HeroArt::Instance().Image(id),
+                game.data(GameListItemPath::HasIconRole).toBool() ? HeroArt::Tint(icon) : QColor{});
     }
 }
 
-QPixmap Launcher::RenderBackdrop(const QImage& image) const {
+void Launcher::ShowArt(const QImage& image, const QColor& color) {
+    art = image;
+    tint = color;
+    previous_backdrop = backdrop;
+    backdrop = {};
+    fade.stop();
+    fade.start();
+}
+
+QPixmap Launcher::RenderBackdrop(const QImage& image, const QColor& color) const {
     const qreal ratio = devicePixelRatioF();
     QPixmap result(size() * ratio);
     result.setDevicePixelRatio(ratio);
@@ -272,14 +282,11 @@ QPixmap Launcher::RenderBackdrop(const QImage& image) const {
     const int canvas_height = std::max(height(), 800);
     const QRectF bounds(240, 0, canvas_width - 240, canvas_height * 0.73125);
     if (!image.isNull()) {
-        const QSizeF area =
-            QSizeF(image.size()).scaled(bounds.size(), Qt::KeepAspectRatioByExpanding);
-        const QPointF origin = bounds.center() - QPointF(area.width() / 2, area.height() / 2);
-        painter.setClipRect(bounds);
         painter.setOpacity(0.9);
-        painter.drawImage(QRectF(origin, area), image);
+        HeroArt::Paint(painter, bounds, image);
         painter.setOpacity(1.0);
-        painter.setClipping(false);
+    } else if (color.isValid()) {
+        painter.fillRect(bounds, color);
     }
 
     const auto scrim = [](int opacity) {
@@ -308,12 +315,12 @@ void Launcher::paintEvent(QPaintEvent*) {
                pixmap.devicePixelRatio() != devicePixelRatioF();
     };
     if (stale(backdrop)) {
-        backdrop = RenderBackdrop(art);
+        backdrop = RenderBackdrop(art, tint);
     }
     QPainter painter(this);
     if (fade.state() == QAbstractAnimation::Running) {
         if (stale(previous_backdrop)) {
-            previous_backdrop = RenderBackdrop({});
+            previous_backdrop = RenderBackdrop({}, {});
         }
         painter.drawPixmap(0, 0, previous_backdrop);
         painter.setOpacity(fade.currentValue().toReal());
