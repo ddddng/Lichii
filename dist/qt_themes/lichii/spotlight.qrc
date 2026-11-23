@@ -29,6 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/caret-up.png</file>
         <file>spotlight/icons/chat-circle.png</file>
         <file>spotlight/icons/check-circle-fill.png</file>
+        <file>spotlight/icons/check-circle.png</file>
         <file>spotlight/icons/check.png</file>
         <file>spotlight/icons/circle-fill.png</file>
         <file>spotlight/icons/circle-notch.png</file>
