@@ -24,6 +24,14 @@ public:
     /// Adds a menu that also lives elsewhere, such as in the menu bar, with an icon only the menu
     /// panels show.
     void AddSharedMenu(QMenu* menu, const QIcon& icon);
+
+    enum class Heading {
+        Label, ///< 12 px secondary text, as "Sort by".
+        Caps,  ///< 11 px uppercase muted text, as "COLUMNS".
+    };
+
+    /// Adds a heading row that can't be selected.
+    void AddHeading(const QString& text, Heading style);
 };
 
 /// Shows a hotkey the action doesn't own as its hint, with the controller hotkey after the keyboard

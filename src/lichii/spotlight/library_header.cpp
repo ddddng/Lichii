@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <tuple>
 
 #include <QActionGroup>
 #include <QHBoxLayout>
@@ -29,7 +30,12 @@ public:
     }
 
     QSize sizeHint() const override {
-        return {fontMetrics().horizontalAdvance(text()) + 68, 34};
+        return {fontMetrics().horizontalAdvance(text()) + 69, 34};
+    }
+
+    void SetOpen(bool open_) {
+        open = open_;
+        update();
     }
 
 protected:
@@ -37,16 +43,17 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(HasKeyboardFocus(this) ? Color::Accent() : Color::Stroke());
-        painter.setBrush(underMouse() ? Color::ControlHover() : Color::Control());
+        painter.setBrush(underMouse() || open ? Color::ControlHover()
+                                              : QColor(255, 255, 255, 0x24));
         painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 17, 17);
-        painter.drawPixmap(12, 9,
-                           IconPixmap(u"sort-ascending", 16, Color::Text(), devicePixelRatioF()));
+        const auto ratio = devicePixelRatioF();
+        painter.drawPixmap(12, 10, IconPixmap(u"sort-ascending", 15, Color::Text(), ratio));
         painter.drawPixmap(
-            width() - 26, 9,
-            IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
+            width() - 26, 10,
+            IconPixmap(open ? u"caret-up" : u"caret-down", 14, Color::TextSecondary(), ratio));
         painter.setPen(Color::Text());
         painter.setFont(font());
-        painter.drawText(QRect(35, 0, width() - 68, height()), Qt::AlignVCenter | Qt::AlignLeft,
+        painter.drawText(QRect(35, 0, width() - 69, height()), Qt::AlignVCenter | Qt::AlignLeft,
                          text());
     }
 
@@ -56,19 +63,22 @@ protected:
     void leaveEvent(QEvent*) override {
         update();
     }
+
+private:
+    bool open = false;
 };
 
 class ViewButtons final : public QWidget {
 public:
     ViewButtons(QAction* grid, QAction* list, QWidget* parent) : QWidget(parent) {
-        setFixedSize(74, 34);
+        setFixedSize(72, 34);
         setStyleSheet(QStringLiteral("background: transparent;"));
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(3, 3, 3, 3);
         row->setSpacing(2);
         const auto add = [&](QAction* action, QStringView icon_name, const QString& label) {
             auto* button = new QToolButton(this);
-            button->setFixedSize(33, 28);
+            button->setFixedSize(32, 28);
             button->setIconSize({15, 15});
             button->setToolTip(label);
             button->setAccessibleName(label);
@@ -79,14 +89,11 @@ public:
                 QStringLiteral("QToolButton { border: 1px solid transparent; border-radius: 9px; "
                                "padding: 0; } "
                                "QToolButton:hover { background: rgba(255,255,255,20); } "
-                               "QToolButton:checked { background: white; } "
+                               "QToolButton:checked { background: rgba(255,255,255,46); } "
                                "QToolButton:focus { border-color: %1; }")
                     .arg(Color::Accent().name()));
-            const auto sync = [button, action, name = icon_name.toString()] {
-                button->setChecked(action->isChecked());
-                button->setIcon(
-                    Icon(name, action->isChecked() ? Color::OnLight() : Color::Text(), 15));
-            };
+            button->setIcon(Icon(icon_name, Color::Text(), 15));
+            const auto sync = [button, action] { button->setChecked(action->isChecked()); };
             sync();
             connect(action, &QAction::changed, button, sync);
             connect(button, &QToolButton::clicked, action, [action, sync] {
@@ -103,9 +110,9 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(Color::Stroke());
-        painter.setBrush(Color::Control());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 17, 17);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Fill());
+        painter.drawRoundedRect(rect(), 12, 12);
     }
 };
 
@@ -134,20 +141,26 @@ LibraryHeader::LibraryHeader(QAction* grid, QAction* list, QWidget* parent)
     row->addWidget(sort);
 
     auto* menu = new Menu(this);
+    menu->setMinimumWidth(260);
+    menu->AddHeading(tr("Sort by"), Menu::Heading::Label);
     using enum Lichii::LibrarySort;
     const std::array options{
-        std::pair{Recent, tr("Recently played")},
-        std::pair{Name, tr("Name")},
-        std::pair{PlayTime, tr("Play time")},
-        std::pair{Size, tr("Size")},
+        std::tuple{Recent, tr("Recently played"), tr("Recently played")},
+        std::tuple{Name, tr("Name"), tr("Name (A–Z)")},
+        std::tuple{PlayTime, tr("Play time"), tr("Play time (most first)")},
+        std::tuple{Size, tr("Size"), tr("Size (largest first)")},
     };
-    for (const auto& [key, text] : options) {
+    for (const auto& [key, label, text] : options) {
         auto* choice = menu->addAction(text);
+        choice->setData(label);
         choice->setCheckable(true);
         choice->setChecked(key == Recent);
         sort_choices->addAction(choice);
         connect(choice, &QAction::triggered, this, [this, key] { emit SortChanged(key); });
     }
+    auto* sort_button = static_cast<SortButton*>(sort);
+    connect(menu, &QMenu::aboutToShow, sort, [sort_button] { sort_button->SetOpen(true); });
+    connect(menu, &QMenu::aboutToHide, sort, [sort_button] { sort_button->SetOpen(false); });
     connect(sort, &QAbstractButton::clicked, menu, [this, menu] {
         menu->popup(sort->mapToGlobal(
             QPoint(sort->width() - menu->sizeHint().width(), sort->height() + 5)));
@@ -163,7 +176,7 @@ void LibraryHeader::SetSortLabel(const QString& column_name) {
     const auto label = column_name.isEmpty() ? tr("Recently played") : column_name;
     sort->setText(label);
     for (auto* choice : sort_choices->actions()) {
-        choice->setChecked(choice->text() == label);
+        choice->setChecked(choice->data().toString() == label);
     }
 }
 

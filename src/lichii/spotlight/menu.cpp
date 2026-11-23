@@ -4,10 +4,12 @@
 #include <algorithm>
 
 #include <QApplication>
+#include <QLabel>
 #include <QMenuBar>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QStyleOptionMenuItem>
+#include <QWidgetAction>
 
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
@@ -103,8 +105,8 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
                                                                              : Color::MenuInk();
         const QIcon panel_icon = action->property(PanelIcon).value<QIcon>();
         const QIcon icon = !panel_icon.isNull() ? panel_icon
-                           : in_menu_bar         ? QIcon{}
-                                                 : action->icon();
+                           : in_menu_bar        ? QIcon{}
+                                                : action->icon();
         if (action->isChecked()) {
             painter.drawPixmap(leading.topLeft(), IconPixmap(u"check", 16, Color::Accent(), ratio));
         } else if (!icon.isNull()) {
@@ -192,6 +194,25 @@ Menu* Menu::AddSubmenu(const QIcon& icon, const QString& title) {
 
 void Menu::AddSharedMenu(QMenu* menu, const QIcon& icon) {
     addMenu(menu)->setProperty(PanelIcon, icon);
+}
+
+void Menu::AddHeading(const QString& text, Heading style) {
+    const bool caps = style == Heading::Caps;
+    auto* label = new QLabel(text, this);
+    QFont font = Font(caps ? 11 : 12, 600);
+    if (caps) {
+        font.setCapitalization(QFont::AllUppercase);
+        font.setLetterSpacing(QFont::PercentageSpacing, 106);
+    }
+    label->setFont(font);
+    label->setContentsMargins(12, caps ? 8 : 6, 12, caps ? 4 : 6);
+    label->setStyleSheet(
+        QStringLiteral("color: %1; background: transparent;")
+            .arg((caps ? Color::TextMuted() : Color::TextSecondary()).name(QColor::HexArgb)));
+    auto* action = new QWidgetAction(this);
+    action->setDefaultWidget(label);
+    action->setEnabled(false);
+    addAction(action);
 }
 
 void SetHotkeyHint(QAction* action, const QKeySequence& keys, const QString& controller) {
