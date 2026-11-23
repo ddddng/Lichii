@@ -91,6 +91,7 @@ public:
         if (close_button) {
             close = new CircleButton(QStringLiteral("x"), CloseSize, dialog);
             close->setToolTip(QDialog::tr("Close"));
+            close->setFocusPolicy(Qt::NoFocus);
             connect(close, &QAbstractButton::clicked, dialog, &QDialog::reject);
         }
         dialog->installEventFilter(this);
