@@ -55,6 +55,7 @@
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/shader_chip.h"
+#include "lichii/spotlight/startup_prompt.h"
 #include "lichii/spotlight/style.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
@@ -712,8 +713,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (has_broken_vulkan) {
         UISettings::values.has_broken_vulkan = true;
 
-        QMessageBox::warning(this, tr("Broken Vulkan Installation Detected"),
-                             tr("Vulkan initialization failed during boot."));
+        Spotlight::StartupPrompt::Notify(this, Spotlight::StartupPrompt::Tone::Warning,
+                                         tr("Broken Vulkan Installation Detected"),
+                                         tr("Vulkan initialization failed during boot."));
 #ifdef HAS_OPENGL
         Settings::values.renderer_backend = Settings::RendererBackend::OpenGL_GLSL;
 #else
@@ -6949,13 +6951,15 @@ void MainWindow::OnCheckFirmwareDecryption(bool prompt) {
                     Common::FS::PathToUTF8String(
                         Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir)));
     } else if (!ContentManager::AreKeysPresent()) {
-        const auto res = QtCommon::Frontend::Warning(
-            tr("Derivation Components Missing"),
-            tr("Decryption keys are missing. Install them now?"),
-            QtCommon::Frontend::StandardButton::Yes | QtCommon::Frontend::StandardButton::No);
-
-        if (res == QtCommon::Frontend::StandardButton::Yes)
+        Spotlight::StartupPrompt prompt(this, Spotlight::StartupPrompt::Tone::Warning,
+                                        tr("Derivation Components Missing"),
+                                        tr("Decryption keys are missing. Install them now?"));
+        prompt.AddButton(tr("No"), false);
+        auto* yes = prompt.AddButton(tr("Yes"), true);
+        prompt.exec();
+        if (prompt.ClickedButton() == yes) {
             OnInstallDecryptionKeys();
+        }
     }
 
     SetFirmwareVersion();
@@ -6980,34 +6984,24 @@ void MainWindow::OnCheckGraphicsBackend() {
     if (currently_hidden)
         return;
 
-    QMessageBox msgbox(this);
-    msgbox.setWindowTitle(tr("Wayland Detected!"));
-    msgbox.setText(
-        tr("Wayland is known to have significant performance issues and mysterious bugs.\n"
-           "It's recommended to use X11 instead.\n\n"
-           "Would you like to force it for future launches?"));
-    msgbox.setIcon(QMessageBox::Warning);
+    Spotlight::StartupPrompt prompt(
+        this, Spotlight::StartupPrompt::Tone::Warning, tr("Wayland Detected!"),
+        tr("Wayland can cause performance problems. Use X11 for future launches?"));
+    auto* hide = prompt.AddCheckBox(tr("Don't show again"));
+    prompt.AddButton(tr("Continue with Wayland"), false);
+    auto* use_x11 = prompt.AddButton(tr("Use X11"), true);
+    prompt.exec();
 
-    QPushButton* okButton = msgbox.addButton(tr("Use X11"), QMessageBox::AcceptRole);
-    msgbox.addButton(tr("Continue with Wayland"), QMessageBox::RejectRole);
-    msgbox.setDefaultButton(okButton);
-
-    QCheckBox* cb = new QCheckBox(tr("Don't show again"), &msgbox);
-    cb->setChecked(currently_hidden);
-    msgbox.setCheckBox(cb);
-
-    msgbox.exec();
-
-    const bool hide = cb->isChecked();
-    if (hide != currently_hidden) {
-        UISettings::values.gui_hide_backend_warning.SetValue(hide);
+    if (hide->isChecked()) {
+        UISettings::values.gui_hide_backend_warning.SetValue(true);
     }
 
-    if (msgbox.clickedButton() == okButton) {
+    if (prompt.ClickedButton() == use_x11) {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
-        QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Lichii to apply the X11 backend."));
+        Spotlight::StartupPrompt::Notify(this, Spotlight::StartupPrompt::Tone::Info,
+                                         tr("Restart Required"),
+                                         tr("Restart Lichii to apply the X11 backend."));
     }
 }
 #endif
