@@ -382,11 +382,10 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             nvidia_dlss_panel = new NvidiaDlssPanel(group);
             group_layout->addWidget(nvidia_dlss_panel);
             hold_graphics.emplace(setting->Id(), group);
-        } else if (auto* options =
-                       nvidia_dlss_panel != nullptr
-                           ? nvidia_dlss_panel->findChild<QVBoxLayout*>(
-                                 QStringLiteral("dlssRuntimeOptions"))
-                           : nullptr;
+        } else if (auto* options = nvidia_dlss_panel != nullptr
+                                       ? nvidia_dlss_panel->findChild<QVBoxLayout*>(
+                                             QStringLiteral("dlssRuntimeOptions"))
+                                       : nullptr;
                    options != nullptr &&
                    (setting->Id() == Settings::values.nvidia_dlss_quality.Id() ||
                     setting->Id() == Settings::values.nvidia_dlss_preset.Id())) {
