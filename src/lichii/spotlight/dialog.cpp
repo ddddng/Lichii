@@ -341,7 +341,7 @@ private:
         if (box) {
             return;
         }
-        QSize size = dialog->size();
+        QSize size = dialog->testAttribute(Qt::WA_Resized) ? dialog->size() : QSize();
         if (dialog->testAttribute(Qt::WA_Resized)) {
             const QMargins margins = dialog->contentsMargins();
             const QSize minimum = dialog->minimumSize();
