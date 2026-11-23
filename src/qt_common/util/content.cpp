@@ -18,26 +18,22 @@
 #include "qt_common/qt_common.h"
 
 #include <JlCompress.h>
+#include <QClipboard>
 #include <QFuture>
 #include <QFutureWatcher>
+#include <QGuiApplication>
 #include <QtConcurrentRun>
 
 namespace QtCommon::Content {
 
-bool CheckGameFirmware(u64 program_id) {
-    if (FirmwareManager::GameRequiresFirmware(program_id) &&
-        !FirmwareManager::CheckFirmwarePresence(*system)) {
-        auto result = QtCommon::Frontend::Warning(
-            tr("Game Requires Firmware"),
-            tr("This game may require firmware to function properly, and you don't have any installed. "
-                "Please install firmware before launching, or press \"OK\" to launch anyways."),
-            QtCommon::Frontend::Ok | QtCommon::Frontend::Cancel);
+namespace {
 
-        return result == QtCommon::Frontend::Ok;
-    }
-
-    return true;
+QString MissingFilesText(std::size_t count, const QString& names) {
+    return count == 1 ? tr("1 file is corrupt or missing: %1").arg(names)
+                      : tr("%1 files are corrupt or missing: %2").arg(qsizetype(count)).arg(names);
 }
+
+} // namespace
 
 void InstallFirmware(const QString& location, bool recursive) {
     // Initialize a progress dialog.
@@ -162,8 +158,13 @@ void InstallFirmware(const QString& location, bool recursive) {
         const auto failed_names =
             QString::fromStdString(fmt::format("{}", fmt::join(results, ", ")));
         progress->close();
-        QtCommon::Frontend::Critical(tr("Firmware verification failed"),
-                                     tr("Corrupt or missing: %1").arg(failed_names));
+        if (QtCommon::Frontend::ShowChoice(
+                QtCommon::Frontend::Icon::Critical, tr("Firmware verification failed"),
+                MissingFilesText(results.size(), failed_names), tr("Copy list"), tr("Close"),
+                QtCommon::Frontend::ChoiceKind::Outlined)) {
+            QGuiApplication::clipboard()->setText(
+                QString::fromStdString(fmt::format("{}", fmt::join(results, "\n"))));
+        }
         return;
     }
 
@@ -283,8 +284,13 @@ void VerifyInstalledContents() {
     } else {
         const auto failed_names =
             QString::fromStdString(fmt::format("{}", fmt::join(result, ", ")));
-        QtCommon::Frontend::Critical(tr("Verification failed"),
-                                     tr("Corrupt or missing: %1").arg(failed_names));
+        if (QtCommon::Frontend::ShowChoice(
+                QtCommon::Frontend::Icon::Critical, tr("Verification failed"),
+                MissingFilesText(result.size(), failed_names), tr("Copy list"), tr("Close"),
+                QtCommon::Frontend::ChoiceKind::Outlined)) {
+            QGuiApplication::clipboard()->setText(
+                QString::fromStdString(fmt::format("{}", fmt::join(result, "\n"))));
+        }
     }
 }
 
@@ -343,15 +349,42 @@ void FixProfiles() {
 
 void ClearDataDir(FrontendCommon::DataManager::DataDir dir, const std::string& user_id) {
     using namespace QtCommon::Frontend;
-    auto result = Warning(tr("Really clear data?"), tr("Important data may be lost!"), Yes | No);
-
-    if (result != Yes)
+    using FrontendCommon::DataManager::DataDir;
+    QString title = tr("Clear this data?");
+    QString clear = tr("Clear");
+    switch (dir) {
+    case DataDir::Saves:
+        title = tr("Clear saves?");
+        clear = tr("Clear saves");
+        break;
+    case DataDir::UserNand:
+        title = tr("Clear installed games, updates and DLC?");
+        break;
+    case DataDir::SysNand:
+        title = tr("Clear firmware and system data?");
+        break;
+    case DataDir::Mods:
+        title = tr("Clear mods?");
+        clear = tr("Clear mods");
+        break;
+    case DataDir::Shaders:
+        title = tr("Clear shaders?");
+        clear = tr("Clear shaders");
+        break;
+    }
+    const QString text =
+        dir == DataDir::Saves
+            ? tr("The selected profile's saves are deleted. This cannot be undone, and Lichii "
+                 "asks once more.")
+            : tr("These files are deleted. This cannot be undone, and Lichii asks once more.");
+    if (!ShowChoice(Icon::Critical, title, text, clear, tr("Cancel"), ChoiceKind::Danger)) {
         return;
+    }
 
-    result = Warning(tr("Are you REALLY sure?"),
-                     tr("Once deleted, your data will NOT come back!\n"
-                        "Only do this if you're 100% sure you want to delete this data."),
-                     Yes | No);
+    auto result = Warning(tr("Are you REALLY sure?"),
+                          tr("Once deleted, your data will NOT come back!\n"
+                             "Only do this if you're 100% sure you want to delete this data."),
+                          Yes | No);
 
     if (result != Yes)
         return;

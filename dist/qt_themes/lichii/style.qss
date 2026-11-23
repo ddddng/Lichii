@@ -126,7 +126,7 @@ QMenu::right-arrow {
 }
 
 /* Buttons: pills. Secondary by default; the default button is primary. Set the "kind" property
-   to "primary", "ghost" or "destructive" for the others. A button shows its focus ring only after
+   to "primary", "outlined", "ghost", "destructive" or "danger" (solid red) for the others. A button shows its focus ring only after
    keyboard navigation (the Spotlight style sets "keyboardFocus"). ------------------------------- */
 
 QPushButton {
@@ -207,6 +207,29 @@ QPushButton[kind="destructive"]:pressed {
     background-color: rgba(255, 143, 174, 56);
 }
 
+QPushButton[kind="danger"] {
+    background-color: #ff5c7a;
+    border-color: #ff5c7a;
+    color: #2a0a14;
+}
+
+QPushButton[kind="danger"]:hover,
+QPushButton[kind="danger"]:pressed {
+    background-color: #ff7d95;
+    border-color: #ff7d95;
+}
+
+QPushButton[kind="outlined"]:default {
+    background-color: rgba(255, 255, 255, 31);
+    border-color: rgba(255, 255, 255, 46);
+    color: #ffffff;
+}
+
+QPushButton[kind="outlined"]:default:hover,
+QPushButton[kind="outlined"]:default:pressed {
+    background-color: rgba(255, 255, 255, 46);
+}
+
 QPushButton[keyboardFocus="true"] {
     border-color: #ffffff;
 }
@@ -215,7 +238,9 @@ QPushButton:disabled,
 QPushButton:default:disabled,
 QPushButton[kind="primary"]:disabled,
 QPushButton[kind="destructive"]:disabled,
-QPushButton[kind="outlined"]:disabled {
+QPushButton[kind="danger"]:disabled,
+QPushButton[kind="outlined"]:disabled,
+QPushButton[kind="outlined"]:default:disabled {
     background-color: rgba(255, 255, 255, 15);
     border-color: transparent;
     color: rgba(255, 255, 255, 89);

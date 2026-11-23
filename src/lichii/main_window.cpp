@@ -104,6 +104,7 @@
 #endif
 
 #include <optional>
+#include <QAbstractButton>
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
@@ -2321,6 +2322,105 @@ void MainWindow::AllowOSSleep() {
 #endif
 }
 
+namespace {
+
+/// A choice in a picker card: an icon tile, a title over a detail line, and a caret.
+class ChoiceRow final : public QAbstractButton {
+public:
+    ChoiceRow(QStringView icon_, const QColor& tint_, const QString& title, const QString& detail_)
+        : icon{icon_.toString()}, tint{tint_}, detail{detail_} {
+        setText(title);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover);
+        setFocusPolicy(Qt::StrongFocus);
+        setFixedHeight(66);
+    }
+
+    QSize sizeHint() const override {
+        return {320, 66};
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool keyboard = hasFocus() && property("keyboardFocus").toBool();
+        painter.setPen(
+            QPen(keyboard ? Spotlight::Color::Text() : Spotlight::Color::StrokeSubtle(), 1));
+        painter.setBrush(underMouse() || isDown() ? Spotlight::Color::Fill()
+                                                  : Spotlight::Color::FillFaint());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16);
+
+        const qreal ratio = devicePixelRatioF();
+        const QRectF tile(15, (height() - 36) / 2.0, 36, 36);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Spotlight::Color::Fill());
+        painter.drawRoundedRect(tile, 12, 12);
+        painter.drawPixmap(QPointF(tile.left() + 9, tile.top() + 9),
+                           Spotlight::IconPixmap(icon, 18, tint, ratio));
+        painter.drawPixmap(
+            QPointF(width() - 15 - 14, (height() - 14) / 2.0),
+            Spotlight::IconPixmap(u"caret-right", 14, Spotlight::Color::TextMuted(), ratio));
+
+        const QFont title_font = Spotlight::Font(14, 600);
+        const QFont detail_font = Spotlight::Font(12, 400);
+        const QFontMetrics title_metrics(title_font);
+        const QFontMetrics detail_metrics(detail_font);
+        const int left = 63;
+        const int right = width() - 15 - 14 - 12;
+        const int top = (height() - title_metrics.height() - 2 - detail_metrics.height()) / 2;
+        painter.setFont(title_font);
+        painter.setPen(Spotlight::Color::Text());
+        painter.drawText(QRect(left, top, right - left, title_metrics.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         title_metrics.elidedText(text(), Qt::ElideRight, right - left));
+        painter.setFont(detail_font);
+        painter.setPen(Spotlight::Color::TextSecondary());
+        painter.drawText(
+            QRect(left, top + title_metrics.height() + 2, right - left, detail_metrics.height()),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            detail_metrics.elidedText(detail, Qt::ElideRight, right - left));
+    }
+
+private:
+    QString icon;
+    QColor tint;
+    QString detail;
+};
+
+enum class FirmwareSource { None, Folder, Zip };
+
+/// The Install firmware card: a folder or a ZIP of the user's own console dump.
+FirmwareSource AskFirmwareSource(QWidget* parent) {
+    Spotlight::Dialog dialog(parent);
+    dialog.setWindowTitle(MainWindow::tr("Install firmware"));
+    dialog.SetSubtitle(MainWindow::tr("From your own console dump"));
+    dialog.SetIcon(u"cpu", Spotlight::Color::Accent());
+    dialog.SetCardWidth(420);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
+    auto* folder =
+        new ChoiceRow(u"folder", Spotlight::Color::Success(), MainWindow::tr("From a folder"),
+                      MainWindow::tr("The folder with the .nca files"));
+    auto* zip = new ChoiceRow(u"archive", Spotlight::Color::Info(), MainWindow::tr("From a ZIP"),
+                              MainWindow::tr("A zipped firmware dump"));
+    QObject::connect(folder, &QAbstractButton::clicked, &dialog, [&dialog] { dialog.done(1); });
+    QObject::connect(zip, &QAbstractButton::clicked, &dialog, [&dialog] { dialog.done(2); });
+    layout->addWidget(folder);
+    layout->addWidget(zip);
+    switch (dialog.exec()) {
+    case 1:
+        return FirmwareSource::Folder;
+    case 2:
+        return FirmwareSource::Zip;
+    default:
+        return FirmwareSource::None;
+    }
+}
+
+} // namespace
+
 bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletParameters params) {
     // Shutdown previous session if the emu thread is still active...
     if (QtCommon::emu_thread != nullptr)
@@ -2351,8 +2451,33 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
 
     /** firmware check */
 
-    if (!QtCommon::Content::CheckGameFirmware(params.program_id))
-        return false;
+    if (FirmwareManager::GameRequiresFirmware(params.program_id) && !CheckFirmwarePresence()) {
+        QMessageBox box(QMessageBox::Warning, tr("This game needs firmware"),
+                        tr("This game may use system files from firmware, and none is installed. "
+                           "Install firmware, or start without it."),
+                        QMessageBox::NoButton, this);
+        QPushButton* start = box.addButton(tr("Start anyway"), QMessageBox::ResetRole);
+        start->setProperty("kind", QStringLiteral("ghost"));
+        start->setStyleSheet(QStringLiteral("min-height: 34px; font-size: 13px; color: #ffffff;"));
+        QPushButton* install = box.addButton(tr("Install firmware\u2026"), QMessageBox::AcceptRole);
+        box.setDefaultButton(install);
+        box.exec();
+        if (box.clickedButton() != start) {
+            if (box.clickedButton() == install) {
+                switch (AskFirmwareSource(this)) {
+                case FirmwareSource::Folder:
+                    OnInstallFirmware();
+                    break;
+                case FirmwareSource::Zip:
+                    OnInstallFirmwareFromZIP();
+                    break;
+                case FirmwareSource::None:
+                    break;
+                }
+            }
+            return false;
+        }
+    }
 
     /** Exec */
     const Core::SystemResultStatus result{

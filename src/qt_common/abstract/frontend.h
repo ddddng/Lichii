@@ -73,6 +73,13 @@ StandardButton ShowMessage(Icon icon, const QString& title, const QString& text,
                            StandardButtons buttons = StandardButton::NoButton,
                            QObject* parent = nullptr);
 
+enum class ChoiceKind { Primary, Danger, Outlined };
+
+/// A message whose two buttons carry their own labels: `accept` is the default, drawn as `kind`,
+/// and `reject` the answer to Escape. Returns whether `accept` was chosen.
+bool ShowChoice(Icon icon, const QString& title, const QString& text, const QString& accept,
+                const QString& reject, ChoiceKind kind, QObject* parent = nullptr);
+
 #define UTIL_OVERRIDES(level)                                                                      \
     inline StandardButton level(QObject* parent, const QString& title, const QString& text,        \
                                 StandardButtons buttons) {                                         \

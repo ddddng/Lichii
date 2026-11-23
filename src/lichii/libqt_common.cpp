@@ -6,6 +6,7 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QPushButton>
 
 #include "libqt_common.h"
 #include "lichii/spotlight/dialog.h"
@@ -25,6 +26,25 @@ StandardButton ShowMessage(Icon icon, const QString& title, const QString& text,
         Spotlight::MarkSuccess(box);
     }
     return StandardButton(box->exec());
+}
+
+bool ShowChoice(Icon icon, const QString& title, const QString& text, const QString& accept,
+                const QString& reject, ChoiceKind kind, QObject* parent) {
+    const bool success = icon == Icon::Success;
+    QMessageBox box(success ? QMessageBox::Information : QMessageBox::Icon(int(icon)), title, text,
+                    QMessageBox::NoButton, qobject_cast<QWidget*>(parent ? parent : rootObject));
+    if (success) {
+        Spotlight::MarkSuccess(&box);
+    }
+    box.setEscapeButton(box.addButton(reject, QMessageBox::RejectRole));
+    QPushButton* chosen = box.addButton(accept, QMessageBox::AcceptRole);
+    if (kind != ChoiceKind::Primary) {
+        chosen->setProperty("kind", kind == ChoiceKind::Danger ? QStringLiteral("danger")
+                                                               : QStringLiteral("outlined"));
+    }
+    box.setDefaultButton(chosen);
+    box.exec();
+    return box.clickedButton() == chosen;
 }
 
 WidgetsProgressDialog::WidgetsProgressDialog(const QString& labelText,
