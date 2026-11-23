@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
@@ -14,6 +15,7 @@
 
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_page_group.h"
@@ -54,6 +56,18 @@ bool TraceEnabled() {
 struct InstanceTrace {
     u32 tasks, resets, errors;
     u64 total_tasks;
+};
+
+// The hardware decodes asynchronously, and the SDK's Execute marks its tasks as processing only
+// after SubmitTasks returns. A completion published inside SubmitTasks can be read by another
+// guest thread before that, which breaks the instance's lists for good (Star Fox voices, #2366).
+constexpr std::chrono::microseconds CompletionLatency{500};
+
+struct PendingCompletion {
+    Hwacod::Completion completion;
+    u32 slot;
+    bool notify;
+    std::chrono::nanoseconds due;
 };
 }
 
@@ -362,6 +376,9 @@ struct IHardwareAudioCodecManagerSession::Impl {
           process{system.Kernel()}, context{system, "hwacod"} {}
 
     ~Impl() {
+        if (publish_event) {
+            system.CoreTiming().UnscheduleEvent(publish_event);
+        }
         instances.clear();
         context.CloseEvent(event);
         if (locked) {
@@ -384,7 +401,36 @@ struct IHardwareAudioCodecManagerSession::Impl {
         u32 consumer{}, producer{};
         R_UNLESS(process->GetMemory().Read32Acquire(ring + 0x44, consumer) &&
                      process->GetMemory().Read32Acquire(ring + 4, producer), ResultInvalidAddressInfo);
-        R_RETURN(batch.Reclaim(consumer, producer));
+        R_UNLESS(producer == published, ResultInvalidArgument);
+        R_RETURN(batch.Reclaim(consumer, batch.State().write_index));
+    }
+
+    void Publish() {
+        std::scoped_lock lock{mutex};
+        if (faulted) {
+            return;
+        }
+        auto& memory = process->GetMemory();
+        const auto now = system.CoreTiming().GetGlobalTimeNs();
+        bool notify{};
+        size_t count{};
+        for (; count < pending.size() && pending[count].due <= now; ++count) {
+            const auto& entry = pending[count];
+            const u32 next = (entry.slot + 1) % (layout.io_count + 1);
+            if (!memory.WriteBlock(ring + 0x80 + u64{entry.slot} * sizeof(entry.completion),
+                                   &entry.completion, sizeof(entry.completion)) ||
+                !memory.WriteExclusive32(ring + 4, next, published)) {
+                pending.clear();
+                static_cast<void>(Fault());
+                return;
+            }
+            published = next;
+            notify |= entry.notify;
+        }
+        pending.erase(pending.begin(), pending.begin() + count);
+        if (notify) {
+            event->Signal(system.Kernel());
+        }
     }
 
     Result Fault() {
@@ -400,6 +446,10 @@ struct IHardwareAudioCodecManagerSession::Impl {
     Kernel::KScopedAutoObject<Kernel::KProcess> process;
     KernelHelpers::ServiceContext context;
     Kernel::KEvent* event{};
+    std::mutex mutex;
+    std::shared_ptr<Core::Timing::EventType> publish_event;
+    std::vector<PendingCompletion> pending;
+    u32 published{};
     std::optional<Kernel::KPageGroup> pages;
     bool locked{}, faulted{};
     u16 tag{};
@@ -469,6 +519,11 @@ Result IHardwareAudioCodecManagerSession::Initialize(
     }
     p.event = p.context.CreateEvent("hwacod completion");
     R_UNLESS(p.event, ResultOutOfSessions);
+    p.publish_event = Core::Timing::CreateEvent(
+        "hwacod completion", [&p](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+            p.Publish();
+            return std::nullopt;
+        });
     auto& memory = process->GetMemory();
     p.ring = process_address + layout.completion_offset;
     u32 consumer{};
@@ -521,6 +576,7 @@ void IHardwareAudioCodecManagerSession::Dispatch(HLERequestContext& ctx) {
 Result IHardwareAudioCodecManagerSession::InitializeInstance(
     u32 id, InBuffer<BufferAttr_HipcPointer> bytes) {
     auto& p = *impl;
+    std::scoped_lock lock{p.mutex};
     R_UNLESS(!p.faulted, ResultOperationFailed);
     R_UNLESS(id < p.instances.size() && !p.instances[id], ResultInvalidArgument);
     AudioCore::OpusDecoder::CodecConfig config{};
@@ -545,6 +601,7 @@ Result IHardwareAudioCodecManagerSession::InitializeInstance(
 
 Result IHardwareAudioCodecManagerSession::FinalizeInstance(u32 id) {
     auto& p = *impl;
+    std::scoped_lock lock{p.mutex};
     R_TRY(p.Reclaim());
     R_UNLESS(id < p.instances.size() && p.instances[id], ResultInvalidArgument);
     R_UNLESS(!p.batch.HasOutstanding(id), ResultBufferCountReached);
@@ -560,6 +617,7 @@ Result IHardwareAudioCodecManagerSession::FinalizeInstance(u32 id) {
 
 Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSelect> bytes) {
     auto& p = *impl;
+    std::scoped_lock lock{p.mutex};
     R_TRY(p.Reclaim());
     R_UNLESS(bytes.size() % sizeof(Hwacod::Task) == 0 &&
                  bytes.size() / sizeof(Hwacod::Task) <= p.layout.io_count, ResultInvalidArgument);
@@ -581,6 +639,7 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
     }
     R_TRY(p.Reclaim());
     R_TRY(p.batch.ValidateTasks(tasks, p.live, p.layout.input_stride));
+    const auto due = system.CoreTiming().GetGlobalTimeNs() + CompletionLatency;
     u32 successful{}, failed{};
     u64 output_total{};
     for (size_t i = 0; i < tasks.size(); ++i) {
@@ -594,18 +653,12 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
         const u32 output_bytes = result.IsSuccess() ? samples * decoder.GetConfig().channels * sizeof(s16) : 0;
         const u64 output = p.address + p.layout.io_offset +
                            u64{task.io} * (u64{p.layout.input_stride} + p.layout.output_stride) + p.layout.input_stride;
-        const auto completion = Hwacod::MakeCompletion(task, result, output_bytes, elapsed);
-        const u32 current = p.batch.State().write_index;
-        const u32 next = (current + 1) % (p.layout.io_count + 1);
-        if ((output_bytes && !memory.WriteBlock(output, pcm.data(), output_bytes)) ||
-            !memory.WriteBlock(p.ring + 0x80 + u64{current} * sizeof(completion), &completion, sizeof(completion)) ||
-            !memory.WriteExclusive32(p.ring + 4, next, current)) {
+        if (output_bytes && !memory.WriteBlock(output, pcm.data(), output_bytes)) {
             R_RETURN(p.Fault());
         }
+        p.pending.push_back({Hwacod::MakeCompletion(task, result, output_bytes, elapsed),
+                             p.batch.State().write_index, task.notify != 0, due});
         p.batch.Commit(task);
-        if (task.notify) {
-            p.event->Signal(system.Kernel());
-        }
         if (!p.trace.empty()) {
             auto& trace = p.trace[task.instance];
             ++trace.tasks;
@@ -630,6 +683,7 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
         LOG_INFO(Service_Audio, "hwacod completed tag={} tasks={} decoded={} errors={} pcm_bytes={} producer={}",
                  p.tag, tasks.size(), successful, failed, output_total, p.batch.State().write_index);
     }
+    system.CoreTiming().ScheduleEvent(CompletionLatency, p.publish_event);
     if (!p.trace.empty()) {
         ++p.trace_batches;
         const auto now = std::chrono::steady_clock::now();
