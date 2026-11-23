@@ -1455,7 +1455,12 @@ void SettingsPage::SetBuilder(int category, std::function<void()> build) {
     categories[category].build = std::move(build);
 }
 
-QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool advanced_) {
+void SettingsPage::SetAdvancedBuilder(int category, std::function<void()> build) {
+    categories[category].build_advanced = std::move(build);
+}
+
+QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool advanced_,
+                                      QWidget* action) {
     if (advanced_) {
         auto& entry = categories[category];
         const int column = static_cast<int>(entry.section_rows.size()) % 2;
@@ -1466,10 +1471,15 @@ QVBoxLayout* SettingsPage::AddSection(int category, const QString& title, bool a
     auto* layout = new QVBoxLayout(section);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(2);
-    if (!title.isEmpty()) {
+    if (!title.isEmpty() || action != nullptr) {
+        auto* title_row = new QHBoxLayout;
+        title_row->setContentsMargins(6, 4, 4, 6);
         auto* label = Text(title, 13, 600, true);
-        label->setContentsMargins(6, 4, 6, 6);
-        layout->addWidget(label);
+        title_row->addWidget(label, 1);
+        if (action != nullptr) {
+            title_row->addWidget(action);
+        }
+        layout->addLayout(title_row);
     }
     auto* surface = new Surface(Color::FillFaint(), GroupRadius, Color::StrokeSubtle());
     surface->setObjectName(QStringLiteral("settingsGroup"));
@@ -1609,16 +1619,17 @@ void SettingsPage::SetAdvancedSections(int category, QList<AdvancedSection> sect
     UpdateMode();
 }
 
-void SettingsPage::AddAdvancedRow(int category, const QString& key, const QString& title,
-                                  const QString& description, QWidget* control) {
+QLabel* SettingsPage::AddAdvancedRow(int category, const QString& key, const QString& title,
+                                     const QString& description, QWidget* control) {
     auto& entry = categories[category];
     if (!entry.slot_map.contains(key)) {
-        return;
+        control->deleteLater();
+        return nullptr;
     }
     if (entry.section_rows.isEmpty()) {
         BuildSections(category);
     }
-    PlaceRow(category, entry.slot_map.value(key), title, description, {}, control);
+    return PlaceRow(category, entry.slot_map.value(key), title, description, {}, control);
 }
 
 void SettingsPage::BuildSections(int category) {
@@ -1720,6 +1731,9 @@ void SettingsPage::Build(int index, bool with_advanced) {
         categories[index].advanced_built = true;
         if (categories[index].section_rows.isEmpty()) {
             BuildSections(index);
+        }
+        if (auto build = std::exchange(categories[index].build_advanced, {})) {
+            build();
         }
         for (auto& page : categories[index].pages) {
             if (page.advanced) {
@@ -2402,6 +2416,22 @@ QLabel* SettingsPage::Text(const QString& text, int size, int weight, bool secon
         QStringLiteral("QLabel { background: transparent; border: none; color: %1; }")
             .arg(CssColor(secondary ? Color::TextSecondary() : Color::Text())));
     return label;
+}
+
+QWidget* SettingsPage::Note(const QString& text) {
+    auto* note = new QWidget;
+    note->setProperty("spotlightTransparent", true);
+    auto* layout = new QHBoxLayout(note);
+    layout->setContentsMargins(8, 2, 8, 2);
+    layout->setSpacing(8);
+    auto* icon = new QLabel;
+    icon->setPixmap(
+        IconPixmap(QStringLiteral("info"), 14, Color::TextSecondary(), note->devicePixelRatioF()));
+    layout->addWidget(icon, 0, Qt::AlignTop);
+    auto* label = Text(text, 12, 400, true);
+    label->setWordWrap(true);
+    layout->addWidget(label, 1);
+    return note;
 }
 
 QPixmap SettingsPage::WholeIcon(const QPixmap& icon, int size, qreal dpr) {

@@ -137,7 +137,11 @@ public:
     int AddSubPage(int parent, const QString& title, const QString& subtitle, bool wide = false);
     /// Builds the category's rows the first time it is shown or searched.
     void SetBuilder(int category, std::function<void()> build);
-    QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false);
+    /// `action` sits at the right of the section's title, such as an "Add folder" button.
+    QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false,
+                            QWidget* action = nullptr);
+    /// Adds the category's hand-built Advanced rows the first time its Advanced view is built.
+    void SetAdvancedBuilder(int category, std::function<void()> build);
     void AddBlock(int category, QWidget* widget, QString search_label, bool advanced = false);
     /// Shows an existing settings page as Spotlight rows, built when first needed. The page stays
     /// hidden and keeps its own load and apply logic; the rows edit its controls.
@@ -147,8 +151,8 @@ public:
     void SetAdvancedSections(int category, QList<AdvancedSection> sections,
                              QStringList removed = {});
     /// Adds a hand-built row to the Advanced section that lists `key`.
-    void AddAdvancedRow(int category, const QString& key, const QString& title,
-                        const QString& description, QWidget* control);
+    QLabel* AddAdvancedRow(int category, const QString& key, const QString& title,
+                           const QString& description, QWidget* control);
     void SetCategory(int category);
     void ShowAdvancedPage(int category, QWidget* page);
     void SetFooter(QWidget* widget);
@@ -228,6 +232,7 @@ private:
         QList<Block> blocks;
         QList<Page> pages;
         std::function<void()> build;
+        std::function<void()> build_advanced;
         bool basic_built = false;
         bool advanced_built = false;
         bool advanced_only = false;
