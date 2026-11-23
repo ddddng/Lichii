@@ -5998,10 +5998,14 @@ void MainWindow::WriteArchiveFromSettings(u64 title_id, const std::string& game_
     const bool nup =
         QString::fromStdString(game_path).endsWith(QStringLiteral(".nup"), Qt::CaseInsensitive);
     if (icon) {
+        const QString busy =
+            tr("Another archive job is running. Pick the icon again when it finishes.");
         QPixmap shown;
         shown.loadFromData(*icon);
         if (nup) {
-            if (CanRewriteArchive(game_path, tr("Edit title and icon"))) {
+            if (nup_running) {
+                ArchiveNotice(this, tr("Edit title and icon"), busy);
+            } else if (CanRewriteArchive(game_path, tr("Edit title and icon"))) {
                 FileSys::Nup::MetadataEdit write;
                 write.icon = std::vector<u8>(icon->begin(), icon->end());
                 WriteNupMetadata(game_path, std::move(write), GameTitleName(game_path), shown,
@@ -6013,9 +6017,14 @@ void MainWindow::WriteArchiveFromSettings(u64 title_id, const std::string& game_
             }
         }
 #ifdef LICHII_NX_TOOLS
-        else if (NxTools::IsNxArchive(game_path) && CanWriteNxMetadata()) {
-            nx_artwork_title_id = title_id;
-            nx_tools->SetNxIcon(game_path, *icon, [this] { return PrepareNxMetadataWrite(); });
+        else if (NxTools::IsNxArchive(game_path)) {
+            if (nx_metadata_write_in_progress) {
+                ArchiveNotice(this, tr("NX Archive"), busy);
+            } else if (CanWriteNxMetadata()) {
+                nx_artwork_title_id = title_id;
+                nx_tools->SetNxIcon(game_path, *icon,
+                                    [this] { return PrepareNxMetadataWrite(); });
+            }
         }
 #endif
         return;
