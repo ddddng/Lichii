@@ -601,13 +601,59 @@ void BufferCache<P>::DownloadMemoryForRead(DAddr device_addr, u64 size) {
             });
         }
         const std::array own{std::pair<DAddr, u64>{device_addr, size}};
-        RecordReadDownload(ranges, own, false);
+        const auto extra = AdjacentReadRanges(device_addr, size);
+        RecordReadDownload(ranges, own, false, extra);
     }
 }
 
 template <class P>
+auto BufferCache<P>::AdjacentReadRanges(DAddr addr, u64 size)
+    -> std::array<std::pair<DAddr, u64>, 2> {
+    constexpr u64 MaxRunBytes = 256_KiB;
+    if (!read_run_page_allowed || size == 0 || !IsRegionGpuModified(addr, size)) {
+        return {};
+    }
+    const DAddr begin = Common::AlignDown(addr, DEVICE_PAGESIZE);
+    const DAddr end = Common::AlignUp(addr + size, DEVICE_PAGESIZE);
+    if (end - begin >= MaxRunBytes) {
+        return {};
+    }
+    const BufferId id = page_table[begin >> CACHING_PAGEBITS];
+    if (!id) {
+        return {};
+    }
+    const Buffer& buffer = slot_buffers[id];
+    const DAddr buffer_begin = buffer.CpuAddr();
+    const DAddr buffer_end = buffer_begin + buffer.SizeBytes();
+    if (begin < buffer_begin || end > buffer_end) {
+        return {};
+    }
+
+    const auto pending = PendingCpuWriteRanges();
+    const auto eligible = [&](DAddr page) {
+        return gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) &&
+               memory_tracker.IsRegionGpuModified(page, DEVICE_PAGESIZE) &&
+               !memory_tracker.IsRegionPreflushable(page, DEVICE_PAGESIZE) &&
+               !pending.Intersects(page, DEVICE_PAGESIZE) &&
+               read_run_page_allowed(page, DEVICE_PAGESIZE);
+    };
+    DAddr run_begin = begin;
+    DAddr run_end = end;
+    while (run_end - run_begin < MaxRunBytes && buffer_end - run_end >= DEVICE_PAGESIZE &&
+           eligible(run_end)) {
+        run_end += DEVICE_PAGESIZE;
+    }
+    while (run_end - run_begin < MaxRunBytes && run_begin - buffer_begin >= DEVICE_PAGESIZE &&
+           eligible(run_begin - DEVICE_PAGESIZE)) {
+        run_begin -= DEVICE_PAGESIZE;
+    }
+    return {{{end, run_end - end}, {run_begin, begin - run_begin}}};
+}
+
+template <class P>
 void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> ranges,
-                                        std::span<const std::pair<DAddr, u64>> own, bool early) {
+                                        std::span<const std::pair<DAddr, u64>> own, bool early,
+                                        std::span<const std::pair<DAddr, u64>> extra) {
     if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
         struct Copy {
             BufferId buffer_id;
@@ -668,7 +714,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             }
         }
         boost::container::small_vector<std::pair<DAddr, DAddr>, 8> gaps;
-        for (const auto& [range_addr, range_size] : ranges) {
+        const auto record_range = [&](DAddr range_addr, u64 range_size) {
             ForEachBufferInRange(range_addr, range_size, [&](BufferId buffer_id, Buffer& buffer) {
                 const DAddr buffer_addr = buffer.CpuAddr();
                 const DAddr begin = (std::max)(range_addr, buffer_addr);
@@ -705,6 +751,15 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
                         ClearFenceDownloads(run_addr, run_size);
                     });
             });
+        };
+        for (const auto& [range_addr, range_size] : ranges) {
+            record_range(range_addr, range_size);
+        }
+        download.first_extra_copy = copies.size();
+        for (const auto& [range_addr, range_size] : extra) {
+            if (range_size != 0) {
+                record_range(range_addr, range_size);
+            }
         }
         if (check) {
             // Each byte a synchronous flush copies is in this download or an earlier one (kept).
@@ -1173,6 +1228,25 @@ void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Land
             // applied, which takes them out of write_ranges (ClaimCpuWrites): either way they
             // keep their bytes.
             const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+            for (size_t i = download.first_extra_copy; i < download.copies.size(); ++i) {
+                const BufferCopy& copy = download.copies[i];
+                const DAddr end = copy.src_offset + copy.size;
+                for (DAddr start = copy.src_offset; start < end;) {
+                    const DAddr page_end = Common::AlignDown(start, DEVICE_PAGESIZE) +
+                                           DEVICE_PAGESIZE;
+                    const DAddr stop = (std::min)(end, page_end);
+                    if (!memory_tracker.IsRegionGpuModified(start, stop - start)) {
+                        download.clean_ranges.ForEachInRange(
+                            start, stop - start,
+                            [&](DAddr lower, DAddr upper) {
+                                read_download_ranges.Subtract(lower, upper - lower);
+                            });
+                        download.clean_ranges.Subtract(start, stop - start);
+                        download.write_ranges.Subtract(start, stop - start);
+                    }
+                    start = stop;
+                }
+            }
             const u8* const base = download.staging.mapped_span.data();
             for (const BufferCopy& copy : download.copies) {
                 const DAddr copy_addr = static_cast<DAddr>(copy.src_offset);
