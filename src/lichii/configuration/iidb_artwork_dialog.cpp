@@ -153,7 +153,7 @@ ArtworkDialog::ArtworkDialog(QWidget* parent, const QString& game_title, const Q
     layout->addWidget(status);
     auto* notice =
         new QLabel(tr("Cancel or a failed download or decode leaves the original artwork intact. "
-                      "Use Artwork stages the new icon; Apply or OK in Properties saves it."),
+                      "Use Artwork stages the new icon; closing Game Settings saves it."),
                    this);
     notice->setWordWrap(true);
     layout->addWidget(notice);

@@ -97,10 +97,10 @@ signals:
 
 private:
     void done(int result) override;
+    void reject() override;
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
 
-    void HandleApplyButtonClicked();
     void BuildSettings();
     void BuildAddons(int mods, int updates);
     void RebuildAddons();
@@ -136,7 +136,7 @@ private:
     /// The game's own icon, shown again when the custom artwork is removed.
     QPixmap file_icon;
     bool has_custom_icon{false};
-    /// The saved custom artwork is deleted on Apply or OK.
+    /// The saved custom artwork is deleted when Game Settings closes.
     bool remove_custom_icon{false};
     QFutureWatcher<DetectIconResult> detect_watcher;
     std::shared_ptr<std::atomic_bool> detect_cancel;

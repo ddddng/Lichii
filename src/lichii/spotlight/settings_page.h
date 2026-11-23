@@ -128,7 +128,7 @@ public:
     static QWidget* Card(const QString& icon = {}, int image_size = 0);
     static QLabel* AddRow(QVBoxLayout* group, const QString& title, const QString& description,
                           const QString& icon, const QColor& color, QWidget* control,
-                          const QString& tooltip = {});
+                          const QString& tooltip = {}, const QPixmap& image = {});
     static QAbstractButton* Manage(const QString& text = {});
     static ConfigurationShared::Widget* Editor(QWidget* page,
                                                const Settings::BasicSetting& setting);

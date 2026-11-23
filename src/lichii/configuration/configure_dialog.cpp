@@ -10,19 +10,23 @@
 #include <memory>
 #include <tuple>
 #include <utility>
+#include <QAbstractSlider>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QGroupBox>
 #include <QLabel>
+#include <QListWidget>
 #include <QLocale>
 #include <QMenu>
+#include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include "common/settings.h"
@@ -58,6 +62,53 @@
 
 namespace {
 using Spotlight::PresetCard;
+
+class ColourSwatch final : public QAbstractButton {
+public:
+    ColourSwatch(QPushButton* source_, const QString& name) : source{source_} {
+        setFixedSize(28, 28);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(name);
+        setToolTip(name);
+        connect(this, &QAbstractButton::clicked, source, &QAbstractButton::click);
+        source->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::StyleChange) {
+            update();
+        }
+        return QAbstractButton::eventFilter(watched, event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        static const QRegularExpression pattern(
+            QStringLiteral("background-color:\\s*(#[0-9a-fA-F]{6})"));
+        const auto match = pattern.match(source->styleSheet());
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool active = hasFocus() || underMouse();
+        painter.setPen(
+            QPen(active ? Spotlight::Color::Accent() : QColor(255, 255, 255, 70), 1.5));
+        painter.setBrush(match.hasMatch() ? QColor(match.captured(1)) : QColor(Qt::transparent));
+        painter.drawEllipse(QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5));
+    }
+
+    void enterEvent(QEnterEvent* event) override {
+        update();
+        QAbstractButton::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent* event) override {
+        update();
+        QAbstractButton::leaveEvent(event);
+    }
+
+private:
+    QPushButton* source;
+};
 using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
@@ -91,8 +142,10 @@ QString MappingStyle() {
         " top: 2px; color: rgba(255,255,255,158); background: transparent; }"
         "QTabWidget#spotlightMapping QGroupBox QGroupBox { background: transparent; border: none;"
         " margin-top: 16px; padding: 2px; }"
-        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,20); color: #ffffff;"
-        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; padding: 0 6px;"
+        "QTabWidget#spotlightMapping QPushButton { background: rgba(255,255,255,20);"
+        " color: #ffffff;"
+        " border: 1px solid transparent; border-radius: 10px; min-height: 28px; min-width: 52px;"
+        " padding: 0 6px;"
         " font-size: 12px; font-weight: 600; }"
         "QTabWidget#spotlightMapping QPushButton:hover { background: rgba(255,255,255,46); }"
         "QTabWidget#spotlightMapping QPushButton:focus { border-color: #ff6b95; }"
@@ -102,6 +155,43 @@ QString MappingStyle() {
         "QTabWidget#spotlightMapping QLabel { color: rgba(255,255,255,158);"
         " background: transparent; }");
 }
+
+class BindingButton final : public QAbstractButton {
+public:
+    explicit BindingButton(QString icon_) : icon{std::move(icon_)} {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_Hover);
+        setProperty("spotlightTransparent", true);
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(30, 5, 6, 5);
+        cap = new Spotlight::KeyCap({});
+        cap->setAttribute(Qt::WA_TransparentForMouseEvents);
+        layout->addWidget(cap);
+    }
+
+    void SetBinding(const QString& text, bool set) {
+        cap->SetText(text);
+        cap->setEnabled(set);
+        updateGeometry();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(hasFocus() ? QPen(Color::Accent(), 1.5) : Qt::NoPen);
+        painter.setBrush(underMouse() ? Color::Fill() : Color::FillFaint());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75), 12, 12);
+        painter.drawPixmap(9, (height() - 14) / 2,
+                           Spotlight::IconPixmap(icon, 14, Color::TextSecondary(),
+                                                 devicePixelRatioF()));
+    }
+
+private:
+    QString icon;
+    Spotlight::KeyCap* cap;
+};
 
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
@@ -147,18 +237,13 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);
     game_dirs = UISettings::values.game_dirs;
-    general_tab->SetResetCallback([this] { close(); });
+    general_tab->SetResetCallback([this] { done(QDialog::Rejected); });
     connect(ui_tab.get(), &ConfigureUi::LanguageChanged, this, &ConfigureDialog::OnLanguageChanged);
     connect(general_tab.get(), &ConfigureGeneral::ExternalContentDirsChanged, this,
             &ConfigureDialog::ExternalContentDirsChanged);
 
-    if (system.IsPoweredOn()) {
-        auto* apply = ui->buttonBox->addButton(QDialogButtonBox::Apply);
-        connect(apply, &QPushButton::clicked, this, &ConfigureDialog::HandleApplyButtonClicked);
-    }
-    ui->label->setVisible(system.IsPoweredOn());
+    ui->footer->setVisible(system.IsPoweredOn());
     BuildSettings();
-    ui->buttonBox->setFocus();
     ConfigurationShared::FitToScreen(this, QSize(1280, 800));
 }
 
@@ -190,7 +275,7 @@ void ConfigureDialog::ApplyConfiguration() {
     if (check_updates != nullptr) {
         UISettings::values.check_for_updates.SetValue(check_updates->isChecked());
     }
-    if (start_fullscreen->isEnabled() &&
+    if (start_fullscreen != nullptr && start_fullscreen->isEnabled() &&
         UISettings::values.fullscreen.GetValue() != start_fullscreen->isChecked()) {
         UISettings::values.fullscreen.SetValue(start_fullscreen->isChecked());
         emit FullscreenOnStartChanged(start_fullscreen->isChecked());
@@ -217,9 +302,8 @@ void ConfigureDialog::changeEvent(QEvent* event) {
     QDialog::changeEvent(event);
 }
 
-void ConfigureDialog::HandleApplyButtonClicked() {
-    UISettings::values.configuration_applied = true;
-    ApplyConfiguration();
+void ConfigureDialog::reject() {
+    accept();
 }
 
 void ConfigureDialog::OnLanguageChanged(const QString& locale) {
@@ -232,11 +316,15 @@ void ConfigureDialog::OnLanguageChanged(const QString& locale) {
 
 void ConfigureDialog::BuildSettings() {
     settings_page = new SettingsPage(this, false);
+    for (const char* name :
+         {"external_content_list", "add_external_dir_button", "remove_external_dir_button"}) {
+        general_tab->findChild<QWidget*>(QLatin1String(name))->setProperty("spotlightBound", true);
+    }
     ui->verticalLayout->setContentsMargins(0, 0, 0, 0);
     ui->verticalLayout->setSpacing(0);
     ui->verticalLayout->addWidget(settings_page);
     settings_page->SetFooter(ui->footer);
-    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::reject);
+    connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::accept);
 
     const int general =
         settings_page->AddCategory(tr("General"), tr("Preset, look, folders and updates"),
@@ -288,10 +376,12 @@ void ConfigureDialog::BuildSettings() {
                       QStringLiteral("translate"), Tints::Blue());
         AddSettingRow(console, system_tab.get(), Settings::values.region_index, tr("Region"),
                       tr("Region reported to games"), QStringLiteral("globe"), Color::Accent());
+        const int profiles = settings_page->AddSubPage(
+            system_page, tr("Profiles"), tr("Local console users; games start as the current one"));
+        settings_page->SetBuilder(profiles, [this, profiles] { BuildProfiles(profiles); });
         auto* profile = SettingsPage::Manage(tr("Manage"));
-        connect(profile, &QAbstractButton::clicked, settings_page, [this, system_page] {
-            settings_page->ShowAdvancedPage(system_page, profile_tab.get());
-        });
+        connect(profile, &QAbstractButton::clicked, settings_page,
+                [this, profiles] { settings_page->SetCategory(profiles); });
         SettingsPage::AddRow(console, tr("Profiles"), tr("Manage local console profiles"),
                              QStringLiteral("user"), Tints::Lavender(), profile);
     });
@@ -318,7 +408,6 @@ void ConfigureDialog::BuildSettings() {
              {graphics, graphics_extensions_tab.get(), tr("Extras")},
              {audio, audio_tab.get(), tr("Audio")},
              {system_page, system_tab.get(), tr("System")},
-             {system_page, profile_tab.get(), tr("Profiles")},
              {system_page, cpu_tab.get(), tr("CPU")},
              {system_page, filesystem_tab.get(), tr("Filesystem")},
              {system_page, applets_tab.get(), tr("Applets")},
@@ -327,9 +416,144 @@ void ConfigureDialog::BuildSettings() {
          }) {
         settings_page->AddPage(category, widget, name);
     }
-    settings_page->AddPage(shortcuts, hotkeys_tab.get(), tr("Hotkeys"), false);
+    settings_page->SetBuilder(shortcuts, [this, shortcuts] { BuildShortcuts(shortcuts); });
+    hotkeys_tab->hide();
+    profile_tab->hide();
     input_tab->hide();
     settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::BuildProfiles(int profiles) {
+    profile_rows = settings_page->AddSection(profiles, tr("Users"));
+    auto* actions = new QWidget;
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 4, 0, 0);
+    actions_layout->setSpacing(14);
+    add_profile = new Spotlight::PillButton(tr("Add a profile"), QStringLiteral("plus"),
+                                            Spotlight::PillButton::Kind::Accent, 38);
+    connect(add_profile, &QAbstractButton::clicked, this, [this] { profile_tab->AddUser(); });
+    actions_layout->addWidget(add_profile);
+    if (system.IsPoweredOn()) {
+        actions_layout->addWidget(SettingsPage::Text(
+            tr("Changes reach the running game after it restarts."), 13, 500, true));
+    }
+    actions_layout->addStretch();
+    settings_page->AddBlock(profiles, actions, tr("Add a profile"));
+    auto* model = profile_tab->Model();
+    connect(model, &QAbstractItemModel::rowsInserted, this, &ConfigureDialog::RebuildProfiles);
+    connect(model, &QAbstractItemModel::rowsRemoved, this, &ConfigureDialog::RebuildProfiles);
+    connect(model, &QAbstractItemModel::dataChanged, this, &ConfigureDialog::RebuildProfiles);
+    connect(profile_tab.get(), &ConfigureProfileManager::CurrentUserChanged, this,
+            &ConfigureDialog::RebuildProfiles);
+    RebuildProfiles();
+}
+
+void ConfigureDialog::RebuildProfiles() {
+    while (auto* item = profile_rows->takeAt(0)) {
+        item->widget()->hide();
+        item->widget()->deleteLater();
+        delete item;
+    }
+    auto* model = profile_tab->Model();
+    const int current = Settings::values.current_user.GetValue();
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QStandardItem* user = model->item(row);
+        const QStringList lines = user->text().split(QChar::fromLatin1('\n'));
+        auto* control = new QWidget;
+        auto* layout = new QHBoxLayout(control);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(10);
+        if (row == current) {
+            layout->addWidget(
+                SettingsPage::Badge(tr("Current"), Color::Accent(), Color::OnAccent()), 0,
+                Qt::AlignVCenter);
+        } else {
+            auto* use = new Spotlight::PillButton(tr("Make current"));
+            connect(use, &QAbstractButton::clicked, this,
+                    [this, row] { profile_tab->SelectUserAt(row); });
+            layout->addWidget(use);
+        }
+        auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
+        more->setAccessibleName(tr("More for %1").arg(lines.value(0)));
+        auto* menu = new QMenu(more);
+        menu->addAction(tr("Edit name and picture"), this,
+                        [this, row] { profile_tab->EditUserAt(row); });
+        menu->addAction(tr("Delete"), this, [this, row] { profile_tab->ConfirmDeleteUserAt(row); });
+        connect(more, &QAbstractButton::clicked, menu,
+                [menu, more] { menu->popup(more->mapToGlobal(QPoint(0, more->height()))); });
+        layout->addWidget(more);
+        SettingsPage::AddRow(profile_rows, lines.value(0), lines.value(1), QStringLiteral("user"),
+                             Tints::Lavender(), control, {}, user->icon().pixmap(64, 64));
+    }
+    add_profile->setEnabled(profile_tab->CanAddUser());
+}
+
+void ConfigureDialog::BuildShortcuts(int shortcuts) {
+    auto* actions = new QWidget;
+    actions->setProperty("spotlightTransparent", true);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(6, 0, 0, 0);
+    actions_layout->setSpacing(10);
+    actions_layout->addWidget(SettingsPage::Text(
+        tr("Click a binding to change it; a game controller binding is pressed on the pad"), 13,
+        500, true));
+    actions_layout->addStretch();
+    auto* clear_all = new Spotlight::PillButton(tr("Clear all"), QStringLiteral("x"));
+    connect(clear_all, &QAbstractButton::clicked, this, [this] { hotkeys_tab->ClearAll(); });
+    actions_layout->addWidget(clear_all);
+    auto* restore = new Spotlight::PillButton(tr("Restore defaults"),
+                                              QStringLiteral("arrow-counter-clockwise"));
+    connect(restore, &QAbstractButton::clicked, this, [this] { hotkeys_tab->RestoreDefaults(); });
+    actions_layout->addWidget(restore);
+    settings_page->AddBlock(shortcuts, actions, tr("Clear all\nRestore defaults"));
+
+    auto* model = hotkeys_tab->Model();
+    for (int group_row = 0; group_row < model->rowCount(); ++group_row) {
+        const QStandardItem* group = model->item(group_row);
+        auto* rows = settings_page->AddSection(shortcuts, group->text());
+        for (int row = 0; row < group->rowCount(); ++row) {
+            const QPersistentModelIndex action = group->child(row)->index();
+            auto* control = new QWidget;
+            auto* layout = new QHBoxLayout(control);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(8);
+            auto* keyboard = new BindingButton(QStringLiteral("keyboard"));
+            auto* pad = new BindingButton(QStringLiteral("game-controller"));
+            auto* reset =
+                new Spotlight::CircleButton(QStringLiteral("arrow-counter-clockwise"), 32);
+            reset->setToolTip(tr("Restore default"));
+            reset->setAccessibleName(reset->toolTip());
+            reset->setFocusPolicy(Qt::StrongFocus);
+            keyboard->setMinimumWidth(128);
+            pad->setMinimumWidth(184);
+            for (auto* button : {keyboard, pad}) {
+                layout->addWidget(button);
+            }
+            layout->addWidget(reset);
+            const auto refresh = [this, action, keyboard, pad, reset] {
+                const QString key = action.sibling(action.row(), 1).data().toString();
+                const QString button = action.sibling(action.row(), 2).data().toString();
+                keyboard->SetBinding(key.isEmpty() ? tr("Not set") : key, !key.isEmpty());
+                keyboard->setToolTip(tr("Keyboard: %1").arg(key.isEmpty() ? tr("not set") : key));
+                keyboard->setAccessibleName(keyboard->toolTip());
+                pad->SetBinding(button.isEmpty() ? tr("Not set") : button, !button.isEmpty());
+                pad->setToolTip(
+                    tr("Controller: %1").arg(button.isEmpty() ? tr("not set") : button));
+                pad->setAccessibleName(pad->toolTip());
+                reset->setVisible(!hotkeys_tab->IsDefault(action));
+            };
+            refresh();
+            connect(model, &QAbstractItemModel::dataChanged, control, refresh);
+            connect(keyboard, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 1)); });
+            connect(pad, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->Configure(action.sibling(action.row(), 2)); });
+            connect(reset, &QAbstractButton::clicked, this,
+                    [this, action] { hotkeys_tab->RestoreAction(action); });
+            SettingsPage::AddRow(rows, group->child(row)->text(), {}, QStringLiteral("keyboard"),
+                                 Tints::Gold(), control);
+        }
+    }
 }
 
 void ConfigureDialog::AddSettingRow(QVBoxLayout* group, QWidget* page,
@@ -525,6 +749,49 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
 void ConfigureDialog::BuildLibrary(int library) {
     folders_layout = settings_page->AddSection(library, tr("Game folders"));
     RebuildGameFolders();
+    auto* external_list =
+        general_tab->findChild<QListWidget*>(QStringLiteral("external_content_list"));
+    auto* add_external =
+        general_tab->findChild<QPushButton*>(QStringLiteral("add_external_dir_button"));
+    auto* remove_external =
+        general_tab->findChild<QPushButton*>(QStringLiteral("remove_external_dir_button"));
+    auto* external_rows = settings_page->AddSection(library, tr("Update and DLC folders"));
+    const auto rebuild_external = [external_rows, external_list, add_external, remove_external] {
+        while (auto* item = external_rows->takeAt(0)) {
+            item->widget()->hide();
+            item->widget()->deleteLater();
+            delete item;
+        }
+        for (int i = 0; i < external_list->count(); ++i) {
+            const QString path = external_list->item(i)->text();
+            auto* remove = new Spotlight::CircleButton(QStringLiteral("trash"), 36);
+            remove->setAccessibleName(tr("Remove"));
+            remove->setToolTip(remove->accessibleName());
+            connect(remove, &QAbstractButton::clicked, external_list,
+                    [external_list, remove_external, path] {
+                        const auto found = external_list->findItems(path, Qt::MatchExactly);
+                        if (!found.isEmpty()) {
+                            external_list->setCurrentItem(found.first());
+                            remove_external->click();
+                        }
+                    });
+            SettingsPage::AddRow(external_rows, QDir(path).dirName(), path,
+                                 QStringLiteral("folder"), Tints::Lavender(), remove);
+        }
+        auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
+        connect(add, &QAbstractButton::clicked, add_external, &QAbstractButton::click);
+        SettingsPage::AddRow(external_rows, tr("Add an update and DLC folder"),
+                             tr("Lichii reads updates and DLC from it without installing them"),
+                             QStringLiteral("folder-open"), Tints::Lavender(), add);
+    };
+    rebuild_external();
+    auto* external_model = external_list->model();
+    for (const auto signal :
+         {&QAbstractItemModel::rowsInserted, &QAbstractItemModel::rowsRemoved}) {
+        connect(external_model, signal, external_rows->parentWidget(), rebuild_external);
+    }
+    connect(external_model, &QAbstractItemModel::modelReset, external_rows->parentWidget(),
+            rebuild_external);
     auto* view = ui_tab.get();
     auto* display = settings_page->AddSection(library, tr("Display"));
     for (const auto& [name, label] : std::array{
@@ -579,18 +846,17 @@ void ConfigureDialog::BuildGraphics(int graphics) {
             presets_control->SetCurrentIndex(selected == -1 ? 4 : selected);
             presets_control->setEnabled(sources.CanApply());
             const int tier = selected == 0 ? SuggestedTier(SelectedGpu(sources)) : selected - 1;
+            const QString resolution = SettingsPage::ClosedSettingLabel(
+                sources.resolution, Settings::values.resolution_setup.Id(),
+                sources.resolution->currentIndex());
+            const QString filter = SettingsPage::ClosedSettingLabel(
+                sources.filter, Settings::values.scaling_filter.Id(),
+                sources.filter->currentIndex());
             preset_summary->setText(
-                selected == -1
-                    ? tr("Custom graphics settings")
-                    : tr("%1: %2 resolution, %3, %4. Game overrides stay.")
-                          .arg(Spotlight::PerformancePresetName(tier),
-                               SettingsPage::ClosedSettingLabel(sources.resolution,
-                                                                Settings::values.resolution_setup.Id(),
-                                                                sources.resolution->currentIndex()),
-                               SettingsPage::ClosedSettingLabel(sources.filter,
-                                                                Settings::values.scaling_filter.Id(),
-                                                                sources.filter->currentIndex()),
-                               sources.aa->currentText()));
+                selected == -1 ? tr("Custom graphics settings")
+                               : tr("%1: %2 resolution, %3, %4. Game overrides stay.")
+                                     .arg(Spotlight::PerformancePresetName(tier), resolution,
+                                          filter, sources.aa->currentText()));
             preset_summary->show();
         });
     }
@@ -709,9 +975,10 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
         auto* connected_text = SettingsPage::Text({}, 13, 500, true);
         const auto sync_state = [connected_text, dot, state] {
             connected_text->setText(state->isChecked() ? tr("Connected") : tr("Disconnected"));
-            dot->setStyleSheet(QStringLiteral("QLabel { background: %1; border-radius: 4px; }")
-                                   .arg(state->isChecked() ? QStringLiteral("#3FD18B")
-                                                           : QStringLiteral("rgba(255,255,255,70)")));
+            const QString dot_color = state->isChecked() ? QStringLiteral("#3FD18B")
+                                                         : QStringLiteral("rgba(255,255,255,70)");
+            dot->setStyleSheet(
+                QStringLiteral("QLabel { background: %1; border-radius: 4px; }").arg(dot_color));
         };
         sync_state();
         connect(state, &QAbstractButton::toggled, connected_text, sync_state);
@@ -910,8 +1177,40 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
         input_tabs->setObjectName(QStringLiteral("spotlightMapping"));
         input_tabs->setStyleSheet(MappingStyle());
         input_tabs->setMinimumHeight(560);
+        const auto size_to_current = [input_tabs] {
+            for (int i = 0; i < input_tabs->count(); ++i) {
+                const auto policy = i == input_tabs->currentIndex() ? QSizePolicy::Preferred
+                                                                    : QSizePolicy::Ignored;
+                input_tabs->widget(i)->setSizePolicy(policy, policy);
+            }
+        };
+        size_to_current();
+        connect(input_tabs, &QTabWidget::currentChanged, input_tabs, size_to_current);
         settings_page->AddBlock(mapping, input_tabs, tr("Map buttons"));
     });
+    auto* colours = settings_page->AddSection(category, tr("Controller colours"), true);
+    for (int i = 0; i < 8; ++i) {
+        auto* swatches = new QWidget;
+        auto* swatch_layout = new QHBoxLayout(swatches);
+        swatch_layout->setContentsMargins(0, 0, 0, 0);
+        swatch_layout->setSpacing(8);
+        for (const auto& [part, name] : std::array{
+                 std::pair{"left_body", tr("Left body")},
+                 std::pair{"left_buttons", tr("Left buttons")},
+                 std::pair{"right_body", tr("Right body")},
+                 std::pair{"right_buttons", tr("Right buttons")},
+             }) {
+            auto* source = pages[8]->findChild<QPushButton*>(
+                QStringLiteral("player%1_%2_button").arg(i + 1).arg(QLatin1String(part)));
+            if (source != nullptr) {
+                source->setProperty("spotlightBound", true);
+                swatch_layout->addWidget(new ColourSwatch(source, name));
+            }
+        }
+        SettingsPage::AddRow(colours, tr("Player %1").arg(i + 1),
+                             tr("Left body, left buttons, right body, right buttons"),
+                             QStringLiteral("palette"), Tints::Lavender(), swatches);
+    }
     settings_page->AddPage(category, pages[8], tr("Input devices"));
     settings_page->AddPage(category, pages[9], tr("Microphone"));
 }

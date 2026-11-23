@@ -33,7 +33,11 @@ class ConfigurePerGameAddons : public QWidget {
     Q_OBJECT
 
 public:
-    enum PatchData { NUMERIC_VERSION = Qt::UserRole, PATCH_LOCATION, PATCH_TYPE = PATCH_LOCATION + 2 };
+    enum PatchData {
+        NUMERIC_VERSION = Qt::UserRole,
+        PATCH_LOCATION,
+        PATCH_TYPE = PATCH_LOCATION + 2
+    };
 
     explicit ConfigurePerGameAddons(Core::System& system_, QWidget* parent = nullptr);
     ~ConfigurePerGameAddons() override;
