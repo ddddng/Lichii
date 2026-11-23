@@ -181,7 +181,7 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setCursor(Qt::PointingHandCursor);
         setAttribute(Qt::WA_Hover);
-        setFixedHeight(44);
+        setFixedHeight(40);
     }
 
 protected:
@@ -1050,6 +1050,9 @@ protected:
 
 private:
     void Place(QWidget* section, int column) {
+        for (auto* each : columns) {
+            each->removeWidget(section);
+        }
         auto* target = columns[std::clamp(column, 0, 1)];
         target->insertWidget(target->count() - 1, section);
     }
@@ -1320,6 +1323,7 @@ SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     main_column->setContentsMargins(0, 0, 0, 0);
     main_column->setSpacing(0);
     scroll = new QScrollArea;
+    QApplication::instance()->installEventFilter(this);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -1449,6 +1453,31 @@ void SettingsPage::resizeEvent(QResizeEvent* event) {
         edges->setVisible(!window()->isMaximized() && !window()->isFullScreen());
         edges->raise();
     }
+}
+
+bool SettingsPage::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() != QEvent::Wheel && event->type() != QEvent::Show) {
+        return QWidget::eventFilter(watched, event);
+    }
+    auto* control = qobject_cast<QWidget*>(watched);
+    const bool value_control = control != nullptr && qobject_cast<QScrollBar*>(control) == nullptr &&
+                               (qobject_cast<QComboBox*>(control) != nullptr ||
+                                qobject_cast<QAbstractSpinBox*>(control) != nullptr ||
+                                qobject_cast<QAbstractSlider*>(control) != nullptr);
+    if (!value_control || !isAncestorOf(control)) {
+        return QWidget::eventFilter(watched, event);
+    }
+    if (event->type() == QEvent::Show) {
+        if (control->focusPolicy() == Qt::WheelFocus) {
+            control->setFocusPolicy(Qt::StrongFocus);
+        }
+        return false;
+    }
+    if (control->hasFocus()) {
+        return false;
+    }
+    QCoreApplication::sendEvent(scroll->verticalScrollBar(), event);
+    return true;
 }
 
 void SettingsPage::SetBuilder(int category, std::function<void()> build) {
@@ -1705,7 +1734,10 @@ void SettingsPage::UpdateMode() {
         }
     }
     static_cast<ModeSegment*>(advanced_mode)->SetCount(count);
-    mode_switch->setVisible(HasAdvanced(top) || filtering);
+    mode_switch->setVisible(
+        HasAdvanced(top) || filtering ||
+        std::any_of(categories.cbegin(), categories.cend(),
+                    [](const auto& category) { return category.advanced_only; }));
 }
 
 void SettingsPage::Build(int index, bool with_advanced) {
@@ -2225,7 +2257,8 @@ void SettingsPage::SetCategory(int category) {
     navigation->setVisible(!entry.wide);
     if (banner != nullptr) {
         banner->setVisible(
-            banner_categories.contains(entry.parent == -1 ? category : entry.parent));
+            banner_categories.contains(entry.parent == -1 ? category : entry.parent) &&
+            !ShowsAdvanced(category));
     }
     content->setContentsMargins(entry.wide ? 24 : 40, 0, entry.wide ? 24 : 40, 24);
     header_row->setContentsMargins(entry.wide ? 24 : 40, 22, ClientFrame ? 14 : 40, 14);
@@ -2427,10 +2460,11 @@ QWidget* SettingsPage::Note(const QString& text) {
     auto* icon = new QLabel;
     icon->setPixmap(
         IconPixmap(QStringLiteral("info"), 14, Color::TextSecondary(), note->devicePixelRatioF()));
+    icon->setContentsMargins(0, 1, 0, 0);
     layout->addWidget(icon, 0, Qt::AlignTop);
     auto* label = Text(text, 12, 400, true);
     label->setWordWrap(true);
-    layout->addWidget(label, 1);
+    layout->addWidget(label, 1, Qt::AlignTop);
     return note;
 }
 
