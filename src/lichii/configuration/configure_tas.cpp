@@ -21,9 +21,8 @@ ConfigureTasDialog::ConfigureTasDialog(QWidget* parent)
     SetSubtitle(tr("Tool-assisted input scripts"));
 
     setFocusPolicy(Qt::ClickFocus);
-    setWindowTitle(tr("TAS Configuration"));
 
-    connect(ui->tas_path_button, &QToolButton::pressed, this,
+    connect(ui->tas_path_button, &QPushButton::clicked, this,
             [this] { SetDirectory(DirectoryTarget::TAS, ui->tas_path_edit); });
 
     LoadConfiguration();
