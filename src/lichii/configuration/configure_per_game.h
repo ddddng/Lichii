@@ -10,8 +10,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <QByteArray>
 #include <QDialog>
 #include <QFutureWatcher>
 #include <QImage>
@@ -88,6 +90,17 @@ public:
         return title_changed;
     }
 
+    /// An icon picked for a NUP or NX game, as a 256x256 JPEG: it is written into the game file
+    /// once Game Settings has closed and released the file.
+    std::optional<QByteArray> TakeArchiveIcon() {
+        return std::exchange(archive_icon, std::nullopt);
+    }
+
+    /// The user asked to edit the title and icon stored in the game file.
+    bool ArchiveEditRequested() const {
+        return archive_edit_requested;
+    }
+
 signals:
     void BrowseModsRequested();
     void OpenSaveDataRequested();
@@ -129,6 +142,11 @@ private:
     std::filesystem::path file_path;
     const u64 title_id;
     bool is_nup_file{false};
+    /// NUP and NX files take the icon inside them; other formats keep it for this PC only.
+    bool icon_in_file{false};
+    std::optional<QByteArray> archive_icon;
+    bool archive_edit_requested{false};
+    QLabel* icon_destination = nullptr;
     std::string original_title;
     std::string initial_title;
     std::optional<QString> renamed_title;

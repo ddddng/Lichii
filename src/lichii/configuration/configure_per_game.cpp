@@ -85,6 +85,7 @@
 #include "lichii/configuration/configure_input_per_game.h"
 #include "lichii/configuration/configure_network.h"
 #include "lichii/configuration/configure_per_game.h"
+#include "lichii/nup_dialogs.h"
 #include "lichii/configuration/configure_per_game_addons.h"
 #include "lichii/configuration/configure_system.h"
 #include "lichii/configuration/iidb_artwork_dialog.h"
@@ -394,6 +395,21 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
             &ConfigurePerGame::OnRemoveCustomIcon);
     connect(ui->button_browse_iidb, &QPushButton::clicked, this,
             &ConfigurePerGame::OnBrowseIiDB);
+    // Where a picked icon goes, and for NUP and NX files the editor of what the file stores.
+    icon_destination = new QLabel(ui->nup_icon_widget);
+    icon_destination->setWordWrap(true);
+    Spotlight::SetTextColor(icon_destination, Spotlight::Color::TextMuted());
+    ui->nup_icon_layout->addWidget(icon_destination, 4, 0, 1, 2);
+    auto* edit_in_file = new Spotlight::PillButton(tr("Edit title and icon in the file"),
+                                                   QStringLiteral("archive"));
+    edit_in_file->setObjectName(QStringLiteral("editInFile"));
+    edit_in_file->setToolTip(tr("Saves and closes Game Settings, then opens the editor"));
+    edit_in_file->hide();
+    ui->nup_icon_layout->addWidget(edit_in_file, 5, 0, 1, 2);
+    connect(edit_in_file, &QAbstractButton::clicked, this, [this] {
+        archive_edit_requested = true;
+        accept();
+    });
     connect(&detect_watcher, &QFutureWatcher<DetectIconResult>::finished, this, [this] {
         if (!detect_cancel || detect_cancel->load()) {
             return;
@@ -1106,6 +1122,25 @@ void ConfigurePerGame::LoadConfiguration() {
     const auto loader = Loader::GetLoader(system, file, title_id);
 
     is_nup_file = loader != nullptr && loader->GetFileType() == Loader::FileType::NUP;
+#ifdef LICHII_NX_TOOLS
+    const bool is_nx_file = loader != nullptr && loader->GetFileType() == Loader::FileType::NX;
+#else
+    const bool is_nx_file = false;
+#endif
+    icon_in_file = is_nup_file || is_nx_file;
+    icon_destination->setText(
+        is_nup_file  ? tr("Icons you pick are written into the NUP file when you close Game "
+                          "Settings, so they show on every PC.")
+        : is_nx_file ? tr("Icons you pick are written into the NX archive when you close Game "
+                          "Settings, so they show on every PC.")
+                     : tr("Icons you pick are saved for this PC only: %1 files are never "
+                          "changed.")
+                           .arg(loader != nullptr ? QString::fromStdString(Loader::GetFileTypeString(
+                                                        loader->GetFileType()))
+                                                  : tr("game")));
+    if (auto* edit_in_file = findChild<QWidget*>(QStringLiteral("editInFile"))) {
+        edit_in_file->setVisible(icon_in_file && title_id != 0);
+    }
     // Custom artwork is stored per program ID, outside the game file, so it works for every
     // format and while a game runs.
     ui->nup_icon_widget->setVisible(title_id != 0);
@@ -1489,10 +1524,12 @@ bool ConfigurePerGame::SaveCustomMetadata(bool show_error) {
         UISettings::values.is_game_list_reload_pending.exchange(true);
         emit CustomArtworkChanged(title_id);
     }
-    if (!pending_custom_icon.isNull()) {
-        // Saved as the game's custom artwork: rewriting the whole archive to embed it took a full
-        // copy of the game on the UI thread (25 GB for some NUPs) and failed when the game file
-        // was in use.
+    if (!pending_custom_icon.isNull() && icon_in_file) {
+        // Written into the NUP or NX file once this dialog has released it. The local artwork,
+        // which would hide it, is removed when the write succeeds.
+        archive_icon = EncodeArchiveIcon(pending_custom_icon, pending_custom_icon.rect());
+        pending_custom_icon = {};
+    } else if (!pending_custom_icon.isNull()) {
         if (!QtCommon::Game::SaveCustomArtwork(title_id, pending_custom_icon)) {
             if (show_error) {
                 QMessageBox::warning(this, tr("Game Artwork"),

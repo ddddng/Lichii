@@ -568,10 +568,16 @@ endif()
 # Remember that the linker is incredibly stupid.
 target_link_libraries(lichii PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
-# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically.
-if (TARGET nxformat::static_nozstd)
+# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically,
+# or in MinGW builds loaded from nxformat.dll next to the executable.
+if (TARGET lichii_nxformat)
     target_sources(lichii PRIVATE nx_tools.h nx_tools.cpp)
-    target_link_libraries(lichii PRIVATE nxformat::static_nozstd)
+    target_link_libraries(lichii PRIVATE lichii_nxformat)
     target_compile_definitions(lichii PRIVATE LICHII_NX_TOOLS)
+    if (MINGW)
+        target_sources(lichii PRIVATE nx_tools_loader.cpp)
+        add_custom_command(TARGET lichii POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LICHII_NXFORMAT_DLL}" "$<TARGET_FILE_DIR:lichii>")
+    endif()
 endif()
 create_target_directory_groups(lichii)

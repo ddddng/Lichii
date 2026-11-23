@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -487,8 +488,30 @@ private slots:
     void SyncNextendoProfile(bool force);
 
 private:
+    using NupJobProgress =
+        std::function<void(const QString& step, const FileSys::Nup::PackProgress& progress)>;
+    /// Runs a NUP job on a worker behind the progress card. work reports its progress and
+    /// returns what to run on the UI thread when it is done.
+    void StartNupJob(
+        const std::string& game_path, const QString& operation, const QString& title,
+        const QPixmap& icon,
+        std::function<std::function<void()>(const NupJobProgress&, const std::atomic_bool*)> work);
+    void ConvertDumpToNup(const std::filesystem::path& root, const std::string& game_path);
+    void ConvertPackageToNup(const std::string& game_path);
+    /// Whether the game file may be rewritten now: not while its game runs or another job does.
+    bool CanRewriteArchive(const std::string& game_path, const QString& title);
+    /// Writes the edit into the NUP behind the progress card; the original is replaced only when
+    /// the new file is complete.
+    void WriteNupMetadata(const std::string& game_path, FileSys::Nup::MetadataEdit edit,
+                          const QString& title, const QPixmap& icon,
+                          std::function<void()> on_success = {});
+    /// An icon picked in Game Settings goes into the NUP or NX file; edit opens the file's editor.
+    void WriteArchiveFromSettings(u64 title_id, const std::string& game_path,
+                                  const std::optional<QByteArray>& icon, bool edit);
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
     void OnGameListEditNxMetadata(const std::string& game_path);
+    bool CanWriteNxMetadata();
+    bool PrepareNxMetadataWrite();
     void RemovePlayTimeData(u64 program_id);
     bool SelectRomFSDumpTarget(const FileSys::ContentProvider&, u64 program_id,
                                u64* selected_title_id, u8* selected_content_record_type);
@@ -690,6 +713,8 @@ private:
     bool startup_whats_new_pending{};
     NxTools* nx_tools = nullptr;
     bool nx_metadata_write_in_progress = false;
+    /// The game whose local artwork goes once its icon is written into its NX archive.
+    u64 nx_artwork_title_id{};
     std::string nup_source_path;
 
     // Last game booted, used for multi-process apps
