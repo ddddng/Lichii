@@ -8,6 +8,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QFocusEvent>
 #include <QInputDialog>
 #include <QMessageBox>
@@ -66,6 +67,8 @@ public:
         case SH_Menu_Mask:
         case SH_UnderlineShortcut:
             return 0;
+        case SH_DialogButtonLayout:
+            return QDialogButtonBox::GnomeLayout;
         default:
             return QProxyStyle::styleHint(hint, option, widget, data);
         }
