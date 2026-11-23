@@ -142,7 +142,7 @@ public:
         title->setObjectName(QStringLiteral("spotlightDialogTitle"));
         title->setFont(DisplayFont(box ? 20 : 22));
         title->setTextFormat(Qt::PlainText);
-        title->setWordWrap(box != nullptr);
+        title->setWordWrap(true);
         SetTextColor(title, Color::Text());
         subtitle = new QLabel(dialog);
         subtitle->setObjectName(QStringLiteral("spotlightDialogSubtitle"));
@@ -192,6 +192,8 @@ protected:
         case QEvent::Resize:
             if (box) {
                 FitMessageBox();
+            } else {
+                UpdateMargins();
             }
             Place();
             return false;
@@ -230,7 +232,7 @@ private:
 
     int HeaderHeight() const {
         const int width = std::max(1, TextRight() - TextLeft());
-        int height = title->isHidden() ? 0 : title->sizeHint().height();
+        int height = title->isHidden() ? 0 : title->heightForWidth(width);
         if (!subtitle->isHidden()) {
             height += SubtitleGap + subtitle->heightForWidth(width);
         }
@@ -263,12 +265,19 @@ private:
                                        dialog->property(IconTintProperty).value<QColor>(),
                                        dialog->devicePixelRatioF()));
         }
-        const int header = HeaderHeight();
-        dialog->setContentsMargins(
-            ShadowMargins.left() + Padding,
-            ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
-            ShadowMargins.right() + Padding, ShadowMargins.bottom() + Padding);
+        UpdateMargins();
         Place();
+    }
+
+    // The header grows when the title or subtitle wraps to another line at the dialog's width.
+    void UpdateMargins() {
+        const int header = HeaderHeight();
+        const QMargins margins(ShadowMargins.left() + Padding,
+                               ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
+                               ShadowMargins.right() + Padding, ShadowMargins.bottom() + Padding);
+        if (dialog->contentsMargins() != margins) {
+            dialog->setContentsMargins(margins);
+        }
     }
 
     void Place() {
@@ -281,15 +290,14 @@ private:
         const int left = TextLeft();
         const int width = std::max(1, TextRight() - left);
         icon->move(card.left() + Padding, top);
-        title->setText(
-            title->fontMetrics().elidedText(dialog->windowTitle(), Qt::ElideRight, width));
+        const int title_height = title->heightForWidth(width);
         int y = top;
         if (!icon->isHidden() && subtitle->isHidden()) {
-            y += (HeaderIconSize - title->sizeHint().height()) / 2;
+            y += std::max(0, HeaderIconSize - title_height) / 2;
         }
         if (!title->isHidden()) {
-            title->setGeometry(left, y, width, title->sizeHint().height());
-            y += title->sizeHint().height() + SubtitleGap;
+            title->setGeometry(left, y, width, title_height);
+            y += title_height + SubtitleGap;
         }
         subtitle->setGeometry(left, y, width, subtitle->heightForWidth(width));
         if (close) {
@@ -352,6 +360,10 @@ private:
             size = size.grownBy(margins);
         }
         size = size.expandedTo(dialog->sizeHint());
+        // sizeHint ignores word-wrapped labels, which need more height at the final width.
+        if (dialog->hasHeightForWidth()) {
+            size.setHeight(std::max(size.height(), dialog->heightForWidth(size.width())));
+        }
         if (const QScreen* screen = dialog->screen()) {
             size = size.boundedTo(screen->availableGeometry().size());
         }
