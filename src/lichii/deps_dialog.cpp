@@ -1,116 +1,135 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <QAbstractTextDocumentLayout>
-#include <QDesktopServices>
-#include <QIcon>
+#include <algorithm>
+#include <QDialogButtonBox>
+#include <QFontDatabase>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QPainter>
-#include <QStyle>
-#include <QTableWidget>
-#include <QTextEdit>
-#include <fmt/ranges.h>
+#include <QScrollArea>
+#include <QVBoxLayout>
 #include "dep_hashes.h"
-#include "ui_deps_dialog.h"
 #include "lichii/deps_dialog.h"
+#include "lichii/spotlight/theme.h"
+#include "lichii/spotlight/widgets.h"
 
-DepsDialog::DepsDialog(QWidget* parent)
-    : Spotlight::Dialog(parent), ui{std::make_unique<Ui::DepsDialog>()} {
-    ui->setupUi(this);
-    SetTitleVisible(false);
+namespace {
 
-    constexpr int rows = (int)Common::dep_hashes.size();
-    ui->tableDeps->setRowCount(rows);
+constexpr int VersionWidth = 118;
 
-    QStringList labels;
-    labels << tr("Dependency") << tr("Version");
+QWidget* Divider(QWidget* parent) {
+    auto* line = new QWidget(parent);
+    line->setFixedHeight(1);
+    line->setAttribute(Qt::WA_StyledBackground);
+    line->setStyleSheet(QStringLiteral("background-color: rgba(255, 255, 255, 18);"));
+    return line;
+}
 
-    ui->tableDeps->setHorizontalHeaderLabels(labels);
-    ui->tableDeps->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeMode::Stretch);
-    ui->tableDeps->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeMode::Fixed);
-    ui->tableDeps->horizontalHeader()->setMinimumSectionSize(200);
+} // namespace
 
-    for (int i = 0; i < rows; ++i) {
-        const std::string name = Common::dep_names.at(i);
-        const std::string sha = Common::dep_hashes.at(i);
-        const std::string url = Common::dep_urls.at(i);
+DepsDialog::DepsDialog(QWidget* parent) : Spotlight::Dialog(parent) {
+    setWindowTitle(tr("Lichii Dependencies"));
+    SetCardWidth(509);
 
-        std::string dependency = fmt::format("<a href=\"{}\">{}</a>", url, name);
+    auto* layout = new QVBoxLayout(this);
+    layout->setSpacing(14);
 
-        QTableWidgetItem* nameItem = new QTableWidgetItem(QString::fromStdString(dependency));
-        QTableWidgetItem* shaItem = new QTableWidgetItem(QString::fromStdString(sha));
+    auto* intro = new QHBoxLayout;
+    intro->setSpacing(12);
+    auto* logo = new QLabel(this);
+    const qreal ratio = devicePixelRatioF();
+    QPixmap icon(qRound(42 * ratio), qRound(42 * ratio));
+    icon.setDevicePixelRatio(ratio);
+    icon.fill(Qt::transparent);
+    {
+        QPainter painter(&icon);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        Spotlight::PaintWholeIcon(painter, QRectF(0, 0, 42, 42),
+                                  QPixmap(QStringLiteral(":/icons/default/256x256/lichii.png")), 11);
+    }
+    logo->setPixmap(icon);
+    intro->addWidget(logo);
+    auto* info = new QLabel(tr("The projects that make Lichii possible"), this);
+    info->setFont(Spotlight::Font(13, 400));
+    Spotlight::SetTextColor(info, Spotlight::Color::TextSecondary());
+    intro->addWidget(info, 1);
+    layout->addLayout(intro);
 
-        ui->tableDeps->setItem(i, 0, nameItem);
-        ui->tableDeps->setItem(i, 1, shaItem);
+    auto* table = new QWidget;
+    table->setObjectName(QStringLiteral("depsTable"));
+    auto* rows = new QVBoxLayout(table);
+    rows->setContentsMargins(12, 12, 12, 12);
+    rows->setSpacing(9);
+    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    mono.setPixelSize(13);
+    const auto add_row = [&](QWidget* name, const QString& version, const QFont& font,
+                             const QColor& color) {
+        auto* row = new QHBoxLayout;
+        row->setSpacing(12);
+        row->addWidget(name);
+        row->addStretch(1);
+        auto* value = new QLabel(table);
+        value->setFont(font);
+        value->setFixedWidth(VersionWidth);
+        value->setText(QFontMetrics(font).elidedText(version, Qt::ElideRight, VersionWidth));
+        if (value->text() != version) {
+            value->setToolTip(version);
+        }
+        Spotlight::SetTextColor(value, color);
+        row->addWidget(value);
+        rows->addLayout(row);
+    };
+    auto* header = new QLabel(tr("Dependency"), table);
+    header->setFont(Spotlight::Font(13, 600));
+    add_row(header, tr("Version"), Spotlight::Font(13, 600), Spotlight::Color::Text());
+    const QPixmap link = Spotlight::IconPixmap(u"arrow-square-out", 14, Spotlight::Color::Info(),
+                                               devicePixelRatioF());
+    for (std::size_t i = 0; i < Common::dep_names.size(); ++i) {
+        auto* divider_row = new QHBoxLayout;
+        divider_row->setContentsMargins(0, 0, 18, 0);
+        divider_row->addWidget(Divider(table));
+        rows->addLayout(divider_row);
+
+        auto* name = new QWidget(table);
+        auto* name_layout = new QHBoxLayout(name);
+        name_layout->setContentsMargins(0, 0, 0, 0);
+        name_layout->setSpacing(6);
+        auto* text = new QLabel(QStringLiteral("<a href=\"%1\" style=\"color: #8fb5ff; "
+                                               "text-decoration: none\">%2</a>")
+                                    .arg(QString::fromUtf8(Common::dep_urls[i]),
+                                         QString::fromUtf8(Common::dep_names[i]).toHtmlEscaped()),
+                                name);
+        text->setFont(Spotlight::Font(13, 600));
+        text->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        text->setOpenExternalLinks(true);
+        name_layout->addWidget(text);
+        auto* arrow = new QLabel(name);
+        arrow->setPixmap(link);
+        name_layout->addWidget(arrow);
+        add_row(name, QString::fromUtf8(Common::dep_hashes[i]), mono,
+                Spotlight::Color::TextSecondary());
     }
 
-    ui->tableDeps->setItemDelegateForColumn(0, new LinkItemDelegate(this));
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("depsCard"));
+    scroll->setWidget(table);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(QStringLiteral(
+        "#depsCard { background-color: rgba(255, 255, 255, 13); "
+        "border: 1px solid rgba(255, 255, 255, 20); border-radius: 18px; } "
+        "#depsTable { background: transparent; }"));
+    scroll->viewport()->setAutoFillBackground(false);
+    scroll->setFixedHeight(std::min(table->sizeHint().height() + 2, 340));
+    layout->addWidget(scroll);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, this);
+    buttons->setContentsMargins(0, 12, 0, 0);
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    layout->addWidget(buttons);
 }
 
 DepsDialog::~DepsDialog() = default;
-
-LinkItemDelegate::LinkItemDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
-
-void LinkItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
-                             const QModelIndex& index) const {
-    auto options = option;
-    initStyleOption(&options, index);
-
-    QTextDocument doc;
-    QString html = index.data(Qt::DisplayRole).toString();
-    doc.setHtml(html);
-
-    options.text.clear();
-    options.widget->style()->drawControl(QStyle::CE_ItemViewItem, &options, painter, options.widget);
-
-    painter->save();
-    painter->translate(options.rect.left(),
-                       options.rect.top() + (options.rect.height() - doc.size().height()) / 2);
-    doc.drawContents(painter, QRectF(0, 0, options.rect.width(), options.rect.height()));
-    painter->restore();
-}
-
-QSize LinkItemDelegate::sizeHint(const QStyleOptionViewItem& option,
-                                 const QModelIndex& index) const {
-    QStyleOptionViewItem options = option;
-    initStyleOption(&options, index);
-
-    QTextDocument doc;
-    doc.setHtml(options.text);
-    doc.setTextWidth(options.rect.width());
-    return QSize(doc.idealWidth(), doc.size().height());
-}
-
-bool LinkItemDelegate::editorEvent(QEvent* event, QAbstractItemModel* model,
-                                   const QStyleOptionViewItem& option, const QModelIndex& index) {
-    if (event->type() == QEvent::MouseButtonRelease) {
-        QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
-        if (mouseEvent->button() == Qt::LeftButton) {
-            QString html = index.data(Qt::DisplayRole).toString();
-            QTextDocument doc;
-            doc.setHtml(html);
-            doc.setTextWidth(option.rect.width());
-
-            // this is kinda silly but it werks
-            QAbstractTextDocumentLayout* layout = doc.documentLayout();
-
-            QPoint pos = mouseEvent->pos() - option.rect.topLeft();
-            int charPos = layout->hitTest(pos, Qt::ExactHit);
-
-            if (charPos >= 0) {
-                QTextCursor cursor(&doc);
-                cursor.setPosition(charPos);
-
-                QTextCharFormat format = cursor.charFormat();
-
-                if (format.isAnchor()) {
-                    QString href = format.anchorHref();
-                    if (!href.isEmpty()) {
-                        QDesktopServices::openUrl(QUrl(href));
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return QStyledItemDelegate::editorEvent(event, model, option, index);
-}
