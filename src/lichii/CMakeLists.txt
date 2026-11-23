@@ -283,7 +283,7 @@ add_executable(lichii
 
     configuration/system/new_user_dialog.h configuration/system/new_user_dialog.cpp configuration/system/new_user_dialog.ui
     configuration/system/profile_avatar_dialog.h configuration/system/profile_avatar_dialog.cpp
-    configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
+    configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp
 
     render/performance_overlay.h render/performance_overlay.cpp
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui

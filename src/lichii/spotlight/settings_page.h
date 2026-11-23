@@ -7,7 +7,10 @@
 #include <functional>
 #include <QAbstractButton>
 #include <QColor>
+#include <QHash>
 #include <QList>
+#include <QSet>
+#include <QStringList>
 #include <QWidget>
 #include "common/settings_enums.h"
 
@@ -106,24 +109,50 @@ private:
 
 class ToggleSwitch;
 
+/// One section of a category's Advanced view. Each item is a setting key or a source widget's
+/// object name; a leading '>' nests the row under the one before it, and "key|Title|Description"
+/// replaces the row's wording.
+struct AdvancedSection {
+    QString title;
+    QString hint;
+    int column = 0;
+    QStringList items;
+    /// The chip that scrolls to this section; sections sharing a chip label share one chip.
+    QString chip;
+};
+
 class SettingsPage final : public QWidget {
     Q_OBJECT
 
 public:
     explicit SettingsPage(QWidget* parent, bool per_game);
 
+    /// An advanced-only category is listed in the sidebar only while Advanced is on.
     int AddCategory(const QString& title, const QString& subtitle, const QString& icon,
-                    const QColor& color, QString page_title = {});
+                    const QColor& color, QString page_title = {}, bool advanced_only = false);
+    /// The subtitle shown instead of the category's own while Advanced is on.
+    void SetAdvancedSubtitle(int category, const QString& text);
     /// A page without a sidebar entry, reached from a row of its parent category.
     /// A wide page hides the sidebar while it is shown.
     int AddSubPage(int parent, const QString& title, const QString& subtitle, bool wide = false);
     /// Builds the category's rows the first time it is shown or searched.
     void SetBuilder(int category, std::function<void()> build);
-    QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false);
+    /// `action` sits at the right of the section's title, such as an "Add folder" button.
+    QVBoxLayout* AddSection(int category, const QString& title = {}, bool advanced = false,
+                            QWidget* action = nullptr);
+    /// Adds the category's hand-built Advanced rows the first time its Advanced view is built.
+    void SetAdvancedBuilder(int category, std::function<void()> build);
     void AddBlock(int category, QWidget* widget, QString search_label, bool advanced = false);
     /// Shows an existing settings page as Spotlight rows, built when first needed. The page stays
     /// hidden and keeps its own load and apply logic; the rows edit its controls.
     void AddPage(int category, QWidget* page, const QString& name, bool advanced = true);
+    /// Lays the category's Advanced view out in these sections. Rows of its advanced pages that
+    /// match no item and are not in `removed` collect under "More".
+    void SetAdvancedSections(int category, QList<AdvancedSection> sections,
+                             QStringList removed = {});
+    /// Adds a hand-built row to the Advanced section that lists `key`.
+    QLabel* AddAdvancedRow(int category, const QString& key, const QString& title,
+                           const QString& description, QWidget* control);
     void SetCategory(int category);
     void ShowAdvancedPage(int category, QWidget* page);
     void SetFooter(QWidget* widget);
@@ -132,6 +161,8 @@ public:
     void SetGame(const QString& title, const QPixmap& icon);
 
     static QLabel* Text(const QString& text, int size, int weight = 500, bool secondary = false);
+    /// A muted line with an info icon, as under a category's Everyday rows.
+    static QWidget* Note(const QString& text);
     static QPixmap WholeIcon(const QPixmap& icon, int size, qreal dpr);
     static QPixmap WholeIcon(const QPixmap& icon, QSize size, qreal dpr);
     static QWidget* Badge(const QString& text, const QColor& fill, const QColor& ink);
@@ -156,12 +187,18 @@ public:
     static void WatchOverride(ConfigurationShared::Widget* source, QWidget* context,
                               std::function<void()> update);
     static void SetComboIndex(QComboBox* source, int index);
+    /// Puts a "Changed" badge before a per-game control and a reset button after it. Both show
+    /// while `is_custom` returns true; call RefreshOverride on the result when it may change.
+    static QWidget* WithOverride(QWidget* control, std::function<bool()> is_custom,
+                                 std::function<void()> reset);
+    static void RefreshOverride(QWidget* combined);
 
 signals:
     void BackRequested();
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     struct Block {
@@ -174,6 +211,13 @@ private:
         QString name;
         bool advanced;
         QWidget* anchor = nullptr;
+    };
+    struct Slot {
+        int section = 0;
+        int order = 0;
+        bool nested = false;
+        QString title;
+        QString description;
     };
     struct Category {
         QString title;
@@ -189,12 +233,35 @@ private:
         QList<Block> blocks;
         QList<Page> pages;
         std::function<void()> build;
+        std::function<void()> build_advanced;
         bool basic_built = false;
         bool advanced_built = false;
+        bool advanced_only = false;
+        QString advanced_subtitle;
+        QHash<QString, QWidget*> chip_groups;
+        int advanced_pages = 0;
+        QList<AdvancedSection> sections;
+        QHash<QString, Slot> slot_map;
+        QSet<QString> removed;
+        QList<QWidget*> section_widgets;
+        QList<QVBoxLayout*> section_rows;
+        QWidget* chips = nullptr;
+        QWidget* columns = nullptr;
+        int more_section = -1;
+        int advanced_rows = 0;
     };
 
     void Build(int category, bool with_advanced);
     void BuildPage(int category, Page& page);
+    void BuildSections(int category);
+    QWidget* AdvancedArea(int category);
+    QVBoxLayout* NewSection(int category, const QString& title, const QString& hint, int column,
+                            const QString& chip);
+    QLabel* PlaceRow(int category, const Slot& slot, const QString& title,
+                     const QString& description, const QString& tooltip, QWidget* control);
+    bool HasAdvanced(int category) const;
+    bool ShowsAdvanced(int category) const;
+    void UpdateMode();
     bool RefreshCategory(int category);
     void UpdateAdvanced();
     void UpdateSearch();
@@ -216,7 +283,10 @@ private:
     QLabel* empty;
     QLabel* game_icon = nullptr;
     QLabel* game_title = nullptr;
-    ToggleSwitch* advanced;
+    QAbstractButton* everyday_mode;
+    QAbstractButton* advanced_mode;
+    QWidget* mode_switch;
+    bool show_advanced = false;
     QList<Category> categories;
     int current_category = -1;
     int unfiltered_category = -1;

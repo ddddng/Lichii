@@ -34,6 +34,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/cloud-arrow-down.png</file>
         <file>spotlight/icons/copy.png</file>
         <file>spotlight/icons/cpu.png</file>
+        <file>spotlight/icons/crop.png</file>
         <file>spotlight/icons/cube.png</file>
         <file>spotlight/icons/desktop.png</file>
         <file>spotlight/icons/dots-three.png</file>
@@ -42,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/eye.png</file>
         <file>spotlight/icons/file.png</file>
         <file>spotlight/icons/film-strip.png</file>
+        <file>spotlight/icons/floppy-disk.png</file>
         <file>spotlight/icons/folder-open.png</file>
         <file>spotlight/icons/folder.png</file>
         <file>spotlight/icons/frame-corners.png</file>
@@ -64,15 +66,19 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/list.png</file>
         <file>spotlight/icons/lock-simple.png</file>
         <file>spotlight/icons/magic-wand.png</file>
+        <file>spotlight/icons/magnifying-glass-minus.png</file>
+        <file>spotlight/icons/magnifying-glass-plus.png</file>
         <file>spotlight/icons/magnifying-glass.png</file>
         <file>spotlight/icons/memory.png</file>
         <file>spotlight/icons/minus.png</file>
         <file>spotlight/icons/monitor-fill.png</file>
         <file>spotlight/icons/monitor.png</file>
+        <file>spotlight/icons/package.png</file>
         <file>spotlight/icons/paint-brush.png</file>
         <file>spotlight/icons/palette.png</file>
         <file>spotlight/icons/pause-fill.png</file>
         <file>spotlight/icons/pause.png</file>
+        <file>spotlight/icons/pencil-simple.png</file>
         <file>spotlight/icons/play-fill.png</file>
         <file>spotlight/icons/play.png</file>
         <file>spotlight/icons/plus.png</file>
