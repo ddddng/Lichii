@@ -5605,7 +5605,7 @@ void MainWindow::OnWhatsNew() {
                                        Qt::ISODate);
     whats_new_dialog = new WhatsNewDialog(build, date, LICHII_USE_PENDING_RELEASE_NOTES, this);
     whats_new_dialog->setAttribute(Qt::WA_DeleteOnClose);
-    ConfigurationShared::FitToScreen(whats_new_dialog, QSize(600, 740));
+    ConfigurationShared::FitToScreen(whats_new_dialog, QSize(442, 576));
     whats_new_dialog->show();
 
     if (build && build != UISettings::values.last_seen_release.GetValue()) {
@@ -7582,7 +7582,7 @@ void MainWindow::UpdateMenuIcons() {
         {ui->action_Load_File, "file"},
         {ui->action_Load_Folder, "folder"},
         {ui->menu_recent_files->menuAction(), "clock"},
-        {ui->action_Load_Amiibo, "star"},
+        {ui->action_Load_Amiibo, "wave"},
         {ui->menuOpen_Eden_Folders->menuAction(), "folder"},
         {ui->action_Exit, "x"},
         {ui->action_Root_Data_Folder, "folder"},
@@ -7600,11 +7600,11 @@ void MainWindow::UpdateMenuIcons() {
         {ui->menu_View_Debugging->menuAction(), "bug"},
         {ui->menu_Game_List_Mode->menuAction(), "grid"},
         {ui->menuGame_Icon_Size->menuAction(), "image"},
-        {ui->action_View_Lobby, "globe"},
+        {ui->action_View_Lobby, "search"},
         {ui->action_Start_Room, "plus"},
-        {ui->action_Connect_To_Room, "users"},
-        {ui->action_Show_Room, "dot"},
-        {ui->action_Leave_Room, "x"},
+        {ui->action_Connect_To_Room, "link"},
+        {ui->action_Show_Room, "chat"},
+        {ui->action_Leave_Room, "sign_out"},
         {ui->action_Install_Keys, "key"},
         {ui->menuInstall_Firmware->menuAction(), "cpu"},
         {ui->action_Firmware_From_Folder, "folder"},

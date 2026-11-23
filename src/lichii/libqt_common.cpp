@@ -13,6 +13,7 @@
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/abstract/progress.h"
 #include "qt_common/qt_common.h"
+#include "lichii/spotlight/dialog.h"
 
 namespace QtCommon::Frontend {
 

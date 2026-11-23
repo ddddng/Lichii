@@ -416,12 +416,12 @@ inline constexpr bool CreateShortcutMessagesGUI(ShortcutMessages imsg, const QSt
     switch (imsg) {
     case ShortcutMessages::Fullscreen:
         buttons = Yes | No;
-        result = QtCommon::Frontend::Information(
+        result = QtCommon::Frontend::Question(
             tr("Create Shortcut"), tr("Do you want to launch the game in fullscreen?"), buttons);
         return result == Yes;
     case ShortcutMessages::Success:
-        QtCommon::Frontend::Information(
-            tr("Shortcut Created"), tr("Successfully created a shortcut to %1").arg(game_title));
+        QtCommon::Frontend::Success(tr("Shortcut Created"),
+                                    tr("Successfully created a shortcut to %1").arg(game_title));
         return false;
     case ShortcutMessages::Volatile:
         buttons = Ok | Cancel;

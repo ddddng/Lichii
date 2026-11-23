@@ -94,6 +94,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_bug@2x.png</file>
         <file>icons/menu_bug_white.png</file>
         <file>icons/menu_bug_white@2x.png</file>
+        <file>icons/menu_chat.png</file>
+        <file>icons/menu_chat@2x.png</file>
+        <file>icons/menu_chat_white.png</file>
+        <file>icons/menu_chat_white@2x.png</file>
         <file>icons/menu_check.png</file>
         <file>icons/menu_check@2x.png</file>
         <file>icons/menu_check_white.png</file>
@@ -226,10 +230,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_sd@2x.png</file>
         <file>icons/menu_sd_white.png</file>
         <file>icons/menu_sd_white@2x.png</file>
+        <file>icons/menu_search.png</file>
+        <file>icons/menu_search@2x.png</file>
+        <file>icons/menu_search_white.png</file>
+        <file>icons/menu_search_white@2x.png</file>
         <file>icons/menu_share.png</file>
         <file>icons/menu_share@2x.png</file>
         <file>icons/menu_share_white.png</file>
         <file>icons/menu_share_white@2x.png</file>
+        <file>icons/menu_sign_out.png</file>
+        <file>icons/menu_sign_out@2x.png</file>
+        <file>icons/menu_sign_out_white.png</file>
+        <file>icons/menu_sign_out_white@2x.png</file>
         <file>icons/menu_sliders.png</file>
         <file>icons/menu_sliders@2x.png</file>
         <file>icons/menu_sliders_white.png</file>
@@ -266,6 +278,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_wand@2x.png</file>
         <file>icons/menu_wand_white.png</file>
         <file>icons/menu_wand_white@2x.png</file>
+        <file>icons/menu_wave.png</file>
+        <file>icons/menu_wave@2x.png</file>
+        <file>icons/menu_wave_white.png</file>
+        <file>icons/menu_wave_white@2x.png</file>
         <file>icons/menu_x.png</file>
         <file>icons/menu_x@2x.png</file>
         <file>icons/menu_x_white.png</file>

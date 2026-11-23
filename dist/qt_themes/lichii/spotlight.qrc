@@ -23,6 +23,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/arrows-left-right.png</file>
         <file>spotlight/icons/arrows-out-cardinal.png</file>
         <file>spotlight/icons/arrows-out.png</file>
+        <file>spotlight/icons/backspace.png</file>
         <file>spotlight/icons/broadcast.png</file>
         <file>spotlight/icons/bug.png</file>
         <file>spotlight/icons/camera.png</file>
@@ -38,6 +39,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/circle-fill.png</file>
         <file>spotlight/icons/circle-notch.png</file>
         <file>spotlight/icons/circle.png</file>
+        <file>spotlight/icons/clipboard-text.png</file>
         <file>spotlight/icons/clock.png</file>
         <file>spotlight/icons/cloud-arrow-down.png</file>
         <file>spotlight/icons/copy.png</file>
@@ -61,6 +63,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/game-controller.png</file>
         <file>spotlight/icons/gauge.png</file>
         <file>spotlight/icons/gear-six.png</file>
+        <file>spotlight/icons/github-logo.png</file>
         <file>spotlight/icons/globe-fill.png</file>
         <file>spotlight/icons/globe.png</file>
         <file>spotlight/icons/graphics-card.png</file>
@@ -84,9 +87,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/minus.png</file>
         <file>spotlight/icons/monitor-fill.png</file>
         <file>spotlight/icons/monitor.png</file>
+        <file>spotlight/icons/newspaper.png</file>
         <file>spotlight/icons/package.png</file>
         <file>spotlight/icons/paint-brush.png</file>
         <file>spotlight/icons/palette.png</file>
+        <file>spotlight/icons/paper-plane-tilt.png</file>
         <file>spotlight/icons/pause-fill.png</file>
         <file>spotlight/icons/pause.png</file>
         <file>spotlight/icons/pencil-simple.png</file>
@@ -94,6 +99,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/play.png</file>
         <file>spotlight/icons/plus.png</file>
         <file>spotlight/icons/power.png</file>
+        <file>spotlight/icons/prohibit.png</file>
         <file>spotlight/icons/push-pin.png</file>
         <file>spotlight/icons/puzzle-piece-fill.png</file>
         <file>spotlight/icons/puzzle-piece.png</file>
@@ -101,6 +107,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/record.png</file>
         <file>spotlight/icons/seal-check.png</file>
         <file>spotlight/icons/shield-check.png</file>
+        <file>spotlight/icons/shield.png</file>
         <file>spotlight/icons/sign-out.png</file>
         <file>spotlight/icons/sliders-horizontal.png</file>
         <file>spotlight/icons/sort-ascending.png</file>
@@ -124,6 +131,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/translate.png</file>
         <file>spotlight/icons/trash.png</file>
         <file>spotlight/icons/upload-simple.png</file>
+        <file>spotlight/icons/user-circle.png</file>
         <file>spotlight/icons/user.png</file>
         <file>spotlight/icons/users.png</file>
         <file>spotlight/icons/vibrate.png</file>

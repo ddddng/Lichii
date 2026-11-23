@@ -2,15 +2,11 @@
 
 #pragma once
 
-#include <QDialog>
+#include "lichii/spotlight/dialog.h"
 
-class AboutDialog : public QDialog {
+class AboutDialog : public Spotlight::Dialog {
     Q_OBJECT
 
 public:
     explicit AboutDialog(QWidget* parent);
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-    void mousePressEvent(QMouseEvent* event) override;
 };
