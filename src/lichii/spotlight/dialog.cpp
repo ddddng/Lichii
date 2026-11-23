@@ -369,26 +369,42 @@ private:
         if (box) {
             return;
         }
-        QSize size = dialog->size();
+        // The minimum and Qt's size before show used the header margins of the unsized dialog, so a
+        // dialog nothing resized starts from its size hint rather than from that size.
+        if (dialog->layout()) {
+            dialog->layout()->activate();
+        }
+        QSize given;
         if (dialog->testAttribute(Qt::WA_Resized)) {
+            given = dialog->size();
             const QMargins margins = dialog->contentsMargins();
             const QSize minimum = dialog->minimumSize();
-            if (size.width() > minimum.width()) {
-                size.rwidth() += margins.left() + margins.right();
+            if (given.width() > minimum.width()) {
+                given.rwidth() += margins.left() + margins.right();
             }
-            if (size.height() > minimum.height()) {
-                size.rheight() += margins.top() + margins.bottom();
+            if (given.height() > minimum.height()) {
+                given.rheight() += margins.top() + margins.bottom();
             }
         }
-        size = size.expandedTo(dialog->sizeHint()).boundedTo(dialog->maximumSize());
+        QSize available(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        if (const QScreen* screen = dialog->screen()) {
+            available = screen->availableGeometry().size();
+        }
+        // The header wraps at the final width, so settle the width and the header's margin first.
+        const int width = std::min({std::max(given.width(), dialog->sizeHint().width()),
+                                    dialog->maximumWidth(), available.width()});
+        dialog->resize(width, dialog->height());
+        UpdateMargins();
+        if (dialog->layout()) {
+            dialog->layout()->activate();
+        }
+        int height = std::max(given.height(), dialog->sizeHint().height());
         // sizeHint ignores word-wrapped labels, which need more height at the final width.
         if (dialog->hasHeightForWidth()) {
-            size.setHeight(std::max(size.height(), dialog->heightForWidth(size.width())));
+            height = std::max(height, dialog->heightForWidth(width));
         }
-        if (const QScreen* screen = dialog->screen()) {
-            size = size.boundedTo(screen->availableGeometry().size());
-        }
-        dialog->resize(size.expandedTo(dialog->minimumSizeHint()));
+        height = std::min({height, dialog->maximumHeight(), available.height()});
+        dialog->resize(QSize(width, height).expandedTo(dialog->minimumSizeHint()));
     }
 
     // Runs before QMessageBox::showEvent, which sizes the box from its layout.
