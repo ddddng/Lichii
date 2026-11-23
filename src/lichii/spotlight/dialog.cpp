@@ -671,6 +671,25 @@ private:
                 }
             }
         }
+        // Paper's message cards end the button row with the default button.
+        auto* row = box ? qobject_cast<QBoxLayout*>(chosen->parentWidget()->layout()) : nullptr;
+        if (!row || !qobject_cast<QDialogButtonBox*>(chosen->parentWidget())) {
+            return;
+        }
+        int last = -1;
+        for (int i = 0; i < row->count(); ++i) {
+            if (row->itemAt(i)->widget()) {
+                last = i;
+            }
+        }
+        const int at = row->indexOf(chosen);
+        if (at < 0 || at >= last) {
+            return;
+        }
+        QWidget* before = row->itemAt(last)->widget();
+        row->removeWidget(chosen);
+        row->insertWidget(last, chosen);
+        QWidget::setTabOrder(before, chosen);
     }
 
     QDialog* dialog;

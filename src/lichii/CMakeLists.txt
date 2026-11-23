@@ -254,7 +254,7 @@ add_executable(lichii
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
-    deps_dialog.cpp deps_dialog.h deps_dialog.ui
+    deps_dialog.cpp deps_dialog.h
 
     spotlight/theme.cpp spotlight/theme.h
     spotlight/hero.cpp spotlight/hero.h

@@ -183,7 +183,7 @@ PillButton::PillButton(const QString& text, QString icon, Kind kind_, int height
     setText(text);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::TabFocus);
-    setFont(Font(height >= 40 ? 15 : 13, 600));
+    setFont(Font(height >= 44 ? 15 : height >= 38 ? 14 : 13, 600));
     setFixedHeight(height);
 }
 
@@ -204,8 +204,8 @@ void PillButton::SetForegroundColor(const QColor& color) {
 }
 
 QSize PillButton::sizeHint() const {
-    const int icon = icon_name.isEmpty() ? 0 : height >= 40 ? 26 : height == 26 ? 20 : 24;
-    const int padding = height >= 40 ? 24 : height == 26 ? 11 : 16;
+    const int icon = icon_name.isEmpty() ? 0 : height == 26 ? 20 : 23;
+    const int padding = height >= 44 ? 22 : height >= 38 ? 18 : height == 26 ? 11 : 14;
     return {fontMetrics().horizontalAdvance(text()) + icon + padding * 2, height};
 }
 
@@ -223,11 +223,7 @@ void PillButton::paintEvent(QPaintEvent*) {
         ink = Color::OnLight();
         break;
     case Kind::Control:
-        fill = Mix(height == 26 ? Color::Fill() : Color::Control(), Color::ControlHover(),
-                   hover.Value());
-        if (height != 26) {
-            stroke = Color::Stroke();
-        }
+        fill = Mix(Color::Fill(), Color::ControlHover(), hover.Value());
         ink = Color::Text();
         break;
     }
@@ -243,7 +239,7 @@ void PillButton::paintEvent(QPaintEvent*) {
     }
     FillRounded(painter, rect(), height / 2.0, fill, stroke);
 
-    const int icon = icon_name.isEmpty() ? 0 : height >= 40 ? 18 : height == 26 ? 14 : 16;
+    const int icon = icon_name.isEmpty() ? 0 : height == 26 ? 14 : 15;
     const int gap = icon ? (height == 26 ? 6 : 8) : 0;
     const int content = icon + gap + fontMetrics().horizontalAdvance(text());
     int x = (width() - content) / 2;
@@ -314,20 +310,28 @@ void SegmentedControl::SetOptionEnabled(int index, bool on) {
     }
 }
 
+// The 40 px top bar control insets its segments by 4 px with 16 px padding; the 38 px and smaller
+// controls of the kit inset them by 3 px with 14 px padding.
 QSize SegmentedControl::sizeHint() const {
-    int width = 8 + 2 * qMax(0, int(options.size()) - 1);
+    const int inset = height >= 40 ? 4 : 3;
+    const int padding = height >= 40 ? 16 : 14;
+    int width = inset * 2 + 2 * qMax(0, int(options.size()) - 1);
     for (const auto& option : options) {
-        width += QFontMetrics(Font(font().pixelSize(), 600)).horizontalAdvance(option) + 32;
+        width +=
+            QFontMetrics(Font(font().pixelSize(), 600)).horizontalAdvance(option) + padding * 2;
     }
     return {width, height};
 }
 
 QRect SegmentedControl::SegmentRect(int index) const {
-    int x = 4;
+    const int inset = height >= 40 ? 4 : 3;
+    const int padding = height >= 40 ? 16 : 14;
+    int x = inset;
     for (int i = 0; i < options.size(); ++i) {
-        const int w = QFontMetrics(Font(font().pixelSize(), 600)).horizontalAdvance(options[i]) + 32;
+        const int w =
+            QFontMetrics(Font(font().pixelSize(), 600)).horizontalAdvance(options[i]) + padding * 2;
         if (i == index) {
-            return {x, 4, w, height - 8};
+            return {x, inset, w, height - inset * 2};
         }
         x += w + 2;
     }
@@ -352,8 +356,13 @@ void SegmentedControl::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     const QRect frame(0, 0, sizeHint().width(), height);
-    FillRounded(painter, frame, height / 2.0, kind == Kind::Light ? Color::Control() : Color::Fill(),
-                kind == Kind::Light ? Color::Stroke() : QColor{});
+    if (height >= 40) {
+        FillRounded(painter, frame, height / 2.0,
+                    kind == Kind::Light ? Color::Control() : Color::Fill(),
+                    kind == Kind::Light ? Color::Stroke() : QColor{});
+    } else {
+        FillRounded(painter, frame, height / 2.0, Color::SegmentFrame());
+    }
     if (const QRectF selection = SelectionRect(); !selection.isEmpty()) {
         FillRounded(painter, selection, selection.height() / 2.0,
                     kind == Kind::Light ? Color::Text() : Color::Accent());
