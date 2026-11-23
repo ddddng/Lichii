@@ -5,13 +5,14 @@
 
 #include "lichii/spotlight/dialog.h"
 
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QEvent>
+#include <QGridLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
 #include <QStyle>
@@ -27,91 +28,127 @@ namespace {
 constexpr char ChromeProperty[] = "spotlightChrome";
 constexpr char SubtitleProperty[] = "spotlightSubtitle";
 constexpr char TitleHiddenProperty[] = "spotlightTitleHidden";
+constexpr char IconProperty[] = "spotlightIcon";
+constexpr char IconTintProperty[] = "spotlightIconTint";
+constexpr char ToneProperty[] = "spotlightTone";
+constexpr char ContentChromeProperty[] = "spotlightContentChrome";
 
-// Room around the card for its shadow, which falls 8 px down.
-constexpr QMargins ShadowMargins{24, 16, 24, 32};
-constexpr int ShadowBlur = 16;
-constexpr int ShadowOffset = 8;
-constexpr int PaddingX = 14;
-constexpr int PaddingTop = 18;
-constexpr int PaddingBottom = 16;
-constexpr int TitleGap = 6;
-constexpr int CloseSize = 30;
+// Room around the card for its shadow (Paper: 0 30 80 #000000a6), which falls down.
+constexpr QMargins ShadowMargins{36, 20, 36, 52};
+constexpr int ShadowBlur = 28;
+constexpr int ShadowOffset = 18;
+constexpr int Padding = 24;
+constexpr int HeaderGap = 20;
+constexpr int HeaderIconSize = 44;
+constexpr int HeaderIconGap = 14;
+constexpr int SubtitleGap = 4;
+constexpr int CloseSize = 32;
+constexpr int ButtonGap = 10;
 
-QPixmap MessageIcon(QMessageBox::Icon icon, qreal ratio) {
-    QString name;
-    QColor tint;
-    switch (icon) {
-    case QMessageBox::Information:
-        name = QStringLiteral("info");
-        tint = Color::Info();
-        break;
-    case QMessageBox::Warning:
-        name = QStringLiteral("warning-circle");
-        tint = Color::Warning();
-        break;
-    case QMessageBox::Critical:
-        name = QStringLiteral("warning-circle");
-        tint = Color::Destructive();
-        break;
-    case QMessageBox::Question:
-        name = QStringLiteral("question");
-        tint = Color::Accent();
-        break;
-    case QMessageBox::NoIcon:
-        return {};
+// Message boxes: a 412 px card with the icon beside the title and text.
+constexpr int MessageIconGap = 16;
+constexpr int MessageTextWidth = 304;
+constexpr int MessageWideTextWidth = 456;
+constexpr int MessageTitleGap = 6;
+constexpr int MessageButtonGap = 18;
+
+struct MessageLook {
+    QString icon;
+    QColor color;
+    int fill_alpha = 0;
+};
+
+MessageLook LookOf(const QMessageBox* box) {
+    if (box->property(ToneProperty).toString() == QStringLiteral("success")) {
+        return {QStringLiteral("check-circle"), Color::Success(), 0x1f};
     }
-    constexpr int size = 44;
-    QPixmap tile(qRound(size * ratio), qRound(size * ratio));
+    switch (box->icon()) {
+    case QMessageBox::Information:
+        return {QStringLiteral("info"), Color::Info(), 0x1f};
+    case QMessageBox::Warning:
+        return {QStringLiteral("warning-circle"), Color::Warning(), 0x1f};
+    case QMessageBox::Critical:
+        return {QStringLiteral("warning-circle"), Color::Destructive(), 0x1f};
+    case QMessageBox::Question:
+        return {QStringLiteral("question"), Color::Accent(), 0x24};
+    case QMessageBox::NoIcon:
+        break;
+    }
+    return {};
+}
+
+QPixmap MessageIcon(const MessageLook& look, qreal ratio) {
+    QPixmap tile(qRound(HeaderIconSize * ratio), qRound(HeaderIconSize * ratio));
     tile.setDevicePixelRatio(ratio);
     tile.fill(Qt::transparent);
     QPainter painter(&tile);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::NoPen);
-    QColor fill = tint;
-    fill.setAlpha(0x24);
+    QColor fill = look.color;
+    fill.setAlpha(look.fill_alpha);
     painter.setBrush(fill);
-    painter.drawRoundedRect(QRectF(0, 0, size, size), 15, 15);
+    painter.drawEllipse(QRectF(0, 0, HeaderIconSize, HeaderIconSize));
+    painter.drawPixmap(11, 11, IconPixmap(look.icon, 22, look.color, ratio));
+    return tile;
+}
+
+QPixmap HeaderIcon(const QString& name, const QColor& tint, qreal ratio) {
+    QPixmap tile(qRound(HeaderIconSize * ratio), qRound(HeaderIconSize * ratio));
+    tile.setDevicePixelRatio(ratio);
+    tile.fill(Qt::transparent);
+    QPainter painter(&tile);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Color::Fill());
+    painter.drawRoundedRect(QRectF(0, 0, HeaderIconSize, HeaderIconSize), Radius::Tile,
+                            Radius::Tile);
     painter.drawPixmap(11, 11, IconPixmap(name, 22, tint, ratio));
     return tile;
 }
 
-class DialogScrim final : public QWidget {
+// Dims the window under a modal dialog, as Paper draws every dialog.
+class Scrim final : public QWidget {
 public:
-    explicit DialogScrim(QWidget* owner) : QWidget(owner) {
+    explicit Scrim(QWidget* window) : QWidget(window) {
         setAttribute(Qt::WA_TransparentForMouseEvents);
-        setGeometry(owner->rect());
-        owner->installEventFilter(this);
+        setGeometry(window->rect());
+        window->installEventFilter(this);
+        raise();
+        show();
     }
 
 protected:
-    bool eventFilter(QObject* owner, QEvent* event) override {
+    bool eventFilter(QObject*, QEvent* event) override {
         if (event->type() == QEvent::Resize) {
-            setGeometry(static_cast<QWidget*>(owner)->rect());
+            setGeometry(parentWidget()->rect());
         }
         return false;
     }
 
     void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.fillRect(rect(), QColor(0x07, 0x08, 0x0b, 0xb8));
+        QPainter(this).fillRect(rect(), Color::DialogScrim());
     }
 };
 
 class DialogChrome final : public QObject {
 public:
-    DialogChrome(QDialog* dialog_, bool close_button, bool custom_ = false)
-        : QObject(dialog_), dialog(dialog_), custom(custom_) {
+    DialogChrome(QDialog* dialog_, bool close_button)
+        : QObject(dialog_), dialog(dialog_), box(qobject_cast<QMessageBox*>(dialog_)) {
         title = new QLabel(dialog);
         title->setObjectName(QStringLiteral("spotlightDialogTitle"));
-        title->setFont(Font(18, 700));
+        title->setFont(DisplayFont(box ? 20 : 22));
         title->setTextFormat(Qt::PlainText);
+        title->setWordWrap(box != nullptr);
         SetTextColor(title, Color::Text());
         subtitle = new QLabel(dialog);
         subtitle->setObjectName(QStringLiteral("spotlightDialogSubtitle"));
-        subtitle->setFont(Font(12, 500));
+        subtitle->setFont(Font(14, 400));
         subtitle->setTextFormat(Qt::PlainText);
+        subtitle->setWordWrap(true);
         SetTextColor(subtitle, Color::TextSecondary());
+        icon = new QLabel(dialog);
+        icon->setFixedSize(HeaderIconSize, HeaderIconSize);
+        icon->hide();
         if (close_button) {
             close = new CircleButton(QStringLiteral("x"), CloseSize, dialog);
             close->setToolTip(QDialog::tr("Close"));
@@ -123,7 +160,7 @@ public:
     }
 
     ~DialogChrome() override {
-        delete scrim.data();
+        delete scrim;
     }
 
 protected:
@@ -134,23 +171,24 @@ protected:
             Update();
             return false;
         case QEvent::Show:
-            if (custom && dialog->parentWidget()) {
-                scrim = new DialogScrim(dialog->parentWidget()->window());
-                scrim->show();
-                scrim->raise();
+            if (box) {
+                PrepareMessageBox();
             }
-            PrepareMessageBox();
-            MarkDestructiveButtons();
+            PrepareButtons();
             Update();
+            ShowScrim();
             if (!shown) {
                 shown = true;
                 MakeRoomForChrome();
             }
             return false;
         case QEvent::Hide:
-            delete scrim.data();
+            delete scrim;
             return false;
         case QEvent::Resize:
+            if (box) {
+                FitMessageBox();
+            }
             Place();
             return false;
         case QEvent::Paint:
@@ -173,10 +211,27 @@ private:
         return dialog->rect().marginsRemoved(ShadowMargins);
     }
 
-    int TitleHeight() const {
+    QLabel* MessageLabel() const {
+        return dialog->findChild<QLabel*>(QStringLiteral("qt_msgbox_label"),
+                                          Qt::FindDirectChildrenOnly);
+    }
+
+    int TextLeft() const {
+        return Card().left() + Padding + (icon->isHidden() ? 0 : HeaderIconSize + HeaderIconGap);
+    }
+
+    int TextRight() const {
+        return Card().right() + 1 - Padding - (close ? CloseSize + HeaderIconGap : 0);
+    }
+
+    int HeaderHeight() const {
+        const int width = std::max(1, TextRight() - TextLeft());
         int height = title->isHidden() ? 0 : title->sizeHint().height();
         if (!subtitle->isHidden()) {
-            height += 2 + subtitle->sizeHint().height();
+            height += SubtitleGap + subtitle->heightForWidth(width);
+        }
+        if (!icon->isHidden()) {
+            height = std::max(height, HeaderIconSize);
         }
         if (close) {
             height = std::max(height, CloseSize);
@@ -185,86 +240,188 @@ private:
     }
 
     void Update() {
-        if (custom) {
+        if (dialog->property(ContentChromeProperty).toBool()) {
             title->hide();
             subtitle->hide();
+            icon->hide();
             dialog->setContentsMargins(ShadowMargins);
             return;
         }
         title->setText(dialog->windowTitle());
+        if (box) {
+            title->setHidden(title->text().isEmpty());
+            subtitle->hide();
+            dialog->setContentsMargins(ShadowMargins +
+                                       QMargins(Padding, Padding, Padding, Padding));
+            Place();
+            return;
+        }
         title->setHidden(title->text().isEmpty() || dialog->property(TitleHiddenProperty).toBool());
         subtitle->setText(dialog->property(SubtitleProperty).toString());
         subtitle->setHidden(subtitle->text().isEmpty());
-        const int title_height = TitleHeight();
+        const QString icon_name = dialog->property(IconProperty).toString();
+        icon->setHidden(icon_name.isEmpty());
+        if (!icon_name.isEmpty()) {
+            icon->setPixmap(HeaderIcon(icon_name,
+                                       dialog->property(IconTintProperty).value<QColor>(),
+                                       dialog->devicePixelRatioF()));
+        }
+        const int header = HeaderHeight();
         dialog->setContentsMargins(
-            ShadowMargins.left() + PaddingX,
-            ShadowMargins.top() + PaddingTop + title_height + (title_height ? TitleGap : 0),
-            ShadowMargins.right() + PaddingX, ShadowMargins.bottom() + PaddingBottom);
+            ShadowMargins.left() + Padding,
+            ShadowMargins.top() + Padding + header + (header ? HeaderGap : 0),
+            ShadowMargins.right() + Padding, ShadowMargins.bottom() + Padding);
         Place();
     }
 
     void Place() {
-        if (custom) {
+        if (dialog->property(ContentChromeProperty).toBool()) {
+            return;
+        }
+        if (box) {
+            PlaceMessageTitle();
             return;
         }
         const QRect card = Card();
-        const int left = card.left() + PaddingX + 8;
-        const int right = card.right() - PaddingX - (close ? 4 : 8);
-        const int top = card.top() + PaddingTop;
-        const int text_right = close ? right - CloseSize - 8 : right;
-        const int title_height = TitleHeight();
-        const int text_height = title->sizeHint().height() +
-                                (subtitle->isHidden() ? 0 : 2 + subtitle->sizeHint().height());
-        int y = top + (title_height - text_height) / 2;
-        title->setText(title->fontMetrics().elidedText(dialog->windowTitle(), Qt::ElideRight,
-                                                       text_right - left));
-        title->setGeometry(left, y, text_right - left, title->sizeHint().height());
-        y += title->sizeHint().height() + 2;
-        subtitle->setGeometry(left, y, text_right - left, subtitle->sizeHint().height());
-        if (close) {
-            close->move(right - CloseSize + 1, top + (title_height - CloseSize) / 2);
+        const int top = card.top() + Padding;
+        const int left = TextLeft();
+        const int width = std::max(1, TextRight() - left);
+        icon->move(card.left() + Padding, top);
+        title->setText(
+            title->fontMetrics().elidedText(dialog->windowTitle(), Qt::ElideRight, width));
+        int y = top;
+        if (!icon->isHidden() && subtitle->isHidden()) {
+            y += (HeaderIconSize - title->sizeHint().height()) / 2;
         }
+        if (!title->isHidden()) {
+            title->setGeometry(left, y, width, title->sizeHint().height());
+            y += title->sizeHint().height() + SubtitleGap;
+        }
+        subtitle->setGeometry(left, y, width, subtitle->heightForWidth(width));
+        if (close) {
+            close->move(card.right() + 1 - Padding - CloseSize, top);
+        }
+    }
+
+    void PlaceMessageTitle() {
+        const QLabel* label = MessageLabel();
+        if (!label || title->isHidden()) {
+            return;
+        }
+        const QRect text = label->geometry();
+        title->setGeometry(text.left(), text.top(), text.width(),
+                           title->heightForWidth(text.width()));
     }
 
     void Paint() {
         QPainter painter(dialog);
         painter.setRenderHint(QPainter::Antialiasing);
         const QRectF card = QRectF(Card()).adjusted(0.5, 0.5, -0.5, -0.5);
-        const int radius = custom ? Radius::Card + 2 : Radius::Dialog;
         painter.setPen(Qt::NoPen);
         QColor shadow = Color::Shadow();
         for (int step = ShadowBlur; step > 0; --step) {
             const qreal t = 1.0 - qreal(step) / ShadowBlur;
-            shadow.setAlphaF(0.06f * float(t * t));
+            shadow.setAlphaF(0.05f * float(t * t));
             painter.setBrush(shadow);
             const qreal grow = step;
             painter.drawRoundedRect(
                 card.translated(0, ShadowOffset * t).adjusted(-grow, -grow, grow, grow),
-                radius + grow, radius + grow);
+                Radius::Dialog + grow, Radius::Dialog + grow);
         }
         painter.setPen(QPen(Color::StrokeSubtle(), 1));
-        painter.setBrush(custom ? QColor(0x15, 0x16, 0x1e) : Color::DialogSolid());
-        painter.drawRoundedRect(card, radius, radius);
+        painter.setBrush(Color::DialogSolid());
+        painter.drawRoundedRect(card, Radius::Dialog, Radius::Dialog);
+    }
+
+    void ShowScrim() {
+        QWidget* parent = dialog->parentWidget();
+        if (scrim || !parent || !dialog->isModal()) {
+            return;
+        }
+        QWidget* window = parent->window();
+        if (window->property(ChromeProperty).toBool()) {
+            return;
+        }
+        scrim = new Scrim(window);
     }
 
     // setupUi sizes a dialog from its form, which was drawn without the card around it, so the
     // dialog grows to the size its layout asks for when the form is too small.
     void MakeRoomForChrome() {
-        dialog->resize(dialog->size().expandedTo(dialog->sizeHint()));
+        if (!box) {
+            dialog->resize(dialog->size().expandedTo(dialog->sizeHint()));
+        }
     }
 
+    // Runs before QMessageBox::showEvent, which sizes the box from its layout.
     void PrepareMessageBox() {
-        auto* box = qobject_cast<QMessageBox*>(dialog);
-        if (!box || box->icon() == QMessageBox::NoIcon) {
+        const MessageLook look = LookOf(box);
+        if (!look.icon.isEmpty()) {
+            box->setIconPixmap(MessageIcon(look, box->devicePixelRatioF()));
+        }
+        ApplyMessageSpacing();
+    }
+
+    void ApplyMessageSpacing() {
+        if (auto* grid = qobject_cast<QGridLayout*>(box->layout())) {
+            grid->setContentsMargins(0, 0, 0, 0);
+            grid->setHorizontalSpacing(0);
+            grid->setVerticalSpacing(0);
+        }
+        if (auto* icon_label = box->findChild<QLabel*>(QStringLiteral("qt_msgboxex_icon_label"))) {
+            icon_label->setContentsMargins(0, 0, MessageIconGap - 7, 0);
+        }
+        if (auto* informative =
+                box->findChild<QLabel*>(QStringLiteral("qt_msgbox_informativelabel"))) {
+            informative->setContentsMargins(0, MessageTitleGap, 0, 0);
+        }
+        if (auto* buttons = box->findChild<QDialogButtonBox*>()) {
+            buttons->setContentsMargins(0, MessageButtonGap, 0, 0);
+        }
+        if (QCheckBox* check = box->checkBox()) {
+            check->setContentsMargins(0, 12, 0, 0);
+        }
+    }
+
+    // QMessageBox fits its text to the screen; Paper's message card wraps it at a fixed width
+    // with the title above it, so the box is refitted each time QMessageBox sizes it.
+    void FitMessageBox() {
+        QLabel* label = MessageLabel();
+        if (fitting || !label || !box->layout()) {
             return;
         }
-        box->setIconPixmap(MessageIcon(box->icon(), box->devicePixelRatioF()));
+        fitting = true;
+        ApplyMessageSpacing();
+        auto* informative = box->findChild<QLabel*>(QStringLiteral("qt_msgbox_informativelabel"));
+        label->setWordWrap(true);
+        int width = MessageTextWidth;
+        if (label->heightForWidth(width) > 8 * label->fontMetrics().lineSpacing()) {
+            width = MessageWideTextWidth;
+        }
+        const int title_height = title->isHidden() ? 0 : title->heightForWidth(width);
+        label->setContentsMargins(0, title_height ? title_height + MessageTitleGap : 0, 0, 0);
+        label->setFixedWidth(width);
+        if (informative) {
+            informative->setWordWrap(true);
+            informative->setFixedWidth(width);
+        }
+        QLayout* layout = box->layout();
+        layout->invalidate();
+        layout->activate();
+        const int total_width = layout->totalMinimumSize().width();
+        const int height = layout->hasHeightForWidth() ? layout->totalHeightForWidth(total_width)
+                                                       : layout->totalMinimumSize().height();
+        box->setFixedSize(total_width, height);
+        fitting = false;
     }
 
-    void MarkDestructiveButtons() {
-        for (auto* box : dialog->findChildren<QDialogButtonBox*>()) {
-            for (auto* button : box->buttons()) {
-                if (box->buttonRole(button) == QDialogButtonBox::DestructiveRole &&
+    void PrepareButtons() {
+        for (auto* buttons : dialog->findChildren<QDialogButtonBox*>()) {
+            if (buttons->layout()) {
+                buttons->layout()->setSpacing(ButtonGap);
+            }
+            for (auto* button : buttons->buttons()) {
+                if (buttons->buttonRole(button) == QDialogButtonBox::DestructiveRole &&
                     button->property("kind").isNull()) {
                     button->setProperty("kind", QStringLiteral("destructive"));
                     button->style()->unpolish(button);
@@ -275,12 +432,14 @@ private:
     }
 
     QDialog* dialog;
+    QMessageBox* box;
     QLabel* title;
     QLabel* subtitle;
+    QLabel* icon;
     CircleButton* close = nullptr;
-    QPointer<DialogScrim> scrim;
-    bool custom;
+    QPointer<Scrim> scrim;
     bool shown = false;
+    bool fitting = false;
 };
 
 } // namespace
@@ -290,18 +449,25 @@ Dialog::Dialog(QWidget* parent, Qt::WindowFlags flags) : QDialog(parent, flags) 
 }
 
 Dialog::Dialog(QWidget* parent, Chrome) : QDialog(parent) {
-    setProperty(ChromeProperty, true);
-    setAttribute(Qt::WA_TranslucentBackground);
-    overrideWindowFlags(windowFlags() | Qt::FramelessWindowHint);
-    new DialogChrome(this, false, true);
+    setProperty(ContentChromeProperty, true);
+    AdoptDialogChrome(this, false);
 }
 
 void Dialog::SetSubtitle(const QString& subtitle) {
     setProperty(SubtitleProperty, subtitle);
 }
 
+void Dialog::SetIcon(QStringView name, const QColor& tint) {
+    setProperty(IconTintProperty, tint);
+    setProperty(IconProperty, name.toString());
+}
+
 void Dialog::SetTitleVisible(bool visible) {
     setProperty(TitleHiddenProperty, !visible);
+}
+
+void MarkSuccess(QMessageBox* box) {
+    box->setProperty(ToneProperty, QStringLiteral("success"));
 }
 
 void AdoptDialogChrome(QDialog* dialog, bool close_button) {
