@@ -35,6 +35,7 @@ class ConfigureUi;
 class ConfigureWeb;
 
 class HotkeyRegistry;
+class QAbstractButton;
 class QCheckBox;
 class QColor;
 class QComboBox;
@@ -113,6 +114,8 @@ private:
     void BuildGraphics(int graphics);
     void BuildControls(int category, int shortcuts);
     void BuildShortcuts(int shortcuts);
+    void BuildProfiles(int profiles);
+    void RebuildProfiles();
     void EnsureInput();
     void AddSettingRow(QVBoxLayout* group, QWidget* page, const Settings::BasicSetting& setting,
                        const QString& title, const QString& detail, const QString& icon,
@@ -135,6 +138,8 @@ private:
     const std::vector<VkDeviceInfo::Record>& devices;
     InputCommon::InputSubsystem* input_subsystem;
     int mapping_page = -1;
+    QVBoxLayout* profile_rows = nullptr;
+    QAbstractButton* add_profile = nullptr;
     bool input_initialized = false;
     QList<int> vibration_strength;
     std::unique_ptr<ConfigurationShared::Builder> builder;

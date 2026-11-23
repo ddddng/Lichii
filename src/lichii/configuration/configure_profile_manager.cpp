@@ -249,6 +249,26 @@ void ConfigureProfileManager::SelectUser(const QModelIndex& index) {
         std::clamp<s32>(index.row(), 0, static_cast<s32>(profile_manager.GetUserCount() - 1));
 
     UpdateCurrentUser();
+    emit CurrentUserChanged();
+}
+
+bool ConfigureProfileManager::CanAddUser() const {
+    return ui->pm_add->isEnabled();
+}
+
+void ConfigureProfileManager::SelectUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    SelectUser(item_model->index(row, 0));
+}
+
+void ConfigureProfileManager::EditUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    EditUser();
+}
+
+void ConfigureProfileManager::ConfirmDeleteUserAt(int row) {
+    tree_view->setCurrentIndex(item_model->index(row, 0));
+    ConfirmDeleteUser();
 }
 
 void ConfigureProfileManager::AddUser() {

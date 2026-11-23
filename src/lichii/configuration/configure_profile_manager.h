@@ -68,6 +68,18 @@ public:
 
     void ApplyConfiguration();
 
+    QStandardItemModel* Model() const {
+        return item_model;
+    }
+    bool CanAddUser() const;
+    void AddUser();
+    void SelectUserAt(int row);
+    void EditUserAt(int row);
+    void ConfirmDeleteUserAt(int row);
+
+signals:
+    void CurrentUserChanged();
+
 private slots:
     void saveImage(QPixmap pixmap, Common::UUID uuid);
     void showContextMenu(const QPoint& pos);
@@ -83,7 +95,6 @@ private:
     void UpdateCurrentUser();
 
     void SelectUser(const QModelIndex& index);
-    void AddUser();
     void EditUser();
     void ConfirmDeleteUser();
     bool LoadAvatarData();

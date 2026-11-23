@@ -328,10 +328,12 @@ void ConfigureDialog::BuildSettings() {
                       QStringLiteral("translate"), Tints::Blue());
         AddSettingRow(console, system_tab.get(), Settings::values.region_index, tr("Region"),
                       tr("Region reported to games"), QStringLiteral("globe"), Color::Accent());
+        const int profiles = settings_page->AddSubPage(
+            system_page, tr("Profiles"), tr("Local console users; games start as the current one"));
+        settings_page->SetBuilder(profiles, [this, profiles] { BuildProfiles(profiles); });
         auto* profile = SettingsPage::Manage(tr("Manage"));
-        connect(profile, &QAbstractButton::clicked, settings_page, [this, system_page] {
-            settings_page->ShowAdvancedPage(system_page, profile_tab.get());
-        });
+        connect(profile, &QAbstractButton::clicked, settings_page,
+                [this, profiles] { settings_page->SetCategory(profiles); });
         SettingsPage::AddRow(console, tr("Profiles"), tr("Manage local console profiles"),
                              QStringLiteral("user"), Tints::Lavender(), profile);
     });
@@ -358,7 +360,6 @@ void ConfigureDialog::BuildSettings() {
              {graphics, graphics_extensions_tab.get(), tr("Extras")},
              {audio, audio_tab.get(), tr("Audio")},
              {system_page, system_tab.get(), tr("System")},
-             {system_page, profile_tab.get(), tr("Profiles")},
              {system_page, cpu_tab.get(), tr("CPU")},
              {system_page, filesystem_tab.get(), tr("Filesystem")},
              {system_page, applets_tab.get(), tr("Applets")},
@@ -369,8 +370,72 @@ void ConfigureDialog::BuildSettings() {
     }
     settings_page->SetBuilder(shortcuts, [this, shortcuts] { BuildShortcuts(shortcuts); });
     hotkeys_tab->hide();
+    profile_tab->hide();
     input_tab->hide();
     settings_page->SetCategory(general);
+}
+
+void ConfigureDialog::BuildProfiles(int profiles) {
+    profile_rows = settings_page->AddSection(profiles, tr("Users"));
+    auto* actions = new QWidget;
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 4, 0, 0);
+    actions_layout->setSpacing(14);
+    add_profile = new Spotlight::PillButton(tr("Add a profile"), QStringLiteral("plus"),
+                                            Spotlight::PillButton::Kind::Accent, 38);
+    connect(add_profile, &QAbstractButton::clicked, this, [this] { profile_tab->AddUser(); });
+    actions_layout->addWidget(add_profile);
+    if (system.IsPoweredOn()) {
+        actions_layout->addWidget(SettingsPage::Text(
+            tr("Changes reach the running game after it restarts."), 13, 500, true));
+    }
+    actions_layout->addStretch();
+    settings_page->AddBlock(profiles, actions, tr("Add a profile"));
+    auto* model = profile_tab->Model();
+    connect(model, &QAbstractItemModel::rowsInserted, this, &ConfigureDialog::RebuildProfiles);
+    connect(model, &QAbstractItemModel::rowsRemoved, this, &ConfigureDialog::RebuildProfiles);
+    connect(model, &QAbstractItemModel::dataChanged, this, &ConfigureDialog::RebuildProfiles);
+    connect(profile_tab.get(), &ConfigureProfileManager::CurrentUserChanged, this,
+            &ConfigureDialog::RebuildProfiles);
+    RebuildProfiles();
+}
+
+void ConfigureDialog::RebuildProfiles() {
+    while (auto* item = profile_rows->takeAt(0)) {
+        item->widget()->hide();
+        item->widget()->deleteLater();
+        delete item;
+    }
+    auto* model = profile_tab->Model();
+    const int current = Settings::values.current_user.GetValue();
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QStandardItem* user = model->item(row);
+        const QStringList lines = user->text().split(QChar::fromLatin1('\n'));
+        auto* control = new QWidget;
+        auto* layout = new QHBoxLayout(control);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(10);
+        if (row == current) {
+            layout->addWidget(SettingsPage::Badge(tr("Current"), Color::Accent(), Color::OnAccent()),
+                              0, Qt::AlignVCenter);
+        } else {
+            auto* use = new Spotlight::PillButton(tr("Make current"));
+            connect(use, &QAbstractButton::clicked, this,
+                    [this, row] { profile_tab->SelectUserAt(row); });
+            layout->addWidget(use);
+        }
+        auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
+        more->setAccessibleName(tr("More for %1").arg(lines.value(0)));
+        auto* menu = new QMenu(more);
+        menu->addAction(tr("Edit name and picture"), this, [this, row] { profile_tab->EditUserAt(row); });
+        menu->addAction(tr("Delete"), this, [this, row] { profile_tab->ConfirmDeleteUserAt(row); });
+        connect(more, &QAbstractButton::clicked, menu,
+                [menu, more] { menu->popup(more->mapToGlobal(QPoint(0, more->height()))); });
+        layout->addWidget(more);
+        SettingsPage::AddRow(profile_rows, lines.value(0), lines.value(1), QStringLiteral("user"),
+                             Tints::Lavender(), control, {}, user->icon().pixmap(64, 64));
+    }
+    add_profile->setEnabled(profile_tab->CanAddUser());
 }
 
 void ConfigureDialog::BuildShortcuts(int shortcuts) {

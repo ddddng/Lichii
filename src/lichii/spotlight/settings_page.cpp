@@ -1639,7 +1639,7 @@ QWidget* SettingsPage::Badge(const QString& text, const QColor& fill, const QCol
 
 QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QString& description,
                              const QString& icon, const QColor& color, QWidget* control,
-                             const QString& tooltip) {
+                             const QString& tooltip, const QPixmap& image) {
     auto* row = new SettingsRow(group->count() > 0);
     row->setObjectName(QStringLiteral("settingsRow"));
     row->setProperty("spotlightTransparent", true);
@@ -1652,7 +1652,14 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(14, 12, 18, 12);
     layout->setSpacing(14);
-    layout->addWidget(new IconTile(icon, color), 0, Qt::AlignVCenter);
+    if (image.isNull()) {
+        layout->addWidget(new IconTile(icon, color), 0, Qt::AlignVCenter);
+    } else {
+        auto* picture = new QLabel;
+        picture->setFixedSize(40, 40);
+        picture->setPixmap(WholeIcon(image, 40, row->devicePixelRatioF()));
+        layout->addWidget(picture, 0, Qt::AlignVCenter);
+    }
     auto* copy = new QVBoxLayout;
     copy->setSpacing(3);
     auto* title_line = new QHBoxLayout;
@@ -1668,11 +1675,10 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
             .arg(CssColor(Color::TextSecondary())));
     detail->setWordWrap(true);
     detail->setMaximumWidth(400);
-    copy->addStretch();
     copy->addLayout(title_line);
     copy->addWidget(detail);
-    copy->addStretch();
     layout->addLayout(copy, 1);
+    copy->setAlignment(Qt::AlignVCenter);
     if (control != nullptr) {
         if (control->metaObject() == &QWidget::staticMetaObject) {
             control->setProperty("spotlightTransparent", true);
