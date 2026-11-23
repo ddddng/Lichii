@@ -69,12 +69,6 @@
 #include "core/file_sys/xts_archive.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
-#include "qt_common/abstract/frontend.h"
-#include "qt_common/config/uisettings.h"
-#include "qt_common/qt_common.h"
-#include "qt_common/util/game.h"
-#include "qt_common/util/vk.h"
-#include "ui_configure_per_game.h"
 #include "lichii/configuration/configuration_shared.h"
 #include "lichii/configuration/configure_applets.h"
 #include "lichii/configuration/configure_audio.h"
@@ -85,19 +79,26 @@
 #include "lichii/configuration/configure_input_per_game.h"
 #include "lichii/configuration/configure_network.h"
 #include "lichii/configuration/configure_per_game.h"
-#include "lichii/nup_dialogs.h"
 #include "lichii/configuration/configure_per_game_addons.h"
 #include "lichii/configuration/configure_system.h"
 #include "lichii/configuration/iidb_artwork_dialog.h"
+#include "lichii/configuration/iidb_key_dialog.h"
+#include "lichii/game/artwork_image.h"
+#include "lichii/mod_store/mod_store_install.h"
+#include "lichii/nup_dialogs.h"
+#include "lichii/spotlight/dialog.h"
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 #include "lichii/spotlight/widgets.h"
-#include "lichii/configuration/iidb_key_dialog.h"
-#include "lichii/game/artwork_image.h"
-#include "lichii/mod_store/mod_store_install.h"
 #include "lichii/util/util.h"
+#include "qt_common/abstract/frontend.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/qt_common.h"
+#include "qt_common/util/game.h"
+#include "qt_common/util/vk.h"
+#include "ui_configure_per_game.h"
 
 namespace {
 
@@ -618,6 +619,9 @@ void ConfigurePerGame::BuildSettings() {
     namespace Color = Spotlight::Color;
     namespace Tints = Spotlight::SettingsColor;
     setWindowFlag(Qt::FramelessWindowHint, Spotlight::ClientFrame);
+    if constexpr (Spotlight::ClientFrame) {
+        Spotlight::RoundWindowCorners(this);
+    }
     settings_page = new SettingsPage(this, true);
     ui->verticalLayout_3->setContentsMargins(0, 0, 0, 0);
     ui->verticalLayout_3->setSpacing(0);
