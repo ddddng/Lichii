@@ -3,21 +3,25 @@
 
 #include <QApplication>
 #include <QFileInfo>
+#include <QGridLayout>
 #include <QKeyEvent>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
 #include <QPainter>
+#include <QPixmapCache>
 #include <QRegion>
 #include <QStackedLayout>
 #include <QVBoxLayout>
 #include <QWindow>
 
+#include "lichii/game/game_grid.h"
 #include "lichii/game/game_list.h"
 #include "lichii/game/search_field.h"
 #include "lichii/spotlight/hero.h"
 #include "lichii/spotlight/launcher.h"
 #include "lichii/spotlight/library_header.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/top_bar.h"
 
@@ -89,20 +93,36 @@ Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* p
       library_stack(new QStackedLayout), pin_menu(new QAction(tr("Show menu bar\tAlt"), this)) {
     setObjectName(QStringLiteral("spotlightLauncher"));
     setAttribute(Qt::WA_OpaquePaintEvent);
-    auto* add = new QMenu(this);
-    add->addAction(Icon(u"folder-open", Color::TextSecondary(), 16), tr("Add game folder…"), games,
+    InstallMenuStyle(*qApp);
+    QPixmapCache::setCacheLimit(std::max(QPixmapCache::cacheLimit(), 64 * 1024));
+    auto* add = new Menu(this);
+    add->addAction(Icon(u"folder-open", Color::MenuInk(), 16), tr("Add game folder…"), games,
                    &GameList::AddDirectory);
-    add->addAction(actions.load_file);
-    add->addAction(actions.load_folder);
-    add->addAction(actions.install);
+    const auto mirror = [add](QAction* source, QStringView icon, const QString& label) {
+        auto* entry = add->addAction(Icon(icon, Color::MenuInk(), 16), label);
+        const auto sync = [entry, source, label] {
+            const QString keys = source->shortcut()
+                                     .toString(QKeySequence::NativeText)
+                                     .replace(QLatin1Char('+'), QLatin1Char(' '));
+            entry->setText(keys.isEmpty() ? label : label + QLatin1Char('\t') + keys);
+            entry->setEnabled(source->isEnabled());
+            entry->setVisible(source->isVisible());
+        };
+        sync();
+        connect(source, &QAction::changed, entry, sync);
+        connect(entry, &QAction::triggered, source, &QAction::trigger);
+    };
+    mirror(actions.load_file, u"file", tr("Load file…"));
+    mirror(actions.load_folder, u"folder", tr("Load folder…"));
+    mirror(actions.install, u"download-simple", tr("Install files to NAND…"));
     add->addSeparator();
-    add->addAction(Icon(u"arrow-clockwise", Color::TextSecondary(), 16), tr("Rescan library"), this,
+    add->addAction(Icon(u"arrow-clockwise", Color::MenuInk(), 16), tr("Rescan library"), this,
                    &Launcher::RescanRequested);
 
-    auto* more = new QMenu(this);
-    more->addMenu(actions.tools);
-    more->addMenu(actions.multiplayer);
-    more->addMenu(actions.help);
+    auto* more = new Menu(this);
+    more->AddSharedMenu(actions.tools, Icon(u"wrench", Color::MenuInk(), 16));
+    more->AddSharedMenu(actions.multiplayer, Icon(u"users", Color::MenuInk(), 16));
+    more->AddSharedMenu(actions.help, Icon(u"question", Color::MenuInk(), 16));
     if constexpr (ClientFrame) {
         more->addSeparator();
         pin_menu->setCheckable(true);
@@ -131,11 +151,16 @@ Launcher::Launcher(QMainWindow* window, GameList* games_, GameListPlaceholder* p
     column->setSpacing(0);
     column->addWidget(top);
     column->addWidget(hero);
-    column->addWidget(library);
-    library_stack->setContentsMargins(0, 0, 0, 0);
     library_stack->addWidget(placeholder);
     library_stack->addWidget(games);
-    column->addLayout(library_stack, 1);
+    placeholder->setContentsMargins(0, GameGrid::HeaderOverlap, 0, 0);
+    auto* library_body = new QVBoxLayout;
+    library_body->setContentsMargins(0, library->minimumHeight() - GameGrid::HeaderOverlap, 0, 0);
+    library_body->addLayout(library_stack);
+    auto* library_area = new QGridLayout;
+    library_area->addLayout(library_body, 0, 0);
+    library_area->addWidget(library, 0, 0, Qt::AlignTop);
+    column->addLayout(library_area, 1);
 
     connect(top, &TopBar::PlatformChanged, games, &GameList::SetPlatform);
     connect(hero, &Hero::PlayRequested, games, &GameList::PlaySelected);
@@ -165,6 +190,7 @@ Launcher::~Launcher() {
 void Launcher::SetLibraryAvailable(bool available) {
     library_available = available;
     library_stack->setCurrentIndex(available ? 1 : 0);
+    library->raise();
     if (!available) {
         UpdateSelection({}, 0);
     }
@@ -259,6 +285,10 @@ bool Launcher::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void Launcher::UpdateSelection(const QModelIndex& game, int count) {
+    if (!game.isValid() && showing_game && games->IsPopulating()) {
+        return;
+    }
+    showing_game = game.isValid();
     library->SetCount(count);
     if (game.isValid()) {
         QString title = game.data(GameListItemPath::TitleRole).toString();
@@ -275,39 +305,37 @@ void Launcher::UpdateSelection(const QModelIndex& game, int count) {
     const QPixmap image = game.data(Qt::DecorationRole).value<QPixmap>();
     if (image.cacheKey() != art_key) {
         art_key = image.cacheKey();
-        previous_art = art;
         art = image.isNull() ? QImage{}
                              : image.toImage()
                                    .scaled(8, 8, Qt::KeepAspectRatio, Qt::SmoothTransformation)
                                    .scaled(144, 144, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        previous_backdrop = backdrop;
+        backdrop = {};
         fade.stop();
         fade.start();
     }
 }
 
-void Launcher::paintEvent(QPaintEvent*) {
-    QPainter painter(this);
+QPixmap Launcher::RenderBackdrop(const QImage& image) const {
+    const qreal ratio = devicePixelRatioF();
+    QPixmap result(size() * ratio);
+    result.setDevicePixelRatio(ratio);
+    QPainter painter(&result);
     painter.fillRect(rect(), Color::Window());
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    const qreal alpha = fade.currentValue().toReal();
     const int canvas_width = std::max(width(), 1280);
     const int canvas_height = std::max(height(), 800);
     const QRectF bounds(240, 0, canvas_width - 240, canvas_height * 0.73125);
-    const auto draw = [&](const QImage& image, qreal opacity) {
-        if (image.isNull() || bounds.isEmpty() || opacity <= 0) {
-            return;
-        }
+    if (!image.isNull()) {
         const QSizeF area =
             QSizeF(image.size()).scaled(bounds.size(), Qt::KeepAspectRatioByExpanding);
         const QPointF origin = bounds.center() - QPointF(area.width() / 2, area.height() / 2);
-        painter.save();
         painter.setClipRect(bounds);
-        painter.setOpacity(opacity * 0.9);
+        painter.setOpacity(0.9);
         painter.drawImage(QRectF(origin, area), image);
-        painter.restore();
-    };
-    draw(previous_art, 1.0 - alpha);
-    draw(art, alpha);
+        painter.setOpacity(1.0);
+        painter.setClipping(false);
+    }
 
     const auto scrim = [](int opacity) {
         auto color = Color::Scrim();
@@ -326,6 +354,28 @@ void Launcher::paintEvent(QPaintEvent*) {
                        {0.70, Color::WindowBottom()},
                        {1.0, Color::WindowBottom()}});
     painter.fillRect(rect(), vertical);
+    return result;
+}
+
+void Launcher::paintEvent(QPaintEvent*) {
+    const auto stale = [this](const QPixmap& pixmap) {
+        return pixmap.deviceIndependentSize().toSize() != size() ||
+               pixmap.devicePixelRatio() != devicePixelRatioF();
+    };
+    if (stale(backdrop)) {
+        backdrop = RenderBackdrop(art);
+    }
+    QPainter painter(this);
+    if (fade.state() == QAbstractAnimation::Running) {
+        if (stale(previous_backdrop)) {
+            previous_backdrop = RenderBackdrop({});
+        }
+        painter.drawPixmap(0, 0, previous_backdrop);
+        painter.setOpacity(fade.currentValue().toReal());
+    } else {
+        previous_backdrop = {};
+    }
+    painter.drawPixmap(0, 0, backdrop);
 }
 
 } // namespace Spotlight

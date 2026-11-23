@@ -11,6 +11,7 @@
 #include <QToolButton>
 
 #include "lichii/spotlight/library_header.h"
+#include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
 
 namespace Spotlight {
@@ -114,7 +115,8 @@ LibraryHeader::LibraryHeader(QAction* grid, QAction* list, QWidget* parent)
       sort_choices(new QActionGroup(this)) {
     setObjectName(QStringLiteral("spotlightLibraryHeader"));
     auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(40, 0, 40, 10);
+    setFixedHeight(48);
+    row->setContentsMargins(40, 0, 40, 14);
     row->setSpacing(10);
     auto* label = new QLabel(tr("Library"), this);
     label->setFont(DisplayFont(20));
@@ -130,7 +132,7 @@ LibraryHeader::LibraryHeader(QAction* grid, QAction* list, QWidget* parent)
     sort->setText(tr("Recently played"));
     row->addWidget(sort);
 
-    auto* menu = new QMenu(this);
+    auto* menu = new Menu(this);
     using enum Lichii::LibrarySort;
     const std::array options{
         std::pair{Recent, tr("Recently played")},

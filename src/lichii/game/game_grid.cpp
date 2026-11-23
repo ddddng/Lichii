@@ -25,7 +25,7 @@ GameGrid::GameGrid(QWidget* parent, Mode mode_)
     setContextMenuPolicy(Qt::CustomContextMenu);
     setFlow(QListView::LeftToRight);
     setWrapping(mode == Mode::Grid);
-    setViewportMargins(32, 0, 19, 0);
+    setViewportMargins(0, 0, 32, 0);
     setObjectName(mode == Mode::Grid ? QStringLiteral("spotlightGrid")
                                      : QStringLiteral("spotlightCarousel"));
     UpdateIconSize();
@@ -37,8 +37,60 @@ void GameGrid::UpdateIconSize() {
 }
 
 QModelIndex GameGrid::indexAt(const QPoint& point) const {
-    const QModelIndex index = QListView::indexAt(point);
+    const QModelIndex index =
+        QListView::indexAt(point - QPoint(GameCard::HitShift, GameCard::HitShift));
     return index.isValid() && m_gameCard->HitTest(point, visualRect(index)) ? index : QModelIndex{};
+}
+
+void GameGrid::setSelection(const QRect& rect, QItemSelectionModel::SelectionFlags command) {
+    const QModelIndex index = indexAt(rect.center());
+    if (index.isValid()) {
+        QListView::setSelection(QRect(visualRect(index).center(), QSize(1, 1)), command);
+    }
+}
+
+void GameGrid::UpdateEffects(const QModelIndex& index) {
+    if (index.isValid()) {
+        constexpr int margin = GameCard::EffectMargin;
+        viewport()->update(visualRect(index).adjusted(-margin, -margin, margin, margin));
+    }
+}
+
+void GameGrid::dataChanged(const QModelIndex& top_left, const QModelIndex& bottom_right,
+                           const QList<int>& roles) {
+    QListView::dataChanged(top_left, bottom_right, roles);
+    viewport()->update();
+}
+
+void GameGrid::currentChanged(const QModelIndex& current, const QModelIndex& previous) {
+    QListView::currentChanged(current, previous);
+    UpdateEffects(previous);
+    UpdateEffects(current);
+}
+
+bool GameGrid::viewportEvent(QEvent* event) {
+    switch (event->type()) {
+    case QEvent::ToolTip:
+        return true;
+    case QEvent::HoverEnter:
+    case QEvent::HoverMove:
+    case QEvent::HoverLeave:
+    case QEvent::Leave: {
+        const QModelIndex index =
+            event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverMove
+                ? indexAt(static_cast<QHoverEvent*>(event)->position().toPoint())
+                : QModelIndex{};
+        if (index != hovered) {
+            UpdateEffects(hovered);
+            UpdateEffects(index);
+            hovered = index;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return QListView::viewportEvent(event);
 }
 
 void GameGrid::mousePressEvent(QMouseEvent* event) {

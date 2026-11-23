@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QImage>
+#include <QPixmap>
 #include <QVariantAnimation>
 #include <QWidget>
 
@@ -61,6 +62,7 @@ protected:
 private:
     void UpdateChrome();
     void UpdateSelection(const QModelIndex& game, int count);
+    QPixmap RenderBackdrop(const QImage& image) const;
 
     QMainWindow* owner;
     GameList* games;
@@ -72,13 +74,15 @@ private:
     QWidget* edges = nullptr;
     QAction* pin_menu;
     bool library_available = false;
+    bool showing_game = false;
     bool inline_emulation = false;
     bool inline_fullscreen = false;
     bool alt_pressed = false;
     bool temporary_menu = false;
 
-    QImage previous_art;
     QImage art;
+    QPixmap backdrop;
+    QPixmap previous_backdrop;
     qint64 art_key = 0;
     QVariantAnimation fade;
 };

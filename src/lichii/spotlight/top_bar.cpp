@@ -32,7 +32,7 @@ public:
     enum class Kind { Minimize, Maximize, Close };
 
     WindowButton(Kind kind_, QWidget* parent) : QAbstractButton(parent), kind(kind_) {
-        setFixedSize(20, 28);
+        setFixedSize(28, 28);
         setFocusPolicy(Qt::TabFocus);
         setMouseTracking(true);
         connect(this, &QAbstractButton::clicked, this, [this] {
@@ -92,8 +92,8 @@ void WindowDragBar::AddWindowControls(QHBoxLayout* row) {
         return;
     }
     auto* controls = new QHBoxLayout;
-    controls->setContentsMargins(10, 0, 0, 0);
-    controls->setSpacing(9);
+    controls->setContentsMargins(5, 0, 0, 0);
+    controls->setSpacing(3);
     using enum WindowButton::Kind;
     const auto add = [&](WindowButton::Kind kind, const QString& description) {
         auto* button = new WindowButton(kind, this);
@@ -153,7 +153,7 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
     setObjectName(QStringLiteral("spotlightTopBar"));
     setFixedHeight(64);
     auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(22, 0, 20, 0);
+    row->setContentsMargins(22, 0, ClientFrame ? 14 : 20, 0);
     row->setSpacing(10);
 
     auto* logo = new QLabel(this);
@@ -207,7 +207,7 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
 RunningTitleBar::RunningTitleBar(QWidget* parent) : WindowDragBar(parent), title(new QLabel(this)) {
     setFixedHeight(36);
     auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(14, 0, 16, 0);
+    row->setContentsMargins(14, 0, 10, 0);
     row->setSpacing(9);
     title->setFont(Font(13, 600));
     title->setStyleSheet(QStringLiteral("color: white;"));
