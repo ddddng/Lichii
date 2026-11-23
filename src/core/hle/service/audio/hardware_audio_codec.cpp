@@ -639,7 +639,8 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
     }
     R_TRY(p.Reclaim());
     R_TRY(p.batch.ValidateTasks(tasks, p.live, p.layout.input_stride));
-    const auto due = system.CoreTiming().GetGlobalTimeNs() + CompletionLatency;
+    const size_t first_pending = p.pending.size();
+    p.pending.reserve(first_pending + tasks.size());
     u32 successful{}, failed{};
     u64 output_total{};
     for (size_t i = 0; i < tasks.size(); ++i) {
@@ -657,7 +658,7 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
             R_RETURN(p.Fault());
         }
         p.pending.push_back({Hwacod::MakeCompletion(task, result, output_bytes, elapsed),
-                             p.batch.State().write_index, task.notify != 0, due});
+                             p.batch.State().write_index, task.notify != 0, {}});
         p.batch.Commit(task);
         if (!p.trace.empty()) {
             auto& trace = p.trace[task.instance];
@@ -683,7 +684,11 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
         LOG_INFO(Service_Audio, "hwacod completed tag={} tasks={} decoded={} errors={} pcm_bytes={} producer={}",
                  p.tag, tasks.size(), successful, failed, output_total, p.batch.State().write_index);
     }
-    system.CoreTiming().ScheduleEvent(CompletionLatency, p.publish_event);
+    const auto due = system.CoreTiming().GetGlobalTimeNs() + CompletionLatency;
+    for (size_t i = first_pending; i < p.pending.size(); ++i) {
+        p.pending[i].due = due;
+    }
+    system.CoreTiming().ScheduleEvent(due, p.publish_event, true);
     if (!p.trace.empty()) {
         ++p.trace_batches;
         const auto now = std::chrono::steady_clock::now();
