@@ -8,6 +8,7 @@
 #include <QProgressDialog>
 
 #include "libqt_common.h"
+#include "lichii/spotlight/dialog.h"
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/abstract/progress.h"
 #include "qt_common/qt_common.h"
@@ -16,9 +17,13 @@ namespace QtCommon::Frontend {
 
 StandardButton ShowMessage(Icon icon, const QString& title, const QString& text,
                            StandardButtons buttons, QObject* parent) {
+    const bool success = icon == Icon::Success;
     QMessageBox* box =
-        new QMessageBox(QMessageBox::Icon(int(icon)), title, text,
-                        QMessageBox::StandardButtons(int(buttons)), (QWidget*)parent);
+        new QMessageBox(success ? QMessageBox::Information : QMessageBox::Icon(int(icon)), title,
+                        text, QMessageBox::StandardButtons(int(buttons)), (QWidget*)parent);
+    if (success) {
+        Spotlight::MarkSuccess(box);
+    }
     return StandardButton(box->exec());
 }
 

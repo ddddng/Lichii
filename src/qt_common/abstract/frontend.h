@@ -63,7 +63,9 @@ enum class Icon {
     Information = 1,
     Warning = 2,
     Critical = 3,
-    Question = 4
+    Question = 4,
+    // not in QMessageDialogOptions: an information box with a success icon
+    Success = 5
 };
 Q_ENUM_NS(Icon)
 
@@ -93,6 +95,7 @@ UTIL_OVERRIDES(Information)
 UTIL_OVERRIDES(Warning)
 UTIL_OVERRIDES(Critical)
 UTIL_OVERRIDES(Question)
+UTIL_OVERRIDES(Success)
 
 const QString GetOpenFileName(const QString& title, const QString& dir, const QString& filter,
                               QString* selectedFilter = nullptr);
