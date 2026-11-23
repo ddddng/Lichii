@@ -14,12 +14,15 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QFontMetrics>
 #include <QFileDialog>
 #include <QGroupBox>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QLocale>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QProgressBar>
 #include <QPushButton>
@@ -211,6 +214,139 @@ private:
     QProgressBar* source;
 };
 
+class VisibilityFollower final : public QObject {
+public:
+    VisibilityFollower(QWidget* source_, QWidget* target_) : QObject(target_), source{source_}, target{target_} {
+        target->setVisible(!source->isHidden());
+        source->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::ShowToParent || event->type() == QEvent::HideToParent) {
+            target->setVisible(!source->isHidden());
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QWidget* source;
+    QWidget* target;
+};
+
+class ToggleSegments final : public QWidget {
+public:
+    explicit ToggleSegments(QList<std::pair<QString, QCheckBox*>> options_)
+        : options{std::move(options_)} {
+        setFixedHeight(38);
+        setFocusPolicy(Qt::StrongFocus);
+        setCursor(Qt::PointingHandCursor);
+        setMouseTracking(true);
+        for (const auto& option : options) {
+            connect(option.second, &QCheckBox::toggled, this, [this] { update(); });
+        }
+        setFixedWidth(SegmentRect(static_cast<int>(options.size()) - 1).right() + 4);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()), height() / 2.0, height() / 2.0);
+        for (int i = 0; i < options.size(); ++i) {
+            const QRect segment = SegmentRect(i);
+            const bool on = options[i].second->isChecked();
+            const bool usable = options[i].second->isEnabled();
+            painter.setPen(Qt::NoPen);
+            if (on || (i == hovered && usable)) {
+                painter.setBrush(on ? Color::Accent() : Color::Fill());
+                painter.drawRoundedRect(QRectF(segment), segment.height() / 2.0,
+                                        segment.height() / 2.0);
+            }
+            if (hasFocus() && i == focused) {
+                painter.setPen(QPen(Color::Text(), 1));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawRoundedRect(QRectF(segment).adjusted(-1.5, -1.5, 1.5, 1.5),
+                                        segment.height() / 2.0 + 1.5,
+                                        segment.height() / 2.0 + 1.5);
+            }
+            painter.setPen(!usable ? Color::TextFaint() : on ? Color::OnAccent() : Color::Text());
+            painter.setFont(Spotlight::Font(13, on ? 600 : 500));
+            painter.drawText(segment, Qt::AlignCenter, options[i].first);
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        const int index = SegmentAt(event->position().toPoint());
+        if (index >= 0) {
+            focused = index;
+            Toggle(index);
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        const int index = SegmentAt(event->position().toPoint());
+        if (index != hovered) {
+            hovered = index;
+            update();
+        }
+    }
+
+    void leaveEvent(QEvent*) override {
+        hovered = -1;
+        update();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        switch (event->key()) {
+        case Qt::Key_Left:
+        case Qt::Key_Right:
+            focused = std::clamp(focused + (event->key() == Qt::Key_Left ? -1 : 1), 0,
+                                 static_cast<int>(options.size()) - 1);
+            update();
+            return;
+        case Qt::Key_Space:
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            Toggle(focused);
+            return;
+        default:
+            QWidget::keyPressEvent(event);
+        }
+    }
+
+private:
+    QRect SegmentRect(int index) const {
+        const QFontMetrics metrics(Spotlight::Font(13, 600));
+        int x = 3;
+        for (int i = 0; i < index; ++i) {
+            x += metrics.horizontalAdvance(options[i].first) + 28 + 2;
+        }
+        return QRect(x, 3, metrics.horizontalAdvance(options[index].first) + 28, 32);
+    }
+
+    int SegmentAt(const QPoint& point) const {
+        for (int i = 0; i < options.size(); ++i) {
+            if (SegmentRect(i).contains(point)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    void Toggle(int index) {
+        if (auto* box = options[index].second; box->isEnabled()) {
+            box->click();
+        }
+    }
+
+    QList<std::pair<QString, QCheckBox*>> options;
+    int hovered = -1;
+    int focused = 0;
+};
+
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
@@ -344,10 +480,10 @@ void ConfigureDialog::BuildSettings() {
     connect(settings_page, &SettingsPage::BackRequested, this, &QDialog::accept);
 
     const int general =
-        settings_page->AddCategory(tr("General"), tr("Preset, look, folders and updates"),
+        settings_page->AddCategory(tr("General"), tr("How Lichii looks and behaves"),
                                    QStringLiteral("globe"), Color::Accent());
     const int library = settings_page->AddCategory(
-        tr("Library"), tr("Choose where Lichii looks for games and what the library shows"),
+        tr("Library"), tr("Where Lichii looks for games, updates and DLC"),
         QStringLiteral("folder"), Tints::Green());
     const int graphics = settings_page->AddCategory(
         tr("Graphics"), tr("Preset first; everything else follows it unless you change it"),
@@ -657,34 +793,24 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
     const auto sources = FindPresetSources();
     QList<PresetCard*> presets;
     if (sources.resolution != nullptr) {
-        auto* preset_group = new QWidget;
-        auto* presets_layout = new QVBoxLayout(preset_group);
-        presets_layout->setContentsMargins(0, 0, 0, 0);
-        presets_layout->setSpacing(2);
-        auto* presets_label = SettingsPage::Text(
-            tr("Preset · changes inherited settings only; game overrides stay"), 13, 600, true);
-        presets_label->setContentsMargins(6, 4, 6, 6);
-        presets_layout->addWidget(presets_label);
-        auto* cards_layout = new QHBoxLayout;
-        cards_layout->setContentsMargins(0, 0, 0, 0);
-        cards_layout->setSpacing(10);
+        auto* preset_holder = new QWidget(this);
+        preset_holder->hide();
         const std::array cards{
-            new PresetCard(tr("Auto"), tr("Picks for your GPU")),
-            new PresetCard(Spotlight::PerformancePresetName(0), tr("Older or integrated GPUs")),
-            new PresetCard(Spotlight::PerformancePresetName(1), tr("Most gaming laptops")),
-            new PresetCard(Spotlight::PerformancePresetName(2), tr("Desktop GPUs")),
+            new PresetCard(tr("Auto"), tr("Picks for your GPU"), preset_holder),
+            new PresetCard(Spotlight::PerformancePresetName(0), tr("Older or integrated GPUs"),
+                           preset_holder),
+            new PresetCard(Spotlight::PerformancePresetName(1), tr("Most gaming laptops"),
+                           preset_holder),
+            new PresetCard(Spotlight::PerformancePresetName(2), tr("Desktop GPUs"), preset_holder),
         };
         for (int i = 0; i < static_cast<int>(cards.size()); ++i) {
-            cards_layout->addWidget(cards[i], 1);
             connect(cards[i], &QAbstractButton::clicked, this, [this, sources, cards, i] {
                 ApplyPreset(sources, i);
                 cards[i]->setChecked(CurrentPreset(sources) == i);
             });
         }
-        presets_layout->addLayout(cards_layout);
         presets = {cards.cbegin(), cards.cend()};
-        settings_page->AddBlock(general, preset_group, tr("Performance preset"));
-        WatchPreset(sources, preset_group, [this, sources, cards] {
+        WatchPreset(sources, preset_holder, [this, sources, cards] {
             const auto* gpu = SelectedGpu(sources);
             cards[0]->SetSuggestion(
                 gpu ? QString::fromStdString(gpu->name) : tr("No GPU identified"),
@@ -700,28 +826,7 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
     }
 
     auto* view = ui_tab.get();
-    auto* options = settings_page->AddSection(general);
-    auto* language = view->findChild<QComboBox*>(QStringLiteral("language_combobox"));
-    const auto locale_name = [](const QString& name) {
-        return name.startsWith(QChar::fromLatin1('<')) ? tr("System language") : name;
-    };
-    auto* locale_description = SettingsPage::AddRow(
-        options, tr("Language"), locale_name(language->currentText()), QStringLiteral("globe"),
-        Color::Accent(),
-        SettingsPage::BindCombo(language, {}, [](const QComboBox& combo, int index) {
-            const auto locale = combo.itemData(index).toString();
-            if (locale.isEmpty()) {
-                return tr("System");
-            }
-            const QLocale parsed(locale);
-            return parsed.language() == QLocale::C ? combo.itemText(index)
-                                                   : QLocale::languageToString(parsed.language());
-        }));
-    connect(language, &QComboBox::currentTextChanged, locale_description,
-            [locale_description, locale_name](const QString& name) {
-                locale_description->setText(locale_name(name));
-            });
-
+    auto* look_rows = settings_page->AddSection(general, tr("Look and language"));
     auto* theme = view->findChild<QComboBox*>(QStringLiteral("theme_combobox"));
     const int dark_index = theme->findData(QStringLiteral("lichii"));
     const int light_index = theme->findData(QStringLiteral("default"));
@@ -747,31 +852,66 @@ void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
             [theme, dark_index, light_index](int index) {
                 SettingsPage::SetComboIndex(theme, index == 0 ? dark_index : light_index);
             });
-    SettingsPage::AddRow(options, tr("Look"), tr("Choose the window's color theme"),
-                         QStringLiteral("palette"), Tints::Lavender(), look);
-    auto* manage_folders = SettingsPage::Manage(tr("Manage"));
-    connect(manage_folders, &QAbstractButton::clicked, settings_page,
-            [this, library] { settings_page->SetCategory(library); });
-    folder_summary = SettingsPage::AddRow(options, tr("Game folders"), GameFolderSummary(),
-                                          QStringLiteral("folder"), Tints::Green(), manage_folders);
+    SettingsPage::AddRow(look_rows, tr("Look"),
+                         tr("Dark is the Spotlight look; Light follows the classic theme"),
+                         QStringLiteral("palette"), Color::Accent(), look);
+    auto* language = view->findChild<QComboBox*>(QStringLiteral("language_combobox"));
+    auto* language_combo =
+        SettingsPage::BindCombo(language, {}, [](const QComboBox& combo, int index) {
+            const auto locale = combo.itemData(index).toString();
+            if (locale.isEmpty()) {
+                return tr("System");
+            }
+            const QLocale parsed(locale);
+            return parsed.language() == QLocale::C ? combo.itemText(index)
+                                                   : QLocale::languageToString(parsed.language());
+        });
+    language_combo->setMinimumWidth(170);
+    SettingsPage::AddRow(look_rows, tr("Launcher language"),
+                         tr("Menus and settings. Games use System › Language."),
+                         QStringLiteral("translate"), Tints::Blue(), language_combo);
+
+    auto* play_rows = settings_page->AddSection(general, tr("While you play"));
+    AddSettingRow(play_rows, general_tab.get(), UISettings::values.pause_when_in_background,
+                  tr("Pause when Lichii is in the background"),
+                  tr("The game waits while you use another window"), QStringLiteral("pause"),
+                  Tints::Gold());
+    AddSettingRow(play_rows, general_tab.get(), UISettings::values.confirm_before_stopping,
+                  tr("Ask before stopping a game"),
+                  tr("Unsaved progress is lost when a game stops"), QStringLiteral("stop"),
+                  Color::Accent());
+
+    auto* privacy_rows = settings_page->AddSection(general, tr("Updates and privacy"));
 #ifdef ENABLE_UPDATE_CHECKER
-    if (auto* updates =
-            SettingsPage::Editor(general_tab.get(), UISettings::values.check_for_updates)) {
-        SettingsPage::AddRow(options, tr("Updates"), tr("Check for new Lichii builds at start"),
-                             QStringLiteral("cloud-arrow-down"), Tints::Blue(),
-                             SettingsPage::BindSetting(updates));
-    }
+    AddSettingRow(privacy_rows, general_tab.get(), UISettings::values.check_for_updates,
+                  tr("Check for updates when Lichii starts"), {},
+                  QStringLiteral("arrow-circle-up"), Tints::Green());
 #endif
-    auto* get_started = SettingsPage::Manage();
+    if (auto* discord = web_tab->findChild<QCheckBox*>(QStringLiteral("toggle_discordrpc"))) {
+        SettingsPage::AddRow(privacy_rows, tr("Show the current game in Discord"),
+                             tr("Your friends see what you play"), QStringLiteral("chat-circle"),
+                             Tints::Lavender(), SettingsPage::BindToggle(discord));
+    }
+
+    auto* footer = new QWidget;
+    auto* footer_layout = new QHBoxLayout(footer);
+    footer_layout->setContentsMargins(0, 0, 0, 0);
+    footer_layout->setSpacing(12);
+    footer_layout->addWidget(SettingsPage::Note(
+        tr("Find screenshots, diagnostics, Gamemode and Reset all settings under Advanced.")), 1);
+    auto* get_started = new Spotlight::PillButton(tr("Get Started"), QStringLiteral("sparkle"));
+    get_started->setToolTip(tr("Run the setup again: keys, firmware, folders, controller, preset"));
     connect(get_started, &QAbstractButton::clicked, this,
             [this, controls, presets] { OpenGetStarted(controls, presets); });
-    SettingsPage::AddRow(options, tr("Get Started"),
-                         tr("Run the setup again: keys, firmware, folders, controller, preset"),
-                         QStringLiteral("sparkle"), Tints::Lavender(), get_started);
+    footer_layout->addWidget(get_started);
+    settings_page->AddBlock(general, footer, tr("Get Started"));
+    static_cast<void>(library);
 }
 
 void ConfigureDialog::BuildLibrary(int library) {
-    folders_layout = settings_page->AddSection(library, tr("Game folders"));
+    auto* add_game = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
+    connect(add_game, &QAbstractButton::clicked, this, &ConfigureDialog::AddGameFolder);
+    folders_layout = settings_page->AddSection(library, tr("Game folders"), false, add_game);
     RebuildGameFolders();
     auto* external_list =
         general_tab->findChild<QListWidget*>(QStringLiteral("external_content_list"));
@@ -779,8 +919,11 @@ void ConfigureDialog::BuildLibrary(int library) {
         general_tab->findChild<QPushButton*>(QStringLiteral("add_external_dir_button"));
     auto* remove_external =
         general_tab->findChild<QPushButton*>(QStringLiteral("remove_external_dir_button"));
-    auto* external_rows = settings_page->AddSection(library, tr("Update and DLC folders"));
-    const auto rebuild_external = [external_rows, external_list, add_external, remove_external] {
+    auto* add_update = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
+    connect(add_update, &QAbstractButton::clicked, add_external, &QAbstractButton::click);
+    auto* external_rows =
+        settings_page->AddSection(library, tr("Update and DLC folders"), false, add_update);
+    const auto rebuild_external = [this, external_rows, external_list, remove_external] {
         while (auto* item = external_rows->takeAt(0)) {
             item->widget()->hide();
             item->widget()->deleteLater();
@@ -788,25 +931,31 @@ void ConfigureDialog::BuildLibrary(int library) {
         }
         for (int i = 0; i < external_list->count(); ++i) {
             const QString path = external_list->item(i)->text();
-            auto* remove = new Spotlight::CircleButton(QStringLiteral("trash"), 36);
-            remove->setAccessibleName(tr("Remove"));
-            remove->setToolTip(remove->accessibleName());
-            connect(remove, &QAbstractButton::clicked, external_list,
-                    [external_list, remove_external, path] {
-                        const auto found = external_list->findItems(path, Qt::MatchExactly);
-                        if (!found.isEmpty()) {
-                            external_list->setCurrentItem(found.first());
-                            remove_external->click();
-                        }
-                    });
-            SettingsPage::AddRow(external_rows, QDir(path).dirName(), path,
-                                 QStringLiteral("folder"), Tints::Lavender(), remove);
+            auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
+            more->setAccessibleName(tr("More for %1").arg(path));
+            auto* menu = new QMenu(more);
+            menu->addAction(tr("Open location"), this,
+                            [this, path] { emit OpenGameFolderRequested(path); });
+            menu->addSeparator();
+            menu->addAction(tr("Remove folder"), external_list,
+                            [external_list, remove_external, path] {
+                                const auto found = external_list->findItems(path, Qt::MatchExactly);
+                                if (!found.isEmpty()) {
+                                    external_list->setCurrentItem(found.first());
+                                    remove_external->click();
+                                }
+                            });
+            connect(more, &QAbstractButton::clicked, menu,
+                    [menu, more] { menu->popup(more->mapToGlobal(QPoint(0, more->height()))); });
+            SettingsPage::AddRow(external_rows, QDir::toNativeSeparators(path),
+                                 tr("Updates and DLC here apply without installing"),
+                                 QStringLiteral("cloud-arrow-down"), Color::Accent(), more);
         }
-        auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
-        connect(add, &QAbstractButton::clicked, add_external, &QAbstractButton::click);
-        SettingsPage::AddRow(external_rows, tr("Add an update and DLC folder"),
-                             tr("Lichii reads updates and DLC from it without installing them"),
-                             QStringLiteral("folder-open"), Tints::Lavender(), add);
+        if (external_list->count() == 0) {
+            SettingsPage::AddRow(external_rows, tr("No update and DLC folders"),
+                                 tr("Lichii reads updates and DLC from them without installing"),
+                                 QStringLiteral("cloud-arrow-down"), Color::Accent(), nullptr);
+        }
     };
     rebuild_external();
     auto* external_model = external_list->model();
@@ -816,34 +965,15 @@ void ConfigureDialog::BuildLibrary(int library) {
     }
     connect(external_model, &QAbstractItemModel::modelReset, external_rows->parentWidget(),
             rebuild_external);
-    auto* view = ui_tab.get();
-    auto* display = settings_page->AddSection(library, tr("Display"));
-    for (const auto& [name, label] : std::array{
-             std::pair{"folder_icon_size_combobox", tr("Folder icon size")},
-             std::pair{"row_1_text_combobox", tr("First title line")},
-             std::pair{"row_2_text_combobox", tr("Second title line")},
-         }) {
-        SettingsPage::AddRow(
-            display, label, {}, QStringLiteral("list"), Tints::Green(),
-            SettingsPage::BindCombo(view->findChild<QComboBox*>(QString::fromLatin1(name))));
-    }
-    for (const auto& [name, label] : std::array{
-             std::pair{"show_add_ons", tr("Show add-ons")},
-             std::pair{"show_size", tr("Show size")},
-             std::pair{"show_types", tr("Show file formats")},
-             std::pair{"show_play_time", tr("Show play time")},
-         }) {
-        SettingsPage::AddRow(
-            display, label, {}, QStringLiteral("eye"), Tints::Blue(),
-            SettingsPage::BindToggle(view->findChild<QCheckBox*>(QString::fromLatin1(name))));
-    }
+    settings_page->AddBlock(
+        library, SettingsPage::Note(tr("Removing a folder does not delete its files.")),
+        tr("Removing a folder"));
 }
 
 void ConfigureDialog::BuildGraphics(int graphics) {
     auto& values = Settings::values;
     auto* gfx = graphics_tab.get();
-    auto* quick = settings_page->AddSection(graphics, tr("Quick"));
-    auto* picture = settings_page->AddSection(graphics, tr("Picture"));
+    auto* quick = settings_page->AddSection(graphics);
     const auto sources = FindPresetSources();
     if (sources.resolution != nullptr) {
         auto* presets_control = new Spotlight::SegmentedControl(
@@ -879,61 +1009,121 @@ void ConfigureDialog::BuildGraphics(int graphics) {
             preset_summary->show();
         });
     }
-    AddSettingRow(quick, gfx, values.fps_limit, tr("Guest FPS cap"),
-                  tr("Limits how often supported games present; 0 follows the game"),
+    AddSettingRow(quick, gfx, values.fps_limit, tr("FPS limit"),
+                  tr("Auto follows the game. The cap does not change a game's native frame rate."),
                   QStringLiteral("lightning"), Tints::Green());
-    AddSettingRow(picture, gfx, values.resolution_setup, tr("Resolution"),
-                  tr("Choose the game's internal rendering scale"), QStringLiteral("monitor"),
-                  Tints::Gold());
-    AddSettingRow(picture, gfx, values.scaling_filter, tr("Scaling filter"),
-                  tr("How the image fits the window"), QStringLiteral("stack"), Tints::Blue());
-    auto* frame_generation = SettingsPage::BindFrameGeneration(gfx);
-    if (frame_generation != nullptr) {
-        SettingsPage::AddRow(picture, tr("Frame generation"),
-                             tr("Adds displayed frames between game frames"),
-                             QStringLiteral("film-strip"), Tints::Lavender(), frame_generation);
+    AddSettingRow(quick, gfx, values.vsync_mode, tr("VSync mode"), {}, QStringLiteral("clock"),
+                  Tints::Blue());
+
+    auto* picture = settings_page->AddSection(graphics, tr("Picture"));
+    if (auto* resolution = SettingsPage::Editor(gfx, values.resolution_setup)) {
+        auto* detail = SettingsPage::AddRow(picture, tr("Resolution"), {}, QStringLiteral("monitor"),
+                                            Tints::Gold(), SettingsPage::BindSetting(resolution));
+        const auto describe = [detail, combo = resolution->combobox] {
+            Settings::ResolutionScalingInfo info{};
+            Settings::TranslateResolutionInfo(
+                static_cast<Settings::ResolutionSetup>(combo->currentData().toUInt()), info);
+            detail->setText(tr("%1× native · %2p handheld / %3p docked")
+                                .arg(info.up_factor)
+                                .arg(qRound(720 * info.up_factor))
+                                .arg(qRound(1080 * info.up_factor)));
+            detail->show();
+        };
+        describe();
+        connect(resolution->combobox, &QComboBox::currentIndexChanged, detail, describe);
     }
+    if (auto* filter = SettingsPage::Editor(gfx, values.scaling_filter)) {
+        auto* control = SettingsPage::BindSetting(filter);
+        if (auto* sharpness = SettingsPage::Editor(gfx, values.fsr_sharpening_slider)) {
+            auto* line = new QWidget(control);
+            line->setObjectName(QStringLiteral("detailLine"));
+            line->setProperty("spotlightTransparent", true);
+            auto* line_layout = new QHBoxLayout(line);
+            line_layout->setContentsMargins(0, 4, 0, 0);
+            line_layout->setSpacing(14);
+            line_layout->addWidget(SettingsPage::Text(tr("RCAS sharpness"), 12, 500, true));
+            auto* slider = SettingsPage::BindSetting(sharpness);
+            slider->setFixedWidth(240);
+            line_layout->addWidget(slider);
+            line_layout->addStretch();
+            new VisibilityFollower(sharpness, line);
+        }
+        SettingsPage::AddRow(picture, tr("Scaling filter"), tr("How the image fits the window"),
+                             QStringLiteral("stack"), Tints::Blue(), control);
+    }
+    if (auto* aa = SettingsPage::Editor(gfx, values.anti_aliasing); aa && aa->combobox) {
+        QStringList names;
+        for (int i = 0; i < aa->combobox->count(); ++i) {
+            names.append(aa->combobox->itemText(i));
+        }
+        auto* segments =
+            new Spotlight::SegmentedControl(names, Spotlight::SegmentedControl::Kind::Accent, 38);
+        const auto sync = [segments, combo = aa->combobox] {
+            const QSignalBlocker blocker(segments);
+            segments->SetCurrentIndex(combo->currentIndex());
+            segments->setEnabled(combo->isEnabled());
+        };
+        sync();
+        connect(aa->combobox, &QComboBox::currentIndexChanged, segments, sync);
+        connect(segments, &Spotlight::SegmentedControl::CurrentChanged, aa->combobox,
+                [combo = aa->combobox](int index) { SettingsPage::SetComboIndex(combo, index); });
+        SettingsPage::AddRow(picture, tr("Anti-aliasing"), {}, QStringLiteral("paint-brush"),
+                             Tints::Lavender(), segments);
+    }
+    QList<std::pair<QString, QCheckBox*>> upscalers;
+    for (const auto& [setting, name] :
+         {std::pair<const Settings::BasicSetting*, QString>{&values.game_dlss_network,
+                                                            tr("Game DLSS")},
+          {&values.nvidia_dlss, tr("NVIDIA DLSS")},
+          {&values.amd_fsr4, tr("FSR 4")}}) {
+        if (auto* editor = SettingsPage::Editor(gfx, *setting);
+            editor && editor->checkbox && editor->isVisibleTo(gfx)) {
+            upscalers.append({name, editor->checkbox});
+        }
+    }
+    if (!upscalers.isEmpty()) {
+        SettingsPage::AddRow(picture, tr("Game upscaling"),
+                             tr("Replaces the upscaler a game ships with. Only what this PC "
+                                "supports."),
+                             QStringLiteral("magic-wand"), Color::Accent(),
+                             new ToggleSegments(upscalers));
+    }
+
+    auto* smooth = settings_page->AddSection(graphics, tr("Smoothness and display"));
+    if (auto* frame = SettingsPage::Editor(gfx, values.frame_gen); frame && frame->checkbox) {
+        auto* control = new QWidget;
+        auto* layout = new QHBoxLayout(control);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(10);
+        for (const auto& [setting, name] :
+             {std::pair<const Settings::BasicSetting*, QString>{&values.frame_gen_type, tr("Type")},
+              {&values.frame_gen_multiplier, tr("Multiplier")}}) {
+            auto* editor = SettingsPage::Editor(gfx, *setting);
+            if (editor == nullptr) {
+                continue;
+            }
+            auto* column = new QWidget;
+            column->setProperty("spotlightTransparent", true);
+            auto* column_layout = new QVBoxLayout(column);
+            column_layout->setContentsMargins(0, 0, 0, 0);
+            column_layout->setSpacing(6);
+            column_layout->addWidget(SettingsPage::Text(name, 12, 600, true));
+            column_layout->addWidget(SettingsPage::BindSetting(editor));
+            new VisibilityFollower(editor, column);
+            layout->addWidget(column, 0, Qt::AlignBottom);
+        }
+        layout->addWidget(SettingsPage::BindSetting(frame), 0, Qt::AlignBottom);
+        SettingsPage::AddRow(smooth, tr("Frame generation"), {}, QStringLiteral("film-strip"),
+                             Tints::Lavender(), control);
+    }
+    AddSettingRow(smooth, gfx, values.hdr_mode, tr("HDR output"),
+                  tr("Unavailable without an HDR-capable display and Vulkan."),
+                  QStringLiteral("sparkle"), Tints::Gold());
     start_fullscreen = new Spotlight::ToggleSwitch;
     start_fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
     start_fullscreen->setEnabled(!system.IsPoweredOn());
-    SettingsPage::AddRow(picture, tr("Fullscreen when a game starts"), {},
-                         QStringLiteral("monitor"), Color::Accent(), start_fullscreen);
-
-    int advanced_count = 0;
-    const bool has_frame_gen_choices = qobject_cast<QComboBox*>(frame_generation) != nullptr;
-    for (auto* tab : std::initializer_list<QWidget*>{
-             graphics_tab.get(),
-             graphics_advanced_tab.get(),
-             graphics_extensions_tab.get(),
-         }) {
-        for (auto* editor : tab->findChildren<ConfigurationShared::Widget*>()) {
-            const auto id = editor->SettingId();
-            if (has_frame_gen_choices &&
-                (id == values.frame_gen_type.Id() || id == values.frame_gen_multiplier.Id())) {
-                continue;
-            }
-            if (editor->Valid() && editor->isVisibleTo(tab) && id != values.resolution_setup.Id() &&
-                id != values.scaling_filter.Id() && id != values.frame_gen.Id() &&
-                id != values.fps_limit.Id()) {
-                ++advanced_count;
-            }
-        }
-    }
-    auto* footnote = new QWidget;
-    auto* footnote_layout = new QHBoxLayout(footnote);
-    footnote_layout->setContentsMargins(6, 0, 6, 0);
-    footnote_layout->setSpacing(8);
-    auto* info = new QLabel;
-    info->setPixmap(Spotlight::IconPixmap(QStringLiteral("info"), 14, Color::TextSecondary(),
-                                          devicePixelRatioF()));
-    footnote_layout->addWidget(info, 0, Qt::AlignTop);
-    auto* footnote_text = SettingsPage::Text(
-        tr("VSync, speed limit and more are separate controls under Show advanced (%n more).",
-           nullptr, advanced_count),
-        12, 500, true);
-    footnote_text->setWordWrap(true);
-    footnote_layout->addWidget(footnote_text, 1);
-    settings_page->AddBlock(graphics, footnote, tr("Show advanced"));
+    SettingsPage::AddRow(smooth, tr("Fullscreen when a game starts"), {},
+                         QStringLiteral("arrows-out"), Color::Accent(), start_fullscreen);
 }
 
 void ConfigureDialog::EnsureInput() {
@@ -1364,7 +1554,7 @@ void ConfigureDialog::RebuildGameFolders() {
         const auto& folder = game_dirs[i];
         const bool built_in = IsBuiltInFolder(folder);
         const QString path = QString::fromStdString(folder.path);
-        auto* menu_button = new Spotlight::CircleButton(QStringLiteral("dots-three"), 36);
+        auto* menu_button = new Spotlight::CircleButton(QStringLiteral("dots-three"), 32);
         auto* menu = new QMenu(menu_button);
         const auto changed = [this] {
             game_dirs_changed = true;
@@ -1390,7 +1580,8 @@ void ConfigureDialog::RebuildGameFolders() {
                 game_dirs[i].deep_scan = enabled;
                 changed();
             });
-            menu->addAction(tr("Remove"), this, [this, i, changed] {
+            menu->addSeparator();
+            menu->addAction(tr("Remove folder"), this, [this, i, changed] {
                 game_dirs.removeAt(i);
                 changed();
             });
@@ -1398,17 +1589,31 @@ void ConfigureDialog::RebuildGameFolders() {
         connect(menu_button, &QAbstractButton::clicked, menu, [menu, menu_button] {
             menu->popup(menu_button->mapToGlobal(QPoint(0, menu_button->height())));
         });
-        const QString title = folder.path == "SDMC"       ? tr("SD card")
-                              : folder.path == "UserNAND" ? tr("User NAND")
-                              : folder.path == "SysNAND"  ? tr("System NAND")
-                                                          : QDir(path).dirName();
-        SettingsPage::AddRow(folders_layout, title, built_in ? tr("Built-in location") : path,
-                             QStringLiteral("folder"), Tints::Green(), menu_button);
+        if (built_in) {
+            const QString title = folder.path == "SDMC"       ? tr("SD card")
+                                  : folder.path == "UserNAND" ? tr("User NAND")
+                                                              : tr("System NAND");
+            SettingsPage::AddRow(folders_layout, title, tr("Built-in location"),
+                                 QStringLiteral("hard-drives"), Tints::Blue(), menu_button);
+            continue;
+        }
+        auto* control = new QWidget;
+        control->setProperty("spotlightTransparent", true);
+        auto* control_layout = new QHBoxLayout(control);
+        control_layout->setContentsMargins(0, 0, 0, 0);
+        control_layout->setSpacing(14);
+        auto* subfolders = new QCheckBox(tr("Subfolders"));
+        subfolders->setChecked(folder.deep_scan);
+        connect(subfolders, &QCheckBox::toggled, this, [this, i, changed](bool enabled) {
+            game_dirs[i].deep_scan = enabled;
+            changed();
+        });
+        control_layout->addWidget(subfolders);
+        control_layout->addWidget(menu_button);
+        SettingsPage::AddRow(folders_layout, QDir::toNativeSeparators(path),
+                             folder.deep_scan ? tr("Subfolders scanned") : QString(),
+                             QStringLiteral("folder"), Tints::Green(), control);
     }
-    auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
-    connect(add, &QAbstractButton::clicked, this, &ConfigureDialog::AddGameFolder);
-    SettingsPage::AddRow(folders_layout, tr("Add a game folder"), tr("Scan a folder for games"),
-                         QStringLiteral("folder-open"), Tints::Green(), add);
     if (folder_summary != nullptr) {
         folder_summary->setText(GameFolderSummary());
     }
