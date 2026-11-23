@@ -126,7 +126,11 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
     disabled_addons = FileSys::StoredDisabledAddons(title_id, std::move(disabled_addons));
 
     std::sort(disabled_addons.begin(), disabled_addons.end());
-    Settings::values.disabled_addons[title_id] = disabled_addons;
+    if (disabled_addons.empty()) {
+        Settings::values.disabled_addons.erase(title_id);
+    } else {
+        Settings::values.disabled_addons[title_id] = disabled_addons;
+    }
     const QSignalBlocker block(item_model);
     for (const auto& row : list_items) {
         auto* const item = row.front();
