@@ -7,6 +7,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QStyleOptionMenuItem>
+#include <QWidgetAction>
 
 #include "lichii/spotlight/menu.h"
 #include "lichii/spotlight/theme.h"
@@ -80,7 +81,7 @@ void PaintMenu(QMenu& menu, const QPaintEvent& event) {
             continue;
         }
         const bool enabled = action->isEnabled();
-        if (action == menu.activeAction() && enabled) {
+        if (action == menu.activeAction() && enabled && !qobject_cast<QWidgetAction*>(action)) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(Color::RowHover());
             painter.drawRoundedRect(row, Radius::Small, Radius::Small);

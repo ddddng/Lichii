@@ -68,7 +68,7 @@ class NupProgressDialog;
 class ShaderWarmDialog;
 class WhatsNewDialog;
 class NxTools;
-class QSlider;
+class QAbstractSlider;
 class QMenu;
 class QHBoxLayout;
 class WaitTreeWidget;
@@ -79,7 +79,6 @@ class InGameBar;
 class InGameMenu;
 class StoppingOverlay;
 class AudioControls;
-class GraphicsControls;
 } // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
@@ -630,7 +629,6 @@ private:
 
     Spotlight::InGameBar* ingame_bar = nullptr;
     Spotlight::InGameMenu* ingame_menu = nullptr;
-    Spotlight::GraphicsControls* graphics_panel = nullptr;
     Spotlight::AudioControls* audio_panel = nullptr;
     Spotlight::FullscreenHint* fullscreen_hint = nullptr;
     Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
@@ -663,7 +661,7 @@ private:
     bool frame_gen_generating = false;
     double frame_gen_fps = 0.0;
     QElapsedTimer frame_gen_fps_timer;
-    QSlider* volume_slider = nullptr;
+    QAbstractSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
 
     // Stores what suffix to add to the FPS counter, e.g. Unlocked.

@@ -1285,10 +1285,23 @@ void MainWindow::InitializeWidgets() {
 
     quick_controls = ui->menu_View->addMenu(tr("Quick controls"));
     quick_controls->setToolTipsVisible(true);
-    const auto make_submenu = [](QMenu* parent, const QString& name) {
+    const auto make_submenu = [](QMenu* parent, const QString& name, QStringView icon = {}) {
         auto* menu = parent->addMenu(name);
         menu->setToolTipsVisible(true);
+        if (!icon.isEmpty()) {
+            menu->menuAction()->setProperty("spotlightIcon",
+                                            Spotlight::Icon(icon, Spotlight::Color::MenuInk(), 16));
+        }
         return menu;
+    };
+    const auto in_order = [](const auto& texts, const auto& order) {
+        std::vector<std::pair<typename std::decay_t<decltype(texts)>::key_type, QString>> choices;
+        for (const auto value : order) {
+            if (const auto it = texts.find(value); it != texts.end()) {
+                choices.emplace_back(value, it->second);
+            }
+        }
+        return choices;
     };
     const auto add_choices = [this](QMenu* menu, const auto& choices, auto& setting,
                                     const auto& apply, const auto& available) {
@@ -1306,12 +1319,16 @@ void MainWindow::InitializeWidgets() {
         }
     };
     const auto all = [](auto) { return true; };
-    auto* renderer = make_submenu(quick_controls, tr("Renderer"));
+    auto* renderer = make_submenu(quick_controls, tr("Renderer"), u"monitor");
     renderer_status_action = renderer->menuAction();
     renderer->addAction(tr("Cycle renderer"), this, &MainWindow::OnToggleGraphicsAPI);
     renderer->addSeparator();
+    using Settings::RendererBackend;
     add_choices(
-        renderer, ConfigurationShared::renderer_backend_texts_map,
+        renderer,
+        in_order(ConfigurationShared::renderer_backend_texts_map,
+                 std::array{RendererBackend::Vulkan, RendererBackend::OpenGL_GLSL,
+                            RendererBackend::OpenGL_SPIRV, RendererBackend::OpenGL_GLASM}),
         Settings::values.renderer_backend,
         [this](auto value) {
             Settings::values.renderer_backend.SetValue(value);
@@ -1319,13 +1336,13 @@ void MainWindow::InitializeWidgets() {
         },
         [](auto value) {
 #ifndef HAS_OPENGL
-            return value == Settings::RendererBackend::Vulkan;
+            return value == RendererBackend::Vulkan;
 #else
-            return value != Settings::RendererBackend::Null;
+            return value != RendererBackend::Null;
 #endif
         });
 
-    auto* console = make_submenu(quick_controls, tr("Console mode"));
+    auto* console = make_submenu(quick_controls, tr("Console mode"), u"game-controller");
     dock_status_action = console->menuAction();
     add_choices(
         console, ConfigurationShared::use_docked_mode_texts_map, Settings::values.use_docked_mode,
@@ -1336,7 +1353,7 @@ void MainWindow::InitializeWidgets() {
         },
         all);
 
-    auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"));
+    auto* accuracy = make_submenu(quick_controls, tr("GPU accuracy"), u"gauge");
     gpu_accuracy_action = accuracy->menuAction();
     add_choices(
         accuracy, ConfigurationShared::gpu_accuracy_texts_map, Settings::values.gpu_accuracy,
@@ -1348,8 +1365,18 @@ void MainWindow::InitializeWidgets() {
 
     auto* filter = make_submenu(quick_controls, tr("Scaling filter"));
     filter_status_action = filter->menuAction();
+    using Settings::ScalingFilter;
     add_choices(
-        filter, ConfigurationShared::scaling_filter_texts_map, Settings::values.scaling_filter,
+        filter,
+        in_order(ConfigurationShared::scaling_filter_texts_map,
+                 std::array{ScalingFilter::NearestNeighbor, ScalingFilter::Bilinear,
+                            ScalingFilter::Bicubic, ScalingFilter::ZeroTangent,
+                            ScalingFilter::BSpline, ScalingFilter::Mitchell, ScalingFilter::Spline1,
+                            ScalingFilter::Gaussian, ScalingFilter::Lanczos,
+                            ScalingFilter::ScaleForce, ScalingFilter::Fsr, ScalingFilter::Area,
+                            ScalingFilter::Mmpx, ScalingFilter::Sgsr, ScalingFilter::SgsrEdge,
+                            ScalingFilter::Fsr3}),
+        Settings::values.scaling_filter,
         [this](auto value) {
             Settings::values.scaling_filter.SetValue(value);
             UpdateFilterText();
@@ -1459,21 +1486,18 @@ void MainWindow::InitializeWidgets() {
     UpdatePostShaderText();
 #endif
 
-    auto* audio = make_submenu(quick_controls, tr("Audio"));
+    auto* audio = make_submenu(quick_controls, tr("Audio"), u"speaker-high");
     auto* slider_action = new QWidgetAction(audio);
-    volume_slider = new QSlider(Qt::Horizontal, audio);
-    volume_slider->setAccessibleName(tr("Volume"));
-    volume_slider->setMinimumWidth(190);
-    volume_slider->setMaximum(200);
-    volume_slider->setPageStep(5);
-    slider_action->setDefaultWidget(volume_slider);
+    auto* volume_block = new Spotlight::VolumeBlock(audio);
+    volume_slider = volume_block->Track();
+    slider_action->setDefaultWidget(volume_block);
     audio->addAction(slider_action);
     const auto set_volume = [this](int percentage) {
         Settings::values.audio_muted = false;
         Settings::values.volume.SetValue(static_cast<u8>(percentage));
         UpdateVolumeUI();
     };
-    connect(volume_slider, &QSlider::valueChanged, this, set_volume);
+    connect(volume_slider, &QAbstractSlider::valueChanged, this, set_volume);
     mute_action = audio->addAction(tr("Mute"), this, &MainWindow::OnMute);
     mute_action->setCheckable(true);
     auto* decrease_volume =
@@ -1484,7 +1508,7 @@ void MainWindow::InitializeWidgets() {
         UpdateVolumeUI();
     });
 
-    auto* speed = make_submenu(quick_controls, tr("Emulation speed"));
+    auto* speed = make_submenu(quick_controls, tr("Emulation speed"), u"timer");
     speed_limit_action = speed->addAction(tr("Toggle speed limit"), this, [this] {
         RememberSpeedLimitBeforeHotkey();
         Settings::ToggleStandardMode();
@@ -1509,11 +1533,12 @@ void MainWindow::InitializeWidgets() {
                                      std::vector<std::pair<QAction*, const char*>> hotkeys) {
         connect(menu, &QMenu::aboutToShow, this, [this, hotkeys] {
             for (const auto& [action, name] : hotkeys) {
-                QStringList keys{
-                    Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", name)),
-                    ControllerKeys(name)};
+                const QString key =
+                    Spotlight::KeyText(hotkey_registry.GetKeySequence("Main Window", name));
+                QStringList keys{key, ControllerKeys(name)};
                 keys.removeAll(QString{});
                 action->setProperty("spotlightHint", keys.join(QStringLiteral(" · ")));
+                action->setProperty("spotlightKey", key);
             }
         });
     };
@@ -1563,7 +1588,13 @@ void MainWindow::InitializeWidgets() {
                                              .decrease_volume = decrease_volume,
                                              .increase_volume = increase_volume,
                                              .mute = mute_action,
-                                             .reset_volume = reset_volume};
+                                             .reset_volume = reset_volume,
+                                             .audio = audio,
+                                             .speed = speed,
+                                             .session = session,
+                                             .rescan = refresh_action,
+                                             .performance_overlay =
+                                                 ui->action_Show_Performance_Overlay};
     ingame_menu = new Spotlight::InGameMenu({.pause = ui->action_Pause,
                                              .restart = ui->action_Restart,
                                              .stop = ui->action_Stop,
@@ -1574,7 +1605,6 @@ void MainWindow::InitializeWidgets() {
                                              .effects = post_shader_status_action,
                                              .controls = controls},
                                             this);
-    graphics_panel = new Spotlight::GraphicsControls(controls, this);
     audio_panel = new Spotlight::AudioControls(controls, this);
     const auto set_docked = [this](bool docked) {
         if (Settings::IsDockedMode() != docked) {
@@ -1583,11 +1613,6 @@ void MainWindow::InitializeWidgets() {
     };
     connect(ingame_menu, &Spotlight::InGameMenu::DockedChanged, this, set_docked);
     connect(ingame_menu, &Spotlight::InGameMenu::VolumeChanged, this, set_volume);
-    connect(graphics_panel, &Spotlight::GraphicsControls::AboutToOpen, this, [this] {
-        UpdateStatusButtons();
-        UpdateInGameGraphicsSummary();
-    });
-    connect(graphics_panel, &Spotlight::GraphicsControls::DockedChanged, this, set_docked);
     connect(audio_panel, &Spotlight::AudioControls::AboutToOpen, this, [this] {
         const auto device = Settings::values.audio_output_device_id.GetValue();
         audio_panel->SetOutput(device.empty() || device == "auto" ? tr("System default")
@@ -1600,8 +1625,7 @@ void MainWindow::InitializeWidgets() {
     emulation_menu->addSeparator();
     emulation_menu->addActions(
         {ui->action_Fullscreen, ui->action_Capture_Screenshot, ui->action_Load_Amiibo});
-    emulation_menu->AddSharedMenu(speed,
-                                  Spotlight::Icon(u"lightning", Spotlight::Color::MenuInk(), 16));
+    emulation_menu->addMenu(speed);
     emulation_menu->addSeparator();
     emulation_menu->addActions({ui->action_Configure_Current_Game, ui->action_Configure});
     show_hotkeys(emulation_menu, {{ui->action_Pause, "Continue/Pause Emulation"},
@@ -1611,6 +1635,16 @@ void MainWindow::InitializeWidgets() {
                                   {ui->action_Capture_Screenshot, "Capture Screenshot"},
                                   {ui->action_Load_Amiibo, "Load/Remove Amiibo"}});
     running_title_bar->AddMenu(tr("Emulation"), emulation_menu);
+    auto* graphics_menu = new Spotlight::Menu(this);
+    graphics_menu->setToolTipsVisible(true);
+    for (QMenu* menu : {renderer, console, accuracy, filter, antialiasing,
+                        static_cast<QMenu*>(frame_gen), effects}) {
+        if (menu) {
+            graphics_menu->addMenu(menu);
+        }
+    }
+    connect(graphics_menu, &QMenu::aboutToShow, this, &MainWindow::UpdateStatusButtons);
+    running_title_bar->AddMenu(tr("Graphics"), graphics_menu);
     const auto add_panel = [this](const QString& name, Spotlight::InGamePopover* panel) {
         auto* button = running_title_bar->AddPanelButton(name);
         connect(button, &QAbstractButton::clicked, panel, [button, panel] {
@@ -1620,14 +1654,13 @@ void MainWindow::InitializeWidgets() {
         connect(panel, &Spotlight::InGamePopover::Dismissed, button,
                 [button] { button->setChecked(false); });
     };
-    add_panel(tr("Graphics"), graphics_panel);
     add_panel(tr("Audio"), audio_panel);
     auto* view_menu = new Spotlight::Menu(this);
     ui->action_Show_Status_Bar->setText(tr("Show bottom bar"));
     view_menu->addActions(
         {ui->action_Show_Performance_Overlay, ingame_menu_action, ui->action_Show_Status_Bar});
     view_menu->addSeparator();
-    view_menu->AddSharedMenu(session, Spotlight::Icon(u"info", Spotlight::Color::MenuInk(), 16));
+    view_menu->addMenu(session);
     view_menu->addAction(refresh_action);
     show_hotkeys(view_menu, {{ui->action_Show_Performance_Overlay, "Toggle Performance Overlay"},
                              {ingame_menu_action, "In-game Menu"},
@@ -6684,7 +6717,6 @@ void MainWindow::UpdateInGameGraphicsSummary() {
                          values.anti_aliasing.UsingGlobal() && values.frame_gen.UsingGlobal(),
     };
     ingame_menu->SetSummary(summary);
-    graphics_panel->SetSummary(summary);
 }
 
 void MainWindow::UpdateGPUAccuracyButton() {
@@ -6699,7 +6731,6 @@ void MainWindow::UpdateDockedButton() {
     const QString mode = docked ? tr("Docked") : tr("Handheld");
     dock_status_action->setText(tr("Console mode: %1").arg(mode));
     ingame_menu->SetConsoleMode(docked);
-    graphics_panel->SetConsoleMode(docked);
     UpdateAPIText();
 }
 
