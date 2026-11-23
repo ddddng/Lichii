@@ -20,6 +20,7 @@
 #include <QGroupBox>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
 #include <QMenu>
@@ -799,6 +800,426 @@ void ConfigureDialog::BuildSettings() {
         settings_page->AddPage(category, widget, name);
     }
     settings_page->SetBuilder(shortcuts, [this, shortcuts] { BuildShortcuts(shortcuts); });
+    using Spotlight::AdvancedSection;
+    for (const auto& [category, text] : std::initializer_list<std::pair<int, QString>>{
+             {general, tr("Advanced: diagnostics for bug reports, screenshots and resets.")},
+             {library, tr("Advanced: artwork sources, the list view and the metadata cache.")},
+             {graphics, tr("Advanced: for troubleshooting a game or tuning performance. Each "
+                           "section says when to touch it.")},
+             {audio, tr("Set the host audio backend and the sound mode games see.")},
+             {system_page, tr("Advanced: CPU, speed, console identity, storage and applets.")},
+             {multiplayer,
+              tr("Advanced: network adapter, custom servers and the public lobby.")},
+         }) {
+        settings_page->SetAdvancedSubtitle(category, text);
+    }
+    if (auto* iidb = ui_tab->findChild<QWidget*>(QStringLiteral("iidb_api_key"))) {
+        iidb->setProperty("spotlightBound", true);
+    }
+    settings_page->SetAdvancedSections(
+        general,
+        {
+            AdvancedSection{tr("Behaviour"),
+                            tr("Desktop integration"),
+                            0,
+                            {QStringLiteral("hideInactiveMouse|%1").arg(tr("Hide the mouse when idle")),
+                             QStringLiteral("enable_gamemode|%1|%2").arg(tr("Gamemode"), tr("Linux")),
+                             QStringLiteral("gui_force_x11|%1|%2")
+                                 .arg(tr("Force X11"), tr("Linux, when Wayland misbehaves")),
+                             QStringLiteral("button_reset_defaults|%1|%2")
+                                 .arg(tr("Reset all settings"),
+                                      tr("Also removes every game’s own settings"))}},
+            AdvancedSection{tr("Screenshots"),
+                            tr("Where captures go"),
+                            0,
+                            {QStringLiteral("screenshot_path_edit"),
+                             QStringLiteral("enable_screenshot_save_as"),
+                             QStringLiteral("screenshot_height")}},
+            AdvancedSection{
+                tr("Diagnostics"),
+                tr("Support may ask you to change these"),
+                1,
+                {QStringLiteral("open_log_button"),
+                 QStringLiteral("log_filter_edit|%1").arg(tr("Log filter")),
+                 QStringLiteral("extended_logging|%1").arg(tr("Extended logging")),
+                 QStringLiteral("flush_line|%1|%2")
+                     .arg(tr("Write the log on every line"), tr("Keeps the log after a crash")),
+                 QStringLiteral("toggle_console|%1|%2")
+                     .arg(tr("Show the log in a console"), tr("Windows")),
+                 QStringLiteral("censor_username|%1").arg(tr("Hide your user name in logs")),
+                 QStringLiteral("enable_graphics_debugging|%1|%2")
+                     .arg(tr("Vulkan validation"), tr("For driver bug reports")),
+                 QStringLiteral("enable_renderdoc_hotkey|%1").arg(tr("RenderDoc hotkey")),
+                 QStringLiteral("perform_vulkan_check|%1").arg(tr("Check Vulkan at startup"))}},
+        },
+        {QStringLiteral("select_user_on_boot"), QStringLiteral("toggle_gdbstub"),
+         QStringLiteral("gdbport_spinbox"), QStringLiteral("gpu_log_level"),
+         QStringLiteral("homebrew_args_edit"), QStringLiteral("enable_shader_feedback"),
+         QStringLiteral("enable_nsight_aftermath"), QStringLiteral("disable_loop_safety_checks"),
+         QStringLiteral("disable_buffer_reorder"), QStringLiteral("dump_guest_shaders"),
+         QStringLiteral("gpu_log_shader_dumps"), QStringLiteral("disable_macro_jit"),
+         QStringLiteral("dump_macros"), QStringLiteral("disable_macro_hle"),
+         QStringLiteral("quest_flag"), QStringLiteral("use_dev_keys"),
+         QStringLiteral("use_debug_asserts"), QStringLiteral("disable_web_applet"),
+         QStringLiteral("enable_all_controllers"), QStringLiteral("use_auto_stub"),
+         QStringLiteral("dump_audio_commands"), QStringLiteral("fs_access_log"),
+         QStringLiteral("reporting_services"), QStringLiteral("serial_battery_edit"),
+         QStringLiteral("serial_board_edit"), QStringLiteral("debug_knobs_spinbox"),
+         QStringLiteral("cpuopt_page_tables"), QStringLiteral("cpuopt_block_linking"),
+         QStringLiteral("cpuopt_return_stack_buffer"), QStringLiteral("cpuopt_fast_dispatcher"),
+         QStringLiteral("cpuopt_context_elimination"), QStringLiteral("cpuopt_const_prop"),
+         QStringLiteral("cpuopt_misc_ir"), QStringLiteral("cpuopt_reduce_misalign_checks"),
+         QStringLiteral("cpuopt_fastmem"), QStringLiteral("cpuopt_fastmem_exclusives"),
+         QStringLiteral("cpuopt_recompile_exclusives"),
+         QStringLiteral("cpuopt_ignore_memory_aborts")});
+    settings_page->SetAdvancedBuilder(general, [this, general] {
+        if (auto* path = ui_tab->findChild<QLineEdit*>(QStringLiteral("screenshot_path_edit"))) {
+            auto* control = new QWidget;
+            auto* layout = new QHBoxLayout(control);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(8);
+            layout->addWidget(SettingsPage::BindLineEdit(path));
+            if (auto* change =
+                    ui_tab->findChild<QAbstractButton*>(QStringLiteral("screenshot_path_button"))) {
+                layout->addWidget(SettingsPage::BindButton(change, tr("Change")));
+            }
+            settings_page->AddAdvancedRow(general, QStringLiteral("screenshot_path_edit"),
+                                          tr("Folder"), {}, control);
+        }
+        if (auto* ask =
+                ui_tab->findChild<QCheckBox*>(QStringLiteral("enable_screenshot_save_as"))) {
+            settings_page->AddAdvancedRow(general, QStringLiteral("enable_screenshot_save_as"),
+                                          tr("Ask where to save"), tr("Windows"),
+                                          SettingsPage::BindToggle(ask));
+        }
+        if (auto* height = ui_tab->findChild<QComboBox*>(QStringLiteral("screenshot_height"))) {
+            settings_page->AddAdvancedRow(general, QStringLiteral("screenshot_height"),
+                                          tr("Height"), {}, SettingsPage::BindCombo(height));
+        }
+        if (auto* open =
+                debug_tab_tab->findChild<QAbstractButton*>(QStringLiteral("open_log_button"))) {
+            settings_page->AddAdvancedRow(general, QStringLiteral("open_log_button"),
+                                          tr("Log folder"), {},
+                                          SettingsPage::BindButton(open, tr("Open")));
+        }
+    });
+
+    settings_page->SetAdvancedSections(
+        library,
+        {
+            AdvancedSection{tr("Artwork"),
+                            tr("Optional sources for missing icons and art"),
+                            0,
+                            {QStringLiteral("|%1|%2").arg(tr("SteamGridDB API key"),
+                                                          tr("Empty disables lookup")),
+                             QStringLiteral("iidb_api_key|%1").arg(tr("iiDB artwork API key"))}},
+            AdvancedSection{tr("Maintenance"),
+                            tr("If the library shows stale names or icons"),
+                            0,
+                            {QStringLiteral("cache_game_list"),
+                             QStringLiteral("reset_game_list_cache")}},
+            AdvancedSection{
+                tr("List view"),
+                tr("Columns and text of the list layout"),
+                1,
+                {QStringLiteral("folder_icon_size_combobox|%1").arg(tr("Folder icon size")),
+                 QStringLiteral("row_1_text_combobox|%1").arg(tr("First line")),
+                 QStringLiteral("row_2_text_combobox|%1").arg(tr("Second line")),
+                 QStringLiteral("show_add_ons|%1").arg(tr("Add-ons column")),
+                 QStringLiteral("show_size|%1").arg(tr("Size column")),
+                 QStringLiteral("show_types|%1").arg(tr("Format column")),
+                 QStringLiteral("show_play_time|%1").arg(tr("Play time column"))}},
+        },
+        {QStringLiteral("theme_combobox"), QStringLiteral("enable_screenshot_save_as"),
+         QStringLiteral("screenshot_path_edit"), QStringLiteral("screenshot_path_button"),
+         QStringLiteral("screenshot_height")});
+    settings_page->SetAdvancedBuilder(library, [this, library] {
+        if (auto* iidb = ui_tab->findChild<QAbstractButton*>(QStringLiteral("iidb_api_key"))) {
+            settings_page->AddAdvancedRow(library, QStringLiteral("iidb_api_key"),
+                                          tr("iiDB artwork API key"), {},
+                                          SettingsPage::BindButton(iidb, tr("Add key")));
+        }
+        if (auto* cache = filesystem_tab->findChild<QCheckBox*>(QStringLiteral("cache_game_list"))) {
+            settings_page->AddAdvancedRow(library, QStringLiteral("cache_game_list"),
+                                          tr("Cache game list metadata"), {},
+                                          SettingsPage::BindToggle(cache));
+        }
+        if (auto* reset = filesystem_tab->findChild<QAbstractButton*>(
+                QStringLiteral("reset_game_list_cache"))) {
+            settings_page->AddAdvancedRow(library, QStringLiteral("reset_game_list_cache"),
+                                          tr("Reset metadata cache"), {},
+                                          SettingsPage::BindButton(reset, tr("Reset")));
+        }
+    });
+
+    settings_page->SetAdvancedSections(
+        graphics,
+        {
+            AdvancedSection{
+                tr("Accuracy"),
+                tr("Higher is closer to the console, lower is faster"),
+                0,
+                {QStringLiteral("gpu_accuracy|%1|%2").arg(tr("GPU mode"), tr("Choose Fast or Accurate")),
+                 QStringLiteral("dma_accuracy|%1").arg(tr("DMA accuracy")),
+                 QStringLiteral("gpu_fence_behavior|%1").arg(tr("GPU fence behaviour")),
+                 QStringLiteral("native_compute_write_mark|%1|%2")
+                     .arg(tr("Switch 2 compute write mark"),
+                          tr("Correctness knob for Switch 2 compute"))}},
+            AdvancedSection{
+                tr("Shaders"),
+                tr("When games stutter while new effects appear"),
+                0,
+                {QStringLiteral("use_disk_shader_cache|%1").arg(tr("Keep a pipeline cache on disk")),
+                 QStringLiteral("use_vulkan_driver_pipeline_cache|%1")
+                     .arg(tr("Use the driver pipeline cache")),
+                 QStringLiteral("precache_shaders|%1")
+                     .arg(tr("Precache shaders before a game starts")),
+                 QStringLiteral("build_all_cached_shaders|%1|%2")
+                     .arg(tr("Build all cached shaders first"), tr("Longer start, fewer hitches")),
+                 QStringLiteral("use_asynchronous_shaders|%1|%2")
+                     .arg(tr("Don't wait for shaders still compiling"),
+                          tr("Draws skip effects that are not ready")),
+                 QStringLiteral(">native_async_draws|%1")
+                     .arg(tr("Switch 2 draws with unbuilt shaders")),
+                 QStringLiteral(">native_pipeline_wait_ms|%1").arg(tr("Wait per frame")),
+                 QStringLiteral(">skip_unbuilt_mesh_draws|%1")
+                     .arg(tr("Skip Switch 2 mesh draws with unbuilt shaders"))}},
+            AdvancedSection{
+                tr("Compatibility"),
+                tr("Change only when a game shows broken graphics"),
+                0,
+                {QStringLiteral("nvdec_emulation|%1").arg(tr("Video decoding (NVDEC)")),
+                 QStringLiteral("accelerate_astc|%1").arg(tr("ASTC decoding")),
+                 QStringLiteral("skip_cpu_inner_invalidation|%1")
+                     .arg(tr("Skip CPU inner invalidation")),
+                 QStringLiteral("sync_memory_operations|%1").arg(tr("Sync memory operations")),
+                 QStringLiteral("enable_compute_pipelines|%1|%2")
+                     .arg(tr("Compute pipelines"), tr("Intel Vulkan driver only")),
+                 QStringLiteral("use_reactive_flushing|%1").arg(tr("Reactive flushing")),
+                 QStringLiteral("barrier_feedback_loops|%1").arg(tr("Barrier feedback loops")),
+                 QStringLiteral("enable_buffer_history|%1").arg(tr("Buffer history")),
+                 QStringLiteral("fix_bloom_effects|%1|%2")
+                     .arg(tr("Fix bloom effects"), tr("For games with incorrect bloom")),
+                 QStringLiteral("dyna_state|%1|%2")
+                     .arg(tr("Extended dynamic state"), tr("Unavailable on macOS")),
+                 QStringLiteral("vertex_input_dynamic_state|%1")
+                     .arg(tr("Vertex input dynamic state")),
+                 QStringLiteral("mesh_shaders|%1").arg(tr("Mesh shaders")),
+                 QStringLiteral("sample_shading_fraction|%1").arg(tr("Sample shading"))}},
+            AdvancedSection{tr("Memory"),
+                            tr("For GPUs with little video memory"),
+                            0,
+                            {QStringLiteral("astc_recompression|%1").arg(tr("ASTC recompression")),
+                             QStringLiteral("vram_usage_mode|%1").arg(tr("VRAM use"))}},
+            AdvancedSection{tr("Device"),
+                            tr("Only for PCs with more than one GPU"),
+                            0,
+                            {QStringLiteral("backend|%1").arg(tr("Graphics API")),
+                             QStringLiteral("vulkan_device|%1").arg(tr("GPU"))}},
+            AdvancedSection{
+                tr("Frame rate"),
+                tr("Pacing and caps beyond the Everyday frame rate"),
+                1,
+                {QStringLiteral("nx2_frame_rate_limit|%1|%2")
+                     .arg(tr("Switch 2 refresh limit"),
+                          tr("Sets the guest display refresh, not the FPS cap")),
+                 QStringLiteral("frame_pacing_mode|%1").arg(tr("Frame pacing (Vulkan)")),
+                 QStringLiteral("async_presentation|%1").arg(tr("Asynchronous presentation")),
+                 QStringLiteral("use_video_framerate|%1")
+                     .arg(tr("Match video playback frame rate"))}},
+            AdvancedSection{
+                tr("Frame generation"),
+                tr("Fine-tuning for the FlyHigh and FSR methods"),
+                1,
+                {QStringLiteral("frame_gen_target_rate|%1|%2")
+                     .arg(tr("Target frame rate"), tr("Off uses the multiplier")),
+                 QStringLiteral("frame_gen_flow_scale_auto|%1|%2")
+                     .arg(tr("Flow scale"), tr("With Auto off, set the scale manually")),
+                 QStringLiteral(">frame_gen_flow_scale"),
+                 QStringLiteral("frame_gen_queue_target|%1").arg(tr("Queue target")),
+                 QStringLiteral("frame_gen_flyhigh_protect_hud|%1|%2")
+                     .arg(tr("Keep the HUD still"), tr("FlyHigh only"))}},
+            AdvancedSection{tr("Display and HDR"),
+                            tr("How the picture reaches your screen"),
+                            1,
+                            {QStringLiteral("fullscreen_mode|%1").arg(tr("Fullscreen mode")),
+                             QStringLiteral("aspect_ratio|%1").arg(tr("Aspect ratio")),
+                             QStringLiteral("max_anisotropy|%1").arg(tr("Anisotropic filtering")),
+                             QStringLiteral(">hdr_swapchain|%1").arg(tr("HDR format")),
+                             QStringLiteral(">hdr_reference_white|%1").arg(tr("Reference white")),
+                             QStringLiteral(">hdr_peak_luminance|%1").arg(tr("Peak brightness"))}},
+            AdvancedSection{tr("Upscaling details"),
+                            tr("Quality of the Game upscaling choice"),
+                            1,
+                            {QString{}}},
+            AdvancedSection{tr("Post-processing"),
+                            tr("Filters drawn over the game"),
+                            1,
+                            {QStringLiteral("post_shader_enabled|%1").arg(tr("Post-processing effects"))}},
+            AdvancedSection{
+                tr("Performance"),
+                tr("Trade power or stability for speed"),
+                1,
+                {QStringLiteral("force_max_clock|%1|%2")
+                     .arg(tr("Force maximum GPU clocks"), tr("Uses more power")),
+                 QStringLiteral("gpu_unswizzle_enabled|%1").arg(tr("GPU unswizzle")),
+                 QStringLiteral(">gpu_unswizzle_texture_size|%1").arg(tr("Max texture size")),
+                 QStringLiteral(">gpu_unswizzle_stream_size|%1").arg(tr("Stream size")),
+                 QStringLiteral(">gpu_unswizzle_chunk_size|%1").arg(tr("Chunk size")),
+                 QStringLiteral("pin_gpu_threads|%1").arg(tr("Pin GPU threads to their own cores")),
+                 QStringLiteral("render_thread|%1|%2").arg(tr("Render thread"), tr("Experimental"))}},
+        },
+        {QStringLiteral("game_dlss_network"), QStringLiteral("amd_fsr4"),
+         QStringLiteral("anti_aliasing"), QStringLiteral("ocarina_fsr"),
+         QStringLiteral("oot_anti_aliasing"), QStringLiteral("mkw_30fps"),
+         QStringLiteral("mkw_60fps"), QStringLiteral("mkw_60fps_fallback"),
+         QStringLiteral("mkw_dynamic_fps"), QStringLiteral("hyrule_dynamic_fps"),
+         QStringLiteral("hyrule_30fps"), QStringLiteral("frame_gen_dump_flow"),
+         QStringLiteral("use_asynchronous_gpu_emulation"), QStringLiteral("bg_button")});
+
+    settings_page->SetAdvancedSections(
+        audio, {AdvancedSection{
+                   tr("Output"),
+                   tr("Changing the engine rebuilds the available output-device list."),
+                   0,
+                   {QStringLiteral("output_engine|%1|%2")
+                        .arg(tr("Output engine"),
+                             tr("Automatic selects the available audio backend.")),
+                    QStringLiteral("sound_index|%1|%2")
+                        .arg(tr("Sound output mode"), tr("Mono, Stereo or Surround.")),
+                    QStringLiteral("muteWhenInBackground|%1|%2")
+                        .arg(tr("Mute audio when in background"),
+                             tr("Silence Lichii while another window has focus."))}}});
+
+    settings_page->SetAdvancedSections(
+        system_page,
+        {
+            AdvancedSection{
+                tr("CPU"),
+                tr("Leave on Auto unless a game asks for it"),
+                0,
+                {QStringLiteral("use_multi_core|%1|%2")
+                     .arg(tr("Multicore CPU emulation"), tr("Off is for diagnosing crashes")),
+                 QStringLiteral("memory_layout_mode|%1|%2")
+                     .arg(tr("Memory layout"), tr("Some mods need 6 or 8 GB")),
+                 QStringLiteral("cpu_accuracy|%1").arg(tr("Accuracy")),
+                 QStringLiteral("cpu_backend|%1").arg(tr("Backend")),
+                 QStringLiteral("cpu_ticks|%1").arg(tr("Custom CPU ticks")),
+                 QStringLiteral(">cpuopt_unsafe_host_mmu|%1").arg(tr("Host MMU emulation (fastmem)")),
+                 QStringLiteral(">cpuopt_unsafe_unfuse_fma|%1").arg(tr("Unfuse FMA")),
+                 QStringLiteral(">cpuopt_unsafe_reduce_fp_error|%1")
+                     .arg(tr("Faster FRSQRTE and FRECPE")),
+                 QStringLiteral(">cpuopt_unsafe_ignore_standard_fpcr|%1")
+                     .arg(tr("Faster ASIMD (32-bit)")),
+                 QStringLiteral(">cpuopt_unsafe_inaccurate_nan|%1").arg(tr("Inaccurate NaN handling")),
+                 QStringLiteral(">cpuopt_unsafe_fastmem_check|%1").arg(tr("Skip address space checks")),
+                 QStringLiteral(">cpuopt_unsafe_ignore_global_monitor|%1")
+                     .arg(tr("Ignore global monitor"))}},
+            AdvancedSection{tr("Speed"),
+                            tr("Speed limits and the Turbo and Slow hotkeys"),
+                            0,
+                            {QStringLiteral("speed_limit|%1").arg(tr("Limit speed")),
+                             QStringLiteral("turbo_speed_limit|%1").arg(tr("Turbo speed")),
+                             QStringLiteral("slow_speed_limit|%1").arg(tr("Slow speed")),
+                             QStringLiteral("sync_core_speed|%1").arg(tr("Synchronise core speed"))}},
+            AdvancedSection{tr("Performance tweaks"),
+                            tr("Clock rates reported to the game"),
+                            0,
+                            {QStringLiteral("fast_cpu_time|%1").arg(tr("CPU clocks")),
+                             QStringLiteral("fast_gpu_time|%1").arg(tr("GPU clocks"))}},
+            AdvancedSection{tr("Console"),
+                            tr("Identity games see; mostly for speedruns and TAS"),
+                            1,
+                            {QStringLiteral("rng_seed|%1").arg(tr("RNG seed")),
+                             QStringLiteral("device_name|%1").arg(tr("Device name")),
+                             QStringLiteral("custom_rtc|%1").arg(tr("Custom clock")),
+                             QStringLiteral("time_zone_index|%1|%2")
+                                 .arg(tr("Time zone"), tr("Follows this PC"))}},
+            AdvancedSection{tr("Storage"),
+                            tr("Moving these does not move the files"),
+                            1,
+                            {QStringLiteral("nand_directory_edit|%1").arg(tr("System (NAND)")),
+                             QStringLiteral("sdmc_directory_edit|%1").arg(tr("SD card")),
+                             QStringLiteral("save_directory_edit|%1").arg(tr("Save data")),
+                             QStringLiteral("load_path_edit|%1").arg(tr("Mods (load)"))}},
+            AdvancedSection{
+                tr("Applets"),
+                tr("Choose Custom frontend, Real applet or Disabled"),
+                1,
+                {QStringLiteral("controller_applet_mode|%1").arg(tr("Controller configuration")),
+                 QStringLiteral("error_applet_mode|%1").arg(tr("Error")),
+                 QStringLiteral("player_select_applet_mode|%1").arg(tr("Player select")),
+                 QStringLiteral("swkbd_applet_mode|%1").arg(tr("Software keyboard")),
+                 QStringLiteral("mii_edit_applet_mode|%1").arg(tr("Mii Edit")),
+                 QStringLiteral("web_applet_mode|%1").arg(tr("Online web")),
+                 QStringLiteral("offline_web_applet_mode|%1").arg(tr("Offline web")),
+                 QStringLiteral("photo_viewer_applet_mode|%1").arg(tr("Photo viewer")),
+                 QStringLiteral("cabinet_applet_mode|%1").arg(tr("Amiibo editor")),
+                 QStringLiteral("enable_overlay|%1").arg(tr("Enable Overlay Applet"))}},
+            AdvancedSection{tr("Profiles"),
+                            tr("Who plays"),
+                            1,
+                            {QStringLiteral("select_user_on_boot")}},
+        },
+        {QStringLiteral("data_erase_applet_mode"), QStringLiteral("net_connect_applet_mode"),
+         QStringLiteral("shop_applet_mode"), QStringLiteral("login_share_applet_mode"),
+         QStringLiteral("wifi_web_auth_applet_mode"), QStringLiteral("my_page_applet_mode"),
+         QStringLiteral("gamecard_inserted"), QStringLiteral("gamecard_current_game"),
+         QStringLiteral("gamecard_path_edit"), QStringLiteral("gamecard_path_button"),
+         QStringLiteral("dump_path_edit"), QStringLiteral("dump_path_button"),
+         QStringLiteral("dump_nso"), QStringLiteral("dump_exefs"),
+         QStringLiteral("cache_game_list"), QStringLiteral("reset_game_list_cache")});
+    settings_page->SetAdvancedBuilder(system_page, [this, system_page] {
+        if (auto* ask = SettingsPage::Editor(general_tab.get(),
+                                             UISettings::values.select_user_on_boot)) {
+            settings_page->AddAdvancedRow(system_page, QStringLiteral("select_user_on_boot"),
+                                          tr("Ask for a profile when a game starts"), {},
+                                          SettingsPage::BindSetting(ask));
+        }
+    });
+
+    settings_page->SetAdvancedSections(
+        multiplayer,
+        {
+            AdvancedSection{tr("Network"),
+                            tr("Adapter changes are unavailable while a game runs"),
+                            0,
+                            {QStringLiteral("network_interface|%1").arg(tr("Network interface")),
+                             QStringLiteral("nextendo_sync_profile|%1|%2")
+                                 .arg(tr("Sync Nextendo name and picture to the profile"),
+                                      tr("Requires an enabled, signed-in account"))}},
+            AdvancedSection{tr("Public lobby"),
+                            tr("Locked while hosting a public room"),
+                            0,
+                            {QStringLiteral("edit_username|%1|%2")
+                                 .arg(tr("Lobby username"), tr("4–20 characters")),
+                             QStringLiteral("edit_token|%1|%2").arg(tr("Token"), tr("80 characters")),
+                             QStringLiteral("button_generate|%1").arg(tr("Generate a new token"))}},
+            AdvancedSection{tr("Mod Store"),
+                            tr("Where mods are listed from"),
+                            0,
+                            {QStringLiteral("edit_mod_store_api_url|%1")
+                                 .arg(tr("Mod Store API base URL"))}},
+            AdvancedSection{tr("Custom server"),
+                            tr("Host redirect is unavailable while a game runs"),
+                            1,
+                            {QStringLiteral("online_service_redirect"),
+                             QStringLiteral(">redirect_hosts|%1").arg(tr("Host names")),
+                             QStringLiteral(">redirect_server|%1").arg(tr("Server address")),
+                             QStringLiteral(">redirect_ca|%1").arg(tr("CA certificate")),
+                             QStringLiteral(">redirect_ca_browse"),
+                             QStringLiteral(">redirect_loopback_only|%1")
+                                 .arg(tr("Block all other network access"))}},
+            AdvancedSection{tr("Nextendo"),
+                            tr("The profile the account belongs to, and friends"),
+                            1,
+                            {QStringLiteral("nextendo_profile|%1").arg(tr("Profile")),
+                             QStringLiteral("nextendo_friend_list"),
+                             QStringLiteral("nextendo_accept"), QStringLiteral("nextendo_decline"),
+                             QStringLiteral("nextendo_remove"), QStringLiteral("nextendo_add_code"),
+                             QStringLiteral("nextendo_add")}},
+        },
+        {QStringLiteral("nextendo_client_id")});
     hotkeys_tab->hide();
     profile_tab->hide();
     input_tab->hide();

@@ -1035,6 +1035,7 @@ public:
     void Add(QWidget* section, int column) {
         sections.emplace_back(section, column);
         Place(section, two ? column : 0);
+        columns[1]->parentWidget()->setVisible(two && (column == 1 || columns[1]->count() > 1));
     }
 
     void SetSingle(bool single_) {
@@ -1066,7 +1067,9 @@ private:
         for (const auto& [section, column] : sections) {
             Place(section, two ? column : 0);
         }
-        columns[1]->parentWidget()->setVisible(two);
+        columns[1]->parentWidget()->setVisible(
+            two && std::any_of(sections.cbegin(), sections.cend(),
+                               [](const auto& entry) { return entry.second == 1; }));
     }
 
     std::array<QVBoxLayout*, 2> columns{};
@@ -1688,8 +1691,8 @@ QLabel* SettingsPage::PlaceRow(int category, const Slot& slot, const QString& ti
                                QWidget* control) {
     auto* rows = categories[category].section_rows[slot.section];
     auto* detail = AddRow(rows, slot.title.isEmpty() ? title : slot.title,
-                          slot.description.isEmpty() ? description : slot.description, {}, {},
-                          control, tooltip);
+                          slot.title.isEmpty() ? description : slot.description, {}, {}, control,
+                          tooltip);
     auto* row = detail->parentWidget();
     row->setProperty("slotOrder", slot.order);
     rows->removeWidget(row);
