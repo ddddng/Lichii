@@ -14,6 +14,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QTimer>
 #include <QVBoxLayout>
 #include "common/assert.h"
@@ -346,14 +347,17 @@ int AskThreshold(QWidget* parent, int value) {
     dialog.SetIcon(QStringLiteral("sliders-horizontal"), Spotlight::Color::Accent());
     dialog.SetSubtitle(QObject::tr("Choose a value between 0% and 100%"));
     auto* layout = new QVBoxLayout(&dialog);
-    layout->setSpacing(20);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(24);
+    layout->setSizeConstraint(QLayout::SetFixedSize);
     auto* spin = new QSpinBox;
     spin->setRange(0, 100);
     spin->setValue(value);
     spin->setSuffix(QStringLiteral(" %"));
-    spin->setMinimumWidth(96);
+    spin->setFixedWidth(80);
     layout->addWidget(spin, 0, Qt::AlignLeft);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->setMinimumWidth(296);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
@@ -1454,6 +1458,19 @@ void ConfigureInputPlayer::SetConnectableControllers() {
     // Disable all unsupported controllers
     if (!Settings::values.enable_all_controllers) {
         return;
+    }
+
+    if (npad_style_set.palma == 1 || npad_style_set.lark == 1 || npad_style_set.lucia == 1 ||
+        npad_style_set.lagoon == 1 || npad_style_set.lager == 1) {
+        auto* combo = ui->comboControllerType;
+        combo->insertSeparator(combo->count());
+        combo->addItem(tr("ONLY WHEN THE GAME SUPPORTS THEM"));
+        const int header = combo->count() - 1;
+        combo->setItemData(header, Spotlight::Font(10, 600), Qt::FontRole);
+        combo->setItemData(header, Spotlight::Color::TextMuted(), Qt::ForegroundRole);
+        if (auto* model = qobject_cast<QStandardItemModel*>(combo->model())) {
+            model->item(header)->setEnabled(false);
+        }
     }
 
     if (npad_style_set.palma == 1) {
