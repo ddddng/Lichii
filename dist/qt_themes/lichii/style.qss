@@ -5,9 +5,9 @@
 
 /* Spotlight (Paper: Lichii Launcher Redesign, 02 · Spotlight). Values match spotlight/theme.h.
    Surfaces: window #0b0c10, deep panel #0f1016, panel #12131a, card 5% white with an 8% stroke,
-   control fill 8% white, outlined control 12% white with an 18% stroke, dialog #141620.
+   control fill 8% white, outlined control 12% white with an 18% stroke, dialog #15161e.
    Radii: track 3, key cap 7, small rows 10, fields 12, rows 13, tiles 14, menus 16, cards 20,
-   dialogs 26; buttons, fields and tabs are pills (half their height).
+   dialogs 22; buttons and tabs are pills (half their height): 40 px, 34 px when compact.
    Text: white, 62% secondary, 55% muted. Accent #ff6b95, on-accent #2a0a14. */
 
 QWidget {
@@ -130,22 +130,39 @@ QMenu::right-arrow {
    keyboard navigation (the Spotlight style sets "keyboardFocus"). ------------------------------- */
 
 QPushButton {
-    background-color: rgba(255, 255, 255, 31);
+    background-color: rgba(255, 255, 255, 20);
     color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 46);
-    border-radius: 16px;
-    padding: 0 16px;
-    min-height: 30px;
-    font-weight: 500;
+    border: 1px solid transparent;
+    border-radius: 20px;
+    padding: 0 17px;
+    min-height: 38px;
+    font-size: 14px;
+    font-weight: 600;
 }
 
 QPushButton:hover {
-    background-color: rgba(255, 255, 255, 46);
+    background-color: rgba(255, 255, 255, 31);
 }
 
 QPushButton:pressed,
 QPushButton:checked {
-    background-color: rgba(255, 255, 255, 56);
+    background-color: rgba(255, 255, 255, 46);
+}
+
+QPushButton[kind="outlined"] {
+    background-color: rgba(255, 255, 255, 31);
+    border-color: rgba(255, 255, 255, 46);
+}
+
+QPushButton[kind="outlined"]:hover {
+    background-color: rgba(255, 255, 255, 46);
+}
+
+QPushButton[compact="true"] {
+    border-radius: 17px;
+    padding: 0 13px;
+    min-height: 32px;
+    font-size: 13px;
 }
 
 QPushButton:default,
@@ -180,16 +197,14 @@ QPushButton[kind="ghost"]:pressed {
 }
 
 QPushButton[kind="destructive"] {
-    background-color: rgba(255, 92, 108, 36);
-    border-color: rgba(255, 92, 108, 89);
-    color: #ff8f9a;
-    font-weight: 600;
+    background-color: rgba(255, 143, 174, 31);
+    border-color: transparent;
+    color: #ff8fae;
 }
 
 QPushButton[kind="destructive"]:hover,
 QPushButton[kind="destructive"]:pressed {
-    background-color: rgba(255, 92, 108, 61);
-    color: #ffffff;
+    background-color: rgba(255, 143, 174, 56);
 }
 
 QPushButton[keyboardFocus="true"] {
@@ -199,10 +214,11 @@ QPushButton[keyboardFocus="true"] {
 QPushButton:disabled,
 QPushButton:default:disabled,
 QPushButton[kind="primary"]:disabled,
-QPushButton[kind="destructive"]:disabled {
-    background-color: rgba(255, 255, 255, 13);
-    border-color: rgba(255, 255, 255, 20);
-    color: rgba(255, 255, 255, 92);
+QPushButton[kind="destructive"]:disabled,
+QPushButton[kind="outlined"]:disabled {
+    background-color: rgba(255, 255, 255, 15);
+    border-color: transparent;
+    color: rgba(255, 255, 255, 89);
 }
 
 QPushButton[kind="ghost"]:disabled {
@@ -269,9 +285,6 @@ QDialogButtonBox {
 
 QDialogButtonBox QPushButton {
     min-width: 76px;
-    min-height: 34px;
-    border-radius: 18px;
-    padding: 0 18px;
 }
 
 QMessageBox {
@@ -292,8 +305,20 @@ QDialog[spotlightChrome="true"] QScrollArea > QWidget > QWidget {
     background: transparent;
 }
 
+QMessageBox QLabel#qt_msgbox_label,
+QMessageBox QLabel#qt_msgbox_informativelabel {
+    font-size: 14px;
+}
+
+QMessageBox QDialogButtonBox QPushButton {
+    border-radius: 18px;
+    min-height: 34px;
+    min-width: 0;
+    font-size: 13px;
+}
+
 QMessageBox QLabel#qt_msgbox_label {
-    color: rgba(255, 255, 255, 214);
+    color: rgba(255, 255, 255, 158);
 }
 
 QMessageBox QLabel#qt_msgbox_informativelabel {
@@ -316,19 +341,22 @@ QDateTimeEdit {
     background-color: rgba(255, 255, 255, 15);
     color: #ffffff;
     border: 1px solid rgba(255, 255, 255, 31);
-    border-radius: 16px;
-    min-height: 30px;
-    padding: 0 8px;
+    border-radius: 12px;
+    min-height: 38px;
+    padding: 0 13px;
+    font-size: 14px;
     selection-background-color: rgba(255, 107, 149, 115);
 }
 
 QComboBox {
-    background-color: rgba(255, 255, 255, 31);
+    background-color: rgba(255, 255, 255, 20);
     color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 46);
-    border-radius: 16px;
-    min-height: 30px;
-    padding: 0 30px 0 14px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    min-height: 32px;
+    padding: 0 30px 0 13px;
+    font-size: 13px;
+    font-weight: 600;
     selection-background-color: rgba(255, 107, 149, 115);
 }
 
@@ -350,7 +378,7 @@ QTextEdit:hover {
 }
 
 QComboBox:hover {
-    background-color: rgba(255, 255, 255, 46);
+    background-color: rgba(255, 255, 255, 31);
 }
 
 QLineEdit:focus,
@@ -394,6 +422,8 @@ QAbstractSpinBox[frame="false"] {
 QComboBox:editable {
     background-color: rgba(255, 255, 255, 15);
     border-color: rgba(255, 255, 255, 31);
+    font-size: 14px;
+    font-weight: 500;
 }
 
 QComboBox QLineEdit,
@@ -529,8 +559,8 @@ QGroupBox::indicator,
 QTreeView::indicator,
 QListView::indicator,
 QTableView::indicator {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
 }
 
 QCheckBox::indicator:unchecked,
@@ -567,8 +597,8 @@ QGroupBox::indicator:checked:disabled {
 
 /* A setting that switches a feature on or off. ConfigurationShared::UseToggles marks them. */
 QCheckBox[toggle="true"]::indicator {
-    width: 34px;
-    height: 20px;
+    width: 44px;
+    height: 26px;
 }
 
 QCheckBox[toggle="true"]::indicator:unchecked {
@@ -592,8 +622,8 @@ QCheckBox[toggle="true"]::indicator:checked:disabled {
 }
 
 QRadioButton::indicator {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
 }
 
 QRadioButton::indicator:unchecked {
@@ -651,14 +681,14 @@ QSlider {
 }
 
 QSlider::groove:horizontal {
-    height: 4px;
-    border-radius: 2px;
+    height: 6px;
+    border-radius: 3px;
     background-color: rgba(255, 255, 255, 46);
 }
 
 QSlider::sub-page:horizontal {
-    height: 4px;
-    border-radius: 2px;
+    height: 6px;
+    border-radius: 3px;
     background-color: #ff6b95;
 }
 
@@ -667,10 +697,10 @@ QSlider::sub-page:horizontal:disabled {
 }
 
 QSlider::handle:horizontal {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     margin: -6px 0;
-    border-radius: 8px;
+    border-radius: 9px;
     background-color: #ffffff;
 }
 
@@ -1143,51 +1173,6 @@ QDialog#AboutDialog QWidget#aboutRule {
 QDialog#AboutDialog QLabel#labelBuildInfo,
 QDialog#AboutDialog QLabel#labelLiability {
     color: rgba(255, 255, 255, 140);
-}
-
-/* What's new ------------------------------------------------------------ */
-
-QDialog#WhatsNewDialog QLabel#WhatsNewText {
-    color: rgba(255, 255, 255, 140);
-}
-
-QDialog#WhatsNewDialog QLabel#WhatsNewMetadata,
-QDialog#WhatsNewDialog QToolButton#WhatsNewArchive {
-    color: #ff8fae;
-}
-
-QDialog#WhatsNewDialog QLabel#WhatsNewBadge {
-    background-color: rgba(255, 107, 149, 41);
-    border-radius: 8px;
-}
-
-QDialog#WhatsNewDialog QWidget#WhatsNewItem {
-    border-bottom: 1px solid rgba(255, 255, 255, 20);
-}
-
-QDialog#WhatsNewDialog QWidget#WhatsNewItem[lead="true"] {
-    background-color: #12131a;
-    border: none;
-    border-radius: 13px;
-}
-
-QDialog#WhatsNewDialog QWidget#WhatsNewFooter {
-    background-color: #0f1016;
-    border-top: 1px solid rgba(255, 255, 255, 20);
-}
-
-QDialog#WhatsNewDialog QPushButton#WhatsNewDone {
-    font-size: 19px;
-    font-weight: 700;
-    min-height: 42px;
-}
-
-QDialog#WhatsNewDialog QToolButton:focus {
-    border-color: #ff8fae;
-}
-
-QDialog#WhatsNewDialog QToolButton:disabled {
-    color: rgba(255, 255, 255, 92);
 }
 
 /* Status bar: setting chips on the left, stats on the right ------------- */
