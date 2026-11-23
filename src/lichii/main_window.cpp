@@ -7389,7 +7389,7 @@ static QPalette LichiiPalette() {
 }
 
 void MainWindow::UpdateMenuIcons() {
-    const std::array<std::pair<QAction*, const char*>, 57> icons{{
+    const std::array<std::pair<QAction*, const char*>, 56> icons{{
         {ui->action_Install_File_NAND, "download"},
         {ui->action_Load_File, "file"},
         {ui->action_Load_Folder, "folder"},
@@ -7439,7 +7439,6 @@ void MainWindow::UpdateMenuIcons() {
         {ui->action_Launch_MiiEdit, "user"},
         {ui->action_Launch_Controller, "gamepad"},
         {ui->action_Launch_PhotoViewer, "image"},
-        {ui->action_Open_Mods_Page, "puzzle"},
         {ui->action_Open_UserHandbook, "help"},
         {ui->action_Apply_Recommended_Settings, "wand"},
         {ui->action_Restore_Previous_Settings, "restart"},
@@ -7451,6 +7450,10 @@ void MainWindow::UpdateMenuIcons() {
     for (const auto& [action, name] : icons) {
         action->setIcon(MenuIcon(name));
     }
+    ui->action_Open_Mods_Page->setIcon(
+        UISettings::values.theme == "lichii"
+            ? Spotlight::Icon(u"arrow-square-out", Spotlight::Color::MenuInk(), 16)
+            : QIcon{});
 }
 
 void MainWindow::UpdateUITheme() {
