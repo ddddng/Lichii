@@ -1761,10 +1761,7 @@ QLabel* SettingsPage::PlaceRow(int category, const Slot& slot, const QString& ti
     }
     rows->insertWidget(position, row);
     if (slot.nested) {
-        auto* layout = static_cast<QHBoxLayout*>(row->layout());
-        const auto margins = layout->contentsMargins();
-        layout->setContentsMargins(46, margins.top(), margins.right(), margins.bottom());
-        layout->insertWidget(0, new Elbow, 0, Qt::AlignVCenter);
+        NestRow(detail);
     }
     ++categories[category].advanced_rows;
     return detail;
@@ -2617,6 +2614,67 @@ QWidget* SettingsPage::Card(const QString& icon, int image_size) {
         return tile;
     }
     return new Surface(Color::FillFaint(), Radius::Card, Color::StrokeSubtle());
+}
+
+void SettingsPage::NestRow(QLabel* detail) {
+    auto* layout = static_cast<QHBoxLayout*>(detail->parentWidget()->layout());
+    const auto margins = layout->contentsMargins();
+    layout->setContentsMargins(46, margins.top(), margins.right(), margins.bottom());
+    layout->insertWidget(0, new Elbow, 0, Qt::AlignVCenter);
+}
+
+StatusBanner::StatusBanner() : icon{new QLabel}, text{new QLabel} {
+    setProperty("spotlightTransparent", true);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    auto* layout = new QHBoxLayout(this);
+    layout->setContentsMargins(14, 12, 14, 12);
+    layout->setSpacing(10);
+    icon->setFixedSize(16, 16);
+    layout->addWidget(icon, 0, Qt::AlignTop);
+    text->setWordWrap(true);
+    text->setTextFormat(Qt::PlainText);
+    text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    text->setFont(Font(13, 500));
+    layout->addWidget(text, 1);
+}
+
+void StatusBanner::Set(const QString& message, Tone tone_) {
+    tone = tone_;
+    text->setText(message);
+    const QColor ink = Ink();
+    SetTextColor(text, tone == Tone::Info ? Color::TextSecondary() : ink.lighter(115));
+    icon->setPixmap(IconPixmap(tone == Tone::Success ? u"check-circle"
+                               : tone == Tone::Info  ? u"info"
+                                                     : u"warning-circle",
+                               16, ink, devicePixelRatioF()));
+    setVisible(!message.isEmpty());
+    update();
+}
+
+void StatusBanner::paintEvent(QPaintEvent*) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QColor fill = Ink();
+    QColor stroke = Ink();
+    fill.setAlpha(tone == Tone::Info ? 0x0d : 0x1a);
+    stroke.setAlpha(tone == Tone::Info ? 0x24 : 0x52);
+    painter.setPen(QPen(stroke, 1));
+    painter.setBrush(fill);
+    painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+}
+
+QColor StatusBanner::Ink() const {
+    switch (tone) {
+    case Tone::Success:
+        return Color::Success();
+    case Tone::Warning:
+        return Color::Warning();
+    case Tone::Error:
+        return Color::Destructive();
+    case Tone::Info:
+        break;
+    }
+    return Color::TextSecondary();
 }
 
 QWidget* SettingsPage::Badge(const QString& text, const QColor& fill, const QColor& ink) {

@@ -121,6 +121,24 @@ struct AdvancedSection {
     QString chip;
 };
 
+/// A rounded message line with an icon, tinted by its tone. An empty message hides it.
+class StatusBanner final : public QWidget {
+public:
+    enum class Tone { Info, Success, Warning, Error };
+    StatusBanner();
+    void Set(const QString& message, Tone tone);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    QColor Ink() const;
+
+    QLabel* icon;
+    QLabel* text;
+    Tone tone = Tone::Info;
+};
+
 class SettingsPage final : public QWidget {
     Q_OBJECT
 
@@ -172,6 +190,8 @@ public:
                           const QString& icon, const QColor& color, QWidget* control,
                           const QString& tooltip = {}, const QPixmap& image = {});
     static QAbstractButton* Manage(const QString& text = {});
+    /// Indents a row AddRow made under the one before it, with an elbow.
+    static void NestRow(QLabel* detail);
     static ConfigurationShared::Widget* Editor(QWidget* page,
                                                const Settings::BasicSetting& setting);
     static QWidget* BindSetting(ConfigurationShared::Widget* source);

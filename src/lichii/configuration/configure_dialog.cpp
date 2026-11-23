@@ -534,71 +534,19 @@ private:
     QList<QWidget*> items;
 };
 
-class StatusBanner final : public QWidget {
-public:
-    StatusBanner() {
-        setProperty("spotlightTransparent", true);
-        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(14, 12, 14, 12);
-        layout->setSpacing(10);
-        icon->setFixedSize(16, 16);
-        layout->addWidget(icon, 0, Qt::AlignTop);
-        text->setWordWrap(true);
-        text->setTextFormat(Qt::PlainText);
-        text->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        text->setFont(Spotlight::Font(13, 500));
-        layout->addWidget(text, 1);
+Spotlight::StatusBanner::Tone BannerTone(ConfigureNetwork::NextendoTone tone) {
+    switch (tone) {
+    case ConfigureNetwork::NextendoTone::Success:
+        return Spotlight::StatusBanner::Tone::Success;
+    case ConfigureNetwork::NextendoTone::Warning:
+        return Spotlight::StatusBanner::Tone::Warning;
+    case ConfigureNetwork::NextendoTone::Error:
+        return Spotlight::StatusBanner::Tone::Error;
+    case ConfigureNetwork::NextendoTone::Info:
+        break;
     }
-
-    void Set(const QString& message, ConfigureNetwork::NextendoTone tone_) {
-        tone = tone_;
-        text->setText(message);
-        const QColor ink = Ink();
-        Spotlight::SetTextColor(text, tone == ConfigureNetwork::NextendoTone::Info
-                                          ? Color::TextSecondary()
-                                          : ink.lighter(115));
-        icon->setPixmap(Spotlight::IconPixmap(
-            tone == ConfigureNetwork::NextendoTone::Success ? u"check-circle"
-            : tone == ConfigureNetwork::NextendoTone::Info  ? u"info"
-                                                            : u"warning-circle",
-            16, ink, devicePixelRatioF()));
-        setVisible(!message.isEmpty());
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        QColor fill = Ink();
-        QColor stroke = Ink();
-        fill.setAlpha(tone == ConfigureNetwork::NextendoTone::Info ? 0x0d : 0x1a);
-        stroke.setAlpha(tone == ConfigureNetwork::NextendoTone::Info ? 0x24 : 0x52);
-        painter.setPen(QPen(stroke, 1));
-        painter.setBrush(fill);
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
-    }
-
-private:
-    QColor Ink() const {
-        switch (tone) {
-        case ConfigureNetwork::NextendoTone::Success:
-            return Color::Success();
-        case ConfigureNetwork::NextendoTone::Warning:
-            return Color::Warning();
-        case ConfigureNetwork::NextendoTone::Error:
-            return Color::Destructive();
-        case ConfigureNetwork::NextendoTone::Info:
-            break;
-        }
-        return Color::TextSecondary();
-    }
-
-    QLabel* icon = new QLabel;
-    QLabel* text = new QLabel;
-    ConfigureNetwork::NextendoTone tone = ConfigureNetwork::NextendoTone::Info;
-};
+    return Spotlight::StatusBanner::Tone::Info;
+}
 
 QPixmap AvatarDot(const QColor& tint, qreal ratio) {
     QPixmap pixmap(QSize(40, 40) * ratio);
@@ -681,8 +629,8 @@ private:
                     : tr("Not signed in"));
         const QString result = network->NextendoFriendsMessage();
         message->Set(result, result == tr("Friend request sent.")
-                                 ? ConfigureNetwork::NextendoTone::Success
-                                 : ConfigureNetwork::NextendoTone::Error);
+                                 ? Spotlight::StatusBanner::Tone::Success
+                                 : Spotlight::StatusBanner::Tone::Error);
         while (auto* item = lists->takeAt(0)) {
             if (auto* widget = item->widget()) {
                 widget->hide();
@@ -800,7 +748,7 @@ private:
 
     ConfigureNetwork* network;
     QLineEdit* code = new QLineEdit;
-    StatusBanner* message = new StatusBanner;
+    Spotlight::StatusBanner* message = new Spotlight::StatusBanner;
     QScrollArea* scroll = new QScrollArea;
     QVBoxLayout* lists = nullptr;
     QLabel* signed_in = new QLabel;
@@ -1029,7 +977,7 @@ void ConfigureDialog::BuildSettings() {
         auto* state_layout = new QVBoxLayout(state);
         state_layout->setContentsMargins(14, 4, 14, 14);
         state_layout->setSpacing(14);
-        auto* banner = new StatusBanner;
+        auto* banner = new Spotlight::StatusBanner;
         state_layout->addWidget(banner);
         auto* actions = new QHBoxLayout;
         actions->setSpacing(8);
@@ -1053,7 +1001,7 @@ void ConfigureDialog::BuildSettings() {
             auto* network = network_tab.get();
             const bool signing_in = network->NextendoSigningIn();
             const bool signed_in = sign_out->isEnabled() && !signing_in;
-            banner->Set(network->NextendoStatus(), network->NextendoStatusTone());
+            banner->Set(network->NextendoStatus(), BannerTone(network->NextendoStatusTone()));
             start->setText(signing_in ? tr("Cancel sign-in") : tr("Sign in to Nextendo"));
             start->SetKind(signing_in ? Spotlight::PillButton::Kind::Control
                                       : Spotlight::PillButton::Kind::Accent);
