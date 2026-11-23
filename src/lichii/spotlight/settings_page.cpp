@@ -1735,27 +1735,32 @@ QLabel* SettingsPage::Text(const QString& text, int size, int weight, bool secon
 }
 
 QPixmap SettingsPage::WholeIcon(const QPixmap& icon, int size, qreal dpr) {
-    QPixmap result(qRound(size * dpr), qRound(size * dpr));
+    return WholeIcon(icon, QSize(size, size), dpr);
+}
+
+QPixmap SettingsPage::WholeIcon(const QPixmap& icon, QSize size, qreal dpr) {
+    const qreal radius = size.width() > size.height() ? 10 : 9;
+    QPixmap result(size * dpr);
     result.setDevicePixelRatio(dpr);
     result.fill(Qt::transparent);
     QPainter painter(&result);
     painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
     if (icon.isNull()) {
+        const int glyph = std::min(size.width(), size.height()) / 2;
         painter.setPen(Qt::NoPen);
         painter.setBrush(Color::Fill());
-        painter.drawRoundedRect(QRectF(0, 0, size, size), 9, 9);
+        painter.drawRoundedRect(QRectF(QPointF(), size), radius, radius);
         painter.drawPixmap(
-            size / 4, size / 4,
-            IconPixmap(QStringLiteral("game-controller"), size / 2, Color::TextMuted(), dpr));
+            (size.width() - glyph) / 2, (size.height() - glyph) / 2,
+            IconPixmap(QStringLiteral("game-controller"), glyph, Color::TextMuted(), dpr));
         return result;
     }
-    const QSizeF image_size =
-        icon.size().scaled(QSize(qRound(size * dpr), qRound(size * dpr)), Qt::KeepAspectRatio) /
-        dpr;
-    const QRectF target((size - image_size.width()) / 2, (size - image_size.height()) / 2,
-                        image_size.width(), image_size.height());
+    const QSizeF image_size = icon.size().scaled(size * dpr, Qt::KeepAspectRatio) / dpr;
+    const QRectF target((size.width() - image_size.width()) / 2,
+                        (size.height() - image_size.height()) / 2, image_size.width(),
+                        image_size.height());
     QPainterPath path;
-    path.addRoundedRect(target, 9, 9);
+    path.addRoundedRect(target, radius, radius);
     painter.setClipPath(path);
     painter.drawPixmap(target, icon, icon.rect());
     return result;
@@ -1806,9 +1811,10 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
     if (image.isNull()) {
         layout->addWidget(new IconTile(icon, color), 0, Qt::AlignVCenter);
     } else {
+        const QSize size = image.width() > image.height() ? QSize(96, 54) : QSize(40, 40);
         auto* picture = new QLabel;
-        picture->setFixedSize(40, 40);
-        picture->setPixmap(WholeIcon(image, 40, row->devicePixelRatioF()));
+        picture->setFixedSize(size);
+        picture->setPixmap(WholeIcon(image, size, row->devicePixelRatioF()));
         layout->addWidget(picture, 0, Qt::AlignVCenter);
     }
     auto* copy = new QVBoxLayout;
@@ -1836,6 +1842,12 @@ QLabel* SettingsPage::AddRow(QVBoxLayout* group, const QString& title, const QSt
         }
         if (auto* badge = control->findChild<QWidget*>(QStringLiteral("changedBadge"))) {
             title_line->addWidget(badge, 0, Qt::AlignVCenter);
+        }
+        if (auto* badge = control->findChild<QWidget*>(QStringLiteral("titleBadge"))) {
+            title_line->addWidget(badge, 0, Qt::AlignVCenter);
+        }
+        if (auto* line = control->findChild<QWidget*>(QStringLiteral("detailLine"))) {
+            copy->addWidget(line);
         }
         control->setAccessibleName(title);
         layout->addWidget(control);

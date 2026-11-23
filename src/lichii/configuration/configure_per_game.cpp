@@ -37,11 +37,14 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSignalBlocker>
@@ -778,9 +781,79 @@ void ConfigurePerGame::RebuildAddons() {
         }
         if (const auto found = store.constFind(item->text()); found != store.cend()) {
             ++store_count;
-            SettingsPage::AddRow(store_rows, found->name,
-                                 tr("Version %1 · Mod Store").arg(found->version),
-                                 QStringLiteral("storefront"), Tints::Blue(), control);
+            if (found->update_available == true) {
+                auto* update = new Spotlight::PillButton(tr("Update"),
+                                                         QStringLiteral("arrow-circle-up"),
+                                                         Spotlight::PillButton::Kind::Accent, 30);
+                connect(update, &QAbstractButton::clicked, this,
+                        &ConfigurePerGame::BrowseModsRequested);
+                control_layout->insertWidget(0, update);
+                auto* badge = SettingsPage::Badge(tr("Update"), Spotlight::Color::Accent(),
+                                                  Spotlight::Color::OnAccent());
+                badge->setObjectName(QStringLiteral("titleBadge"));
+                badge->setFixedHeight(20);
+                badge->setParent(control);
+            }
+
+            QStringList facts;
+            if (!found->author.isEmpty()) {
+                facts << tr("by %1").arg(found->author);
+            }
+            if (found->file_date.isValid()) {
+                const QDate date = found->file_date.toLocalTime().date();
+                facts << tr("file from %1")
+                             .arg(QLocale().toString(date, date.year() == QDate::currentDate().year()
+                                                               ? QStringLiteral("MMM d")
+                                                               : QStringLiteral("MMM d, yyyy")));
+            }
+            if (facts.isEmpty() && !found->version.isEmpty()) {
+                facts << tr("Version %1").arg(found->version);
+            }
+            auto* line = new QWidget(control);
+            line->setObjectName(QStringLiteral("detailLine"));
+            line->setProperty("spotlightTransparent", true);
+            auto* line_layout = new QHBoxLayout(line);
+            line_layout->setContentsMargins(0, 0, 0, 0);
+            line_layout->setSpacing(12);
+            if (!facts.isEmpty()) {
+                line_layout->addWidget(
+                    SettingsPage::Text(facts.join(QStringLiteral(" · ")), 12, 400, true));
+            }
+            const auto add_fact = [line, line_layout](const QString& icon, const QString& text,
+                                                      const QColor& color, int weight) {
+                auto* glyph = new QLabel;
+                glyph->setPixmap(Spotlight::IconPixmap(icon, 14, color, line->devicePixelRatioF()));
+                auto* label = SettingsPage::Text(text, 12, weight);
+                label->setStyleSheet(QStringLiteral("QLabel { background: transparent; color: %1; }")
+                                         .arg(color.name(QColor::HexArgb)));
+                auto* fact = new QHBoxLayout;
+                fact->setSpacing(5);
+                fact->addWidget(glyph);
+                fact->addWidget(label);
+                line_layout->addLayout(fact);
+            };
+            if (found->source) {
+                add_fact(QStringLiteral("globe"), ModStore::SourceName(*found->source),
+                         Spotlight::Color::TextSecondary(), 500);
+            }
+            if (found->verified == false) {
+                add_fact(QStringLiteral("warning-circle"), tr("Unverified"),
+                         Spotlight::Color::Warning(), 600);
+            }
+            line_layout->addStretch();
+
+            QPixmap thumbnail(found->thumbnail_path);
+            if (thumbnail.isNull()) {
+                thumbnail = QPixmap(192, 108);
+                thumbnail.fill(Spotlight::Color::Fill());
+                QPainter painter(&thumbnail);
+                painter.drawPixmap(72, 30,
+                                   Spotlight::IconPixmap(QStringLiteral("storefront"), 48,
+                                                         Spotlight::Color::TextMuted(), 1));
+            }
+            SettingsPage::AddRow(store_rows, found->name, {}, QStringLiteral("storefront"),
+                                 Tints::Blue(), control, facts.join(QStringLiteral(" · ")),
+                                 thumbnail);
             continue;
         }
         ++own_count;

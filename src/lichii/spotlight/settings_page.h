@@ -124,6 +124,7 @@ public:
 
     static QLabel* Text(const QString& text, int size, int weight = 500, bool secondary = false);
     static QPixmap WholeIcon(const QPixmap& icon, int size, qreal dpr);
+    static QPixmap WholeIcon(const QPixmap& icon, QSize size, qreal dpr);
     static QWidget* Badge(const QString& text, const QColor& fill, const QColor& ink);
     static QWidget* Card(const QString& icon = {}, int image_size = 0);
     static QLabel* AddRow(QVBoxLayout* group, const QString& title, const QString& description,
