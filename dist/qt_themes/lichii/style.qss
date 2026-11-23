@@ -878,8 +878,16 @@ QDialog#ConfigurePerGame QLabel#label_8 {
 
 /* About ---------------------------------------------------------------- */
 
+QDialog#AboutDialog {
+    background: transparent;
+}
+
 QDialog#AboutDialog QLabel#labelAbout {
     color: rgba(255, 255, 255, 158);
+}
+
+QDialog#AboutDialog QWidget#aboutRule {
+    background-color: rgba(255, 255, 255, 20);
 }
 
 QDialog#AboutDialog QLabel#labelBuildInfo,
