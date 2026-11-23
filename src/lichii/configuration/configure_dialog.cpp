@@ -18,7 +18,6 @@
 #include <QLabel>
 #include <QLocale>
 #include <QMenu>
-#include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -57,6 +56,7 @@
 #include "lichii/spotlight/widgets.h"
 
 namespace {
+using Spotlight::PresetCard;
 using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
@@ -83,72 +83,6 @@ bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
 
-class PresetCard final : public QAbstractButton {
-public:
-    PresetCard(const QString& title, QString description_) : description{std::move(description_)} {
-        setText(title);
-        setCheckable(true);
-        setProperty("spotlightTransparent", true);
-        setAttribute(Qt::WA_Hover);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(98);
-    }
-
-    void SetSuggestion(QString device, QString tier) {
-        suggestion = std::move(device);
-        suggested_tier = std::move(tier);
-        setToolTip(suggestion + suggested_tier);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const bool active = isChecked();
-        painter.setBrush(active         ? Color::Accent()
-                         : underMouse() ? Color::Fill()
-                                        : Color::FillFaint());
-        painter.setPen(hasFocus() ? Color::Text()
-                       : active   ? Color::Accent()
-                                  : Color::StrokeSubtle());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
-
-        const QColor ink = !isEnabled() ? Color::TextFaint()
-                           : active     ? Color::OnAccent()
-                                        : Color::Text();
-        painter.setPen(ink);
-        painter.setFont(Spotlight::Font(15, 600));
-        painter.drawText(QRect(14, 13, width() - 28, 21), Qt::AlignVCenter | Qt::AlignLeft,
-                         painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 28));
-        if (active) {
-            painter.drawPixmap(
-                width() - 28, 15,
-                Spotlight::IconPixmap(QStringLiteral("check"), 16, ink, devicePixelRatioF()));
-        }
-        painter.setFont(Spotlight::Font(12));
-        painter.setPen(active ? ink : Color::TextSecondary());
-        painter.drawText(QRect(14, 36, width() - 28, 34), Qt::TextWordWrap | Qt::AlignLeft,
-                         description);
-        if (!suggestion.isEmpty()) {
-            painter.setPen(active ? ink : Color::AccentLight());
-            painter.setFont(Spotlight::Font(12, 600));
-            const int remaining =
-                width() - 28 - painter.fontMetrics().horizontalAdvance(suggested_tier);
-            painter.drawText(
-                QRect(14, 69, width() - 28, 16), Qt::AlignVCenter | Qt::AlignLeft,
-                painter.fontMetrics().elidedText(suggestion, Qt::ElideRight, remaining) +
-                    suggested_tier);
-        }
-    }
-
-private:
-    QString description;
-    QString suggestion;
-    QString suggested_tier;
-};
 } // namespace
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,

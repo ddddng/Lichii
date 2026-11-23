@@ -372,6 +372,76 @@ QString PerformancePresetName(int index) {
     }
 }
 
+PresetCard::PresetCard(const QString& title, QString description_, QWidget* parent)
+    : QAbstractButton(parent), description{std::move(description_)} {
+    setText(title);
+    setCheckable(true);
+    setProperty("spotlightTransparent", true);
+    setAttribute(Qt::WA_Hover);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    setFixedHeight(98);
+}
+
+void PresetCard::SetSuggestion(QString device, QString tier) {
+    suggestion = std::move(device);
+    suggested_tier = std::move(tier);
+    setToolTip(suggestion + suggested_tier);
+    update();
+}
+
+PresetCard* PresetCard::Mirror(QWidget* parent) {
+    auto* copy = new PresetCard(text(), description, parent);
+    copy->SetSuggestion(suggestion, suggested_tier);
+    copy->setEnabled(isEnabled());
+    copy->setChecked(isChecked());
+    connect(this, &QAbstractButton::toggled, copy, &QAbstractButton::setChecked);
+    connect(copy, &QAbstractButton::clicked, this, [this, copy] {
+        click();
+        copy->setChecked(isChecked());
+    });
+    return copy;
+}
+
+void PresetCard::paintEvent(QPaintEvent*) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const bool active = isChecked();
+    painter.setBrush(active         ? Color::Accent()
+                     : underMouse() ? Color::Fill()
+                                    : Color::FillFaint());
+    painter.setPen(hasFocus() ? Color::Text()
+                   : active   ? Color::Accent()
+                              : Color::StrokeSubtle());
+    painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
+
+    const QColor ink = !isEnabled() ? Color::TextFaint()
+                       : active     ? Color::OnAccent()
+                                    : Color::Text();
+    painter.setPen(ink);
+    painter.setFont(Font(15, 600));
+    painter.drawText(QRect(14, 13, width() - 28, 21), Qt::AlignVCenter | Qt::AlignLeft,
+                     painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 28));
+    if (active) {
+        painter.drawPixmap(width() - 28, 15,
+                           IconPixmap(QStringLiteral("check"), 16, ink, devicePixelRatioF()));
+    }
+    painter.setFont(Font(12));
+    painter.setPen(active ? ink : Color::TextSecondary());
+    painter.drawText(QRect(14, 36, width() - 28, 34), Qt::TextWordWrap | Qt::AlignLeft,
+                     description);
+    if (!suggestion.isEmpty()) {
+        painter.setPen(active ? ink : Color::AccentLight());
+        painter.setFont(Font(12, 600));
+        const int remaining =
+            width() - 28 - painter.fontMetrics().horizontalAdvance(suggested_tier);
+        painter.drawText(QRect(14, 69, width() - 28, 16), Qt::AlignVCenter | Qt::AlignLeft,
+                         painter.fontMetrics().elidedText(suggestion, Qt::ElideRight, remaining) +
+                             suggested_tier);
+    }
+}
+
 SettingsPage::SettingsPage(QWidget* parent, bool per_game) : QWidget(parent) {
     setStyleSheet(
         QStringLiteral("QWidget[spotlightTransparent=true] { background: transparent; }"));
