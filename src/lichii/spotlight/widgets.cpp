@@ -22,13 +22,6 @@ void FillRounded(QPainter& painter, const QRectF& rect, qreal radius, const QCol
     painter.drawRoundedRect(stroke.isValid() ? rect.adjusted(0.5, 0.5, -0.5, -0.5) : rect, radius, radius);
 }
 
-QColor Mix(const QColor& from, const QColor& to, qreal t) {
-    return QColor::fromRgbF(from.redF() + (to.redF() - from.redF()) * t,
-                            from.greenF() + (to.greenF() - from.greenF()) * t,
-                            from.blueF() + (to.blueF() - from.blueF()) * t,
-                            from.alphaF() + (to.alphaF() - from.alphaF()) * t);
-}
-
 class ShowFade final : public QObject {
 public:
     ShowFade(QWidget* window, int duration_) : QObject(window), duration(duration_) {
@@ -54,6 +47,13 @@ private:
     int duration;
 };
 } // namespace
+
+QColor Mix(const QColor& from, const QColor& to, qreal t) {
+    return QColor::fromRgbF(from.redF() + (to.redF() - from.redF()) * t,
+                            from.greenF() + (to.greenF() - from.greenF()) * t,
+                            from.blueF() + (to.blueF() - from.blueF()) * t,
+                            from.alphaF() + (to.alphaF() - from.alphaF()) * t);
+}
 
 void FadeIn(QWidget* widget, int duration) {
     if (!widget->isVisible() || widget->graphicsEffect() != nullptr) {

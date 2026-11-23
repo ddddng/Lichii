@@ -18,7 +18,6 @@
 #include <QLabel>
 #include <QLocale>
 #include <QMenu>
-#include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -52,11 +51,13 @@
 #include "lichii/configuration/configure_web.h"
 #include "lichii/configuration/shared_widget.h"
 #include "lichii/hotkeys.h"
+#include "lichii/spotlight/settings_get_started.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
 #include "lichii/spotlight/widgets.h"
 
 namespace {
+using Spotlight::PresetCard;
 using Spotlight::SettingsPage;
 namespace Color = Spotlight::Color;
 namespace Tints = Spotlight::SettingsColor;
@@ -106,72 +107,6 @@ bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
 
-class PresetCard final : public QAbstractButton {
-public:
-    PresetCard(const QString& title, QString description_) : description{std::move(description_)} {
-        setText(title);
-        setCheckable(true);
-        setProperty("spotlightTransparent", true);
-        setAttribute(Qt::WA_Hover);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(98);
-    }
-
-    void SetSuggestion(QString device, QString tier) {
-        suggestion = std::move(device);
-        suggested_tier = std::move(tier);
-        setToolTip(suggestion + suggested_tier);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const bool active = isChecked();
-        painter.setBrush(active         ? Color::Accent()
-                         : underMouse() ? Color::Fill()
-                                        : Color::FillFaint());
-        painter.setPen(hasFocus() ? Color::Text()
-                       : active   ? Color::Accent()
-                                  : Color::StrokeSubtle());
-        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
-
-        const QColor ink = !isEnabled() ? Color::TextFaint()
-                           : active     ? Color::OnAccent()
-                                        : Color::Text();
-        painter.setPen(ink);
-        painter.setFont(Spotlight::Font(15, 600));
-        painter.drawText(QRect(14, 13, width() - 28, 21), Qt::AlignVCenter | Qt::AlignLeft,
-                         painter.fontMetrics().elidedText(text(), Qt::ElideRight, width() - 28));
-        if (active) {
-            painter.drawPixmap(
-                width() - 28, 15,
-                Spotlight::IconPixmap(QStringLiteral("check"), 16, ink, devicePixelRatioF()));
-        }
-        painter.setFont(Spotlight::Font(12));
-        painter.setPen(active ? ink : Color::TextSecondary());
-        painter.drawText(QRect(14, 36, width() - 28, 34), Qt::TextWordWrap | Qt::AlignLeft,
-                         description);
-        if (!suggestion.isEmpty()) {
-            painter.setPen(active ? ink : Color::AccentLight());
-            painter.setFont(Spotlight::Font(12, 600));
-            const int remaining =
-                width() - 28 - painter.fontMetrics().horizontalAdvance(suggested_tier);
-            painter.drawText(
-                QRect(14, 69, width() - 28, 16), Qt::AlignVCenter | Qt::AlignLeft,
-                painter.fontMetrics().elidedText(suggestion, Qt::ElideRight, remaining) +
-                    suggested_tier);
-        }
-    }
-
-private:
-    QString description;
-    QString suggestion;
-    QString suggested_tier;
-};
 } // namespace
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
@@ -328,7 +263,9 @@ void ConfigureDialog::BuildSettings() {
         settings_page->AddCategory(tr("Shortcuts"), tr("Edit keyboard and controller shortcuts"),
                                    QStringLiteral("keyboard"), Tints::Gold());
 
-    settings_page->SetBuilder(general, [this, general, library] { BuildGeneral(general, library); });
+    settings_page->SetBuilder(general, [this, general, library, controls] {
+        BuildGeneral(general, library, controls);
+    });
     settings_page->SetBuilder(library, [this, library] { BuildLibrary(library); });
     settings_page->SetBuilder(graphics, [this, graphics] { BuildGraphics(graphics); });
     settings_page->SetBuilder(audio, [this, audio] {
@@ -471,8 +408,9 @@ void ConfigureDialog::WatchPreset(const PresetSources& sources, QObject* context
     sync();
 }
 
-void ConfigureDialog::BuildGeneral(int general, int library) {
+void ConfigureDialog::BuildGeneral(int general, int library, int controls) {
     const auto sources = FindPresetSources();
+    QList<PresetCard*> presets;
     if (sources.resolution != nullptr) {
         auto* preset_group = new QWidget;
         auto* presets_layout = new QVBoxLayout(preset_group);
@@ -499,6 +437,7 @@ void ConfigureDialog::BuildGeneral(int general, int library) {
             });
         }
         presets_layout->addLayout(cards_layout);
+        presets = {cards.cbegin(), cards.cend()};
         settings_page->AddBlock(general, preset_group, tr("Performance preset"));
         WatchPreset(sources, preset_group, [this, sources, cards] {
             const auto* gpu = SelectedGpu(sources);
@@ -575,6 +514,12 @@ void ConfigureDialog::BuildGeneral(int general, int library) {
     SettingsPage::AddRow(options, tr("Updates"), tr("Check for new Lichii builds at start"),
                          QStringLiteral("cloud-arrow-down"), Tints::Blue(), check_updates);
 #endif
+    auto* get_started = SettingsPage::Manage();
+    connect(get_started, &QAbstractButton::clicked, this,
+            [this, controls, presets] { OpenGetStarted(controls, presets); });
+    SettingsPage::AddRow(options, tr("Get Started"),
+                         tr("Run the setup again: keys, firmware, folders, controller, preset"),
+                         QStringLiteral("sparkle"), Tints::Lavender(), get_started);
 }
 
 void ConfigureDialog::BuildLibrary(int library) {
@@ -719,6 +664,7 @@ void ConfigureDialog::BuildControls(int category, int shortcuts) {
     const auto pages = input_tab->GetSubTabs();
     auto* input_tabs = input_tab->findChild<QTabWidget*>(QStringLiteral("tabWidget"));
     const int mapping = settings_page->AddSubPage(category, tr("Map buttons"), {}, true);
+    mapping_page = mapping;
     auto* player_pages = new QStackedWidget;
     QStringList player_names;
     QList<QCheckBox*> connected;
@@ -1024,15 +970,7 @@ void ConfigureDialog::RebuildGameFolders() {
                              QStringLiteral("folder"), Tints::Green(), menu_button);
     }
     auto* add = new Spotlight::PillButton(tr("Add folder"), QStringLiteral("plus"));
-    connect(add, &QAbstractButton::clicked, this, [this] {
-        const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
-        const UISettings::GameDir dir{path.toStdString(), false, true};
-        if (!path.isEmpty() && !game_dirs.contains(dir)) {
-            game_dirs.append(dir);
-            game_dirs_changed = true;
-            RebuildGameFolders();
-        }
-    });
+    connect(add, &QAbstractButton::clicked, this, &ConfigureDialog::AddGameFolder);
     SettingsPage::AddRow(folders_layout, tr("Add a game folder"), tr("Scan a folder for games"),
                          QStringLiteral("folder-open"), Tints::Green(), add);
     if (folder_summary != nullptr) {
@@ -1044,4 +982,49 @@ QString ConfigureDialog::GameFolderSummary() const {
     const auto custom = std::count_if(game_dirs.cbegin(), game_dirs.cend(),
                                       [](const auto& folder) { return !IsBuiltInFolder(folder); });
     return custom == 1 ? tr("1 folder added") : tr("%1 folders added").arg(custom);
+}
+
+void ConfigureDialog::AddGameFolder() {
+    const QString path = QFileDialog::getExistingDirectory(this, tr("Select game folder"));
+    const UISettings::GameDir dir{path.toStdString(), false, true};
+    if (!path.isEmpty() && !game_dirs.contains(dir)) {
+        game_dirs.append(dir);
+        game_dirs_changed = true;
+        RebuildGameFolders();
+    }
+}
+
+void ConfigureDialog::OpenGetStarted(int controls, const QList<PresetCard*>& presets) {
+    EnsureInput();
+    auto* player = input_tab->GetSubTabs().front();
+    auto* type = player->findChild<QComboBox*>(QStringLiteral("comboControllerType"));
+    auto* device = player->findChild<QComboBox*>(QStringLiteral("comboDevices"));
+    auto* connected = input_tab->findChild<QCheckBox*>(QStringLiteral("checkboxPlayer1Connected"));
+    Spotlight::GetStarted wizard(this, system,
+                                 {
+                                     .game_folders =
+                                         [this] {
+                                             QStringList folders;
+                                             for (const auto& folder : game_dirs) {
+                                                 if (!IsBuiltInFolder(folder)) {
+                                                     folders.append(
+                                                         QString::fromStdString(folder.path));
+                                                 }
+                                             }
+                                             return folders;
+                                         },
+                                     .add_game_folder = [this] { AddGameFolder(); },
+                                     .controller = type->currentText(),
+                                     .controller_device = device->currentText(),
+                                     .controller_connected = connected->isChecked(),
+                                     .presets = presets,
+                                 });
+    connect(&wizard, &Spotlight::GetStarted::ContentInstalled, this,
+            &ConfigureDialog::ContentInstalled);
+    wizard.exec();
+    if (wizard.MapButtonsRequested()) {
+        settings_page->SetCategory(controls);
+        input_tab->findChild<QTabWidget*>(QStringLiteral("tabWidget"))->setCurrentIndex(0);
+        settings_page->SetCategory(mapping_page);
+    }
 }

@@ -19,6 +19,9 @@ inline constexpr int Slide = 180;
 inline constexpr int Fade = 160;
 } // namespace Motion
 
+/// The colour t of the way from one colour to another, alpha included.
+QColor Mix(const QColor& from, const QColor& to, qreal t);
+
 /// Fades a shown widget in, such as a page that just replaced another.
 void FadeIn(QWidget* widget, int duration = Motion::Fade);
 /// Fades a top-level window in every time it is shown.

@@ -50,6 +50,7 @@ class BasicSetting;
 }
 
 namespace Spotlight {
+class PresetCard;
 class SettingsPage;
 class ToggleSwitch;
 }
@@ -90,6 +91,8 @@ signals:
     void ExternalContentDirsChanged();
     void FullscreenOnStartChanged(bool enabled);
     void OpenGameFolderRequested(const QString& folder);
+    /// The Get Started wizard installed keys or firmware.
+    void ContentInstalled();
 
 private:
     void changeEvent(QEvent* event) override;
@@ -105,7 +108,7 @@ private:
     };
 
     void BuildSettings();
-    void BuildGeneral(int general, int library);
+    void BuildGeneral(int general, int library, int controls);
     void BuildLibrary(int library);
     void BuildGraphics(int graphics);
     void BuildControls(int category, int shortcuts);
@@ -121,6 +124,8 @@ private:
                      const std::function<void()>& sync);
     void RebuildGameFolders();
     QString GameFolderSummary() const;
+    void AddGameFolder();
+    void OpenGetStarted(int controls, const QList<Spotlight::PresetCard*>& presets);
 
     std::unique_ptr<Ui::ConfigureDialog> ui;
     HotkeyRegistry& registry;
@@ -128,6 +133,7 @@ private:
     Core::System& system;
     const std::vector<VkDeviceInfo::Record>& devices;
     InputCommon::InputSubsystem* input_subsystem;
+    int mapping_page = -1;
     bool input_initialized = false;
     QList<int> vibration_strength;
     std::unique_ptr<ConfigurationShared::Builder> builder;

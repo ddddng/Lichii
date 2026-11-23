@@ -5,12 +5,12 @@
 
 #include <array>
 #include <functional>
+#include <QAbstractButton>
 #include <QColor>
 #include <QList>
 #include <QWidget>
 #include "common/settings_enums.h"
 
-class QAbstractButton;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -52,6 +52,9 @@ inline QColor BackdropBottom() {
 inline QColor Sidebar() {
     return QColor(0x20, 0x21, 0x25);
 }
+inline QColor SidebarBottom() {
+    return QColor(0x1e, 0x1b, 0x1f);
+}
 } // namespace SettingsColor
 
 struct PerformancePreset {
@@ -74,6 +77,23 @@ inline constexpr std::array PerformancePresets{
 
 int PerformancePresetIndex(const PerformancePreset& values);
 QString PerformancePresetName(int index);
+
+/// A performance preset choice of Settings > General: Auto, Low-end, Mid-range or High-end.
+class PresetCard final : public QAbstractButton {
+public:
+    PresetCard(const QString& title, QString description, QWidget* parent = nullptr);
+    void SetSuggestion(QString device, QString tier);
+    /// A card for another page that shows this card's state and clicks it.
+    PresetCard* Mirror(QWidget* parent);
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+
+private:
+    QString description;
+    QString suggestion;
+    QString suggested_tier;
+};
 
 class ToggleSwitch;
 
