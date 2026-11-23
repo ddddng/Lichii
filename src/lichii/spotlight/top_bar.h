@@ -7,6 +7,7 @@
 
 #include "lichii/game/common.h"
 
+class QAbstractButton;
 class QAction;
 class GameListSearchField;
 class QLabel;
@@ -68,10 +69,18 @@ class RunningTitleBar final : public WindowDragBar {
     Q_OBJECT
 
 public:
+    static constexpr int Height = 36;
+
     explicit RunningTitleBar(QWidget* parent);
     void SetGameTitle(const QString& value);
     /// Floats only the window controls over `screen` while it is shown, without a bar or title.
     void FloatOver(QWidget* screen);
+    /// Adds a dropdown button after the game title that opens `menu` below it.
+    void AddMenu(const QString& name, QMenu* menu);
+    /// Adds a dropdown button for a panel the caller opens; check it while the panel is shown.
+    QAbstractButton* AddPanelButton(const QString& name);
+    /// Grows the docked bar past its base height, with its row centred, to take up letterboxing.
+    void SetExtraHeight(int extra);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -81,9 +90,12 @@ private:
     void SetFloating(bool value);
 
     QLabel* title;
+    QWidget* menus;
+    QHBoxLayout* menu_row;
     QHBoxLayout* row;
     QWidget* floating_screen = nullptr;
     bool floating = false;
+    int extra_height = 0;
 };
 
 } // namespace Spotlight

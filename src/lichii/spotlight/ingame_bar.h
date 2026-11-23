@@ -5,57 +5,54 @@
 
 #include <QStatusBar>
 
-class QAbstractButton;
 class QLabel;
 
 namespace Spotlight {
 
 class BarChip;
 class BarMetrics;
-class MenuTooltip;
+class ConfigurationStatus;
 class ShaderChip;
 
 /// The bottom bar of a windowed game (Paper 14YT-0); it replaces the status bar while a game runs.
+/// It only reports status; the running title bar's menus hold the controls.
 class InGameBar final : public QStatusBar {
     Q_OBJECT
 
 public:
+    static constexpr int Height = 36;
+    static constexpr int CollapsedHeight = 16;
+
     explicit InGameBar(QWidget* parent);
     void SetConfiguration(const QString& renderer, const QString& mode);
     void SetStats(double game_fps, double generated_fps, double frame_ms, bool at_target,
                   const QString& details);
     void SetSpeedStatus(const QString& description);
-    void SetMenuShortcut(const QString& keyboard, const QString& controller);
-    void SetMenuOpen(bool open);
-    void SetQuickControlsOpen(bool open);
     /// Collapsed, the bar is a 6 px strip with a handle (bar-states 15AJ-0); a click expands it.
     void SetCollapsed(bool collapsed);
-    QWidget* QuickControlsAnchor() const;
+    /// Grows the expanded bar past its base height, with its row centred, to take up letterboxing.
+    void SetExtraHeight(int extra);
     ShaderChip* Shaders() const {
         return shaders;
     }
 
 signals:
-    void MenuRequested();
-    void QuickControlsRequested();
     void ExpandRequested();
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
-    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     QWidget* contents;
-    QAbstractButton* configuration;
+    ConfigurationStatus* configuration;
     ShaderChip* shaders;
     BarChip* speed;
     QLabel* notice;
     BarMetrics* metrics;
-    BarChip* menu_button;
-    MenuTooltip* menu_tooltip;
     bool collapsed = false;
+    int extra_height = 0;
 };
 
 } // namespace Spotlight

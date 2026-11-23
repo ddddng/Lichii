@@ -3,6 +3,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCursor>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
@@ -103,6 +104,51 @@ protected:
 
 private:
     QWidget* button;
+};
+
+/// "Emulation ▾": a pill with a caret, accent-ringed while its menu is open.
+class TitleMenuButton final : public QAbstractButton {
+public:
+    TitleMenuButton(const QString& name, QWidget* parent) : QAbstractButton(parent) {
+        setText(name);
+        setAccessibleName(name);
+        setCheckable(true);
+        setFont(Font(12, 600));
+        setFixedHeight(26);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::TabFocus);
+    }
+
+    QSize sizeHint() const override {
+        return {10 + fontMetrics().horizontalAdvance(text()) + 4 + 16 + 6, 26};
+    }
+
+protected:
+    void nextCheckState() override {}
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(hasFocus() || isChecked() ? QPen(Color::Accent()) : Qt::NoPen);
+        const bool hovered = rect().contains(mapFromGlobal(QCursor::pos()));
+        painter.setBrush(isChecked()           ? Color::AccentSoft()
+                         : hovered || isDown() ? Color::ControlHover()
+                                               : Color::Fill());
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13);
+        painter.setFont(font());
+        painter.setPen(Color::Text());
+        painter.drawText(QRect{10, 0, width() - 36, height()}, Qt::AlignVCenter, text());
+        painter.drawPixmap(
+            width() - 22, 5,
+            IconPixmap(u"caret-down", 16, Color::TextSecondary(), devicePixelRatioF()));
+    }
+
+    void enterEvent(QEnterEvent*) override {
+        update();
+    }
+    void leaveEvent(QEvent*) override {
+        update();
+    }
 };
 
 } // namespace
@@ -275,23 +321,52 @@ TopBar::TopBar(GameListSearchField* search, QMenu* add, QAction* settings, QMenu
 }
 
 RunningTitleBar::RunningTitleBar(QWidget* parent)
-    : WindowDragBar(parent), title(new QLabel(this)), row(new QHBoxLayout(this)) {
-    setFixedHeight(36);
+    : WindowDragBar(parent), title(new QLabel(this)), menus(new QWidget(this)),
+      menu_row(new QHBoxLayout(menus)), row(new QHBoxLayout(this)) {
+    setFixedHeight(Height);
     row->setContentsMargins(14, 0, 10, 0);
     row->setSpacing(9);
     title->setFont(Font(13, 600));
     title->setStyleSheet(QStringLiteral("color: white;"));
-    QSizePolicy title_policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    title_policy.setRetainSizeWhenHidden(true);
-    title->setSizePolicy(title_policy);
     title->setAttribute(Qt::WA_TransparentForMouseEvents);
-    row->addWidget(title, 1);
+    row->addWidget(title);
+    row->addSpacing(6);
+    menus->setStyleSheet(QStringLiteral("background: transparent;"));
+    menu_row->setContentsMargins(0, 0, 0, 0);
+    menu_row->setSpacing(6);
+    row->addWidget(menus);
+    row->addStretch(1);
     AddWindowControls(row);
     hide();
 }
 
 void RunningTitleBar::SetGameTitle(const QString& value) {
-    title->setText(value);
+    title->setText(title->fontMetrics().elidedText(value, Qt::ElideRight, 320));
+    title->setToolTip(title->text() == value ? QString{} : value);
+}
+
+QAbstractButton* RunningTitleBar::AddPanelButton(const QString& name) {
+    auto* button = new TitleMenuButton(name, menus);
+    menu_row->addWidget(button);
+    return button;
+}
+
+void RunningTitleBar::AddMenu(const QString& name, QMenu* menu) {
+    auto* button = AddPanelButton(name);
+    menu->installEventFilter(new MenuButtonPress(button, menu));
+    connect(button, &QAbstractButton::pressed, menu, [button, menu] {
+        button->setDown(false);
+        button->setChecked(true);
+        menu->popup(button->mapToGlobal(QPoint{0, button->height() + 6}));
+    });
+    connect(menu, &QMenu::aboutToHide, button, [button] { button->setChecked(false); });
+}
+
+void RunningTitleBar::SetExtraHeight(int extra) {
+    extra_height = extra;
+    if (!floating) {
+        setFixedHeight(Height + extra_height);
+    }
 }
 
 void RunningTitleBar::FloatOver(QWidget* screen) {
@@ -318,7 +393,8 @@ void RunningTitleBar::SetFloating(bool value) {
     }
     floating = value;
     title->setVisible(!floating);
-    setFixedHeight(floating ? 52 : 36);
+    menus->setVisible(!floating);
+    setFixedHeight(floating ? 52 : Height + extra_height);
     row->setContentsMargins(14, 0, floating ? 14 : 10, 0);
     if (floating) {
         frame->removeWidget(this);

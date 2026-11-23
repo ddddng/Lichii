@@ -76,7 +76,8 @@ namespace Spotlight {
 class FullscreenHint;
 class InGameBar;
 class InGameMenu;
-class QuickControls;
+class AudioControls;
+class GraphicsControls;
 } // namespace Spotlight
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
@@ -333,6 +334,7 @@ private:
     void changeEvent(QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
 
     std::string CreateTASFramesString(
@@ -509,6 +511,7 @@ private:
     void UpdateInGameGraphicsSummary();
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
+    void UpdateLetterboxBars();
     void UpdateMenuIcons();
     void UpdateUISettings();
     void UpdateInputDrivers();
@@ -602,7 +605,8 @@ private:
 
     Spotlight::InGameBar* ingame_bar = nullptr;
     Spotlight::InGameMenu* ingame_menu = nullptr;
-    Spotlight::QuickControls* quick_panel = nullptr;
+    Spotlight::GraphicsControls* graphics_panel = nullptr;
+    Spotlight::AudioControls* audio_panel = nullptr;
     Spotlight::FullscreenHint* fullscreen_hint = nullptr;
     Spotlight::FullscreenHint* fullscreen_shader_toast = nullptr;
     QMenu* quick_controls = nullptr;

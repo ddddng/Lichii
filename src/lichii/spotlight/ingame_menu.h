@@ -23,13 +23,17 @@ class VolumeControl;
 /// The menus behind the in-game dropdowns; each choice applies at once, as in the View menu.
 struct InGameControls {
     QMenu* renderer;
-    QMenu* console;
     QMenu* filter;
     QMenu* frame_gen;
-    QMenu* more;
+    QMenu* accuracy;
+    QMenu* anti_aliasing;
+    /// Null in builds without post-processing.
+    QMenu* effects;
     QAction* settings;
     QAction* decrease_volume;
     QAction* increase_volume;
+    QAction* mute;
+    QAction* reset_volume;
 };
 
 /// What the in-game panels show, refreshed by MainWindow.
@@ -38,55 +42,71 @@ struct InGameSummary {
     QString resolution;
     QString filter;
     QString frame_gen;
-    QString speed;
-    QString speed_keys;
+    QString accuracy;
+    QString anti_aliasing;
+    QString effects;
     /// 0 Auto, 1 Low, 2 Mid, 3 High; -1 when the values match no preset.
     int preset = -1;
     bool preset_global = true;
 };
 
-/// The bottom bar's "Vulkan · Docked" popover.
-class QuickControls final : public QWidget {
+/// A panel that drops down from a running title bar menu button.
+class InGamePopover : public QWidget {
     Q_OBJECT
 
 public:
-    QuickControls(const InGameControls& controls, QWidget* parent);
-    void Open(QWidget* anchor, QWidget* bar);
-    void SetSummary(const InGameSummary& summary);
-    void SetFrameTime(const QString& text);
-    void SetConsoleMode(bool docked);
-    void SetVolume(int volume, bool muted);
+    explicit InGamePopover(QWidget* parent);
+    void Open(QWidget* anchor);
 
 signals:
     void AboutToOpen();
     void Dismissed();
-    void DockedChanged(bool docked);
-    void VolumeChanged(int volume);
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void hideEvent(QHideEvent* event) override;
+};
+
+/// Graphics: renderer, console mode, resolution, upscaler, frame generation, GPU accuracy,
+/// anti-aliasing and post-processing.
+class GraphicsControls final : public InGamePopover {
+    Q_OBJECT
+
+public:
+    GraphicsControls(const InGameControls& controls, QWidget* parent);
+    void SetSummary(const InGameSummary& summary);
+    void SetConsoleMode(bool docked);
+
+signals:
+    void DockedChanged(bool docked);
 
 private:
-    void ShowMore(bool more);
-    void BuildMore();
-    void Reposition();
-
-    InGameControls menus;
-    QWidget* main_page;
-    QWidget* more_page;
-    QScrollArea* more_scroll;
-    int left = 0;
-    int bar_top = 0;
     ValueButton* renderer;
     ValueButton* resolution;
     ValueButton* filter;
     ValueButton* frame_gen;
-    QLabel* speed;
-    QLabel* speed_keys;
-    QLabel* frame_time;
+    ValueButton* accuracy;
+    ValueButton* anti_aliasing;
+    ValueButton* effects = nullptr;
     SegmentedControl* console_mode;
+};
+
+/// Audio: volume, mute and the output device.
+class AudioControls final : public InGamePopover {
+    Q_OBJECT
+
+public:
+    AudioControls(const InGameControls& controls, QWidget* parent);
+    void SetVolume(int volume, bool muted);
+    void SetOutput(const QString& device);
+
+signals:
+    void VolumeChanged(int volume);
+
+private:
     VolumeControl* volume;
+    QWidget* mute;
+    QLabel* output;
 };
 
 class InGameMenu final : public QWidget {
