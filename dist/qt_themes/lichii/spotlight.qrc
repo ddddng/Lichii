@@ -114,6 +114,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>spotlight/icons/users.png</file>
         <file>spotlight/icons/vibrate.png</file>
         <file>spotlight/icons/warning-circle.png</file>
+        <file>spotlight/icons/wave-sine.png</file>
         <file>spotlight/icons/wifi-high.png</file>
         <file>spotlight/icons/wrench.png</file>
         <file>spotlight/icons/x.png</file>
