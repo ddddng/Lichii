@@ -839,9 +839,10 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
         } else {
             const auto entries = object.value(QStringLiteral("games")).toArray();
             const auto returned_page = object.value(QStringLiteral("page")).toInt(-1);
-            const auto pages = object.value(QStringLiteral("pageCount")).toInt(-1);
+            const auto total_pages = object.value(QStringLiteral("pageCount")).toInt(-1);
             valid = valid && object.value(QStringLiteral("games")).isArray() &&
-                    entries.size() <= 15 && returned_page == page && pages >= 1 && pages <= 10000;
+                    entries.size() <= 15 && returned_page == page && total_pages >= 1 &&
+                    total_pages <= 10000;
             for (const auto& entry : entries) {
                 const auto game = entry.toObject();
                 const double id = game.value(QStringLiteral("sgdbId")).toDouble(-1);
@@ -858,7 +859,7 @@ void Dialog::Finished(bool submission, int http_status, const QByteArray& body,
                                    game.value(QStringLiteral("sgdbId")).toInteger());
                 }
                 games->setCurrentIndex(entries.isEmpty() ? -1 : 0);
-                page_count = pages;
+                page_count = total_pages;
                 page_label->setText(tr("Page %1 of %2").arg(page).arg(page_count));
                 page_hint->setText(tr("Page %1 of %2. Select the exact game and press Confirm game.")
                                        .arg(page)
