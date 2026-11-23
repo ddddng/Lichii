@@ -1221,11 +1221,9 @@ void ConfigureDialog::RebuildGameFolders() {
         item->widget()->deleteLater();
         delete item;
     }
-    int custom_count = 0;
     for (int i = 0; i < game_dirs.size(); ++i) {
         const auto& folder = game_dirs[i];
         const bool built_in = IsBuiltInFolder(folder);
-        custom_count += !built_in;
         const QString path = QString::fromStdString(folder.path);
         auto* menu_button = new Spotlight::CircleButton(QStringLiteral("dots-three"), 36);
         auto* menu = new QMenu(menu_button);
