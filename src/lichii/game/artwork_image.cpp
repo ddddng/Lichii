@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "lichii/game/artwork_image.h"
+#include "lichii/spotlight/theme.h"
 
 #include <algorithm>
 #include <QBuffer>
@@ -77,6 +78,27 @@ void PaintIcon(QPainter& painter, const QRectF& bounds, const QPixmap& source, q
         QPixmapCache::insert(key, rounded);
     }
     painter.drawPixmap(target.topLeft(), rounded);
+}
+
+void PaintMissingArt(QPainter& painter, const QRectF& bounds, qreal radius) {
+    if (bounds.isEmpty()) {
+        return;
+    }
+    using namespace Spotlight;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRectF tile = bounds.adjusted(0.5, 0.5, -0.5, -0.5);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Color::Panel());
+    painter.drawRoundedRect(tile, radius, radius);
+    painter.setPen(QPen(Color::StrokeSubtle(), 1));
+    painter.setBrush(Color::Fill());
+    painter.drawRoundedRect(tile, radius, radius);
+    const int glyph = std::max(12, qRound(bounds.height() * 0.3));
+    painter.drawPixmap(bounds.center() - QPointF(glyph / 2.0, glyph / 2.0),
+                       IconPixmap(u"game-controller", glyph, Color::TextFaint(),
+                                  painter.device()->devicePixelRatioF()));
+    painter.restore();
 }
 
 QIcon Icon(const QPixmap& source, int size, qreal radius) {
