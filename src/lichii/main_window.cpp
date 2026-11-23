@@ -3098,9 +3098,14 @@ void MainWindow::OnEmulationStopped() {
 }
 
 void MainWindow::ShutdownGame() {
-    if (!emulation_running) {
+    if (!emulation_running || shutdown_game_in_progress) {
         return;
     }
+
+    shutdown_game_in_progress = true;
+    SCOPE_EXIT {
+        shutdown_game_in_progress = false;
+    };
 
     if (bug_report_dialog) {
         bug_report_dialog->StopCapture();
@@ -3979,6 +3984,10 @@ void MainWindow::OnPauseContinueGame() {
 }
 
 void MainWindow::OnStopGame() {
+    if (!emulation_running || shutdown_game_in_progress || shutdown_dialog) {
+        return;
+    }
+
     if (ConfirmShutdownGame()) {
         play_time_manager->Stop();
         if (OnShutdownBegin()) {
@@ -4098,6 +4107,9 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
 }
 
 void MainWindow::OnExit() {
+    if (shutdown_dialog) {
+        return;
+    }
     ShutdownGame();
 }
 
