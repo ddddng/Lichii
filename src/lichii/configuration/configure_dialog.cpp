@@ -31,12 +31,12 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QTabWidget>
-#include <QTimer>
 #include <QVBoxLayout>
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -63,6 +63,7 @@
 #include "lichii/configuration/configure_web.h"
 #include "lichii/configuration/shared_widget.h"
 #include "lichii/hotkeys.h"
+#include "lichii/spotlight/dialog.h"
 #include "lichii/spotlight/settings_get_started.h"
 #include "lichii/spotlight/settings_page.h"
 #include "lichii/spotlight/theme.h"
@@ -533,6 +534,278 @@ private:
     QList<QWidget*> items;
 };
 
+class StatusBanner final : public QWidget {
+public:
+    StatusBanner() {
+        setProperty("spotlightTransparent", true);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(14, 12, 14, 12);
+        layout->setSpacing(10);
+        icon->setFixedSize(16, 16);
+        layout->addWidget(icon, 0, Qt::AlignTop);
+        text->setWordWrap(true);
+        text->setTextFormat(Qt::PlainText);
+        text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        text->setFont(Spotlight::Font(13, 500));
+        layout->addWidget(text, 1);
+    }
+
+    void Set(const QString& message, ConfigureNetwork::NextendoTone tone_) {
+        tone = tone_;
+        text->setText(message);
+        const QColor ink = Ink();
+        Spotlight::SetTextColor(text, tone == ConfigureNetwork::NextendoTone::Info
+                                          ? Color::TextSecondary()
+                                          : ink.lighter(115));
+        icon->setPixmap(Spotlight::IconPixmap(
+            tone == ConfigureNetwork::NextendoTone::Success ? u"check-circle"
+            : tone == ConfigureNetwork::NextendoTone::Info  ? u"info"
+                                                            : u"warning-circle",
+            16, ink, devicePixelRatioF()));
+        setVisible(!message.isEmpty());
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QColor fill = Ink();
+        QColor stroke = Ink();
+        fill.setAlpha(tone == ConfigureNetwork::NextendoTone::Info ? 0x0d : 0x1a);
+        stroke.setAlpha(tone == ConfigureNetwork::NextendoTone::Info ? 0x24 : 0x52);
+        painter.setPen(QPen(stroke, 1));
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+    }
+
+private:
+    QColor Ink() const {
+        switch (tone) {
+        case ConfigureNetwork::NextendoTone::Success:
+            return Color::Success();
+        case ConfigureNetwork::NextendoTone::Warning:
+            return Color::Warning();
+        case ConfigureNetwork::NextendoTone::Error:
+            return Color::Destructive();
+        case ConfigureNetwork::NextendoTone::Info:
+            break;
+        }
+        return Color::TextSecondary();
+    }
+
+    QLabel* icon = new QLabel;
+    QLabel* text = new QLabel;
+    ConfigureNetwork::NextendoTone tone = ConfigureNetwork::NextendoTone::Info;
+};
+
+QPixmap AvatarDot(const QColor& tint, qreal ratio) {
+    QPixmap pixmap(QSize(40, 40) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(tint);
+    painter.drawEllipse(QRectF(0, 0, 40, 40));
+    return pixmap;
+}
+
+class FriendsDialog final : public Spotlight::Dialog {
+public:
+    FriendsDialog(ConfigureNetwork* network_, QWidget* parent)
+        : Spotlight::Dialog(parent), network{network_} {
+        setWindowTitle(tr("Friends"));
+        SetIcon(u"users", Tints::Green());
+        setFixedWidth(560);
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(14);
+        auto* add_row = new QHBoxLayout;
+        add_row->setSpacing(8);
+        code->setPlaceholderText(tr("Friend code"));
+        code->setAccessibleName(code->placeholderText());
+        code->addAction(Spotlight::Icon(u"user", Color::TextSecondary(), 16),
+                        QLineEdit::LeadingPosition);
+        code->setMinimumHeight(40);
+        add_row->addWidget(code, 1);
+        auto* add = new Spotlight::PillButton(tr("Add friend"), {},
+                                              Spotlight::PillButton::Kind::Accent, 40);
+        add_row->addWidget(add);
+        layout->addLayout(add_row);
+        layout->addWidget(message);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* holder = new QWidget;
+        holder->setProperty("spotlightTransparent", true);
+        lists = new QVBoxLayout(holder);
+        lists->setContentsMargins(0, 0, 0, 0);
+        lists->setSpacing(8);
+        scroll->setWidget(holder);
+        scroll->viewport()->setAutoFillBackground(false);
+        holder->setAutoFillBackground(false);
+        layout->addWidget(scroll);
+        auto* footer = new QHBoxLayout;
+        footer->addWidget(signed_in, 1);
+        auto* done =
+            new Spotlight::PillButton(tr("Done"), {}, Spotlight::PillButton::Kind::Accent, 40);
+        footer->addWidget(done);
+        layout->addLayout(footer);
+        signed_in->setFont(Spotlight::Font(13, 500));
+        Spotlight::SetTextColor(signed_in, Color::TextSecondary());
+
+        const auto send = [this] {
+            network->AddNextendoFriend(code->text());
+            code->clear();
+        };
+        connect(add, &QAbstractButton::clicked, this, send);
+        connect(code, &QLineEdit::returnPressed, this, send);
+        connect(done, &QAbstractButton::clicked, this, &QDialog::accept);
+        connect(network, &ConfigureNetwork::NextendoChanged, this, [this] { Rebuild(); });
+        Rebuild();
+        network->RefreshNextendoFriends();
+    }
+
+private:
+    void Rebuild() {
+        const auto profile = network->NextendoProfile();
+        const auto account = Common::Nextendo::LoadAccount(profile);
+        SetSubtitle(
+            account && !account->friend_code.empty()
+                ? tr("Your friend code: %1").arg(QString::fromStdString(account->friend_code))
+                : QString{});
+        signed_in->setText(
+            account ? tr("Signed in as %1").arg(QString::fromStdString(account->username))
+                    : tr("Not signed in"));
+        const QString result = network->NextendoFriendsMessage();
+        message->Set(result, result == tr("Friend request sent.")
+                                 ? ConfigureNetwork::NextendoTone::Success
+                                 : ConfigureNetwork::NextendoTone::Error);
+        while (auto* item = lists->takeAt(0)) {
+            if (auto* widget = item->widget()) {
+                widget->hide();
+                widget->deleteLater();
+            }
+            delete item;
+        }
+        static const std::array tints{QColor(0xc9, 0xd8, 0xff), QColor(0xb9, 0xe8, 0xcf),
+                                      QColor(0xff, 0xe0, 0xa8), QColor(0xff, 0xb4, 0xc8)};
+        const auto tint = [](const Common::Nextendo::Friend& entry) {
+            return entry.status == 0 ? QColor(0x6b, 0x6f, 0x7b)
+                                     : tints[static_cast<std::size_t>(entry.pid % tints.size())];
+        };
+        const auto group = [this](const QString& title) {
+            auto* heading = SettingsPage::Text(title, 13, 600, true);
+            heading->setContentsMargins(0, 6, 0, 0);
+            lists->addWidget(heading);
+            auto* card = new QWidget;
+            card->setObjectName(QStringLiteral("friendsCard"));
+            card->setAttribute(Qt::WA_StyledBackground);
+            card->setStyleSheet(QStringLiteral(
+                "QWidget#friendsCard { background: rgba(255,255,255,13); border: 1px solid "
+                "rgba(255,255,255,20); border-radius: 16px; }"));
+            auto* rows = new QVBoxLayout(card);
+            rows->setContentsMargins(1, 1, 1, 1);
+            rows->setSpacing(0);
+            lists->addWidget(card);
+            return rows;
+        };
+        const qreal ratio = devicePixelRatioF();
+        const auto list = Common::Nextendo::CachedFriends(profile);
+        if (!list.requests.empty()) {
+            auto* rows = group(tr("Requests"));
+            for (const auto& entry : list.requests) {
+                auto* control = new QWidget;
+                auto* buttons = new QHBoxLayout(control);
+                buttons->setContentsMargins(0, 0, 0, 0);
+                buttons->setSpacing(6);
+                auto* decline = new Spotlight::PillButton(tr("Decline"), {},
+                                                          Spotlight::PillButton::Kind::Control, 32);
+                auto* accept = new Spotlight::PillButton(tr("Accept"), {},
+                                                         Spotlight::PillButton::Kind::Accent, 32);
+                buttons->addWidget(decline);
+                buttons->addWidget(accept);
+                for (const auto& [button, action] :
+                     {std::pair{decline, Common::Nextendo::FriendAction::Decline},
+                      std::pair{accept, Common::Nextendo::FriendAction::Accept}}) {
+                    connect(button, &QAbstractButton::clicked, this,
+                            [this, pid = entry.pid, action] {
+                                network->AnswerNextendoFriend(pid, action, this);
+                            });
+                }
+                SettingsPage::AddRow(rows, QString::fromStdString(entry.name),
+                                     tr("Wants to be friends"), {}, {}, control, {},
+                                     AvatarDot(tint(entry), ratio));
+            }
+        }
+        if (!list.sent.empty()) {
+            auto* rows = group(tr("Sent requests"));
+            for (const auto& entry : list.sent) {
+                SettingsPage::AddRow(rows, QString::fromStdString(entry.name), tr("Request sent"),
+                                     {}, {}, nullptr, {}, AvatarDot(tint(entry), ratio));
+            }
+        }
+        const auto online = std::count_if(list.friends.cbegin(), list.friends.cend(),
+                                          [](const auto& entry) { return entry.status != 0; });
+        auto* rows =
+            group(list.friends.empty() ? tr("Friends") : tr("Friends · %1 online").arg(online));
+        if (list.friends.empty()) {
+            SettingsPage::AddRow(rows, tr("No friends yet"),
+                                 tr("Share your friend code, or add someone's above."), {}, {},
+                                 nullptr, {}, AvatarDot(QColor(0x6b, 0x6f, 0x7b), ratio));
+        }
+        for (const auto& entry : list.friends) {
+            const QString detail =
+                entry.status == 2
+                    ? (entry.app_detail.empty()
+                           ? tr("Playing")
+                           : tr("Playing %1").arg(QString::fromStdString(entry.app_detail)))
+                : entry.status == 1 ? tr("Online")
+                                    : tr("Offline");
+            auto* control = new QWidget;
+            auto* line = new QHBoxLayout(control);
+            line->setContentsMargins(0, 0, 0, 0);
+            line->setSpacing(10);
+            if (entry.status != 0) {
+                auto* badge = SettingsPage::Text(QStringLiteral("● ") + tr("Online"), 13, 600);
+                Spotlight::SetTextColor(badge, Color::Success());
+                line->addWidget(badge);
+            }
+            auto* more = new Spotlight::CircleButton(QStringLiteral("dots-three"), 30);
+            more->setAccessibleName(tr("More for %1").arg(QString::fromStdString(entry.name)));
+            connect(more, &QAbstractButton::clicked, this, [this, more, pid = entry.pid] {
+                auto* menu = new QMenu(more);
+                menu->setAttribute(Qt::WA_DeleteOnClose);
+                menu->addAction(tr("Remove friend"), this, [this, pid] {
+                    network->AnswerNextendoFriend(pid, Common::Nextendo::FriendAction::Remove,
+                                                  this);
+                });
+                menu->popup(more->mapToGlobal(QPoint(0, more->height())));
+            });
+            line->addWidget(more);
+            SettingsPage::AddRow(rows, QString::fromStdString(entry.name), detail, {}, {}, control,
+                                 {}, AvatarDot(tint(entry), ratio));
+        }
+        int wanted = 0;
+        for (int i = 0; i < lists->count(); ++i) {
+            if (const auto* widget = lists->itemAt(i)->widget()) {
+                wanted += widget->sizeHint().height() + lists->spacing();
+            }
+        }
+        lists->addStretch();
+        scroll->setFixedHeight(std::min(380, wanted));
+    }
+
+    ConfigureNetwork* network;
+    QLineEdit* code = new QLineEdit;
+    StatusBanner* message = new StatusBanner;
+    QScrollArea* scroll = new QScrollArea;
+    QVBoxLayout* lists = nullptr;
+    QLabel* signed_in = new QLabel;
+};
+
 bool IsBuiltInFolder(const UISettings::GameDir& folder) {
     return folder.path == "SDMC" || folder.path == "UserNAND" || folder.path == "SysNAND";
 }
@@ -741,40 +1014,55 @@ void ConfigureDialog::BuildSettings() {
                                      SettingsPage::BindToggle(source));
             }
         }
-        auto* status = network_tab->findChild<QLabel*>(QStringLiteral("nextendo_status"));
         auto* profile = network_tab->findChild<QComboBox*>(QStringLiteral("nextendo_profile"));
         auto* sign_in = network_tab->findChild<QPushButton*>(QStringLiteral("nextendo_sign_in"));
         auto* sign_out = network_tab->findChild<QPushButton*>(QStringLiteral("nextendo_sign_out"));
-        if (status == nullptr || profile == nullptr || sign_in == nullptr || sign_out == nullptr) {
+        if (profile == nullptr || sign_in == nullptr || sign_out == nullptr) {
             return;
         }
         auto* account = settings_page->AddSection(multiplayer, tr("Nextendo account"));
-        auto* buttons = new QWidget;
-        buttons->setProperty("spotlightTransparent", true);
-        auto* buttons_layout = new QHBoxLayout(buttons);
-        buttons_layout->setContentsMargins(0, 0, 0, 0);
-        buttons_layout->setSpacing(8);
-        auto* sign_in_proxy = SettingsPage::BindButton(sign_in, tr("Sign in"));
-        auto* sign_out_proxy = SettingsPage::BindButton(sign_out, tr("Sign out"));
-        buttons_layout->addWidget(sign_in_proxy);
-        buttons_layout->addWidget(sign_out_proxy);
-        auto* detail = SettingsPage::AddRow(account, tr("Nextendo account"), {},
-                                            QStringLiteral("user"), Color::Accent(), buttons);
-        const auto refresh = [detail, status, profile, sign_out, sign_in_proxy, sign_out_proxy] {
-            detail->setText(profile->currentText().isEmpty()
-                                ? status->text()
-                                : tr("%1 Linked to local profile %2.")
-                                      .arg(status->text(), profile->currentText()));
-            detail->show();
-            sign_in_proxy->setVisible(!sign_out->isEnabled());
-            sign_out_proxy->setVisible(sign_out->isEnabled());
+        SettingsPage::AddRow(account, tr("Profile"), tr("The local profile that signs in"),
+                             QStringLiteral("user"), Tints::Lavender(),
+                             SettingsPage::BindCombo(profile));
+        auto* state = new QWidget;
+        state->setProperty("spotlightTransparent", true);
+        auto* state_layout = new QVBoxLayout(state);
+        state_layout->setContentsMargins(14, 4, 14, 14);
+        state_layout->setSpacing(14);
+        auto* banner = new StatusBanner;
+        state_layout->addWidget(banner);
+        auto* actions = new QHBoxLayout;
+        actions->setSpacing(8);
+        auto* friends = new Spotlight::PillButton(tr("Friends"), QStringLiteral("users"));
+        auto* start = new Spotlight::PillButton(tr("Sign in to Nextendo"), {},
+                                                Spotlight::PillButton::Kind::Accent);
+        auto* leave = new Spotlight::PillButton(tr("Sign out"));
+        actions->addWidget(friends);
+        actions->addStretch();
+        actions->addWidget(start);
+        actions->addWidget(leave);
+        state_layout->addLayout(actions);
+        account->addWidget(state);
+        connect(start, &QAbstractButton::clicked, sign_in, &QAbstractButton::click);
+        connect(leave, &QAbstractButton::clicked, sign_out, &QAbstractButton::click);
+        connect(friends, &QAbstractButton::clicked, this, [this] {
+            FriendsDialog dialog(network_tab.get(), this);
+            dialog.exec();
+        });
+        const auto refresh = [this, banner, friends, start, leave, sign_out] {
+            auto* network = network_tab.get();
+            const bool signing_in = network->NextendoSigningIn();
+            const bool signed_in = sign_out->isEnabled() && !signing_in;
+            banner->Set(network->NextendoStatus(), network->NextendoStatusTone());
+            start->setText(signing_in ? tr("Cancel sign-in") : tr("Sign in to Nextendo"));
+            start->SetKind(signing_in ? Spotlight::PillButton::Kind::Control
+                                      : Spotlight::PillButton::Kind::Accent);
+            start->setVisible(!signed_in);
+            leave->setVisible(signed_in);
+            friends->setVisible(signed_in && network->NextendoFriendsAvailable());
         };
         refresh();
-        auto* watcher = new QTimer(detail);
-        watcher->setInterval(500);
-        connect(watcher, &QTimer::timeout, detail, refresh);
-        watcher->start();
-        connect(profile, &QComboBox::currentIndexChanged, detail, refresh);
+        connect(network_tab.get(), &ConfigureNetwork::NextendoChanged, state, refresh);
         settings_page->AddBlock(
             multiplayer,
             SettingsPage::Note(tr("Network adapter, custom servers, lobby token and the Mod Store "
@@ -1212,19 +1500,16 @@ void ConfigureDialog::BuildSettings() {
                              QStringLiteral("nextendo_sync_profile|%1|%2")
                                  .arg(tr("Sync Nextendo name and picture to the profile"),
                                       tr("Requires an enabled, signed-in account"))}},
-            AdvancedSection{
-                tr("Public lobby"),
-                tr("Locked while hosting a public room"),
-                0,
-                {QStringLiteral("edit_username|%1|%2")
-                     .arg(tr("Lobby username"), tr("4–20 characters")),
-                 QStringLiteral("edit_token|%1|%2").arg(tr("Token"), tr("80 characters")),
-                 QStringLiteral("button_generate|%1").arg(tr("Generate a new token"))}},
-            AdvancedSection{
-                tr("Mod Store"),
-                tr("Where mods are listed from"),
-                0,
-                {QStringLiteral("edit_mod_store_api_url|%1").arg(tr("Mod Store API base URL"))}},
+            AdvancedSection{tr("Public lobby"),
+                            tr("Locked while hosting a public room"),
+                            0,
+                            {QStringLiteral("edit_username|%1|%2")
+                                 .arg(tr("Lobby username"), tr("4–20 characters")),
+                             QStringLiteral("edit_token")}},
+            AdvancedSection{tr("Mod Store"),
+                            tr("Where mods are listed from"),
+                            0,
+                            {QStringLiteral("edit_mod_store_api_url")}},
             AdvancedSection{tr("Custom server"),
                             tr("Host redirect is unavailable while a game runs"),
                             1,
@@ -1235,16 +1520,39 @@ void ConfigureDialog::BuildSettings() {
                              QStringLiteral(">redirect_ca_browse"),
                              QStringLiteral(">redirect_loopback_only|%1")
                                  .arg(tr("Block all other network access"))}},
-            AdvancedSection{tr("Nextendo"),
-                            tr("The profile the account belongs to, and friends"),
-                            1,
-                            {QStringLiteral("nextendo_profile|%1").arg(tr("Profile")),
-                             QStringLiteral("nextendo_friend_list"),
-                             QStringLiteral("nextendo_accept"), QStringLiteral("nextendo_decline"),
-                             QStringLiteral("nextendo_remove"), QStringLiteral("nextendo_add_code"),
-                             QStringLiteral("nextendo_add")}},
         },
-        {QStringLiteral("nextendo_client_id")});
+        {QStringLiteral("nextendo_client_id"), QStringLiteral("nextendo_sign_in"),
+         QStringLiteral("nextendo_sign_out"), QStringLiteral("nextendo_profile"),
+         QStringLiteral("nextendo_friend_list"), QStringLiteral("nextendo_accept"),
+         QStringLiteral("nextendo_decline"), QStringLiteral("nextendo_remove"),
+         QStringLiteral("nextendo_add_code"), QStringLiteral("nextendo_add")});
+    for (const char* name : {"edit_token", "button_generate", "edit_mod_store_api_url"}) {
+        if (auto* widget = web_tab->findChild<QWidget*>(QLatin1String(name))) {
+            widget->setProperty("spotlightBound", true);
+        }
+    }
+    settings_page->SetAdvancedBuilder(multiplayer, [this, multiplayer] {
+        auto* token = web_tab->findChild<QLineEdit*>(QStringLiteral("edit_token"));
+        auto* generate = web_tab->findChild<QAbstractButton*>(QStringLiteral("button_generate"));
+        if (token != nullptr && generate != nullptr) {
+            auto* control = new QWidget;
+            auto* layout = new QHBoxLayout(control);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(8);
+            auto* field = SettingsPage::BindLineEdit(token);
+            field->setFixedWidth(160);
+            layout->addWidget(field);
+            layout->addWidget(SettingsPage::BindButton(generate, tr("Generate")));
+            settings_page->AddAdvancedRow(multiplayer, QStringLiteral("edit_token"), tr("Token"),
+                                          tr("80 characters"), control);
+        }
+        if (auto* url = web_tab->findChild<QLineEdit*>(QStringLiteral("edit_mod_store_api_url"))) {
+            auto* field = SettingsPage::BindLineEdit(url);
+            field->setFixedWidth(180);
+            settings_page->AddAdvancedRow(multiplayer, QStringLiteral("edit_mod_store_api_url"),
+                                          tr("Mod Store API base URL"), {}, field);
+        }
+    });
     hotkeys_tab->hide();
     profile_tab->hide();
     input_tab->hide();
