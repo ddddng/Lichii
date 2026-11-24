@@ -986,7 +986,7 @@ void TranscodeAstcBatches(ASTCDecoderPass& decoder, BcEncoderPass& encoder,
                           std::span<const VideoCommon::SwizzleParameters> swizzles, VkImage decode,
                           std::span<const vk::ImageView> level_views, u32 batch, bool bc3,
                           VkBuffer output, VkDeviceSize output_offset, VkDeviceSize output_size,
-                          std::span<const VideoCommon::BufferImageCopy> copies) {
+                          std::span<const u64> level_offsets, std::span<const u64> layer_bytes) {
     const u32 levels = static_cast<u32>(level_views.size());
     const u32 layers = static_cast<u32>(info.resources.layers);
     const u64 layer_stride = info.layer_stride;
@@ -1021,10 +1021,10 @@ void TranscodeAstcBatches(ASTCDecoderPass& decoder, BcEncoderPass& encoder,
             },
             batch_map, swizzles);
         for (u32 level = 0; level < levels; ++level) {
-            const auto& copy = copies[level];
-            encoder.Encode(*level_views[level], copy.image_extent.width, copy.image_extent.height,
-                           count, bc3, output, output_offset, output_size,
-                           copy.buffer_offset + (copy.buffer_size / layers) * base);
+            encoder.Encode(*level_views[level], (std::max)(info.size.width >> level, 1U),
+                           (std::max)(info.size.height >> level, 1U), count, bc3, output,
+                           output_offset, output_size,
+                           level_offsets[level] + layer_bytes[level] * base);
         }
     }
 }

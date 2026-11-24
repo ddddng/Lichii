@@ -5783,9 +5783,15 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // was past the decode, and two textures' blocks met in one buffer.
     auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal, true);
 
+    boost::container::small_vector<u64, 16> level_offsets;
+    boost::container::small_vector<u64, 16> layer_bytes;
+    for (const auto& copy : copies) {
+        level_offsets.push_back(copy.buffer_offset);
+        layer_bytes.push_back(copy.buffer_size / layers);
+    }
     TranscodeAstcBatches(*astc_decoder_pass, *bc_encoder_pass, info, image.guest_size_bytes, map,
                          swizzles, *pending.image, pending.views, batch, bc3, output.buffer,
-                         output.offset, total, copies);
+                         output.offset, total, level_offsets, layer_bytes);
     copy_output(output);
     pending.tick = scheduler.CurrentTick();
     pending_transcodes.push_back(std::move(pending));
